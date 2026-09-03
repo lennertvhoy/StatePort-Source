@@ -1,0 +1,252 @@
+formatVersion: stateport.release-topology/v1
+description: >-
+  Release-assembly input for the WSL2 linux/amd64 capability target
+  (Linux kernel, amd64, cgroup v2, rootless Podman at the required floor,
+  Quadlet, systemd user services, and subordinate UID/GID mappings).
+  Distribution identity is observation, not eligibility.  The assembler signs
+  the derived target topology and renders the staged Quadlet template bundle
+  from this inventory; runtime services must name runtime-service images from
+  images/image-set.v1.yaml and agree with their declared execution identity.
+targets:
+  - targetId: wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet
+    hostBaseline: wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet
+    executionHostMode: stable-host-daemon-client
+    # The assembler binds imageDigest to the exact signed stable-host image;
+    # a null here can never ship unresolved because verify_release_index
+    # requires the contract to match the signed image digest.
+    executionContract:
+      transport: confined-host-unix-socket
+      serviceId: stateport-execution-host
+      imageId: stateport-execution-host
+      imageDigest: null
+      contractVersion: 2
+      clientCompatibility: {minimum: 1, maximum: 2}
+      hostDirectory: /run/stateport/execution-control
+      containerDirectory: /run/stateport-execution
+      socketName: control.sock
+      bootstrap: operator-provisioned-tmpfiles
+      directoryOwner: stateport-exec
+      directoryGroup: stateport-execution-control
+      allowedClientUser: stateport-control
+      directoryMode: "2750"
+      socketMode: "0660"
+      peerIdentity: unix-peer-credentials-required
+      # Host identity handoff. The provisioner reconciles these before writes.
+      socketGroupGid: 65530
+      allowedClientUid: 65531
+      allowedClientGid: 65531
+      runtimeUid: 65532
+      runtimeGid: 65532
+    hostServices:
+      - serviceId: stateport-execution-host
+        imageId: stateport-execution-host
+        trustDomain: execution
+        quadletOwner: stateport-exec
+        revisionScoped: false
+        lifecycle: stable-out-of-revision
+        runAsUser: 65532
+        userNamespace: keep-id
+        readOnlyRoot: true
+        engineAccess:
+          mode: owned-execution-user-podman-socket
+          owner: stateport-exec
+          # Mount the runtime DIRECTORY, not the socket file: podman.socket
+          # recreates the inode on restart and a file mount would go stale.
+          hostPath: "%t/podman"
+          containerPath: /run/stateport-engine
+          access: read-write
+        socket:
+          transport: confined-host-unix-socket
+          hostDirectory: /run/stateport/execution-control
+          socketName: control.sock
+          directoryOwner: stateport-exec
+          directoryGroup: stateport-execution-control
+          allowedClientUser: stateport-control
+          directoryMode: "2750"
+          socketMode: "0660"
+          peerIdentity: unix-peer-credentials-required
+        ports:
+          - name: metrics
+            containerPort: 9911
+            hostPort: 17001
+            hostScope: private-proxy
+            allocation: stable-operator-bound
+        writableVolumes:
+          - name: execution-state
+            hostPath: /var/lib/stateport-exec/stateport-execution-host/state
+            mountPath: /var/lib/stateport/execution-host
+            purpose: durable-state
+            scope: stable-host-service
+            owner: stateport-exec
+            mode: rw
+        resources:
+          memoryMaxBytes: 536870912
+          cpuQuotaPercent: 100
+          pidsMax: 256
+        logging: {driver: k8s-file, maxSizeBytes: 10485760}
+        health:
+          kind: unix-socket
+          value: /run/stateport-execution/control.sock
+        updateCompatibility:
+          contractVersion: 2
+          minimumClientVersion: 1
+          maximumClientVersion: 2
+          replacementPolicy: explicit-compatible-host-update-only
+    sharedWritableVolumes:
+      - volumeKey: stateport-shared:stateport-operations
+        volumeName: stateport-operations
+        members: [stateport-api, stateport-worker]
+        writerCoordination: sqlite-immediate-and-posix-advisory-locks
+    runtimeDerivation:
+      format: stateport.revision-materialization/v2
+      profiles: [validation, accepted]
+      materialization:
+        templateTokenVersion: stateport.quadlet-template/v2
+        stageRoot: /var/lib/stateport/releases/staged
+        liveQuadletRoots:
+          stateport-control: xdg-config-containers-systemd
+          stateport-exec: xdg-config-containers-systemd
+        regularSystemdRoot: xdg-config-systemd-user
+        candidateLocation: outside-live-quadlet-search-roots
+        acceptedLocation: copied-after-acceptance-cas-only
+      portPolicy:
+        algorithm: sha256-full-revision-service-port-modulo-probe-v1
+        rangeStart: 18000
+        rangeEnd: 18999
+        probeStep: 17
+        maximumAttempts: 512
+        collisionInputs: [current, predecessor, candidate]
+        observedHostCollision: installer-refuses-before-start
+      stateMachine:
+        stage:
+          - verify-images-by-digest-and-signature
+          - materialize-outside-live-quadlet-roots
+          - verify-materialization-manifest
+          - pre-pull-with-pull-never-runtime
+        validate:
+          - create-exact-backup-or-snapshot-copy
+          - start-validation-profile-only
+          - run-health-api-browser-and-state-checks
+          - stop-validation-profile
+          - retain-validation-evidence
+        promote:
+          - acquire-quiesced-maintenance-lease
+          - stop-and-discard-validation-generation
+          - fence-ingress-and-quiesce-predecessor-writers
+          - write-fresh-authoritative-backup-d0
+          - create-and-migrate-distinct-data-generation-d1
+          - fsync-data-generation-d1
+          - run-private-candidate-checks-on-d1
+          - write-durable-activation-decision-receipt-r1
+          - reconcile-owner-bundles-per-user
+          - atomically-materialize-and-fsync-regular-target-and-route-projections
+          - daemon-reload-control-user
+          - explicitly-start-observe-and-stop-candidate
+          - write-terminal-promotion-receipts
+          - switch-ingress-and-unfence
+          - retain-predecessor
+        rollback:
+          - stop-failed-candidate
+          - evaluate-data-compatibility
+          - restore-or-reuse-data-only-if-authorized
+          - copy-predecessor-profile-to-live-quadlet-roots
+          - daemon-reload
+          - start-predecessor
+          - run-health-and-state-checks
+          - route-cas-to-predecessor
+          - enable-predecessor-activation-target
+          - retain-failure-evidence
+          - do-not-claim-external-side-effect-reversal
+        rebootRecovery:
+          - load-accepted-pointer
+          - verify-acceptance-receipt
+          - materialize-only-accepted-live-units
+          - daemon-reload
+          - start-accepted-activation-target
+          - refuse-staged-or-stale-auto-start
+        activationCas: generation-and-acceptance-receipt-digest
+    services:
+      - serviceId: stateport-web
+        imageId: stateport-web
+        trustDomain: control
+        quadletOwner: stateport-control
+        revisionScoped: true
+        runAsUser: 65532
+        readOnlyRoot: true
+        health: {kind: http, containerPort: 8080, path: /health}
+        ports:
+          - name: http
+            containerPort: 8080
+            hostScope: loopback
+            allocation: full-revision-digest-derived-collision-probed
+        writableVolumes:
+          - name: stateport-product-data
+            mountPath: /var/lib/stateport
+            purpose: durable-state
+            scope: installation
+            validation:
+              mode: read-only-snapshot-copy
+              authority: exact-backup-receipt-required
+        resources:
+          memoryMaxBytes: 2147483648
+          cpuQuotaPercent: 200
+          pidsMax: 1024
+        capabilities:
+          podmanSocketAccess: none
+          controlContract: narrow-unix-client
+      - serviceId: stateport-api
+        imageId: stateport-api
+        trustDomain: control
+        quadletOwner: stateport-control
+        revisionScoped: true
+        runAsUser: 65532
+        readOnlyRoot: true
+        health: {kind: http, containerPort: 8790, path: /readyz}
+        ports:
+          - name: http
+            containerPort: 8790
+            hostScope: loopback
+            allocation: full-revision-digest-derived-collision-probed
+        writableVolumes:
+          - name: stateport-operations
+            mountPath: /workspace/.stateport
+            purpose: durable-state
+            scope: installation
+            validation:
+              mode: read-only-snapshot-copy
+              authority: exact-backup-receipt-required
+        resources:
+          memoryMaxBytes: 1073741824
+          cpuQuotaPercent: 200
+          pidsMax: 512
+        capabilities:
+          podmanSocketAccess: none
+          controlContract: none
+      - serviceId: stateport-worker
+        imageId: stateport-worker
+        trustDomain: control
+        quadletOwner: stateport-control
+        revisionScoped: true
+        runAsUser: 65532
+        readOnlyRoot: true
+        health: {kind: http, containerPort: 8791, path: /readyz}
+        ports:
+          - name: http
+            containerPort: 8791
+            hostScope: loopback
+            allocation: full-revision-digest-derived-collision-probed
+        writableVolumes:
+          - name: stateport-operations
+            mountPath: /workspace/.stateport
+            purpose: durable-state
+            scope: installation
+            validation:
+              mode: read-only-snapshot-copy
+              authority: exact-backup-receipt-required
+        resources:
+          memoryMaxBytes: 1073741824
+          cpuQuotaPercent: 200
+          pidsMax: 512
+        capabilities:
+          podmanSocketAccess: none
+          controlContract: none

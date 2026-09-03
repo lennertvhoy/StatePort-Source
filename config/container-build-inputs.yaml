@@ -1,0 +1,206 @@
+formatVersion: stateport.container-build-inputs/v1
+resolvedOn: "2026-08-29"
+platform: linux/amd64
+
+builder:
+  name: podman
+  descriptorFormat: stateport.release-builder-descriptor/v1
+  descriptorEnvironment: STATEPORT_RELEASE_BUILDER_DESCRIPTOR
+  observedVersion: 6.1.0
+  compatibilityFloor: 5.0.0
+
+locks:
+  pythonRuntime:
+    path: requirements/runtime-linux-amd64.txt
+    digest: sha256:eee39310508a5f6cb0248cfb886b1a27b708031a3ca55c3ae8c722e909bdc4b1
+    installMode: pip-require-hashes
+    providerExtrasIncluded: false
+  webNpm:
+    path: apps/web/package-lock.json
+    digest: sha256:e401322c3aeed7dc9d13da0a74571f3afcc911163e483eafcf28d4454029fac8
+    installMode: npm-ci-ignore-scripts
+  codexNpm:
+    path: config/codex-runtime/package-lock.json
+    digest: sha256:0866fed991dbb853364c564418fd6945770500dbcc36cd186bf9a3f5eb4beed2
+    installMode: npm-ci-ignore-scripts-omit-dev
+  playwrightNpm:
+    path: images/stateport-playwright/package-lock.json
+    digest: sha256:4fedc00bafbba70c8e71b8240b14376e99c53b3b450ec6bcc494b5adbd6d68d2
+    installMode: npm-ci-ignore-scripts-omit-dev
+
+alpinePackages:
+  release: "3.23"
+  repository: https://dl-cdn.alpinelinux.org/alpine/v3.23/main
+  # The web image's AppServer validates the mounted product root's Git
+  # identity and runs approved filesystem transactions under Bubblewrap.
+  # Alpine Git carries no Perl dependency chain; exact versions fail closed
+  # when the v3.23 repository rolls forward, never silently drift.
+  # libcrypto3/libssl3/sqlite-libs are exact-pinned security upgrades of the
+  # python base image's own packages (the upstream rebuilt tag still ships
+  # 3.5.7-r0/3.51.2-r0); every alpine-based runtime image pins the same
+  # versions against the base's default v3.23 repositories.
+  packages:
+    git: 2.52.0-r0
+    bubblewrap: 0.12.0-r0
+    libcrypto3: 3.5.8-r0
+    libssl3: 3.5.8-r0
+    sqlite-libs: 3.53.4-r0
+
+executionHostAlpine:
+  repositories:
+    - https://dl-cdn.alpinelinux.org/alpine/edge/main
+    - https://dl-cdn.alpinelinux.org/alpine/edge/community
+  # podman-remote is a client-only dependency of the isolated execution host.
+  # Pin the complete edge dependency closure because these repositories are
+  # mutable and the release build must fail rather than drift.
+  packages:
+    aardvark-dns: 2.1.0-r0
+    catatonit: 0.2.1-r0
+    conmon: 2.2.1-r0
+    containers-common: 0.64.2-r0
+    crun: 1.28-r0
+    glib: 2.88.3-r0
+    json-c: 0.19-r1
+    libblkid: 2.42.2-r1
+    libbsd: 0.12.2-r0
+    libcap2: 2.78-r0
+    libeconf: 0.8.4-r0
+    libgcc: 15.2.0-r9
+    libintl: 1.0-r0
+    libmd: 1.2.0-r0
+    libmount: 2.42.2-r1
+    libseccomp: 2.6.0-r2
+    linux-pam: 1.7.1-r2
+    netavark: 2.1.0-r0
+    passt: 2026.07.16-r0
+    pcre2: 10.48-r0
+    skalibs-libs: 2.15.1.0-r0
+    shadow-libs: 4.18.0-r1
+    shadow-subids: 4.18.0-r1
+    utmps-libs: 0.1.3.4-r0
+
+ubuntuSnapshot:
+  timestamp: "20260801T000000Z"
+  sourceFile: images/stateport-dev-workspace/ubuntu-snapshot.sources
+  signedBy: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+  inReleaseDigests:
+    noble: sha256:cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0
+    noble-updates: sha256:6444f7ea0b9fe0955db568c8076a06827c0a1efb276c6519aa455c8667f9eccb
+    noble-security: sha256:ebc0fb5c39e050be717154247bbd1f2acf5ad22bf047ff16ae60a3255ad1c3ec
+  tlsBootstrap:
+    package: ca-certificates
+    version: 20260601~24.04.1
+    source: signed Ubuntu archive configured by the pinned base image
+    rule: exact version or fail; snapshot replaces live sources before every other install
+  packages:
+    bash: 5.2.21-2ubuntu4
+    bat: 0.24.0-1build1
+    build-essential: 12.10ubuntu1
+    curl: 8.5.0-2ubuntu10.11
+    dnsutils: 1:9.18.39-0ubuntu0.24.04.5
+    eza: 0.18.2-1
+    fd-find: 9.0.0-1
+    git: 1:2.43.0-1ubuntu7.3
+    iproute2: 6.1.0-1ubuntu6.4
+    iputils-ping: 3:20240117-1ubuntu0.1
+    jq: 1.7.1-3ubuntu0.24.04.2
+    less: 590-2ubuntu2.1
+    locales: 2.39-0ubuntu8.8
+    netcat-openbsd: 1.226-1ubuntu2
+    openssh-client: 1:9.6p1-3ubuntu13.18
+    procps: 2:4.0.4-4ubuntu3.2
+    python3: 3.12.3-0ubuntu2.1
+    python3-pip: 24.0+dfsg-1ubuntu1.3
+    python3-venv: 3.12.3-0ubuntu2.1
+    ripgrep: 14.1.0-1
+    tmux: 3.4-1ubuntu0.1
+    unzip: 6.0-28ubuntu4.1
+    xz-utils: 5.6.1+really5.4.5-1ubuntu0.3
+    yq: 3.1.0-3
+    zip: 3.0-13ubuntu0.2
+    zsh: 5.9-6ubuntu2
+
+# gh and fzf are built from exact release commits with an exact Go toolchain so
+# their source, module graph, compiler, and version metadata remain explicit.
+# Other tools remain pinned upstream assets.
+buildToolchains:
+  go:
+    version: 1.26.7
+    uri: https://dl.google.com/go/go1.26.7.linux-amd64.tar.gz
+    digest: sha256:ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
+
+sourceBuiltTools:
+  podman-remote:
+    version: 5.8.3
+    sourceCommit: 93dbfd0d86ee57f8f91801f61ce57dd880a4725f
+    uri: https://github.com/podman-container-tools/podman.git
+    digest: sha256:a8f31ff8e010d23e2fc8a478caff694b9ac91e94e7eb661250c72f9e6bed1a0d
+    buildToolchain: golang-1.26.6-alpine3.23
+    installPath: /usr/bin/podman-remote
+
+upstreamTools:
+  gh:
+    version: 2.98.0
+    sourceCommit: a255baf71d13fe5947a4eb7ad521ffd412d64cee
+    uri: https://github.com/cli/cli.git
+    digest: sha256:8774dabd7d3d1a0ee6c8b8231f659d6b8d64a8da8803d63e2a95fba66f2f518f
+    buildToolchain: go1.26.7
+    installPath: /usr/local/bin/gh
+  fzf:
+    version: 0.74.2
+    sourceCommit: 3337be9d450cd349e99273a2d3985ceaf5f3753f
+    uri: https://github.com/junegunn/fzf.git
+    digest: sha256:8d8dd8e1ddb33aad685713be4cdae48030ce4ecd57f8558db242aafe4f81be8e
+    buildToolchain: go1.26.7
+    installPath: /usr/local/bin/fzf
+  node:
+    version: 22.23.2
+    uri: https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.gz
+    digest: sha256:b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a
+    installPath: /usr/local
+  npm:
+    version: 12.0.2
+    uri: https://registry.npmjs.org/npm/-/npm-12.0.2.tgz
+    digest: sha256:5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1
+    installPath: /usr/local/lib/node_modules/npm
+  brace-expansion:
+    version: 5.0.9
+    uri: https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz
+    digest: sha256:5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf
+    installPath: /usr/local/lib/node_modules/npm/node_modules/brace-expansion
+  ip-address:
+    version: 10.3.1
+    uri: https://registry.npmjs.org/ip-address/-/ip-address-10.3.1.tgz
+    digest: sha256:ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5
+    installPath: /usr/local/lib/node_modules/npm/node_modules/ip-address
+  tar:
+    version: 7.5.21
+    uri: https://registry.npmjs.org/tar/-/tar-7.5.21.tgz
+    digest: sha256:bcedf25a21daecd1a18fb5e19ab855b7d79ec8ef1da175e8ba85cfc0ed0069d1
+    installPath: /usr/local/lib/node_modules/npm/node_modules/tar
+
+browserAssets:
+  chrome-for-testing:
+    version: 152.0.7977.65
+    uri: https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.65/linux64/chrome-linux64.zip
+    digest: sha256:94d9948bdeb73ded607ae7ea0c0f19fc0b36387b79bd1f5699402de835a6801c
+    installPath: /ms-playwright/chromium-1234/chrome-linux64
+
+definitions:
+  apps/api/Dockerfile: sha256:2e34fd416b94a84adcd8c27315dc24eeab3a38ca122d59d3a91b6c92f28f7d38
+  apps/web/Dockerfile: sha256:bdbab4e4091d9e84287dd32e612ee40ff0bf4b7ff9b04d8d4303a1ce0392fcb5
+  apps/worker/Dockerfile: sha256:949a106e76d6cb0016783274f80f305b801c5424024c11660bb595989b3f991f
+  apps/runner/Dockerfile: sha256:2895b2ee36cebb8b9133fa930b6ef3cc88d1508dad62fe19aaccca2abdbd49a3
+  images/stateport-dev-workspace/Containerfile: sha256:a7699a362e502d32281db0a6c05c5dca9369451d438297621b3e47f0232a69e8
+  images/stateport-execution-host/Containerfile: sha256:49710ab37e85b4822a3ebeb4ad89afd4844e372496f5adbece0d68a3fe3e6f2e
+  images/stateport-playwright/Containerfile: sha256:6266c60dc0e12e8a0f0cf6bf25bedb21decc255c8ed21b5031b6e78e6e6b5cf5
+  images/packaged-content.v1.yaml: sha256:afd3c567090cd6610cc177f218b172fd3ddbc2ccfd13e3d063d09019504ec915
+  images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
+
+requirements:
+  baseImagesMustUseIndexDigest: true
+  buildNetwork: dependency-fetch-only
+  releaseBuildRequiresCleanTrackedTree: true
+  sourceDateEpochRequired: true
+  mutableTagsForbiddenAsAuthority: true
+  controlPlaneContainerEnginePackagesForbidden: true

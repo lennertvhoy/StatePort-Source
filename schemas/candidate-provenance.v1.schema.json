@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/candidate-provenance.v1.schema.json",
+  "title": "StatePort candidate provenance v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "candidateId",
+    "classification",
+    "authorityClass",
+    "authoritativeForInstallation",
+    "repository",
+    "materialization",
+    "artifacts",
+    "verification",
+    "storage",
+    "retention"
+  ],
+  "properties": {
+    "schema": {"const": "stateport.candidate-provenance/v1"},
+    "candidateId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,127}$"},
+    "classification": {"const": "external_sanitized_git_candidate"},
+    "authorityClass": {"type": "string", "minLength": 1, "maxLength": 80},
+    "authoritativeForInstallation": {"const": false},
+    "repository": {"$ref": "#/$defs/repository"},
+    "materialization": {"$ref": "#/$defs/materialization"},
+    "artifacts": {"$ref": "#/$defs/artifacts"},
+    "verification": {"$ref": "#/$defs/verification"},
+    "storage": {"$ref": "#/$defs/storage"},
+    "retention": {"$ref": "#/$defs/retention"}
+  },
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "receipt": {"type": "string", "pattern": "^(authority_receipt|snapshot_receipt)_[0-9a-f]{32}$"},
+    "locator": {"type": "string", "pattern": "^operator://[A-Za-z0-9._/-]+$"},
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gitBlob", "sha256"],
+      "properties": {
+        "gitBlob": {"$ref": "#/$defs/sha1"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "objectFormat", "ref", "commit", "tree", "parents", "remotes", "primaryRepositoryResolvable"],
+      "properties": {
+        "namespace": {"const": "external"},
+        "objectFormat": {"const": "sha1"},
+        "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"},
+        "commit": {"$ref": "#/$defs/sha1"},
+        "tree": {"$ref": "#/$defs/sha1"},
+        "parents": {"type": "array", "maxItems": 0},
+        "remotes": {"type": "array", "maxItems": 0},
+        "primaryRepositoryResolvable": {"const": false}
+      }
+    },
+    "materialization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRepository", "sourceCommit", "sourceTree", "materializer", "exporter", "policy", "protectedDetectorSet", "receipt"],
+      "properties": {
+        "sourceRepository": {"type": "string", "format": "uri", "pattern": "^https://"},
+        "sourceCommit": {"$ref": "#/$defs/sha1"},
+        "sourceTree": {"$ref": "#/$defs/sha1"},
+        "materializer": {"$ref": "#/$defs/tool"},
+        "exporter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["versionKind", "gitBlob", "sha256"],
+          "properties": {
+            "versionKind": {"const": "exact_source_blob"},
+            "gitBlob": {"$ref": "#/$defs/sha1"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "policy": {"$ref": "#/$defs/tool"},
+        "protectedDetectorSet": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["locator", "sha256", "valuesTrackedInRepository"],
+          "properties": {
+            "locator": {"$ref": "#/$defs/locator"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "valuesTrackedInRepository": {"const": false}
+          }
+        },
+        "receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "digest", "materializationDocumentSha256"],
+          "properties": {
+            "id": {"$ref": "#/$defs/receipt"},
+            "digest": {"$ref": "#/$defs/digest"},
+            "materializationDocumentSha256": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publicManifest", "auditedSourceArchive", "workspaceEvidence", "gitBundle"],
+      "properties": {
+        "publicManifest": {"type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {"sha256": {"$ref": "#/$defs/sha256"}}},
+        "auditedSourceArchive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "embeddedCommit"],
+          "properties": {"sha256": {"$ref": "#/$defs/sha256"}, "embeddedCommit": {"$ref": "#/$defs/sha1"}}
+        },
+        "workspaceEvidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["leaseId", "manifestDigest"],
+          "properties": {
+            "leaseId": {"type": "string", "pattern": "^lease_[0-9a-f]{32}$"},
+            "manifestDigest": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "gitBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "sha256", "bytes", "ref", "locator", "recoveryReceipt"],
+          "properties": {
+            "status": {"const": "verified_recovery_bundle"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "bytes": {"type": "integer", "minimum": 1},
+            "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"},
+            "locator": {"$ref": "#/$defs/locator"},
+            "recoveryReceipt": {"$ref": "#/$defs/receipt"}
+          }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "recovery"],
+      "properties": {
+        "contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["argv", "expectedResult"],
+          "properties": {
+            "argv": {
+              "type": "array",
+              "prefixItems": [
+                {"const": "python3"},
+                {"const": "scripts/validate_candidate_provenance.py"}
+              ],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "expectedResult": {"const": "typed_without_bundle_inspection"}
+          }
+        },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["argvPrefix", "bundleLocator", "expectedResult"],
+          "properties": {
+            "argvPrefix": {
+              "type": "array",
+              "prefixItems": [
+                {"const": "python3"},
+                {"const": "scripts/validate_candidate_provenance.py"},
+                {"const": "--bundle"}
+              ],
+              "items": false,
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "bundleLocator": {"$ref": "#/$defs/locator"},
+            "expectedResult": {"const": "exact_bundle_recovered"}
+          }
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositoryLocator", "archiveLocator", "absolutePathsTrackedInRepository"],
+      "properties": {
+        "repositoryLocator": {"$ref": "#/$defs/locator"},
+        "archiveLocator": {"$ref": "#/$defs/locator"},
+        "absolutePathsTrackedInRepository": {"const": false}
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "preservationReceipt", "retainUntil", "bundleRequired", "deletionRequiresExplicitOwnerApproval"],
+      "properties": {
+        "status": {"const": "durably_reconciled"},
+        "preservationReceipt": {"$ref": "#/$defs/receipt"},
+        "retainUntil": {"const": "explicit_owner_disposition_or_superseding_verified_candidate"},
+        "bundleRequired": {"const": true},
+        "deletionRequiresExplicitOwnerApproval": {"const": true}
+      }
+    }
+  }
+}

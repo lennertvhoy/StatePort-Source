@@ -1,0 +1,87 @@
+formatVersion: stateport.release-image-set/v1
+version: 0.1.0-alpha.1
+platform: linux/amd64
+registry:
+  localAuthority: 127.0.0.1
+  repositoryPrefix: stateport-alpha
+  mutableTagsAreAuthority: false
+  compatibilityFloor: podman-5.0.0
+
+images:
+  stateport-web:
+    containerfile: apps/web/Dockerfile
+    role: runtime-service
+    runtimeUser: "65532:65532"
+    readOnlyRootCompatible: true
+    health: {kind: http, port: 8080, path: /health}
+    packagedContentProfile: stateport-web
+    pullCompose:
+      enabled: true
+      ports: ["127.0.0.1:${STATEPORT_WEB_PORT:-8080}:8080"]
+      volumes: [stateport-product-data:/var/lib/stateport]
+  stateport-api:
+    containerfile: apps/api/Dockerfile
+    role: runtime-service
+    runtimeUser: "65532:65532"
+    readOnlyRootCompatible: true
+    health: {kind: http, port: 8790, path: /readyz}
+    packagedContentProfile: stateport-api
+    pullCompose:
+      enabled: true
+      ports: []
+      volumes: [stateport-operations:/workspace/.stateport]
+  stateport-worker:
+    containerfile: apps/worker/Dockerfile
+    role: runtime-service
+    runtimeUser: "65532:65532"
+    readOnlyRootCompatible: true
+    health: {kind: http, port: 8791, path: /readyz}
+    packagedContentProfile: stateport-worker
+    pullCompose:
+      enabled: true
+      ports: []
+      volumes: [stateport-operations:/workspace/.stateport]
+  stateport-runner:
+    containerfile: apps/runner/Dockerfile
+    role: optional-profile
+    runtimeUser: "65532:65532"
+    readOnlyRootCompatible: true
+    health: null
+    packagedContentProfile: stateport-runner
+  stateport-dev-workspace:
+    containerfile: images/stateport-dev-workspace/Containerfile
+    role: optional-profile
+    runtimeUser: "10001:10001"
+    readOnlyRootCompatible: true
+    health: null
+    packagedContentProfile: stateport-dev-workspace
+  stateport-playwright:
+    containerfile: images/stateport-playwright/Containerfile
+    role: optional-profile
+    runtimeUser: "10001:10001"
+    readOnlyRootCompatible: true
+    health: null
+    packagedContentProfile: stateport-playwright
+  stateport-execution-host:
+    containerfile: images/stateport-execution-host/Containerfile
+    role: stable-host-service
+    runtimeUser: "65532:65532"
+    readOnlyRootCompatible: true
+    health: {kind: unix-socket, path: /run/stateport-execution/control.sock}
+    packagedContentProfile: stateport-execution-host
+
+componentPlacements:
+  stateport-preview-gateway:
+    imageId: stateport-web
+    trustDomain: control
+    processModel: same-origin-web-process
+    engineSocketAccess: none
+    networkAuthority: authenticated-stateport-route-only
+    readiness: packaging-boundary-only-runtime-delivered-by-slice-c
+  stateport-updater:
+    imageId: stateport-worker
+    trustDomain: maintenance
+    processModel: separate-maintenance-service-shared-immutable-image
+    engineSocketAccess: none
+    mutationAuthority: typed-signed-update-plan-only
+    readiness: packaging-boundary-only-runtime-delivered-by-updater-slice

@@ -1,0 +1,6 @@
+# No Python provider SDK is shipped in the public alpha runtime.
+#
+# Codex and OpenCode support use separately authenticated external host
+# executables through their typed adapters. A future direct-API provider must
+# be added here explicitly, locked separately, and bound to Secret Broker
+# capability before any runtime image may install it.

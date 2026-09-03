@@ -1,0 +1,32 @@
+{
+  "schema": "stateport.python-dependency-policy/v1",
+  "runtime": {
+    "python": "3.13",
+    "platform": "linux/amd64",
+    "input": "requirements/runtime-linux-amd64.in",
+    "lock": "requirements/runtime-linux-amd64.txt",
+    "requireHashes": true,
+    "consumers": [
+      "apps/api/Dockerfile",
+      "apps/runner/Dockerfile",
+      "apps/web/Dockerfile",
+      "apps/worker/Dockerfile"
+    ]
+  },
+  "development": {
+    "python": ">=3.12",
+    "platform": "linux/amd64",
+    "input": "requirements/dev-test.in",
+    "lock": "requirements/dev-test.txt",
+    "requireHashes": true
+  },
+  "providers": {
+    "input": "requirements/provider-extras.in",
+    "pythonPackagesShipped": [],
+    "externalExecutables": [
+      "codex",
+      "opencode"
+    ],
+    "missingBehavior": "typed_unavailable"
+  }
+}

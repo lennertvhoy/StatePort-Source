@@ -1,0 +1,111 @@
+formatVersion: stateport.application-experience-policy/v1
+operatorPermits:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+  - file_viewer
+  - workbench
+  - terminal
+  - editor
+  - cto_orchestration
+  - benchmark_evidence
+  - backup
+  - calendar
+  - web_research
+applicationGrants:
+  studystate.sample:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+  checklistdd:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+  studydd:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+  stateport.development-reference:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+    - file_viewer
+    - workbench
+    - terminal
+    - editor
+    - cto_orchestration
+    - benchmark_evidence
+    - backup
+  nixos-infrastructure:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+    - file_viewer
+    - workbench
+    - terminal
+    - editor
+    - cto_orchestration
+  atm10.speedrun-guide:
+    - conversation
+    - progress_dashboard
+runtimeCapabilities:
+  conversation:
+    status: available
+  progress_dashboard:
+    status: available
+  goal_execution:
+    status: degraded
+    reason: provider_free_bounded_actions_and_receipts_only
+  proactive_notifications:
+    status: degraded
+    reason: local_in_app_reminders_only
+  file_viewer:
+    status: available
+  workbench:
+    status: available
+  terminal:
+    status: available
+  editor:
+    status: available
+  cto_orchestration:
+    status: degraded
+    reason: provider_free_advisory_and_governed_receipts_only
+  benchmark_evidence:
+    status: available
+  backup:
+    status: available
+  calendar:
+    status: unavailable
+    reason: calendar_adapter_not_configured
+  web_research:
+    status: unavailable
+    reason: research_adapter_not_configured
+actorPermissions:
+  local_user:
+    - application.use
+    - application.install.fixture
+    - advanced.inspect
+    - application.file.read
+    - application.file.write
+    - application.terminal.use
+    - application.cto.use
+  platform_operator:
+    - application.use
+    - application.install.fixture
+    - advanced.inspect
+    - application.file.read
+    - application.file.write
+    - application.terminal.use
+    - application.cto.use
+    - platform.statebench.read
+    - platform.authority.inspect
+    - platform.authority.mutate
+    - platform.source.inspect
+    - platform.source.development.verify
+    - platform.recovery.restore

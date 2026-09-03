@@ -1,0 +1,821 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/release-index.v1.schema.json",
+  "title": "StatePort release channel index v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "signed", "signatures"],
+  "properties": {
+    "schema": {"const": "stateport.release-index/v1"},
+    "signed": {"$ref": "#/$defs/signed"},
+    "signatures": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/signature"}
+    }
+  },
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "semver": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "uri": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?:https://|http://127\\.0\\.0\\.1(?::[0-9]{1,5})?/|oci://|operator://)[^\\s?#]+(?:\\?[^\\s#]*)?$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "digest", "size", "mediaType"],
+      "properties": {
+        "uri": {"$ref": "#/$defs/uri"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 8589934592},
+        "mediaType": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]+/[a-z0-9][a-z0-9!#$&^_.+-]+(?:;[A-Za-z0-9._=+-]+)?$"
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scheme",
+        "subjectDigest",
+        "bundle",
+        "trustMode",
+        "transparencyLog"
+      ],
+      "properties": {
+        "scheme": {"const": "cosign-v3-bundle"},
+        "subjectDigest": {"$ref": "#/$defs/digest"},
+        "subjectKind": {"const": "oci-manifest-blob"},
+        "bundle": {"$ref": "#/$defs/artifact"},
+        "trustMode": {"enum": ["keyless-certificate", "pinned-public-key"]},
+        "certificateIdentity": {"type": "string", "minLength": 1, "maxLength": 512},
+        "certificateOidcIssuer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^https://[^\\s?#]+$"
+        },
+        "publicKeyFingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "publicKeyFingerprintAlgorithm": {"const": "sha256-canonical-der-spki"},
+        "publicKeyId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"},
+        "transparencyLog": {
+          "enum": ["not-uploaded-private-candidate", "required-public-release"]
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["certificateIdentity", "certificateOidcIssuer"],
+          "properties": {"trustMode": {"const": "keyless-certificate"}}
+        },
+        {
+          "required": ["publicKeyFingerprint", "publicKeyFingerprintAlgorithm", "publicKeyId"],
+          "properties": {
+            "trustMode": {"const": "pinned-public-key"},
+            "transparencyLog": {"const": "not-uploaded-private-candidate"}
+          }
+        }
+      ]
+    },
+    "signed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release",
+        "source",
+        "targets",
+        "artifacts",
+        "images",
+        "signaturePolicy",
+        "supplyChain",
+        "compatibility",
+        "publication"
+      ],
+      "properties": {
+        "release": {"$ref": "#/$defs/release"},
+        "source": {"$ref": "#/$defs/source"},
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/target"}
+        },
+        "artifacts": {"$ref": "#/$defs/artifacts"},
+        "images": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/image"}
+        },
+        "signaturePolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trustMode", "imageSignaturesRequired", "verificationProof"],
+          "properties": {
+            "trustMode": {"enum": ["keyless-certificate", "pinned-public-key"]},
+            "imageSignaturesRequired": {"const": true},
+            "verificationProof": {"const": "stateport.signature-verification-proof/v1"}
+          }
+        },
+        "supplyChain": {"$ref": "#/$defs/supplyChain"},
+        "compatibility": {"$ref": "#/$defs/compatibility"},
+        "publication": {"$ref": "#/$defs/publication"},
+        "successor": {"$ref": "#/$defs/successor"}
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["releaseId", "version", "channel", "qualification"],
+      "properties": {
+        "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+        "version": {"$ref": "#/$defs/semver"},
+        "channel": {"enum": ["alpha", "stable", "owner-dogfood"]},
+        "qualification": {"enum": ["candidate", "published"]}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "tree", "dirty", "publicSnapshot"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^https://[^\\s?#]+(?:\\.git)?$"},
+        "commit": {"$ref": "#/$defs/sha1"},
+        "tree": {"$ref": "#/$defs/sha1"},
+        "dirty": {"const": false},
+        "publicSnapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "commit", "tree", "manifestDigest"],
+          "properties": {
+            "repository": {"type": "string", "pattern": "^https://[^\\s?#]+(?:\\.git)?$"},
+            "commit": {"$ref": "#/$defs/sha1"},
+            "tree": {"$ref": "#/$defs/sha1"},
+            "manifestDigest": {"$ref": "#/$defs/digest"},
+            "authorityUrl": {"type": "string", "pattern": "^https://[^\\s?#]+$"},
+            "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"}
+          }
+        },
+        "candidateProvenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "digest", "document"],
+          "properties": {
+            "schema": {"const": "stateport.candidate-provenance/v2"},
+            "digest": {"$ref": "#/$defs/digest"},
+            "document": {"type": "object", "additionalProperties": true}
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetId",
+        "releaseId",
+        "releaseEligibility",
+        "os",
+        "architecture",
+        "hostBaseline",
+        "cgroupVersion",
+        "containerEngine",
+        "executionHostMode",
+        "executionContract",
+        "hostServices",
+        "runtimeDerivation",
+        "topologyDigest",
+        "quadletBundleDigest",
+        "artifactIds",
+        "services"
+      ],
+      "properties": {
+        "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+        "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+        "releaseEligibility": {"enum": ["release-candidate", "bootstrap-only"]},
+        "os": {"const": "linux"},
+        "architecture": {"enum": ["amd64"]},
+        "hostBaseline": {"enum": ["linux-amd64-rootless-podman-quadlet", "wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet"]},
+        "cgroupVersion": {"const": "v2"},
+        "containerEngine": {"const": "rootless-podman-quadlet"},
+        "executionHostMode": {"enum": ["none", "stable-host-daemon-client", "stable-host-daemon-bootstrap-only"]},
+        "executionContract": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["transport", "serviceId", "imageId", "imageDigest", "contractVersion", "clientCompatibility", "hostDirectory", "containerDirectory", "socketName", "bootstrap", "directoryOwner", "directoryGroup", "allowedClientUser", "directoryMode", "socketMode", "peerIdentity"],
+              "properties": {
+                "transport": {"const": "confined-host-unix-socket"},
+                "serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+                "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+                "imageDigest": {"$ref": "#/$defs/digest"},
+                "contractVersion": {"type": "integer", "minimum": 1, "maximum": 65535},
+                "clientCompatibility": {"type": "object", "additionalProperties": false, "required": ["minimum", "maximum"], "properties": {"minimum": {"type": "integer", "minimum": 1, "maximum": 65535}, "maximum": {"type": "integer", "minimum": 1, "maximum": 65535}}},
+                "hostDirectory": {"const": "/run/stateport/execution-control"},
+                "containerDirectory": {"const": "/run/stateport-execution"},
+                "socketName": {"const": "control.sock"},
+                "bootstrap": {"const": "operator-provisioned-tmpfiles"},
+                "directoryOwner": {"const": "stateport-exec"},
+                "directoryGroup": {"const": "stateport-execution-control"},
+                "allowedClientUser": {"const": "stateport-control"},
+                "directoryMode": {"enum": ["0750", "2750"]},
+                "socketMode": {"const": "0660"},
+                "peerIdentity": {"const": "unix-peer-credentials-required"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "transport",
+                "serviceId",
+                "imageId",
+                "imageDigest",
+                "contractVersion",
+                "clientCompatibility",
+                "hostDirectory",
+                "containerDirectory",
+                "socketName",
+                "bootstrap",
+                "directoryOwner",
+                "directoryGroup",
+                "allowedClientUser",
+                "directoryMode",
+                "socketMode",
+                "peerIdentity",
+                "socketGroupGid",
+                "allowedClientUid",
+                "allowedClientGid",
+                "runtimeUid",
+                "runtimeGid"
+              ],
+              "properties": {
+                "transport": {"const": "confined-host-unix-socket"},
+                "serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+                "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+                "imageDigest": {"$ref": "#/$defs/digest"},
+                "contractVersion": {"type": "integer", "minimum": 1, "maximum": 65535},
+                "clientCompatibility": {"type": "object", "additionalProperties": false, "required": ["minimum", "maximum"], "properties": {"minimum": {"type": "integer", "minimum": 1, "maximum": 65535}, "maximum": {"type": "integer", "minimum": 1, "maximum": 65535}}},
+                "hostDirectory": {"const": "/run/stateport/execution-control"},
+                "containerDirectory": {"const": "/run/stateport-execution"},
+                "socketName": {"const": "control.sock"},
+                "bootstrap": {"const": "operator-provisioned-tmpfiles"},
+                "directoryOwner": {"const": "stateport-exec"},
+                "directoryGroup": {"const": "stateport-execution-control"},
+                "allowedClientUser": {"const": "stateport-control"},
+                "directoryMode": {"enum": ["0750", "2750"]},
+                "socketMode": {"const": "0660"},
+                "peerIdentity": {"const": "unix-peer-credentials-required"},
+                "socketGroupGid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                "allowedClientUid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                "allowedClientGid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                "runtimeUid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                "runtimeGid": {"type": "integer", "minimum": 1, "maximum": 2147483647}
+              }
+            }
+          ]
+        },
+        "hostServices": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/hostService"}
+        },
+        "sharedWritableVolumes": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["volumeKey", "volumeName", "members", "writerCoordination"],
+            "properties": {
+              "volumeKey": {"type": "string", "pattern": "^stateport-shared:[a-z][a-z0-9-]{0,62}$"},
+              "volumeName": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$"},
+              "members": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 16,
+                "uniqueItems": true,
+                "items": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"}
+              },
+              "writerCoordination": {"const": "sqlite-immediate-and-posix-advisory-locks"}
+            }
+          }
+        },
+        "runtimeDerivation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "profiles", "materialization", "portPolicy", "stateMachine"],
+          "properties": {
+            "format": {"const": "stateport.revision-materialization/v2"},
+            "profiles": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {"enum": ["validation", "accepted"]}
+            },
+            "materialization": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["templateTokenVersion", "stageRoot", "liveQuadletRoots", "regularSystemdRoot", "candidateLocation", "acceptedLocation"],
+              "properties": {
+                "templateTokenVersion": {"const": "stateport.quadlet-template/v2"},
+                "stageRoot": {"const": "/var/lib/stateport/releases/staged"},
+                "liveQuadletRoots": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["stateport-control", "stateport-exec"],
+                  "properties": {
+                    "stateport-control": {"const": "xdg-config-containers-systemd"},
+                    "stateport-exec": {"const": "xdg-config-containers-systemd"}
+                  }
+                },
+                "regularSystemdRoot": {"const": "xdg-config-systemd-user"},
+                "candidateLocation": {"const": "outside-live-quadlet-search-roots"},
+                "acceptedLocation": {"const": "copied-after-acceptance-cas-only"}
+              }
+            },
+            "portPolicy": {
+              "type": "object", "additionalProperties": false,
+              "required": ["algorithm", "rangeStart", "rangeEnd", "probeStep", "maximumAttempts", "collisionInputs", "observedHostCollision"],
+              "properties": {
+                "algorithm": {"const": "sha256-full-revision-service-port-modulo-probe-v1"},
+                "rangeStart": {"type": "integer", "minimum": 1024, "maximum": 60000},
+                "rangeEnd": {"type": "integer", "minimum": 1025, "maximum": 65535},
+                "probeStep": {"type": "integer", "minimum": 1, "maximum": 65535},
+                "maximumAttempts": {"type": "integer", "minimum": 1, "maximum": 512},
+                "collisionInputs": {
+                  "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+                  "items": {"enum": ["current", "predecessor", "candidate"]}
+                },
+                "observedHostCollision": {"const": "installer-refuses-before-start"}
+              }
+            },
+            "stateMachine": {
+              "type": "object", "additionalProperties": false,
+              "required": ["stage", "validate", "promote", "rollback", "rebootRecovery", "activationCas"],
+              "properties": {
+                "stage": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1}},
+                "validate": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1}},
+                "promote": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"type": "string", "minLength": 1}},
+                "rollback": {"type": "array", "minItems": 1, "maxItems": 24, "items": {"type": "string", "minLength": 1}},
+                "rebootRecovery": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1}},
+                "activationCas": {"const": "generation-and-acceptance-receipt-digest"}
+              }
+            }
+          }
+        },
+        "topologyDigest": {"$ref": "#/$defs/digest"},
+        "quadletBundleDigest": {"$ref": "#/$defs/digest"},
+        "artifactIds": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 9,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "installer",
+              "executionHostProvisioner",
+              "podmanPackageBundle",
+              "updater",
+              "compose",
+              "quadlet",
+              "sourceArchive",
+              "releaseNotes",
+              "knownLimitations"
+            ]
+          }
+        },
+        "services": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/service"}
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "serviceId",
+        "imageId",
+        "trustDomain",
+        "quadletOwner",
+        "revisionScoped",
+        "runAsUser",
+        "readOnlyRoot",
+        "health",
+        "ports",
+        "writableVolumes",
+        "resources",
+        "capabilities"
+      ],
+      "properties": {
+        "serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+        "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+        "trustDomain": {"enum": ["control", "execution", "preview", "maintenance"]},
+        "quadletOwner": {"enum": ["stateport-control", "stateport-exec"]},
+        "revisionScoped": {"const": true},
+        "runAsUser": {"type": "integer", "minimum": 1, "maximum": 4294967294},
+        "readOnlyRoot": {"const": true},
+        "health": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "containerPort", "path"],
+          "properties": {
+            "kind": {"const": "http"},
+            "containerPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "path": {"type": "string", "pattern": "^/[A-Za-z0-9._~/%-]*$"}
+          }
+        },
+        "ports": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "containerPort", "hostScope", "allocation"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+              "containerPort": {"type": "integer", "minimum": 1, "maximum": 65535},
+              "hostScope": {"enum": ["loopback", "private-proxy"]},
+              "allocation": {"const": "full-revision-digest-derived-collision-probed"}
+            }
+          }
+        },
+        "writableVolumes": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "mountPath", "purpose", "scope", "validation"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$"},
+              "mountPath": {"type": "string", "pattern": "^/(?!\\.\\.(?:/|$))(?!.*/\\.\\.(?:/|$))[^\\s\\\\]+$"},
+              "purpose": {"enum": ["durable-state", "configuration", "cache", "evidence", "runtime"]},
+              "scope": {"enum": ["installation", "release-revision"]},
+              "validation": {
+                "type": "object", "additionalProperties": false,
+                "required": ["mode", "authority"],
+                "properties": {
+                  "mode": {"enum": ["read-only-snapshot-copy", "ephemeral-empty"]},
+                  "authority": {"enum": ["exact-backup-receipt-required", "release-revision-local"]}
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["memoryMaxBytes", "cpuQuotaPercent", "pidsMax"],
+          "properties": {
+            "memoryMaxBytes": {"type": "integer", "minimum": 67108864, "maximum": 68719476736},
+            "cpuQuotaPercent": {"type": "integer", "minimum": 1, "maximum": 1600},
+            "pidsMax": {"type": "integer", "minimum": 16, "maximum": 65536}
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["podmanSocketAccess", "controlContract"],
+          "properties": {
+            "podmanSocketAccess": {"enum": ["none", "owned-execution-user"]},
+            "controlContract": {"enum": ["none", "narrow-unix-client", "narrow-unix-server"]}
+          }
+        }
+      }
+    },
+    "hostService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serviceId", "imageId", "trustDomain", "quadletOwner", "revisionScoped", "lifecycle", "runAsUser", "readOnlyRoot", "engineAccess", "socket", "ports", "writableVolumes", "resources", "logging", "health", "updateCompatibility"],
+      "properties": {
+        "serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+        "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+        "trustDomain": {"enum": ["execution", "maintenance", "preview"]},
+        "quadletOwner": {"enum": ["stateport-control", "stateport-exec"]},
+        "revisionScoped": {"const": false},
+        "lifecycle": {"const": "stable-out-of-revision"},
+        "runAsUser": {"type": "integer", "minimum": 1, "maximum": 4294967294},
+        "userNamespace": {"enum": ["host", "keep-id"]},
+        "readOnlyRoot": {"const": true},
+        "engineAccess": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["mode", "owner", "hostPath", "containerPath", "access"], "properties": {"mode": {"const": "owned-execution-user-podman-socket"}, "owner": {"const": "stateport-exec"}, "hostPath": {"enum": ["%t/podman", "%t/podman/podman.sock"]}, "containerPath": {"enum": ["/run/stateport-engine", "/run/stateport-engine/podman.sock"]}, "access": {"const": "read-write"}}}]},
+        "socket": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["transport", "hostDirectory", "socketName", "directoryOwner", "directoryGroup", "allowedClientUser", "directoryMode", "socketMode", "peerIdentity"], "properties": {"transport": {"const": "confined-host-unix-socket"}, "hostDirectory": {"type": "string", "pattern": "^/run/stateport/[a-z0-9-]+$"}, "socketName": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,63}\\.sock$"}, "directoryOwner": {"enum": ["stateport-control", "stateport-exec"]}, "directoryGroup": {"type": "string", "pattern": "^stateport-[a-z0-9-]+$"}, "allowedClientUser": {"enum": ["stateport-control", "stateport-exec"]}, "directoryMode": {"enum": ["0750", "2750"]}, "socketMode": {"const": "0660"}, "peerIdentity": {"const": "unix-peer-credentials-required"}}}]},
+        "ports": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": false, "required": ["name", "containerPort", "hostPort", "hostScope", "allocation"], "properties": {"name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"}, "containerPort": {"type": "integer", "minimum": 1, "maximum": 65535}, "hostPort": {"type": "integer", "minimum": 1024, "maximum": 65535}, "hostScope": {"enum": ["loopback", "private-proxy"]}, "allocation": {"const": "stable-operator-bound"}}}},
+        "writableVolumes": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": false, "required": ["name", "hostPath", "mountPath", "purpose", "scope", "owner", "mode"], "properties": {"name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$"}, "hostPath": {"type": "string", "pattern": "^/var/lib/stateport-(?:control|exec)(?:/[a-z0-9][a-z0-9._-]{0,62}){2,8}$"}, "mountPath": {"type": "string", "pattern": "^/(?:var/lib/stateport|var/cache/stateport|run/stateport)(?:/[a-z0-9][a-z0-9._-]{0,62}){1,8}$"}, "purpose": {"enum": ["durable-state", "runtime", "evidence", "cache", "configuration"]}, "scope": {"const": "stable-host-service"}, "owner": {"enum": ["stateport-control", "stateport-exec"]}, "mode": {"const": "rw"}}}},
+        "resources": {"type": "object", "additionalProperties": false, "required": ["memoryMaxBytes", "cpuQuotaPercent", "pidsMax"], "properties": {"memoryMaxBytes": {"type": "integer", "minimum": 67108864, "maximum": 68719476736}, "cpuQuotaPercent": {"type": "integer", "minimum": 1, "maximum": 1600}, "pidsMax": {"type": "integer", "minimum": 16, "maximum": 65536}}},
+        "logging": {"type": "object", "additionalProperties": false, "required": ["driver", "maxSizeBytes"], "properties": {"driver": {"const": "k8s-file"}, "maxSizeBytes": {"type": "integer", "minimum": 1048576, "maximum": 104857600}}},
+        "health": {"type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": {"kind": {"enum": ["http", "unix-socket"]}, "value": {"type": "string", "pattern": "^(?:http://127\\.0\\.0\\.1:[0-9]{1,5}/[A-Za-z0-9._~/-]*|/run/(?:stateport/[a-z0-9-]+|stateport-execution)/[a-z0-9][a-z0-9._-]{2,63}\\.sock)$", "maxLength": 255}}},
+        "updateCompatibility": {"type": "object", "additionalProperties": false, "required": ["contractVersion", "minimumClientVersion", "maximumClientVersion", "replacementPolicy"], "properties": {"contractVersion": {"type": "integer", "minimum": 1, "maximum": 65535}, "minimumClientVersion": {"type": "integer", "minimum": 1, "maximum": 65535}, "maximumClientVersion": {"type": "integer", "minimum": 1, "maximum": 65535}, "replacementPolicy": {"const": "explicit-compatible-host-update-only"}}}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installer",
+        "updater",
+        "compose",
+        "quadlet",
+        "sourceArchive",
+        "releaseNotes",
+        "knownLimitations"
+      ],
+      "properties": {
+        "installer": {"$ref": "#/$defs/artifact"},
+        "executionHostProvisioner": {"$ref": "#/$defs/artifact"},
+        "podmanPackageBundle": {"$ref": "#/$defs/artifact"},
+        "updater": {"$ref": "#/$defs/artifact"},
+        "compose": {"$ref": "#/$defs/artifact"},
+        "quadlet": {"$ref": "#/$defs/artifact"},
+        "sourceArchive": {"$ref": "#/$defs/artifact"},
+        "releaseNotes": {"$ref": "#/$defs/artifact"},
+        "knownLimitations": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "imageId",
+        "role",
+        "reference",
+        "digest",
+        "sourceCommit",
+        "sourceTree",
+        "platform",
+        "sizeBytes",
+        "runAsUser",
+        "readOnlyRoot",
+        "healthProbe",
+        "sboms",
+        "scan",
+        "provenance",
+        "signature",
+        "packageInventory",
+        "licenseInventory"
+      ],
+      "properties": {
+        "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+        "role": {"enum": ["runtime-service", "stable-host-service", "optional-profile"]},
+        "reference": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5})?(?:/[a-z0-9][a-z0-9._-]*)+@sha256:[0-9a-f]{64}$"
+        },
+        "digest": {"$ref": "#/$defs/digest"},
+        "sourceCommit": {"$ref": "#/$defs/sha1"},
+        "sourceTree": {"$ref": "#/$defs/sha1"},
+        "platform": {"const": "linux/amd64"},
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 137438953472
+        },
+        "runAsUser": {"type": "integer", "minimum": 1, "maximum": 4294967294},
+        "readOnlyRoot": {"const": true},
+        "healthProbe": {"type": "object", "additionalProperties": false, "required": ["executable", "protocol", "packageInventoryDigest", "evidence"], "properties": {"executable": {"const": "/usr/local/bin/stateport-healthcheck"}, "protocol": {"const": "stateport-healthcheck/v1"}, "packageInventoryDigest": {"$ref": "#/$defs/digest"}, "evidence": {"$ref": "#/$defs/artifact"}}},
+        "sboms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cycloneDx", "spdx"],
+          "properties": {
+            "cycloneDx": {"$ref": "#/$defs/artifact"},
+            "spdx": {"$ref": "#/$defs/artifact"}
+          }
+        },
+        "scan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact", "tool", "toolVersion", "databaseBuiltAt", "scannedAt", "maxDatabaseAgeHours", "maxScanAgeHours", "policy"],
+          "properties": {
+            "artifact": {"$ref": "#/$defs/artifact"},
+            "tool": {"const": "grype"},
+            "toolVersion": {"$ref": "#/$defs/semver"},
+            "databaseBuiltAt": {"$ref": "#/$defs/timestamp"},
+            "scannedAt": {"$ref": "#/$defs/timestamp"},
+            "maxDatabaseAgeHours": {"type": "integer", "minimum": 1, "maximum": 720},
+            "maxScanAgeHours": {"type": "integer", "minimum": 1, "maximum": 720},
+            "policy": {"const": "stateport.grype-policy/v1"}
+          }
+        },
+        "provenance": {"$ref": "#/$defs/artifact"},
+        "signature": {"$ref": "#/$defs/signature"},
+        "packageInventory": {"$ref": "#/$defs/artifact"},
+        "licenseInventory": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "executableDigest", "provenance"],
+      "properties": {
+        "name": {"enum": ["syft", "grype", "cosign"]},
+        "version": {"$ref": "#/$defs/semver"},
+        "executableDigest": {"$ref": "#/$defs/digest"},
+        "provenance": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "supplyChain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tools", "doubleBuildComparison", "publicExportManifest"],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/tool"}
+        },
+        "doubleBuildComparison": {"$ref": "#/$defs/artifact"},
+        "publicExportManifest": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "updaterMinimumVersion",
+        "schemaMigrationVersion",
+        "databaseMigrationVersion",
+        "predecessor",
+        "rollback"
+      ],
+      "properties": {
+        "updaterMinimumVersion": {"$ref": "#/$defs/semver"},
+        "schemaMigrationVersion": {"type": "integer", "minimum": 0},
+        "databaseMigrationVersion": {"type": "integer", "minimum": 0},
+        "predecessor": {
+          "oneOf": [
+            {"$ref": "#/$defs/releaseIdentity"},
+            {"type": "null"}
+          ]
+        },
+        "rollback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["supported", "minimumPredecessorVersion", "dataCompatible", "reason"],
+          "properties": {
+            "supported": {"type": "boolean"},
+            "minimumPredecessorVersion": {
+              "oneOf": [
+                {"$ref": "#/$defs/semver"},
+                {"type": "null"}
+              ]
+            },
+            "dataCompatible": {"type": "boolean"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 1024}
+          }
+        }
+      }
+    },
+    "releaseIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["releaseId", "version", "signedPayloadDigest"],
+      "properties": {
+        "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+        "version": {"$ref": "#/$defs/semver"},
+        "signedPayloadDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publishedAt", "expiresAt", "deprecation"],
+      "properties": {
+        "publishedAt": {
+          "oneOf": [
+            {"$ref": "#/$defs/timestamp"},
+            {"type": "null"}
+          ]
+        },
+        "expiresAt": {
+          "oneOf": [
+            {"$ref": "#/$defs/timestamp"},
+            {"type": "null"}
+          ]
+        },
+        "deprecation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "at", "reason"],
+          "properties": {
+            "status": {"enum": ["active", "deprecated", "withdrawn"]},
+            "at": {
+              "oneOf": [
+                {"$ref": "#/$defs/timestamp"},
+                {"type": "null"}
+              ]
+            },
+            "reason": {
+              "oneOf": [
+                {"type": "string", "minLength": 1, "maxLength": 1024},
+                {"type": "null"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "successor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formatVersion", "qualificationEvent", "disposition", "predecessor", "versionBindings"],
+      "properties": {
+        "formatVersion": {"const": "stateport.release-successor/v1"},
+        "freshnessEnforcement": {"const": "qualification-and-signing-time"},
+        "qualificationEvent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["formatVersion", "eventId", "releaseId", "version", "qualifiedAt", "result", "freshnessBasis", "images"],
+          "properties": {
+            "formatVersion": {"const": "stateport.release-qualification/v1"},
+            "eventId": {"$ref": "#/$defs/digest"},
+            "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+            "version": {"$ref": "#/$defs/semver"},
+            "qualifiedAt": {"$ref": "#/$defs/timestamp"},
+            "result": {"const": "qualified"},
+            "freshnessBasis": {"const": "scan-and-database-checked-at-qualification"},
+            "images": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["imageId", "digest", "databaseBuiltAt", "scannedAt"],
+                "properties": {
+                  "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+                  "digest": {"$ref": "#/$defs/digest"},
+                  "databaseBuiltAt": {"$ref": "#/$defs/timestamp"},
+                  "scannedAt": {"$ref": "#/$defs/timestamp"}
+                }
+              }
+            }
+          }
+        },
+        "disposition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["formatVersion", "signedBy", "sequence", "status", "at", "reason", "previousDispositionDigest"],
+          "properties": {
+            "formatVersion": {"const": "stateport.release-disposition/v2"},
+            "signedBy": {"const": "stateport.release-index/v1"},
+            "sequence": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+            "status": {"enum": ["active", "deprecated", "withdrawn"]},
+            "at": {"oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+            "reason": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 1024}, {"type": "null"}]},
+            "previousDispositionDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+          }
+        },
+        "predecessor": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["formatVersion", "releaseId", "version", "signedPayloadDigest", "indexDigest", "signature", "rawIndex"],
+              "properties": {
+                "formatVersion": {"const": "stateport.release-predecessor/v1"},
+                "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+                "version": {"$ref": "#/$defs/semver"},
+                "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+                "indexDigest": {"$ref": "#/$defs/digest"},
+                "signature": {"$ref": "#/$defs/signature"},
+                "rawIndex": {"type": "object"}
+              }
+            }
+          ]
+        },
+        "versionBindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["releaseVersion", "buildReceiptFormatVersion", "buildReceiptVersion", "imageEvidenceFormatVersion", "qualificationEventFormatVersion"],
+          "properties": {
+            "releaseVersion": {"$ref": "#/$defs/semver"},
+            "buildReceiptFormatVersion": {"const": "stateport.release-image-build-receipt/v1"},
+            "buildReceiptVersion": {"$ref": "#/$defs/semver"},
+            "imageEvidenceFormatVersion": {"const": "stateport.release-image-evidence/v1"},
+            "qualificationEventFormatVersion": {"const": "stateport.release-qualification/v1"}
+          }
+        }
+      }
+    }
+  }
+}

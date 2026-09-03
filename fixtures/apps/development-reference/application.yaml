@@ -1,0 +1,14 @@
+formatVersion: stateport.application/v1
+applicationId: stateport.development-reference
+displayName: ProjectState
+description: A public-safe development application that exposes the optional governed Workbench.
+sourceProfile: fixture:development-reference
+productionEligible: false
+privacyClassification: public_safe
+stateLayout:
+  canonical: [state/PROJECT.yaml]
+  generated: [generated/]
+  ownership:
+    state/PROJECT.yaml: instance
+actionsPath: actions.yaml
+validationCommand: python3 -c "import pathlib; assert pathlib.Path('state/PROJECT.yaml').is_file()"

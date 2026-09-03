@@ -1,0 +1,8 @@
+{
+  "schema": "stateport.web-bundle-budget/v1",
+  "distRoot": "apps/web/dist",
+  "maximumTotalBytes": 3500000,
+  "maximumJavaScriptAssetBytes": 900000,
+  "maximumStylesheetAssetBytes": 100000,
+  "maximumFontAssetBytes": 40000
+}

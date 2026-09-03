@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/statepack-distribution.v1.schema.json",
+  "title": "StatePack deterministic distribution envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "kind", "packageId", "applicationDescriptorVersion", "sourceIdentity", "schemaIdentities", "payloadDigest", "files", "exclusions", "requiredSecrets", "profiles", "interfaces", "derivedArtifacts", "privacyBoundary", "migration"],
+  "properties": {
+    "formatVersion": {"const": "stateport.statepack-distribution/v1"},
+    "kind": {"enum": ["stateport.application", "stateport.instance", "stateport.deployment"]},
+    "packageId": {"type": "string", "minLength": 1},
+    "applicationDescriptorVersion": {"type": "string", "minLength": 1},
+    "sourceIdentity": {"type": "string", "minLength": 1},
+    "schemaIdentities": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "payloadDigest": {"$ref": "#/$defs/digest"},
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size", "digest", "mode"],
+        "properties": {
+          "path": {"$ref": "#/$defs/relativePath"},
+          "size": {"type": "integer", "minimum": 0},
+          "digest": {"$ref": "#/$defs/digest"},
+          "mode": {"type": "integer", "minimum": 0, "maximum": 493}
+        }
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "reason"],
+        "properties": {"path": {"$ref": "#/$defs/relativePath"}, "reason": {"type": "string", "minLength": 1}}
+      }
+    },
+    "requiredSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "capability", "optional"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "capability": {"type": "string", "minLength": 1},
+          "optional": {"type": "boolean"}
+        }
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "artifacts", "degradation"],
+        "properties": {
+          "id": {"enum": ["stateport-native", "agent-package", "standalone-web-oci"]},
+          "status": {"enum": ["packaged", "packaged_with_degradation", "declared_not_built"]},
+          "artifacts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "degradation": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "interfaces": {"$ref": "#/$defs/statusMap"},
+    "derivedArtifacts": {"$ref": "#/$defs/statusMap"},
+    "privacyBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "sensitiveDataGateway", "secretValuesAllowed", "privateInstanceStateAllowed"],
+      "properties": {
+        "classification": {"const": "public_safe"},
+        "sensitiveDataGateway": {"const": "required_before_publication_not_integrated"},
+        "secretValuesAllowed": {"const": false},
+        "privateInstanceStateAllowed": {"const": false}
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "includedMigrations"],
+      "properties": {
+        "strategy": {"const": "plan_before_apply"},
+        "includedMigrations": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "relativePath": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000]+$"},
+    "statusMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status"],
+        "properties": {"status": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

@@ -1,0 +1,141 @@
+formatVersion: stateport.packaged-content/v1
+policy:
+  sourceControlMetadata: forbidden
+  runtimeState: forbidden
+  privateMaterial: forbidden
+  broadRepositoryCopies: forbidden
+  exactTrackedPathsOnly: true
+  forbiddenPathParts: [.git, .github, private, secrets, release-output, docs/audit, __pycache__]
+
+profiles:
+  stateport-api:
+    finalImageSources:
+      - apps/api/src
+      - apps/runner/src
+      - config/statespec-schema-registry.v1.json
+      - fixtures/apps/studystate-sample
+      - images/bin/stateport-healthcheck
+      - packages/api-auth/src
+      - packages/approval-gate/src
+      - packages/audit-log/src
+      - packages/container-runner/src
+      - packages/governed-api/src
+      - packages/governed-runner/src
+      - packages/observability/src
+      - packages/quota-engine/src
+      - packages/statedd-core/src
+      - packages/template-validator/src
+      - requirements/runtime-linux-amd64.txt
+      - schemas
+  stateport-worker:
+    finalImageSources:
+      - apps/worker/src
+      - config/statespec-schema-registry.v1.json
+      - images/bin/stateport-healthcheck
+      - packages/approval-gate/src
+      - packages/audit-log/src
+      - packages/container-runner/src
+      - packages/governed-runner/src
+      - packages/observability/src
+      - packages/quota-engine/src
+      - packages/release-contracts/src
+      - packages/statedd-core/src
+      - packages/template-validator/src
+      - requirements/runtime-linux-amd64.txt
+      - schemas
+  stateport-runner:
+    finalImageSources:
+      - apps/runner/src
+      - config/statespec-schema-registry.v1.json
+      - images/bin/stateport-healthcheck
+      - packages/statedd-core/src
+      - packages/template-validator/src
+      - requirements/runtime-linux-amd64.txt
+      - schemas
+  stateport-execution-host:
+    finalImageSources:
+      - apps/execution-host/src
+      - images/bin/stateport-healthcheck
+      - packages/deployment/src
+      - packages/execution-host/src
+  stateport-web:
+    buildOnlySources:
+      - apps/web
+    finalImageSources:
+      - VERSION
+      - apps/admin-cli/src
+      - apps/runner/src
+      - apps/telegram-adapter/src
+      - apps/web/container-service.py
+      - apps/web/package-lock.json
+      - apps/web/package.json
+      - config/application-experience-policy.yaml
+      - config/context-lifecycle.v1.yaml
+      - config/functionality-preservation.v1.yaml
+      - config/statespec-schema-registry.v1.json
+      - fixtures/application-experiences/checklist-state.yaml
+      - fixtures/application-experiences/development-workspace.yaml
+      - fixtures/application-experiences/study-state.yaml
+      - fixtures/application-experiences/studystate-sample.yaml
+      - fixtures/apps/checklistdd
+      - fixtures/apps/development-reference
+      - fixtures/apps/studystate-sample
+      - fixtures/apps/synthetic-reference
+      - fixtures/host/synthetic-capabilities.json
+      - images/bin/stateport-healthcheck
+      - packages/api-auth/src
+      - packages/api-native-adapter/src
+      - packages/application-experience/src
+      - packages/approval-gate/src
+      - packages/audit-log/src
+      - packages/codex-adapter/src
+      - packages/container-opencode/src
+      - packages/container-runner/src
+      - packages/context-lifecycle/src
+      - packages/contribution-bundle/src
+      - packages/contribution-bundle-v2/src
+      - packages/conversation-service/src
+      - packages/deployment/src
+      - packages/diagnostics/src
+      - packages/execution-host/src
+      - packages/external-engine-runtime/src
+      - packages/file-workspace-broker/src
+      - packages/goal-execution/src
+      - packages/governed-api/src
+      - packages/governed-runner/src
+      - packages/instance-backup/src
+      - packages/instance-catalog/src
+      - packages/lifecycle-migrations/src
+      - packages/observability/src
+      - packages/opencode-adapter/src
+      - packages/persistent-app/src
+      - packages/portable-execution/src
+      - packages/preview-gateway/src
+      - packages/quota-engine/src
+      - packages/release-contracts/src
+      - packages/run-bundle/src
+      - packages/runtime-contracts/src
+      - packages/sandbox-runtime/src
+      - packages/sensitive-data-gateway/src
+      - packages/statebench/src
+      - packages/statedd-core/src
+      - packages/stateport-compat/src
+      - packages/template-validator/src
+      - packages/terminal-broker/src
+      - packages/tool-gateway/src
+      - packages/updater/src
+      - requirements/runtime-linux-amd64.txt
+      - schemas
+      - sources/canonical/studydd.yaml
+      - sources/profiles/studydd-local-alpha.yaml
+  stateport-dev-workspace:
+    finalImageSources:
+      - config/codex-runtime/package-lock.json
+      - config/codex-runtime/package.json
+      - images/bin/stateport-healthcheck
+      - images/stateport-dev-workspace/ubuntu-snapshot.sources
+  stateport-playwright:
+    finalImageSources:
+      - images/stateport-playwright/package-lock.json
+      - images/stateport-playwright/package.json
+      - images/bin/stateport-healthcheck

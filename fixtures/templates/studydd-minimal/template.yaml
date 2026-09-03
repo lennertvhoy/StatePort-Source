@@ -1,0 +1,21 @@
+apiVersion: statedd.stateport.io/v1alpha1
+kind: Template
+metadata:
+  id: stateport.fixture.studydd-minimal
+  name: StatePort synthetic StudyDD fixture
+  version: 0.0.1
+  description: Minimal invented fixture for StatePort lifecycle tests.
+spec:
+  domain: test-fixture
+  lifecycle:
+    - draft
+  allowedActions:
+    - name: read_state
+      level: L0
+  schemas: []
+  agentContract:
+    role: fixture-validator
+    responsibilities:
+      - Exercise lifecycle fixture loading
+    forbiddenActions:
+      - Treat this fixture as canonical content

@@ -1,0 +1,172 @@
+/* Self-hosted fonts (design.md §4.1): Inter 400/500/600 + JetBrains Mono 400/500. */
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+
+@import './styles/tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    font-family: var(--font-ui);
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-size: var(--text-sm);
+    line-height: var(--text-sm-lh);
+  }
+
+  /* Numeric columns, timers, IDs, status-bar items use tabular figures (§4.1). */
+  code,
+  kbd,
+  pre,
+  .tnum {
+    font-feature-settings: 'tnum' 1;
+  }
+
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  /* §6.4 Focus visibility — never removed without replacement. */
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  /* "Stronger focus indicators" setting / HC: 3 px + 1 px inner offset ring. */
+  [data-focus='strong'] :focus-visible,
+  [data-theme^='hc-'] :focus-visible {
+    outline: 3px solid var(--focus-ring);
+    outline-offset: 1px;
+    box-shadow: 0 0 0 1px var(--text-primary) inset;
+  }
+
+  /* §6.3 Reduced motion — kill transitions/animations globally. */
+  [data-motion='reduced'] *,
+  [data-motion='reduced'] *::before,
+  [data-motion='reduced'] *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* HC: selected nav/list items get a 2 px border-strong outline in addition to tint (§3.4). */
+  [data-theme^='hc-'] .nav-item[data-active='true'] {
+    outline: 2px solid var(--border-strong);
+    outline-offset: -2px;
+  }
+
+  /* Thin, theme-consistent scrollbars. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border: 3px solid transparent;
+    border-radius: 8px;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* Canonical mascot visibility belongs to the component layer, not tokens. */
+  .brand-mark {
+    position: relative;
+    forced-color-adjust: none;
+  }
+
+  /* The artwork is scaled from a smaller layout box, so the 125% paint stays
+     inside the fixed mark footprint without relying on clipping. */
+  .brand-art-frame {
+    width: calc(100% / var(--brand-art-scale));
+    height: calc(100% / var(--brand-art-scale));
+  }
+
+  .brand-mascot-compact {
+    display: block;
+    transform-origin: center;
+    transform: scale(var(--brand-art-scale));
+  }
+
+  .brand-mascot-light {
+    display: block;
+    transform-origin: center;
+    transform: scale(var(--brand-art-scale));
+  }
+
+  /* Preserve the reviewed artwork as a visible, self-contained mark in forced-colors mode. */
+  @media (forced-colors: active) {
+    .brand-mark {
+      border: 1px solid ButtonText;
+      border-radius: var(--radius-xs);
+    }
+  }
+
+  /* §6.2 Streaming/spinner rotation — frozen under reduced motion via base rule. */
+  .icon-spin {
+    animation: spin 1s linear infinite;
+  }
+
+  /* §7.3 StatusBadge — the only pill. HC themes: 2 px outline, no fill. */
+  [data-theme^='hc-'] .status-badge {
+    border-width: 2px;
+  }
+
+  /* Middle-ellipsis helper for branch/app/receipt names (§4.2). */
+  .truncate-middle {
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Skeleton shimmer (§6.3: frozen under reduced motion by the base rule). */
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Indeterminate progress: 40 % highlight sliding across the track (§6.2). */
+@keyframes indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}

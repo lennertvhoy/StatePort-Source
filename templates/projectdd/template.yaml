@@ -1,0 +1,44 @@
+apiVersion: statedd.stateport.io/v1alpha1
+kind: Template
+metadata:
+  id: projectdd
+  name: ProjectState for StatePort
+  version: 0.1.0
+  description: Template for project management and team coordination.
+spec:
+  domain: project-management
+  lifecycle:
+    - draft
+    - active
+    - on-hold
+    - closed
+  reviewCadence: weekly
+  allowedActions:
+    - name: read_state
+      level: L0
+    - name: propose_action
+      level: L1
+    - name: write_state
+      level: L2
+    - name: send_summary
+      level: L3
+  schemas:
+    - state/project.yaml
+    - state/tasks.yaml
+    - state/decisions.yaml
+    - state/risks.yaml
+  inbox:
+    format: markdown
+  quotas:
+    runsPerDay: 100
+    messagesPerDay: 200
+    monthlyEuroEstimate: 10
+  agentContract:
+    role: project-assistant
+    responsibilities:
+      - Maintain project state
+      - Track tasks and decisions
+      - Flag risks
+      - Send status summaries
+    forbiddenActions:
+      - Store data outside the instance

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/identity-contract.v1.schema.json",
+  "title": "StatePort execution-host identity contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "contractId", "identityFields", "atomicRead", "detectorScan"],
+  "properties": {
+    "formatVersion": {"const": "stateport.execution-host-identity-contract/v1"},
+    "contractId": {"const": "stateport-execution-host-identity"},
+    "identityFields": {
+      "type": "array",
+      "const": [
+        "workspacePathDigest",
+        "repositoryIdentityDigest",
+        "sourceCommit",
+        "sourceTree",
+        "stagingSnapshotDigest",
+        "toolIdentityDigest"
+      ]
+    },
+    "atomicRead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "symlinkPolicy", "stability"],
+      "properties": {
+        "required": {"const": true},
+        "symlinkPolicy": {"const": "reject"},
+        "stability": {"const": "same-node-size-mtime"}
+      }
+    },
+    "detectorScan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "scope"],
+      "properties": {
+        "required": {"const": true},
+        "scope": {"const": "public-export-candidate"}
+      }
+    }
+  }
+}

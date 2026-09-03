@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/authority-action-claim.v1.schema.json",
+  "title": "StatePort authority action claim v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "claimId", "requestId", "reservationId", "reservationDigest", "decisionDigest", "claimedAt", "claimDigest"],
+  "properties": {
+    "schema": {"const": "stateport.authority-action-claim/v1"},
+    "claimId": {"type": "string", "pattern": "^authority_claim_[0-9a-f]{32}$"},
+    "requestId": {"type": "string", "pattern": "^authority_request_[0-9a-f]{32}$"},
+    "reservationId": {"type": "string", "pattern": "^authority_reservation_[0-9a-f]{32}$"},
+    "reservationDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "decisionDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "claimedAt": {"type": "string", "format": "date-time"},
+    "claimDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

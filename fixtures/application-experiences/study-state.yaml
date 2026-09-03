@@ -1,0 +1,76 @@
+formatVersion: stateport.application-experience/v1
+applicationId: studydd
+displayName: StudyState
+description: A learning application with durable goals, activities, evidence, and review.
+capabilities:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+views:
+  - viewId: learning-home
+    label: Learning
+    component: progress_overview
+    route: /application
+    capability: progress_dashboard
+  - viewId: study-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+  - viewId: next-activity
+    label: Next activity
+    component: goal_actions
+    route: /application/activity
+    capability: goal_execution
+  - viewId: review-reminders
+    label: Reminders
+    component: notification_feed
+    route: /application/notifications
+    capability: proactive_notifications
+navigation:
+  - contributionId: learning-home-nav
+    label: Learning
+    viewId: learning-home
+    placement: application
+    order: 10
+  - contributionId: study-conversation-nav
+    label: Conversation
+    viewId: study-conversation
+    placement: conversation
+    order: 20
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: Study conversation
+  emptyState: Continue your learning conversation from any bound channel.
+advancedControls:
+  - controlId: study-state
+    label: Learning state
+    component: state_summary
+    capability: progress_dashboard
+    order: 10
+  - controlId: study-history
+    label: Activity history
+    component: activity_history
+    capability: progress_dashboard
+    order: 20
+  - controlId: study-context
+    label: Context
+    component: context_summary
+    capability: conversation
+    order: 30
+  - controlId: study-runs
+    label: Governed runs
+    component: run_history
+    capability: goal_execution
+    order: 35
+  - controlId: study-receipts
+    label: Receipts
+    component: receipt_list
+    capability: goal_execution
+    order: 40
+platformOperations: []
+legacyAliases:
+  - StudyDD

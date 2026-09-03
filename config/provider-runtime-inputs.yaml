@@ -1,0 +1,23 @@
+formatVersion: stateport.provider-runtime-inputs/v1
+resolvedOn: "2026-08-01"
+
+codex:
+  package: "@openai/codex"
+  version: 0.146.0
+  source:
+    repository: https://github.com/openai/codex
+    annotatedTag: rust-v0.146.0
+    tagObject: be449751a978f02e5bbba886999662956c7f38f5
+    commit: e363b08c9175ac1cbe5893615dd2cb9ddf95043b
+  npm:
+    registry: https://registry.npmjs.org
+    packageIntegrity: sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+    linuxAmd64Integrity: sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    packageJson: config/codex-runtime/package.json
+    packageLock: config/codex-runtime/package-lock.json
+  verification:
+    observedVersion: codex-cli 0.146.0
+    requiredExecFlags: [--json, --ephemeral, --sandbox]
+    authenticationBoundary: operator-owned CODEX_HOME volume
+    credentialsInImage: false
+    installedOnlyIn: [stateport-dev-workspace]

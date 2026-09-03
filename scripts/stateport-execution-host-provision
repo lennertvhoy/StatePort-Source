@@ -1,0 +1,916 @@
+#!/bin/sh
+# StatePort root boundary for execution-host provisioning.
+#
+# This file is installed root:root at /usr/local/libexec.  It deliberately
+# does not accept a Python path: the only module tree it may execute is the
+# root-owned, manifest-bound tree below /usr/local/lib/stateport.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+module_root=/usr/local/lib/stateport/provisioning
+manifest=/etc/stateport/execution-host-provisioning.manifest
+cosign_root=/usr/local/lib/stateport/tools/cosign
+public_key_root=/etc/stateport/alpha-2026-08-cosign.pub
+helper_root=/usr/local/libexec/stateport-execution-host-provision
+materialize_intent=/usr/local/lib/stateport/.provisioning-materialize.intent
+qualification_marker=/var/lib/stateport-provisioning/qualification-clean-host.json
+python=/usr/bin/python3
+
+if [ "$(id -u)" -ne 0 ]; then
+    printf '%s\n' 'stateport provisioning requires root' >&2
+    exit 77
+fi
+if [ "${PYTHONPATH-}" != "" ] || [ "${PYTHONHOME-}" != "" ]; then
+    printf '%s\n' 'ambient Python path variables are not accepted' >&2
+    exit 77
+fi
+if [ "${1-}" = "qualification-preflight" ]; then
+    [ "$#" -eq 1 ] || {
+        printf '%s\n' 'qualification-preflight accepts no arguments' >&2
+        exit 77
+    }
+    exec "$python" -I - "$qualification_marker" "$helper_root" <<'PY'
+import grp
+import json
+import os
+from pathlib import Path
+import pwd
+import stat
+import sys
+
+marker = Path(sys.argv[1])
+helper = Path(sys.argv[2])
+accounts = ("stateport-control", "stateport-exec")
+groups = ("stateport-control", "stateport-exec", "stateport-execution-control")
+paths = (
+    "/etc/stateport",
+    "/etc/stateport/alpha-2026-08-cosign.pub",
+    "/etc/stateport/execution-host-provisioning.manifest",
+    "/etc/tmpfiles.d/stateport-execution-control.conf",
+    "/run/stateport/execution-control",
+    "/usr/local/lib/stateport",
+    "/usr/local/lib/stateport/provisioning",
+    "/usr/local/lib/stateport/tools/cosign",
+    "/var/lib/stateport-control",
+    "/var/lib/stateport-exec",
+    "/var/lib/stateport-provisioning",
+)
+present = []
+for name in accounts:
+    try:
+        pwd.getpwnam(name)
+        present.append(f"user:{name}")
+    except KeyError:
+        pass
+for name in groups:
+    try:
+        grp.getgrnam(name)
+        present.append(f"group:{name}")
+    except KeyError:
+        pass
+for raw in paths:
+    path = Path(raw)
+    if path.exists() or path.is_symlink():
+        present.append(f"path:{raw}")
+for raw in ("/etc/subuid", "/etc/subgid"):
+    path = Path(raw)
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"qualification preflight cannot trust {raw}")
+    lines = path.read_text(encoding="ascii").splitlines()
+    for name in accounts:
+        if any(line.startswith(f"{name}:") for line in lines):
+            present.append(f"mapping:{raw}:{name}")
+observed = os.lstat(helper)
+if not stat.S_ISREG(observed.st_mode) or observed.st_uid != 0 or observed.st_gid != 0:
+    raise SystemExit("qualification provisioner is not the root-owned installed candidate")
+if present:
+    raise SystemExit("qualification guest contains pre-existing execution-host state: " + ", ".join(present))
+marker.parent.mkdir(parents=True, exist_ok=True)
+if marker.exists() or marker.is_symlink():
+    raise SystemExit("qualification preflight marker already exists")
+payload = {"schema": "stateport.qualification-clean-host/v1", "clean": True}
+fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, "w", encoding="ascii") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chown(marker, 0, 0)
+print(json.dumps(payload, sort_keys=True))
+PY
+fi
+if [ "${1-}" = "materialize" ]; then
+    shift
+    wheel=
+    wheel_digest=
+    release_index=
+    bundle_root=
+    cosign=
+    cosign_digest=
+    public_key=
+    public_key_digest=
+    key_id=
+    key_fingerprint=
+    helper=
+    helper_digest=
+    helper_bytes=
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --updater-wheel) wheel=$2; shift 2 ;;
+            --updater-wheel-digest) wheel_digest=$2; shift 2 ;;
+            --release-index) release_index=$2; shift 2 ;;
+            --bundle-root) bundle_root=$2; shift 2 ;;
+            --cosign) cosign=$2; shift 2 ;;
+            --cosign-digest) cosign_digest=$2; shift 2 ;;
+            --trust-public-key) public_key=$2; shift 2 ;;
+            --trust-public-key-digest) public_key_digest=$2; shift 2 ;;
+            --trust-key-id) key_id=$2; shift 2 ;;
+            --trust-key-fingerprint) key_fingerprint=$2; shift 2 ;;
+            --execution-host-provisioner) helper=$2; shift 2 ;;
+            --execution-host-provisioner-digest) helper_digest=$2; shift 2 ;;
+            --execution-host-provisioner-bytes) helper_bytes=$2; shift 2 ;;
+            *) printf 'unknown materialize argument: %s\n' "$1" >&2; exit 77 ;;
+        esac
+    done
+    [ -n "$wheel" ] && [ -n "$wheel_digest" ] && [ -n "$release_index" ] && \
+        [ -n "$bundle_root" ] && [ -n "$cosign" ] && [ -n "$cosign_digest" ] && \
+        [ -n "$public_key" ] && [ -n "$public_key_digest" ] && [ -n "$key_id" ] && \
+        [ -n "$key_fingerprint" ] && [ -n "$helper" ] && [ -n "$helper_digest" ] && \
+        [ -n "$helper_bytes" ] || {
+        printf '%s\n' 'materialize requires the signed index, updater, bundle root, and pinned trust inputs' >&2
+        exit 77
+    }
+    exec "$python" -I - "$wheel" "$wheel_digest" "$release_index" "$bundle_root" \
+        "$cosign" "$cosign_digest" "$public_key" "$public_key_digest" "$key_id" \
+        "$key_fingerprint" "$helper" "$helper_digest" "$helper_bytes" "$module_root" "$manifest" \
+        "$cosign_root" "$public_key_root" "$helper_root" "$materialize_intent" <<'PY'
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from urllib.parse import urlsplit
+import zipfile
+
+(
+    wheel_raw,
+    wheel_digest,
+    release_index_raw,
+    bundle_root_raw,
+    cosign_raw,
+    cosign_digest,
+    public_key_raw,
+    public_key_digest,
+    key_id,
+    key_fingerprint,
+    helper_raw,
+    helper_digest,
+    helper_expected_bytes,
+    module_root_raw,
+    manifest_raw,
+    cosign_root_raw,
+    public_key_root_raw,
+    helper_root_raw,
+    materialize_intent_raw,
+) = sys.argv[1:]
+wheel = Path(wheel_raw)
+release_index = Path(release_index_raw)
+bundle_root = Path(bundle_root_raw)
+cosign = Path(cosign_raw)
+public_key = Path(public_key_raw)
+helper = Path(helper_raw)
+module_root = Path(module_root_raw)
+manifest = Path(manifest_raw)
+cosign_root = Path(cosign_root_raw)
+public_key_root = Path(public_key_root_raw)
+helper_root = Path(helper_root_raw)
+materialize_intent = Path(materialize_intent_raw)
+# The host cosign pin is the upstream cosign-linux-amd64 v3.1.3 release binary
+# that the bootstrap downloads; it must never pin a workstation-built tool.
+EXPECTED_COSIGN = "sha256:4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+EXPECTED_PUBLIC_KEY = "sha256:798d6ea6e2703993758f0fb45618b1f05b40f6ef116e7d286fd5a6867859b8ad"
+EXPECTED_KEY_ID = "stateport-alpha-private-2026-08"
+EXPECTED_FINGERPRINT = "sha256:df24c1ccdcf1ecf72da6d8d81ae8b0ffaca8d399826091b107cc4d6905915ea5"
+
+
+def regular(path: Path, label: str, maximum: int) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"{label} is unavailable or symlinked")
+    data = path.read_bytes()
+    if len(data) > maximum:
+        raise SystemExit(f"{label} exceeds its size limit")
+    return data
+
+
+def digest(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+if (
+    cosign_digest != EXPECTED_COSIGN
+    or public_key_digest != EXPECTED_PUBLIC_KEY
+    or key_id != EXPECTED_KEY_ID
+    or key_fingerprint != EXPECTED_FINGERPRINT
+):
+    raise SystemExit("materialize trust inputs do not match the compiled Alpha trust root")
+wheel_bytes = regular(wheel, "signed updater wheel", 128 * 1024 * 1024)
+index_bytes = regular(release_index, "signed release index", 4 * 1024 * 1024)
+cosign_bytes = regular(cosign, "pinned Cosign", 512 * 1024 * 1024)
+public_key_bytes = regular(public_key, "pinned public key", 64 * 1024)
+helper_bytes = regular(helper, "signed execution-host provisioner", 1024 * 1024)
+if digest(cosign_bytes) != EXPECTED_COSIGN or digest(public_key_bytes) != EXPECTED_PUBLIC_KEY:
+    raise SystemExit("materialize trust bytes do not match the compiled Alpha trust root")
+if digest(wheel_bytes) != wheel_digest:
+    raise SystemExit("signed updater wheel digest mismatch")
+if digest(helper_bytes) != helper_digest:
+    raise SystemExit("signed execution-host provisioner digest mismatch")
+try:
+    document = json.loads(index_bytes)
+except (UnicodeError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"signed release index is invalid JSON: {exc}") from exc
+if not isinstance(document, dict) or not isinstance(document.get("signed"), dict):
+    raise SystemExit("signed release index has no signed payload")
+signatures = document.get("signatures")
+if not isinstance(signatures, list) or len(signatures) != 1 or not isinstance(signatures[0], dict):
+    raise SystemExit("signed release index must carry exactly one signature")
+signature = signatures[0]
+signed_bytes = json.dumps(
+    document["signed"], ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+).encode("utf-8")
+if (
+    signature.get("subjectDigest") != digest(signed_bytes)
+    or signature.get("scheme") != "cosign-v3-bundle"
+    or signature.get("trustMode") != "pinned-public-key"
+    or signature.get("publicKeyId") != EXPECTED_KEY_ID
+    or signature.get("publicKeyFingerprint") != EXPECTED_FINGERPRINT
+    or signature.get("publicKeyFingerprintAlgorithm") != "sha256-canonical-der-spki"
+    or signature.get("transparencyLog") != "not-uploaded-private-candidate"
+):
+    raise SystemExit("signed release index is outside the compiled Alpha trust root")
+bundle = signature.get("bundle")
+name = Path(urlsplit(str(bundle.get("uri", ""))).path).name if isinstance(bundle, dict) else ""
+if not name.endswith(".sigstore.json") or Path(name).name != name:
+    raise SystemExit("signed release index names an unsafe signature bundle")
+bundle_path = bundle_root / name
+bundle_bytes = regular(bundle_path, "release index signature bundle", 4 * 1024 * 1024)
+if digest(bundle_bytes) != bundle.get("digest") or len(bundle_bytes) != bundle.get("size"):
+    raise SystemExit("release index signature bundle does not match the signed descriptor")
+updater = document["signed"].get("artifacts", {}).get("updater", {})
+if updater.get("digest") != wheel_digest or updater.get("size") != len(wheel_bytes):
+    raise SystemExit("updater wheel is not bound by the signed release index")
+provisioner = document["signed"].get("artifacts", {}).get("executionHostProvisioner", {})
+if (
+    provisioner.get("digest") != helper_digest
+    or provisioner.get("size") != len(helper_bytes)
+    or str(provisioner.get("size")) != helper_expected_bytes
+):
+    raise SystemExit("execution-host provisioner is not bound by the signed release index")
+
+module_root.parent.mkdir(parents=True, exist_ok=True)
+manifest.parent.mkdir(parents=True, exist_ok=True)
+cosign_root.parent.mkdir(parents=True, exist_ok=True)
+def remove_partial() -> None:
+    shutil.rmtree(module_root, ignore_errors=True)
+    for path in (manifest, cosign_root, public_key_root):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    for pattern in (".bootstrap.*", ".provisioning.*"):
+        for path in module_root.parent.glob(pattern):
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    for path in (
+        cosign_root.with_name(f".{cosign_root.name}.tmp"),
+        public_key_root.with_name(f".{public_key_root.name}.tmp"),
+        manifest.with_name(f".{manifest.name}.tmp"),
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+orphaned_staging = any(
+    path.exists() or path.is_symlink()
+    for pattern in (".bootstrap.*", ".provisioning.*")
+    for path in module_root.parent.glob(pattern)
+)
+if materialize_intent.exists():
+    if materialize_intent.is_symlink() or not materialize_intent.is_file():
+        raise SystemExit("materialization recovery intent is unsafe")
+    remove_partial()
+    materialize_intent.unlink()
+elif module_root.exists() or manifest.exists() or cosign_root.exists() or public_key_root.exists():
+    # Rerun convergence: every input above is digest-bound to the signed
+    # release index, so an existing tree may be adopted only when it is
+    # byte-identical to what this exact payload would install. Any drift
+    # keeps the original refusal.
+    expected_entries = []
+    with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
+        for info in archive.infolist():
+            name = info.filename
+            if name.endswith("/") or name.endswith(".pyc"):
+                continue
+            if not (name.startswith("stateport_release/") or name.startswith("execution_host/")):
+                continue
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise SystemExit(f"unsafe wheel path: {name}")
+            expected_entries.append((name, archive.read(info)))
+    if not expected_entries:
+        raise SystemExit("signed updater wheel has no provisioning module tree")
+    expected_manifest = (
+        "\n".join(
+            f"{hashlib.sha256(content).hexdigest()}  {name}"
+            for name, content in sorted(expected_entries)
+        )
+        + "\n"
+    ).encode("ascii")
+    converged = (
+        module_root.is_dir()
+        and not module_root.is_symlink()
+        and manifest.is_file()
+        and not manifest.is_symlink()
+        and cosign_root.is_file()
+        and not cosign_root.is_symlink()
+        and public_key_root.is_file()
+        and not public_key_root.is_symlink()
+        and manifest.read_bytes() == expected_manifest
+        and cosign_root.read_bytes() == cosign_bytes
+        and public_key_root.read_bytes() == public_key_bytes
+    )
+    if converged:
+        observed = sorted(
+            str(path.relative_to(module_root))
+            for path in module_root.rglob("*")
+            if path.is_file() and not path.name.endswith(".pyc") and "__pycache__" not in path.parts
+        )
+        if observed != sorted(name for name, _ in expected_entries):
+            converged = False
+        else:
+            for name, content in expected_entries:
+                if (module_root / name).read_bytes() != content:
+                    converged = False
+                    break
+    if converged:
+        print("provisioning module tree already converged")
+        raise SystemExit(0)
+    raise SystemExit("refusing to replace an existing provisioning module tree")
+elif orphaned_staging:
+    remove_partial()
+intent_fd = os.open(
+    materialize_intent,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+    0o600,
+)
+os.close(intent_fd)
+os.chown(materialize_intent, 0, 0)
+bootstrap = None
+staging = None
+committed = False
+try:
+    bootstrap = Path(tempfile.mkdtemp(prefix=".bootstrap.", dir=module_root.parent))
+    bootstrap_cosign = bootstrap / "cosign"
+    bootstrap_key = bootstrap / "release.pub"
+    payload = bootstrap / "signed-payload.json"
+    bootstrap_cosign.write_bytes(cosign_bytes)
+    bootstrap_key.write_bytes(public_key_bytes)
+    payload.write_bytes(signed_bytes)
+    for path, mode in ((bootstrap_cosign, 0o555), (bootstrap_key, 0o444), (payload, 0o400)):
+        os.chown(path, 0, 0)
+        os.chmod(path, mode)
+    verified = subprocess.run(
+        [str(bootstrap_cosign), "verify-blob", "--insecure-ignore-tlog", "--bundle", str(bundle_path), "--key", str(bootstrap_key), str(payload)],
+        check=False,
+        capture_output=True,
+        cwd="/",
+        env={"HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        text=True,
+        timeout=300,
+    )
+    if verified.returncode != 0:
+        raise SystemExit("release index signature verification failed during root materialization")
+    staging = Path(tempfile.mkdtemp(prefix=".provisioning.", dir=module_root.parent))
+    entries = []
+    with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
+        for info in archive.infolist():
+            name = info.filename
+            if name.endswith("/") or name.endswith(".pyc"):
+                continue
+            if not (name.startswith("stateport_release/") or name.startswith("execution_host/")):
+                continue
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise SystemExit(f"unsafe wheel path: {name}")
+            entries.append((name, archive.read(info)))
+    if not entries:
+        raise SystemExit("signed updater wheel has no provisioning module tree")
+    manifest_lines = []
+    for name, content in sorted(entries):
+        destination = staging / name
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        os.chown(destination.parent, 0, 0)
+        os.chmod(destination.parent, 0o755)
+        destination.write_bytes(content)
+        os.chown(destination, 0, 0)
+        os.chmod(destination, 0o644)
+        manifest_lines.append(f"{hashlib.sha256(content).hexdigest()}  {name}")
+    os.chown(staging, 0, 0)
+    os.chmod(staging, 0o755)
+    cosign_temp = cosign_root.with_name(f".{cosign_root.name}.tmp")
+    key_temp = public_key_root.with_name(f".{public_key_root.name}.tmp")
+    cosign_temp.write_bytes(cosign_bytes)
+    key_temp.write_bytes(public_key_bytes)
+    for path, mode in ((cosign_temp, 0o555), (key_temp, 0o444)):
+        os.chown(path, 0, 0)
+        os.chmod(path, mode)
+    os.replace(cosign_temp, cosign_root)
+    os.replace(key_temp, public_key_root)
+    manifest_temp = manifest.with_name(f".{manifest.name}.tmp")
+    manifest_temp.write_text("\n".join(manifest_lines) + "\n", encoding="ascii")
+    os.chown(manifest_temp, 0, 0)
+    os.chmod(manifest_temp, 0o600)
+    os.replace(manifest_temp, manifest)
+    os.replace(staging, module_root)
+    staging = None
+    committed = True
+finally:
+    if bootstrap is not None:
+        shutil.rmtree(bootstrap, ignore_errors=True)
+    if staging is not None:
+        shutil.rmtree(staging, ignore_errors=True)
+    if not committed:
+        remove_partial()
+    if committed:
+        materialize_intent.unlink()
+PY
+    exit 0
+fi
+if [ "${1-}" = "qualification-cleanup" ]; then
+    [ "$#" -eq 7 ] && [ "$2" = "--release-index" ] && [ "$4" = "--bundle-root" ] && \
+        [ "$6" = "--receipt" ] || {
+        printf '%s\n' 'qualification-cleanup requires exact release-index, bundle-root, and receipt inputs' >&2
+        exit 77
+    }
+    release_index=$3
+    bundle_root=$5
+    receipt=$7
+    exec "$python" -I - "$release_index" "$bundle_root" "$receipt" "$qualification_marker" \
+        "$module_root" "$manifest" "$cosign_root" "$public_key_root" \
+        "$helper_root" "$materialize_intent" <<'PY'
+import grp
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import shutil
+import stat
+import subprocess
+import sys
+
+(
+    release_index_raw,
+    bundle_root_raw,
+    receipt_raw,
+    marker_raw,
+    module_root_raw,
+    manifest_raw,
+    cosign_root_raw,
+    public_key_root_raw,
+    helper_root_raw,
+    materialize_intent_raw,
+) = sys.argv[1:]
+release_index = Path(release_index_raw)
+bundle_root = Path(bundle_root_raw)
+receipt_path = Path(receipt_raw)
+marker = Path(marker_raw)
+module_root = Path(module_root_raw)
+manifest = Path(manifest_raw)
+cosign_root = Path(cosign_root_raw)
+public_key_root = Path(public_key_root_raw)
+helper_root = Path(helper_root_raw)
+materialize_intent = Path(materialize_intent_raw)
+ENV = {
+    "HOME": "/root",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+}
+
+
+def regular_json(path: Path, label: str) -> dict:
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"{label} is unavailable or symlinked")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise SystemExit(f"{label} is not an object")
+    return value
+
+
+def run(argv: list[str], *, allow_absent: bool = False) -> None:
+    completed = subprocess.run(
+        argv,
+        check=False,
+        capture_output=True,
+        cwd="/",
+        env=ENV,
+        text=True,
+        timeout=300,
+    )
+    if completed.returncode != 0 and not allow_absent:
+        raise SystemExit(
+            f"qualification cleanup command failed ({completed.returncode}): {argv[0]}: "
+            + completed.stderr.strip()[:200]
+        )
+
+
+def image_exists(reference: str) -> bool:
+    completed = subprocess.run(
+        [*runuser_env, "/usr/bin/podman", "image", "exists", reference],
+        check=False,
+        capture_output=True,
+        cwd="/",
+        env=ENV,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    raise SystemExit(
+        f"qualification cleanup image absence probe failed ({completed.returncode})"
+    )
+
+
+def service_inactive(unit: str) -> bool:
+    completed = subprocess.run(
+        [*runuser_env, "/usr/bin/systemctl", "--user", "is-active", unit],
+        check=False,
+        capture_output=True,
+        cwd="/",
+        env=ENV,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode == 3 and completed.stdout.strip() == "inactive":
+        return True
+    if completed.returncode == 0:
+        return False
+    raise SystemExit(
+        f"qualification cleanup service absence probe failed ({completed.returncode}): {unit}"
+    )
+
+
+def remove_path(path: Path, *, directory: bool = False) -> None:
+    try:
+        observed = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(observed.st_mode):
+        raise SystemExit(f"qualification cleanup refuses symlinked path: {path}")
+    if directory:
+        if not stat.S_ISDIR(observed.st_mode):
+            raise SystemExit(f"qualification cleanup expected a directory: {path}")
+        shutil.rmtree(path)
+    else:
+        if not stat.S_ISREG(observed.st_mode):
+            raise SystemExit(f"qualification cleanup expected a regular file: {path}")
+        path.unlink()
+
+
+def subordinate_mappings(receipt):
+    values = [(exec_user, receipt.get("subordinateIds"))]
+    control_mapping = receipt.get("controlSubordinateIds")
+    if control_mapping is not None:
+        values.append((control_user, control_mapping))
+    mappings = []
+    for user, mapping in values:
+        if not isinstance(mapping, dict):
+            raise SystemExit(f"qualification cleanup subordinate mapping receipt is invalid for {user}")
+        subid_start = mapping.get("start")
+        subid_count = mapping.get("count")
+        if mapping.get("user") != user or not isinstance(subid_start, int) or subid_count != 65536:
+            raise SystemExit(f"qualification cleanup subordinate mapping receipt is invalid for {user}")
+        mappings.append((user, subid_start, subid_start + subid_count - 1))
+    return mappings
+
+
+marker_value = regular_json(marker, "clean-host marker")
+if marker_value != {"schema": "stateport.qualification-clean-host/v1", "clean": True}:
+    raise SystemExit("qualification cleanup lacks its exact clean-host preflight marker")
+index = regular_json(release_index, "release index")
+receipt = regular_json(receipt_path, "provisioning receipt")
+signatures = index.get("signatures")
+if not isinstance(signatures, list) or len(signatures) != 1 or not isinstance(signatures[0], dict):
+    raise SystemExit("qualification cleanup release index signature is missing")
+signature = signatures[0]
+signed = index.get("signed")
+if not isinstance(signed, dict):
+    raise SystemExit("qualification cleanup release index signed payload is missing")
+signed_bytes = json.dumps(
+    signed, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+).encode()
+subject_digest = "sha256:" + hashlib.sha256(signed_bytes).hexdigest()
+bundle = signature.get("bundle")
+if signature.get("subjectDigest") != subject_digest or not isinstance(bundle, dict):
+    raise SystemExit("qualification cleanup release index signature binding is invalid")
+bundle_name = Path(str(bundle.get("uri", ""))).name
+if not bundle_name.endswith(".sigstore.json"):
+    raise SystemExit("qualification cleanup release index bundle path is unsafe")
+bundle_path = bundle_root / bundle_name
+if bundle_path.is_symlink() or not bundle_path.is_file():
+    raise SystemExit("qualification cleanup release index bundle is unavailable")
+bundle_bytes = bundle_path.read_bytes()
+if (
+    "sha256:" + hashlib.sha256(bundle_bytes).hexdigest() != bundle.get("digest")
+    or len(bundle_bytes) != bundle.get("size")
+):
+    raise SystemExit("qualification cleanup release index bundle is tampered")
+payload = Path("/var/lib/stateport-provisioning/.cleanup-signed-payload.json")
+fd = os.open(payload, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, "wb") as handle:
+    handle.write(signed_bytes)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chown(payload, 0, 0)
+verify = subprocess.run(
+    [
+        str(cosign_root),
+        "verify-blob",
+        "--insecure-ignore-tlog",
+        "--bundle",
+        str(bundle_path),
+        "--key",
+        str(public_key_root),
+        str(payload),
+    ],
+    check=False,
+    capture_output=True,
+    cwd="/",
+    env=ENV,
+    text=True,
+    timeout=300,
+)
+payload.unlink()
+if verify.returncode != 0:
+    raise SystemExit("qualification cleanup release index signature verification failed")
+if receipt.get("schema") != "stateport.execution-host-provisioning-receipt/v1" or receipt.get("result") != "succeeded":
+    raise SystemExit("qualification cleanup requires one succeeded provisioning receipt")
+if receipt.get("evidenceClass") != "clean-host-executed":
+    raise SystemExit("qualification cleanup refuses simulated provisioning evidence")
+receipt_body = dict(receipt)
+claimed_receipt_digest = receipt_body.pop("receiptDigest", None)
+observed_receipt_digest = "sha256:" + hashlib.sha256(
+    json.dumps(receipt_body, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+if claimed_receipt_digest != observed_receipt_digest:
+    raise SystemExit("qualification cleanup receipt digest is stale")
+expected_receipt_identity = {
+    "releaseId": signed.get("release", {}).get("releaseId"),
+    "releaseIndexDigest": "sha256:" + hashlib.sha256(
+        json.dumps(index, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest(),
+    "signedPayloadDigest": subject_digest,
+    "sourceCommit": signed.get("source", {}).get("commit"),
+    "sourceTree": signed.get("source", {}).get("tree"),
+    "installerDigest": signed.get("artifacts", {}).get("installer", {}).get("digest"),
+}
+if any(receipt.get(key) != value for key, value in expected_receipt_identity.items()):
+    raise SystemExit("qualification cleanup release identity does not match its receipt")
+target = next(
+    (
+        item
+        for item in signed.get("targets", [])
+        if isinstance(item, dict) and item.get("targetId") == receipt.get("targetId")
+    ),
+    None,
+)
+if (
+    not isinstance(target, dict)
+    or target.get("topologyDigest") != receipt.get("topologyDigest")
+):
+    raise SystemExit("qualification cleanup target identity does not match its receipt")
+image = next(
+    (
+        item
+        for item in signed.get("images", [])
+        if isinstance(item, dict) and item.get("imageId") == receipt.get("image", {}).get("imageId")
+    ),
+    None,
+)
+if not isinstance(image, dict) or image.get("digest") != receipt.get("image", {}).get("expectedDigest"):
+    raise SystemExit("qualification cleanup image is not signed-index-bound")
+reference = str(image.get("reference", ""))
+if not reference.endswith("@" + str(image.get("digest", ""))):
+    raise SystemExit("qualification cleanup image reference is not digest pinned")
+all_references = []
+for signed_image in signed.get("images", []):
+    if not isinstance(signed_image, dict):
+        raise SystemExit("qualification cleanup image inventory is malformed")
+    signed_reference = str(signed_image.get("reference", ""))
+    if not signed_reference.endswith("@" + str(signed_image.get("digest", ""))):
+        raise SystemExit("qualification cleanup image inventory is not digest pinned")
+    all_references.append(signed_reference)
+
+exec_user = "stateport-exec"
+control_user = "stateport-control"
+runuser_env = [
+    "/usr/sbin/runuser",
+    "-u",
+    exec_user,
+    "--",
+    "/usr/bin/env",
+    "-i",
+    "HOME=/var/lib/stateport-exec",
+    "LANG=C.UTF-8",
+    "LC_ALL=C.UTF-8",
+    "PATH=/usr/bin:/bin",
+    "XDG_CONFIG_HOME=/var/lib/stateport-exec/.config",
+    "XDG_DATA_HOME=/var/lib/stateport-exec/.local/share",
+    "XDG_RUNTIME_DIR=/run/user/65532",
+]
+try:
+    pwd.getpwnam(exec_user)
+except KeyError as exc:
+    raise SystemExit("qualification cleanup execution user is absent") from exc
+for unit in ("stateport-execution-host.service", "podman.socket"):
+    run([*runuser_env, "/usr/bin/systemctl", "--user", "disable", "--now", unit])
+for signed_reference in all_references:
+    if image_exists(signed_reference):
+        run([*runuser_env, "/usr/bin/podman", "image", "rm", signed_reference])
+service_observations = [
+    service_inactive(unit)
+    for unit in ("stateport-execution-host.service", "podman.socket")
+]
+image_observations = [not image_exists(reference) for reference in all_references]
+remove_path(Path("/etc/tmpfiles.d/stateport-execution-control.conf"))
+remove_path(Path("/var/lib/stateport-exec/.config/containers/systemd/stateport-execution-host.container"))
+run(["/usr/bin/loginctl", "disable-linger", control_user])
+run(["/usr/bin/loginctl", "disable-linger", exec_user])
+for user in (control_user, exec_user):
+    try:
+        grp.getgrnam("stateport-execution-control")
+        run(["/usr/bin/gpasswd", "-d", user, "stateport-execution-control"], allow_absent=True)
+    except KeyError:
+        pass
+for user, subid_start, subid_end in subordinate_mappings(receipt):
+    run(["/usr/sbin/usermod", "--del-subuids", f"{subid_start}-{subid_end}", user])
+    run(["/usr/sbin/usermod", "--del-subgids", f"{subid_start}-{subid_end}", user])
+for user in (control_user, exec_user):
+    run(["/usr/sbin/userdel", "--remove", user])
+for group in (control_user, exec_user, "stateport-execution-control"):
+    try:
+        grp.getgrnam(group)
+    except KeyError:
+        continue
+    run(["/usr/sbin/groupdel", group])
+remove_path(Path("/run/stateport/execution-control"), directory=True)
+for path in (module_root,):
+    remove_path(path, directory=True)
+for path in (manifest, cosign_root, public_key_root, materialize_intent):
+    remove_path(path)
+for path in (receipt_path, marker):
+    remove_path(path)
+for path in (Path("/var/lib/stateport-provisioning/receipts"), Path("/var/lib/stateport-provisioning")):
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise SystemExit(f"qualification cleanup directory is not empty: {path}") from exc
+for path in (cosign_root.parent, module_root.parent, manifest.parent):
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise SystemExit(f"qualification cleanup root directory is not empty: {path}") from exc
+helper_root.unlink()
+root_paths = (
+    helper_root,
+    module_root,
+    manifest,
+    cosign_root,
+    public_key_root,
+    materialize_intent,
+    Path("/etc/tmpfiles.d/stateport-execution-control.conf"),
+    Path("/run/stateport/execution-control"),
+    Path("/var/lib/stateport-exec"),
+    Path("/var/lib/stateport-control"),
+    cosign_root.parent,
+    module_root.parent,
+    manifest.parent,
+    *module_root.parent.glob(".bootstrap.*"),
+    *module_root.parent.glob(".provisioning.*"),
+)
+result = {
+    "schema": "stateport.qualification-root-cleanup/v1",
+    "accountsRemoved": all(
+        name not in {entry.pw_name for entry in pwd.getpwall()}
+        for name in (control_user, exec_user)
+    ),
+    "groupsRemoved": all(
+        name not in {entry.gr_name for entry in grp.getgrall()}
+        for name in (control_user, exec_user, "stateport-execution-control")
+    ),
+    "imageRemoved": all(image_observations),
+    "rootArtifactsRemoved": all(not path.exists() and not path.is_symlink() for path in root_paths),
+    "servicesRemoved": all(service_observations),
+    "subordinateMappingsRemoved": all(
+        not any(
+            line.startswith(f"{user}:")
+            for line in Path(path).read_text(encoding="ascii").splitlines()
+        )
+        for path in ("/etc/subuid", "/etc/subgid")
+        for user in (control_user, exec_user)
+    ),
+}
+if not all(value is True for key, value in result.items() if key != "schema"):
+    raise SystemExit("qualification cleanup postconditions failed")
+print(json.dumps(result, sort_keys=True))
+PY
+fi
+if [ ! -f "$manifest" ] || [ ! -f "$python" ]; then
+    printf '%s\n' 'root-owned provisioning prerequisites are absent' >&2
+    exit 77
+fi
+
+check_root_file() {
+    file=$1
+    [ -f "$file" ] || return 1
+    [ "$(stat -c '%u:%g' "$file")" = '0:0' ] || return 1
+    [ -z "$(find "$file" -maxdepth 0 -perm /022 -print -quit)" ] || return 1
+}
+
+check_root_interpreter() {
+    file=$1
+    [ -f "$file" ] || return 1
+    resolved=$(readlink -f -- "$file") || return 1
+    check_root_file "$resolved"
+}
+
+check_root_dir() {
+    directory=$1
+    [ -d "$directory" ] || return 1
+    [ "$(stat -c '%u:%g' "$directory")" = '0:0' ] || return 1
+    [ -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ] || return 1
+}
+
+check_root_file "$manifest" || {
+    printf '%s\n' 'provisioning manifest is not root-owned and non-writable' >&2
+    exit 77
+}
+check_root_dir "$module_root" || {
+    printf '%s\n' 'provisioning module root is not root-owned and non-writable' >&2
+    exit 77
+}
+check_root_interpreter "$python" || {
+    printf '%s\n' 'provisioning interpreter is not root-owned and non-writable' >&2
+    exit 77
+}
+
+entries=0
+while IFS='  ' read -r digest relative; do
+    [ -n "${digest:-}" ] || continue
+    entries=$((entries + 1))
+    case "$relative" in
+        *..*|/*) printf '%s\n' 'provisioning manifest contains an unsafe path' >&2; exit 77 ;;
+        stateport_release/*|stateport_release/schemas/*|execution_host/*) ;;
+        *) printf '%s\n' 'provisioning manifest contains an unsafe path' >&2; exit 77 ;;
+    esac
+    file="$module_root/$relative"
+    check_root_file "$file" || {
+        printf 'provisioning module is not root-owned: %s\n' "$relative" >&2
+        exit 77
+    }
+    observed=$(sha256sum "$file" | cut -d ' ' -f 1)
+    [ "$observed" = "$digest" ] || {
+        printf 'provisioning module digest mismatch: %s\n' "$relative" >&2
+        exit 77
+    }
+done < "$manifest"
+[ "$entries" -gt 0 ] || {
+    printf '%s\n' 'provisioning manifest is empty' >&2
+    exit 77
+}
+
+unset PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP
+export STATEPORT_ROOT_HELPER=1
+exec "$python" -I -c '
+import runpy
+import sys
+sys.path.insert(0, "/usr/local/lib/stateport/provisioning")
+runpy.run_module("stateport_release.execution_host_provisioning", run_name="__main__")
+' "$@"

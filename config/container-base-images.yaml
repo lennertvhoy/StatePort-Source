@@ -1,0 +1,55 @@
+formatVersion: stateport.container-base-images/v1
+resolvedOn: "2026-08-14"
+architecture: linux/amd64
+resolution:
+  mechanism: skopeo-inspect-primary-registry
+  command: skopeo inspect --raw docker://<tag>
+  policy: tags are resolution inputs only; every build FROM uses the recorded index digest
+
+images:
+  golang-1.26.6-alpine3.23:
+    reference: docker.io/library/golang:1.26.6-alpine3.23@sha256:5978cc992ad5ef96a7469713c8af849c1433824761ce3be2c56381403cd8d9a3
+    indexDigest: sha256:5978cc992ad5ef96a7469713c8af849c1433824761ce3be2c56381403cd8d9a3
+    platformManifestDigest: sha256:e7ca5c6ac92d6f71a5b9e7f1e9178a3560c05c8be005ce560e188dbda00a86f0
+    observedVersion: 1.26.6-alpine3.23
+    created: "2026-08-13T19:33:38Z"
+    usedBy: [images/stateport-execution-host/Containerfile]
+  python-3.13-alpine3.23:
+    reference: docker.io/library/python:3.13-alpine3.23@sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76
+    indexDigest: sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76
+    platformManifestDigest: sha256:72c39ab9dbf2227aa91ec2246e6492260ee2530c36bdf37b208394b42d757b60
+    observedVersion: 3.13.14-alpine3.23
+    created: "2026-06-22T20:08:13.556822525Z"
+    usedBy: [apps/web/Dockerfile, apps/api/Dockerfile, apps/worker/Dockerfile, apps/runner/Dockerfile, images/stateport-execution-host/Containerfile]
+  node-22-alpine3.22:
+    reference: docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8
+    indexDigest: sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8
+    platformManifestDigest: sha256:8d6a8a2f25f8950664594b4c64678909718af0f567c99a85e44b11d0b44e059d
+    observedVersion: 22.22.3-alpine3.22
+    created: "2026-05-14T16:56:48.534603546Z"
+    usedBy: [apps/web/Dockerfile]
+  ubuntu-24.04:
+    reference: docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    indexDigest: sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    platformManifestDigest: sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf
+    observedVersion: "24.04"
+    created: "2026-06-22T21:24:21.32740137Z"
+    usedBy: [images/stateport-dev-workspace/Containerfile]
+  playwright-1.62.1-noble:
+    reference: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+    indexDigest: sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+    platformManifestDigest: sha256:c091b21d9fae78c76e85cd4356431e9b018402f172a214fc7d7a5e9a7e29d8ac
+    observedVersion: 1.62.1-noble
+    created: "2026-07-30T17:32:20.775419212Z"
+    usedBy: [images/stateport-playwright/Containerfile]
+  registry-2:
+    reference: docker.io/library/registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    indexDigest: sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    platformManifestDigest: sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
+    observedVersion: "2"
+    created: "2023-10-02T18:42:41Z"
+    usedBy: [scripts/build_release_images.py]
+
+qualification:
+  supported: [linux/amd64]
+  explicitlyNotQualified: [linux/arm64, windows, darwin]

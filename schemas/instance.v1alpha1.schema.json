@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "statedd.stateport.io/instance/v1alpha1",
+  "title": "StateSpec instance v1alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "statedd.stateport.io/v1alpha1"},
+    "kind": {"const": "Instance"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "createdAt": {"type": "string", "minLength": 1}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["templateRef", "status", "owner"],
+      "properties": {
+        "templateRef": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "path"],
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "path": {"type": "string", "minLength": 1}
+          }
+        },
+        "status": {"type": "string", "minLength": 1},
+        "grantedCapabilities": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "allowedCapabilities": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "handle"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "handle": {"type": "string", "minLength": 1}
+          }
+        },
+        "retentionDays": {"type": "integer", "minimum": 0},
+        "quotas": {"$ref": "#/$defs/quota"},
+        "approvalPolicy": {"$ref": "#/$defs/approvalPolicy"},
+        "gdpr": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dataSubjectCategory": {"type": "string"},
+            "pseudonymised": {"type": "boolean"},
+            "dpiaRequired": {"type": "boolean"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runsPerDay": {"type": "integer", "minimum": 0},
+        "messagesPerDay": {"type": "integer", "minimum": 0},
+        "monthlyEuroEstimate": {"type": "integer", "minimum": 0}
+      }
+    },
+    "approvalPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "L2": {"const": "require_explicit_approval"},
+        "L3": {"const": "require_explicit_approval"},
+        "L4": {"const": "require_explicit_approval"},
+        "L5": {"const": "require_explicit_approval"}
+      }
+    }
+  }
+}

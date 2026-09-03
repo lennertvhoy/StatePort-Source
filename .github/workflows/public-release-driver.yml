@@ -1,0 +1,92 @@
+name: StatePort Public Release Driver
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stateport-public-release
+  cancel-in-progress: true
+
+jobs:
+  source-preflight:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Install contract test dependencies
+        run: python3 -m pip install --disable-pip-version-check --quiet pytest pyyaml jsonschema
+      - name: Run release source contracts
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q \
+            scripts/test_public_release_bundle.py \
+            scripts/test_assemble_release_index.py \
+            scripts/test_candidate_provenance.py \
+            scripts/test_ci_workflow.py \
+            scripts/test_qualification_candidate.py \
+            scripts/test_release_images.py \
+            scripts/test_release_scan_exceptions.py \
+            scripts/test_release_tool_inputs.py \
+            scripts/test_container_build_inputs.py \
+            scripts/test_release_contracts.py
+          git diff --check
+
+  reproducible-builder:
+    needs: source-preflight
+    if: needs.source-preflight.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 360
+    env:
+      BUILDER_DESCRIPTOR: /opt/stateport/release/builder-descriptor.json
+      RELEASE_OUTPUT: /opt/stateport/release/public-driver/${{ github.sha }}
+      RELEASE_VERSION: 0.1.0-alpha.10
+      TMPDIR: ${{ runner.temp }}
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Run host governor preflight
+        run: ~/.kimi-code/governor/preflight.sh
+      - name: Verify exact builder descriptor and clean source
+        run: |
+          set -euo pipefail
+          test -f "$BUILDER_DESCRIPTOR"
+          test "$(git status --porcelain --untracked-files=all)" = ""
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          python3 scripts/build_release_images.py plan \
+            --version "$RELEASE_VERSION" \
+            --registry 127.0.0.1:5000 >/tmp/stateport-release-build-plan.json
+      - name: Build exact images under the heavy-operation governor
+        run: |
+          set -euo pipefail
+          ~/.kimi-code/governor/heavy-run.sh 8G \
+            env STATEPORT_RELEASE_BUILDER_DESCRIPTOR="$BUILDER_DESCRIPTOR" \
+            python3 scripts/build_release_images.py build \
+              --version "$RELEASE_VERSION" \
+              --registry 127.0.0.1:5000 \
+              --output-root "$RELEASE_OUTPUT"
+      - name: Verify retained build receipt
+        run: |
+          set -euo pipefail
+          test -f "$RELEASE_OUTPUT/build-receipt.json"
+          python3 - "$RELEASE_OUTPUT/build-receipt.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          receipt = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert receipt["result"] == "succeeded"
+          assert receipt["builder"]["descriptorDigest"].startswith("sha256:")
+          assert all(image["reproducible"] for image in receipt["images"].values())
+          print("reproducible_images=", len(receipt["images"]))
+          PY

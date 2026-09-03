@@ -1,0 +1,420 @@
+name: Validate StatePort
+
+on:
+  pull_request:
+    branches: [main, agent/alpha-public-legal-boundary-001]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    # GitHub-hosted runners are currently unavailable for this repository due
+    # to the account spending/billing gate. The repository-scoped runner uses
+    # this explicit label so another self-hosted machine cannot silently take
+    # these jobs. Heavy validation runs on same-repository pull requests and
+    # manual dispatch only; the automatic push trigger for main is removed to
+    # cut quota use and runner queueing. Never execute code from an untrusted
+    # fork on that runner.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 35
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Verify runner Python
+        run: |
+          python3 --version
+          python3 -c 'import sys; assert sys.version_info >= (3, 13), sys.version'
+
+      - name: Expose pinned supply-chain tools
+        run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+
+      - name: Install locked validation dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r requirements/dev-test.txt
+
+      - name: Validate repo
+        run: .venv/bin/python scripts/validate_repo.py
+
+      - name: Validate StateSpec schemas directly
+        run: .venv/bin/python scripts/statedd_validate_schema.py
+
+      - name: Validate application experience preservation
+        run: .venv/bin/python scripts/validate_application_experience.py
+
+      - name: Compile Python sources
+        run: .venv/bin/python -m compileall -q apps packages scripts
+
+      - name: Run correctness-oriented Python lint
+        run: |
+          test "$(.venv/bin/ruff --version)" = "ruff 0.16.0"
+          .venv/bin/ruff check apps packages scripts
+
+      - name: Verify runner Node for service tests
+        run: |
+          node --version
+          npm --version
+          node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 12)) process.exit(1)"
+
+      - name: Build locked production frontend for service tests
+        run: |
+          npm --prefix apps/web ci --ignore-scripts --silent
+          npm --prefix apps/web run build -- --logLevel error
+
+      - name: Materialize locked updater build wheelhouse
+        run: |
+          wheelhouse="${RUNNER_TEMP}/stateport-updater-build-wheelhouse"
+          mkdir -p "$wheelhouse"
+          .venv/bin/python -m pip download \
+            --disable-pip-version-check \
+            --require-hashes \
+            --only-binary=:all: \
+            --dest "$wheelhouse" \
+            --requirement packages/updater/build-requirements.lock
+          echo "STATEPORT_UPDATER_BUILD_WHEELHOUSE=$wheelhouse" >> "$GITHUB_ENV"
+
+      - name: Run complete Python suite
+        run: .venv/bin/python -m pytest -q
+
+  web:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Verify runner Node
+        run: |
+          node --version
+          npm --version
+          node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major < 22 || (major === 22 && minor < 12)) process.exit(1)"
+
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Run frontend unit and contract tests
+        run: npm run test
+
+      - name: Build production frontend
+        run: npm run build
+
+      - name: Enforce reviewed production bundle budget
+        run: npm run check:bundle
+
+      - name: Verify production and demo build isolation
+        run: npm run test:build-isolation
+
+      - name: Validate frontend dependency tree
+        run: npm run check:dependencies
+
+      - name: Audit frontend dependencies
+        run: python3 ../../scripts/validate_web_dependency_audit.py
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Select isolated Playwright port
+        run: echo "STATEPORT_E2E_PORT=$((30000 + (GITHUB_RUN_ID + GITHUB_RUN_ATTEMPT * 7919) % 10000))" >> "$GITHUB_ENV"
+
+      - name: Run responsive and accessibility browser suite
+        run: npm run test:e2e
+
+  canonical-source-browser:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 35
+    env:
+      STATEPORT_STUDYDD_RECOVERY_ROOT: /opt/stateport/private/studydd-cffc45a2
+      TMPDIR: ${{ runner.temp }}
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run connected backend-supported core workflow acceptance
+        run: npm run test:live-core-browser
+
+      - name: Run exact-source live-service browser acceptance
+        run: |
+          /usr/bin/python3 ../../scripts/source_recovery_bundle.py verify \
+            --profile ../../sources/profiles/studydd-local-alpha.yaml \
+            --bundle-root "$STATEPORT_STUDYDD_RECOVERY_ROOT"
+          STATEPORT_BROWSER_STUDYDD_REPOSITORY="$STATEPORT_STUDYDD_RECOVERY_ROOT/source.bundle" \
+          STATEPORT_BROWSER_ARTIFACT_ROOT="${RUNNER_TEMP}/stateport-canonical-source-artifacts" \
+            npm run test:canonical-source-browser
+
+  security:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 10
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository with Gitleaks
+        run: ./scripts/gitleaks_scan.sh
+
+  package-validation:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Verify runner Python
+        run: |
+          python3 --version
+          python3 -c 'import sys; assert sys.version_info >= (3, 13), sys.version'
+
+      - name: Validate install.sh syntax
+        run: bash -n scripts/install.sh
+
+      - name: Check Dockerfile dependencies are present
+        run: |
+          set -euo pipefail
+          for svc in api web worker; do
+            dockerfile="apps/${svc}/Dockerfile"
+            if [ ! -f "$dockerfile" ]; then
+              echo "ERROR: missing $dockerfile" >&2
+              exit 1
+            fi
+            echo "OK: $dockerfile exists"
+          done
+
+      - name: Validate Dockerfile COPY sources exist
+        run: python3 scripts/validate_dockerfile_copy_sources.py
+
+      - name: Run compose shape test
+        run: python3 scripts/test_compose_shape.py
+
+  compose-integration:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Verify runner Python
+        run: |
+          python3 --version
+          python3 -c 'import sys; assert sys.version_info >= (3, 13), sys.version'
+
+      - name: Detect container engine
+        id: engine
+        run: |
+          if command -v podman >/dev/null 2>&1 && podman compose version >/dev/null 2>&1; then
+            echo "compose=podman compose" >> "$GITHUB_OUTPUT"
+          elif command -v podman >/dev/null 2>&1 && command -v podman-compose >/dev/null 2>&1; then
+            echo "compose=podman-compose" >> "$GITHUB_OUTPUT"
+          elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+            echo "compose=docker compose" >> "$GITHUB_OUTPUT"
+          else
+            echo "ERROR: no container engine found" >&2
+            exit 1
+          fi
+
+      - name: Select isolated Compose identity and ports
+        run: |
+          BASE_PORT=$((45000 + (GITHUB_RUN_ID + GITHUB_RUN_ATTEMPT * 7919) % 10000))
+          {
+            echo "COMPOSE_PROJECT_NAME=stateport-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "STATEPORT_WEB_PORT=${BASE_PORT}"
+          } >> "$GITHUB_ENV"
+
+      - name: Compute build provenance
+        run: |
+          SOURCE_COMMIT="$(git rev-parse --verify HEAD)"
+          SOURCE_TREE="$(git rev-parse --verify "${SOURCE_COMMIT}^{tree}")"
+          SOURCE_EPOCH="$(git show -s --format=%ct "$SOURCE_COMMIT")"
+          SOURCE_CREATED="$(python3 - "$SOURCE_EPOCH" <<'PY'
+          from datetime import datetime, timezone
+          import sys
+
+          print(datetime.fromtimestamp(int(sys.argv[1]), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+          PY
+          )"
+          REF="$(git symbolic-ref --quiet --short HEAD || true)"
+          {
+            echo "STATEPORT_BUILD_SOURCE_COMMIT=${SOURCE_COMMIT}"
+            echo "STATEPORT_BUILD_SOURCE_TREE=${SOURCE_TREE}"
+            echo "STATEPORT_BUILD_SOURCE_REF=${REF:-detached}"
+          if [ -n "$(git status --porcelain)" ]; then
+              echo "STATEPORT_BUILD_SOURCE_DIRTY=true"
+          else
+              echo "STATEPORT_BUILD_SOURCE_DIRTY=false"
+          fi
+            echo "STATEPORT_BUILD_SOURCE_DATE_EPOCH=${SOURCE_EPOCH}"
+            echo "STATEPORT_BUILD_VERSION=0.0.0-ci.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+            echo "STATEPORT_BUILD_CREATED=${SOURCE_CREATED}"
+            echo "STATEPORT_BUILD_ADAPTER=github-actions-compose"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Compose stack
+        run: |
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          $COMPOSE build
+
+      - name: Start services
+        run: |
+          set -euo pipefail
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          timeout 60s $COMPOSE down -v --remove-orphans || true
+          timeout 120s $COMPOSE up -d
+
+      - name: Wait for health checks
+        run: |
+          set -euo pipefail
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          HEALTH_TIMEOUT="${STATEPORT_HEALTH_TIMEOUT:-180}"
+          wait_web_healthy() {
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if curl -fsS -o /dev/null "http://127.0.0.1:${STATEPORT_WEB_PORT}/health" 2>/dev/null; then
+                echo "OK: stateport-web healthy on the one host-published port"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: stateport-web did not become healthy within ${HEALTH_TIMEOUT}s" >&2
+            return 1
+          }
+          wait_internal_healthy() {
+            service="$1"
+            port="$2"
+            path="$3"
+            deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              if $COMPOSE exec -T "$service" /usr/local/bin/stateport-healthcheck \
+                --kind http --host 127.0.0.1 --port "$port" --path "$path" >/dev/null 2>&1; then
+                echo "OK: ${service} healthy inside the private Compose network"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: ${service} did not become healthy within ${HEALTH_TIMEOUT}s" >&2
+            return 1
+          }
+          wait_web_healthy
+          wait_internal_healthy stateport-api 8790 /readyz
+          wait_internal_healthy stateport-worker 8791 /readyz
+
+      - name: Validate web service responds with production frontend
+        run: |
+          set -euo pipefail
+          response="$(curl -fsS "http://127.0.0.1:${STATEPORT_WEB_PORT}/")"
+          if echo "$response" | grep -qi "stateport\|<!doctype html"; then
+            echo "OK: web service returned production frontend"
+          else
+            echo "ERROR: web service response does not look like the production frontend" >&2
+            echo "Response: $response" >&2
+            exit 1
+          fi
+
+      - name: Validate API service responds on /health
+        run: |
+          set -euo pipefail
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          body="$($COMPOSE exec -T stateport-api python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8790/health').read().decode())")"
+          echo "$body"
+          echo "$body" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          assert data.get('ok') is True, f'health was not successful: {data}'
+          result = data.get('result')
+          assert isinstance(result, dict), f'health result is not an object: {data}'
+          assert result.get('status') == 'ok', f'status not ok: {data}'
+          assert result.get('apiVersion', '').startswith('stateport'), f'bad apiVersion: {data}'
+          print('OK: API health response valid')
+          "
+
+      - name: Validate worker service responds on /health
+        run: |
+          set -euo pipefail
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          body="$($COMPOSE exec -T stateport-worker python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8791/health').read().decode())")"
+          echo "$body"
+          echo "$body" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          assert data.get('ok') is True, f'health was not successful: {data}'
+          result = data.get('result')
+          assert isinstance(result, dict), f'health result is not an object: {data}'
+          assert result.get('service') == 'stateport-worker', f'wrong worker service: {data}'
+          assert result.get('status') == 'standby', f'worker must be standby when execution is disabled: {data}'
+          assert result.get('executionEnabled') is False, f'worker execution unexpectedly enabled: {data}'
+          print('OK: Worker health response valid')
+          "
+
+      - name: Validate API capability endpoint
+        run: |
+          set -euo pipefail
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          body="$($COMPOSE exec -T stateport-api python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8790/v1/capabilities').read().decode())")"
+          echo "$body"
+          echo "$body" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          assert data.get('ok') is True, f'capability request was not successful: {data}'
+          result = data.get('result')
+          assert isinstance(result, dict), f'capability result is not an object: {data}'
+          assert 'operations' in result, f'missing operations: {data}'
+          assert result.get('apiVersion', '').startswith('stateport'), f'bad apiVersion: {data}'
+          print('OK: API capabilities endpoint valid')
+          "
+
+      - name: Inspect packaged image dependencies
+        run: |
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          $COMPOSE images
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          echo "=== Service logs ==="
+          $COMPOSE logs --tail=100
+
+      - name: Shut down Compose stack
+        if: always()
+        run: |
+          COMPOSE="${{ steps.engine.outputs.compose }}"
+          timeout 60s $COMPOSE down -v --remove-orphans || true

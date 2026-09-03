@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/execution-host-provisioning-receipt.v1.schema.json",
+  "title": "StatePort execution-host provisioning receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "receiptId", "receiptPath", "planDigest", "releaseId", "releaseIndexDigest", "signedPayloadDigest", "sourceCommit", "sourceTree", "installerDigest", "targetId", "topologyDigest", "verificationBasis", "revalidatedImmediatelyBeforeWrites", "evidenceClass", "executionUser", "executionUid", "executionGid", "controlUser", "controlUid", "controlGid", "executionControlGroup", "executionControlGroupGid", "allowedClientUser", "subordinateIds", "image", "health", "steps", "rollback", "uninstall", "startedAt", "finishedAt", "result", "receiptDigest"],
+  "properties": {
+    "schema": {"const": "stateport.execution-host-provisioning-receipt/v1"},
+    "receiptId": {"type": "string", "pattern": "^exec_host_provision_[0-9a-f]{32}$"},
+    "receiptPath": {"type": "string", "minLength": 2, "maxLength": 500, "pattern": "^/"},
+    "planDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "releaseIndexDigest": {"$ref": "#/$defs/digest"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sourceTree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "installerDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "verificationBasis": {"type": "string", "minLength": 1, "maxLength": 300},
+    "revalidatedImmediatelyBeforeWrites": {"const": true},
+    "evidenceClass": {"enum": ["clean-host-executed", "locally-simulated"]},
+    "executionUser": {"const": "stateport-exec"},
+    "executionUid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "executionGid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "controlUser": {"const": "stateport-control"},
+    "controlUid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "controlGid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "executionControlGroup": {"const": "stateport-execution-control"},
+    "executionControlGroupGid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "allowedClientUser": {"type": "string", "minLength": 1, "maxLength": 64},
+    "subordinateIds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user", "start", "count", "files"],
+      "properties": {
+        "user": {"const": "stateport-exec"},
+        "start": {"type": ["integer", "null"], "minimum": 0},
+        "count": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "files": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["/etc/subuid", "/etc/subgid"]}
+        }
+      }
+    },
+    "controlSubordinateIds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user", "start", "count", "files"],
+      "properties": {
+        "user": {"const": "stateport-control"},
+        "start": {"type": ["integer", "null"], "minimum": 0},
+        "count": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "files": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["/etc/subuid", "/etc/subgid"]}
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["imageId", "reference", "expectedDigest", "observedDigest", "storeOwner", "status"],
+      "properties": {
+        "imageId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "reference": {"type": "string", "minLength": 1, "maxLength": 300},
+        "expectedDigest": {"$ref": "#/$defs/digest"},
+        "observedDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "storeOwner": {"const": "stateport-exec"},
+        "status": {"enum": ["verified", "failed", "not-reached"]}
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "socketPath", "peerUsers", "status", "healthy", "contractVersion", "refusal", "probes"],
+      "properties": {
+        "kind": {"const": "describeCapabilities"},
+        "socketPath": {"type": "string", "minLength": 1, "maxLength": 300},
+        "peerUsers": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "status": {"enum": ["healthy", "failed", "not-reached"]},
+        "healthy": {"type": "boolean"},
+        "contractVersion": {"type": ["integer", "null"], "minimum": 1},
+        "refusal": {"type": ["string", "null"], "maxLength": 300},
+        "probes": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["peerUser", "healthy", "contractVersion", "reason"],
+            "properties": {
+              "peerUser": {"type": "string", "minLength": 1, "maxLength": 64},
+              "healthy": {"type": "boolean"},
+              "contractVersion": {"type": ["integer", "null"], "minimum": 1},
+              "reason": {"type": ["string", "null"], "maxLength": 80}
+            }
+          }
+        }
+      }
+    },
+    "controlGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grantId", "peerUid", "workloadId", "workloadKind", "workloadSpecDigest", "imageReference", "grantDigest"],
+      "properties": {
+        "grantFormatVersion": {"const": "stateport.execution-host-grant/v2"},
+        "grantId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "peerUid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "workloadId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "workloadKind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "workloadSpecDigest": {"$ref": "#/$defs/digest"},
+        "imageReference": {"type": "string", "minLength": 1, "maxLength": 300},
+        "deploymentScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authorityMode", "targetAdapter", "targetId", "allowDataPurge", "maxArchiveBytes", "maxFiles"],
+          "properties": {
+            "authorityMode": {"const": "canonical-control-plane"},
+            "targetAdapter": {"const": "rootless-podman-local"},
+            "targetId": {"const": "local"},
+            "allowDataPurge": {"type": "boolean"},
+            "maxArchiveBytes": {"type": "integer", "minimum": 1, "maximum": 603979776},
+            "maxFiles": {"type": "integer", "minimum": 1, "maximum": 10000}
+          }
+        },
+        "grantDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["step", "result", "commands", "detail"],
+        "properties": {
+          "step": {"type": "string", "minLength": 1, "maxLength": 80},
+          "result": {"enum": ["applied", "already-present", "failed", "not-reached"]},
+          "commands": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {"type": "array", "maxItems": 48, "items": {"type": "string", "maxLength": 300}}
+          },
+          "detail": {"type": "string", "maxLength": 300}
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "detail"],
+      "properties": {
+        "step": {"type": "string", "minLength": 1, "maxLength": 80},
+        "detail": {"type": "string", "maxLength": 300}
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["performed", "status", "actions", "failures"],
+      "properties": {
+        "performed": {"type": "boolean"},
+        "status": {"enum": ["not-reached", "succeeded", "incomplete"]},
+        "actions": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["action", "target", "result", "detail"],
+            "properties": {
+              "action": {"type": "string", "minLength": 1, "maxLength": 60},
+              "target": {"type": "string", "minLength": 1, "maxLength": 300},
+              "result": {"enum": ["done", "skipped", "failed"]},
+              "detail": {"type": "string", "maxLength": 300}
+            }
+          }
+        },
+        "failures": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 300}}
+      }
+    },
+    "uninstall": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {"type": "string", "minLength": 1, "maxLength": 300}
+    },
+    "startedAt": {"$ref": "#/$defs/timestamp"},
+    "finishedAt": {"$ref": "#/$defs/timestamp"},
+    "result": {"enum": ["succeeded", "failed"]},
+    "receiptDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+  }
+}

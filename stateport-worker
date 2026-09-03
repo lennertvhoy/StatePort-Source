@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPT_DIR}/apps/worker/src:${SCRIPT_DIR}/packages/container-runner/src:${SCRIPT_DIR}/packages/governed-runner/src:${SCRIPT_DIR}/packages/approval-gate/src:${SCRIPT_DIR}/packages/audit-log/src:${SCRIPT_DIR}/packages/quota-engine/src:${SCRIPT_DIR}/packages/statedd-core/src:${SCRIPT_DIR}/packages/template-validator/src${PYTHONPATH:+:${PYTHONPATH}}"
+exec python3 -m stateport_worker.http "$@"

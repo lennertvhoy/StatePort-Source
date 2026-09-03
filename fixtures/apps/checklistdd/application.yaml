@@ -1,0 +1,15 @@
+formatVersion: stateport.application/v1
+applicationId: checklistdd
+displayName: ChecklistState
+description: A tiny public-safe checklist application proving generic StatePort execution.
+sourceProfile: fixture:checklistdd
+productionEligible: false
+privacyClassification: public_safe
+stateLayout:
+  canonical: [state/CHECKLIST.yaml]
+  generated: [generated/]
+  ownership:
+    state/CHECKLIST.yaml: instance
+actionsPath: actions.yaml
+executorCommand: scripts/checklist_actions.py
+validationCommand: python3 -c "import pathlib; assert pathlib.Path('state/CHECKLIST.yaml').is_file()"

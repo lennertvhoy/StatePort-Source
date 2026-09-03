@@ -1,0 +1,34 @@
+formatVersion: stateport.frontend-dynamic-preservation/v1
+scope: BL-WORKSPACE-002
+controls:
+  - {id: file-tree-and-tabs, evidence: {file: apps/web/src/features/files/EditorTabs.tsx, contains: 'role="tablist"'}}
+  - {id: editor-refresh-directory, evidence: {file: apps/web/src/features/files/FilesTreePanel.tsx, contains: 'aria-label="Refresh tree"'}}
+  - {id: editor-find, evidence: {file: apps/web/src/features/files/FilesTool.tsx, contains: 'Find in file'}}
+  - {id: editor-replace, evidence: {file: apps/web/src/features/files/CodeEditor.tsx, contains: '@codemirror/search'}}
+  - {id: editor-preview-markdown, evidence: {file: apps/web/src/features/files/MarkdownPreview.tsx, contains: 'Noncanonical draft preview.'}}
+  - {id: editor-preview-changes, evidence: {file: apps/web/src/features/files/FilesTool.tsx, contains: 'Compare active file with last saved'}}
+  - {id: editor-confirm-save, evidence: {file: apps/web/src/features/files/SavePreviewDialog.tsx, contains: 'data-testid="confirm-save"'}}
+  - {id: editor-discard-staged, evidence: {file: apps/web/src/features/files/SavePreviewDialog.tsx, contains: 'data-testid="discard-changes"'}}
+  - {id: native-action-select, evidence: {file: apps/web/src/features/runs/RunsPage.tsx, contains: 'data-testid={`runs-action-${action.id}`}'}}
+  - {id: native-action-prepare, evidence: {file: apps/web/src/features/runs/RunPreparation.tsx, contains: 'data-testid="run-prepare"'}}
+  - {id: native-run-operation, evidence: {file: apps/web/src/features/runs/RunWorkspace.tsx, contains: 'data-testid="run-execute"'}}
+  - {id: overview-provenance-disclosure, evidence: {file: apps/web/src/features/app-overview/components/ProvenanceOwnershipSection.tsx, contains: 'Exact identity and bounded paths'}}
+operations:
+  - {id: file-list-directory, method: GET, operation: listDirectory, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "getOperation(instanceId, 'listDirectory', path)"}}
+  - {id: file-read, method: GET, operation: readFile, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "getOperation(instanceId, 'readFile', path)"}}
+  - {id: file-read-metadata, method: GET, operation: readFileMetadata, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: 'metadata: z.object({'}}
+  - {id: file-prepare-write, method: POST, operation: prepareWrite, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'prepareWrite', {"}}
+  - {id: file-preview-diff, method: POST, operation: previewDiff, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'previewDiff', { preparedWriteId })"}}
+  - {id: file-commit-write, method: POST, operation: commitWrite, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'commitWrite', {"}}
+  - {id: file-discard-write, method: POST, operation: discardWrite, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'discardWrite', { preparedWriteId })"}}
+  - {id: file-create, method: POST, operation: createFile, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'createFile', {"}}
+  - {id: file-rename, method: POST, operation: renamePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'renamePath', {"}}
+  - {id: file-delete, method: POST, operation: deletePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'deletePath', {"}}
+behaviors:
+  - {id: editor-lazy-load, evidence: {file: apps/web/src/App.tsx, contains: "lazy(() => import('@/features/files/FilesTool'))"}}
+  - {id: mobile-governed-editor, evidence: {file: apps/web/src/features/files/FilesTool.tsx, contains: 'data-testid="mobile-review-save"'}}
+  - {id: stale-write-refusal, evidence: {file: apps/web/src/features/files/SavePreviewDialog.tsx, contains: 'This file changed on disk since you opened it'}}
+  - {id: writer-lease, evidence: {file: packages/file-workspace-broker/src/stateport_file_workspace/broker.py, contains: 'Quarantine and writer-lease transitions share one cross-process lock.'}}
+  - {id: two-version-resolution, evidence: {file: apps/web/src/features/files/SavePreviewDialog.tsx, contains: 'current disk version'}}
+  - {id: receipt-conversation-bridge, evidence: {file: apps/web/src/features/receipts/ReceiptDetail.tsx, contains: "kind: 'receipt'"}}
+  - {id: approval-conversation-bridge, evidence: {file: apps/web/src/features/approvals/ApprovalDetailPane.tsx, contains: "kind: 'approval'"}}

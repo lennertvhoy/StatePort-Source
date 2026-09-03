@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunReceipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "runId", "parentJobId", "attemptId", "taskId", "baseGit", "finalGit", "mode", "runtimeIdentity", "capabilityNegotiation", "digests", "references", "preflight", "journal", "attemptChain", "first", "eventual", "verification", "fileChanges", "permissions", "approvals", "usage", "sideEffects", "rollback", "closure", "evidence"],
+  "properties": {
+    "formatVersion": {"const": "stateport.run-receipt/v1"},
+    "runId": {"type": "string", "minLength": 1, "maxLength": 128}, "parentJobId": {"type": "string", "minLength": 1, "maxLength": 128}, "attemptId": {"type": "string", "minLength": 1, "maxLength": 128}, "taskId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "baseGit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}, "finalGit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}, "mode": {"enum": ["agent_native", "assisted", "managed"]},
+    "runtimeIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["harness", "adapter", "provider", "model", "authenticationRoute"],
+      "properties": {
+        "harness": {"$ref": "#/$defs/versionedIdentity"}, "adapter": {"$ref": "#/$defs/versionedIdentity"},
+        "provider": {"$ref": "#/$defs/classifiedIdentity"}, "model": {"$ref": "#/$defs/classifiedIdentity"},
+        "authenticationRoute": {"type": "object", "additionalProperties": false, "required": ["classification", "ownerClassification"], "properties": {"classification": {"enum": ["operator_authenticated", "service_identity", "anonymous", "not_applicable", "unavailable"]}, "ownerClassification": {"enum": ["operator", "organization", "service", "none", "unavailable"]}}}
+      }
+    },
+    "capabilityNegotiation": {
+      "type": "object", "additionalProperties": false, "required": ["requested", "effective", "unavailable", "acceptedDegradations", "observationQuality"],
+      "properties": {"requested": {"$ref": "#/$defs/capabilities"}, "effective": {"$ref": "#/$defs/capabilities"}, "unavailable": {"$ref": "#/$defs/capabilities"}, "acceptedDegradations": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["capability", "reason"], "properties": {"capability": {"type": "string", "minLength": 1, "maxLength": 128}, "reason": {"type": "string", "minLength": 1, "maxLength": 128}}}}, "observationQuality": {"enum": ["observed", "reported", "inferred", "unavailable"]}}
+    },
+    "digests": {"type": "object", "additionalProperties": false, "required": ["workflowDeclaration", "taskManifest", "runtimeProfile", "contextManifest", "agentProfile", "agentRunSpec", "eventJournal"], "properties": {"workflowDeclaration": {"$ref": "#/$defs/digest"}, "taskManifest": {"$ref": "#/$defs/digest"}, "runtimeProfile": {"$ref": "#/$defs/digest"}, "contextManifest": {"$ref": "#/$defs/digest"}, "agentProfile": {"$ref": "#/$defs/digest"}, "agentRunSpec": {"$ref": "#/$defs/digest"}, "eventJournal": {"$ref": "#/$defs/digest"}}},
+    "references": {"type": "object", "additionalProperties": false, "required": ["runResult", "runBundle"], "properties": {"runResult": {"$ref": "#/$defs/reference"}, "runBundle": {"$ref": "#/$defs/reference"}}},
+    "preflight": {"$ref": "#/$defs/outcome"}, "journal": {"type": "object", "additionalProperties": false, "required": ["eventCount", "digest"], "properties": {"eventCount": {"type": "integer", "minimum": 0}, "digest": {"$ref": "#/$defs/digest"}}},
+    "attemptChain": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object", "additionalProperties": false, "required": ["attemptId", "ordinal", "operation", "classification", "result", "automatic", "evidence"], "properties": {"attemptId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}, "ordinal": {"type": "integer", "minimum": 1, "maximum": 32}, "operation": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}, "classification": {"enum": ["completed", "failed", "cancelled", "interrupted", "timed_out"]}, "result": {"enum": ["passed", "failed"]}, "automatic": {"const": false}, "evidence": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}}}},
+    "first": {"$ref": "#/$defs/outcome"}, "eventual": {"$ref": "#/$defs/outcome"}, "verification": {"$ref": "#/$defs/outcome"},
+    "fileChanges": {"type": "object", "additionalProperties": false, "required": ["changedPaths", "allowed", "digest"], "properties": {"changedPaths": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}, "allowed": {"type": "boolean"}, "digest": {"$ref": "#/$defs/digest"}}},
+    "permissions": {"type": "object", "additionalProperties": false, "required": ["requested", "effective"], "properties": {"requested": {"$ref": "#/$defs/capabilities"}, "effective": {"$ref": "#/$defs/capabilities"}}},
+    "approvals": {"type": "object", "additionalProperties": false, "required": ["required", "references"], "properties": {"required": {"type": "boolean"}, "references": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}}},
+    "usage": {"type": "object", "additionalProperties": false, "required": ["availability", "token", "costMinor"], "properties": {"availability": {"enum": ["exact", "approximate", "unavailable"]}, "token": {"type": ["integer", "null"], "minimum": 0}, "costMinor": {"type": ["integer", "null"], "minimum": 0}}},
+    "sideEffects": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["id", "classification", "outcome"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 128}, "classification": {"enum": ["none", "idempotent", "compensated", "external", "filesystem_transaction", "unknown"]}, "outcome": {"enum": ["not_attempted", "completed", "failed", "unknown"]}}}},
+    "rollback": {"type": "object", "additionalProperties": false, "required": ["required", "status"], "properties": {"required": {"type": "boolean"}, "status": {"enum": ["not_required", "not_attempted", "completed", "failed"]}}},
+    "closure": {"type": "object", "additionalProperties": false, "required": ["status", "reason"], "properties": {"status": {"enum": ["open", "closed", "failed"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 4096}}},
+    "evidence": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}, "reference": {"type": "object", "additionalProperties": false, "required": ["id", "digest"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 128}, "digest": {"$ref": "#/$defs/digest"}}},
+    "versionedIdentity": {"type": "object", "additionalProperties": false, "required": ["id", "version", "classification"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 128}, "version": {"type": "string", "minLength": 1, "maxLength": 128}, "classification": {"type": "string", "minLength": 1, "maxLength": 128}}},
+    "classifiedIdentity": {"type": "object", "additionalProperties": false, "required": ["id", "classification"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 128}, "classification": {"type": "string", "minLength": 1, "maxLength": 128}}},
+    "capabilities": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+    "outcome": {"type": "object", "additionalProperties": false, "required": ["status", "evidence"], "properties": {"status": {"enum": ["pending", "passed", "failed", "not_run", "not_applicable"]}, "evidence": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}}}
+  }
+}

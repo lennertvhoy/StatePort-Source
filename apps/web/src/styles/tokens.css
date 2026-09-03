@@ -1,0 +1,332 @@
+/**
+ * StatePort design tokens (design.md §3–§6 — binding).
+ *
+ * Every value a component may consume lives here as a CSS custom property.
+ * Components must use semantic names only — never raw hex.
+ *
+ * Theme variants:
+ *   :root                     light (default)
+ *   [data-theme="dark"]       dark
+ *   [data-theme="hc-light"]   high-contrast light
+ *   [data-theme="hc-dark"]    high-contrast dark
+ * Density:  [data-density="compact" (default) | "comfortable"]
+ * Motion:   [data-motion="full" (default) | "reduced"]  (union of user setting + OS)
+ * Focus:    [data-focus="standard" (default) | "strong"]
+ * Font scale: inline `--font-scale` multiplier on <html> (0.875 | 1 | 1.125 | 1.25),
+ *             applied to --text-* size/line-height tokens only (mono stays user-set).
+ */
+
+:root {
+  /* ── §3.1 Light theme (default) ─────────────────────────────────────────── */
+  --bg-app: #F4F4F2;
+  --bg-sidebar: #EBEBE8;
+  --bg-surface: #FFFFFF;
+  --bg-surface-2: #FAFAF8;
+  --bg-sunken: #F6F6F4;
+  --bg-hover: #F0F0ED;
+  --bg-active: #E7E9E4;
+  --border-default: #E3E3DE;
+  --border-strong: #C9C9C2;
+  --text-primary: #262B31;
+  --text-secondary: #57606A;
+  --text-tertiary: #67717C;
+  --text-disabled: #8A929B;
+  --text-inverse: #FFFFFF;
+  --accent: #2E5AAC;
+  --accent-hover: #264E97;
+  --accent-soft-bg: #E8EEF9;
+  --accent-soft-text: #2E5AAC;
+  --focus-ring: #2E5AAC;
+  --brand-art-scale: 1.25;
+
+  /* ── §3.3 Semantic status colors — light (text/icon · tint bg · tint border) */
+  --status-success-text: #256B43;
+  --status-success-bg: #EAF4EE;
+  --status-success-border: #C9E2D3;
+  --status-neutral-text: #57606A;
+  --status-neutral-bg: #EFF0EE;
+  --status-neutral-border: #DBDCD7;
+  --status-attention-text: #8A6100;
+  --status-attention-bg: #F8F0DC;
+  --status-attention-border: #EAD9A8;
+  --status-waiting-text: #5748B5;
+  --status-waiting-bg: #ECE9F8;
+  --status-waiting-border: #D3CCF0;
+  --status-blocked-text: #9C4A20;
+  --status-blocked-bg: #F9E9E2;
+  --status-blocked-border: #EFCDBB;
+  --status-danger-text: #B3261E;
+  --status-danger-bg: #F9E5E3;
+  --status-danger-border: #EFC4BF;
+  --status-informational-text: #2E5AAC;
+  --status-informational-bg: #E8EEF9;
+  --status-informational-border: #C9D6F2;
+
+  /* ── §5.5 Shadows (light; overlays only) ────────────────────────────────── */
+  --shadow-1: 0 1px 2px rgb(16 18 20 / 0.05), 0 4px 12px rgb(16 18 20 / 0.07);
+  --shadow-2: 0 4px 10px rgb(16 18 20 / 0.08), 0 12px 32px rgb(16 18 20 / 0.14);
+
+  /* Scrim for modal overlays (§9.3). */
+  --scrim: rgb(0 0 0 / 0.4);
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  /* ── §3.2 Dark theme ────────────────────────────────────────────────────── */
+  --bg-app: #15171B;
+  --bg-sidebar: #101215;
+  --bg-surface: #1B1E24;
+  --bg-surface-2: #21252C;
+  --bg-sunken: #0F1114;
+  --bg-hover: #23272E;
+  --bg-active: #2A2F37;
+  --border-default: #2A2E36;
+  --border-strong: #3B414C;
+  --text-primary: #E3E6EA;
+  --text-secondary: #9AA4AF;
+  --text-tertiary: #858F9B;
+  --text-disabled: #5B6470;
+  --text-inverse: #15171B;
+  --accent: #9DB4EC;
+  --accent-hover: #B4C6F2;
+  --accent-soft-bg: #1A2338;
+  --accent-soft-text: #9DB4EC;
+  --focus-ring: #9DB4EC;
+
+  /* ── §3.3 Semantic status colors — dark ─────────────────────────────────── */
+  --status-success-text: #6FC59A;
+  --status-success-bg: #17281F;
+  --status-success-border: #24493A;
+  --status-neutral-text: #9AA4AF;
+  --status-neutral-bg: #23272E;
+  --status-neutral-border: #33383F;
+  --status-attention-text: #D9A93F;
+  --status-attention-bg: #2C2516;
+  --status-attention-border: #4A3D22;
+  --status-waiting-text: #B1A4F0;
+  --status-waiting-bg: #221E38;
+  --status-waiting-border: #39335C;
+  --status-blocked-text: #DB9168;
+  --status-blocked-bg: #301E15;
+  --status-blocked-border: #523526;
+  --status-danger-text: #E57367;
+  --status-danger-bg: #321915;
+  --status-danger-border: #592A24;
+  --status-informational-text: #9DB4EC;
+  --status-informational-bg: #1A2338;
+  --status-informational-border: #2C3A5E;
+
+  /* ── §5.5 Shadows (dark) ────────────────────────────────────────────────── */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 14px rgb(0 0 0 / 0.45);
+  --shadow-2: 0 4px 12px rgb(0 0 0 / 0.5), 0 16px 40px rgb(0 0 0 / 0.55);
+
+  --scrim: rgb(0 0 0 / 0.6);
+
+  color-scheme: dark;
+}
+
+[data-theme="hc-light"] {
+  /* ── §3.4 High-contrast light: ≥7:1 text, strong borders, no tints ─────── */
+  --bg-app: #FFFFFF;
+  --bg-sidebar: #FFFFFF;
+  --bg-surface: #FFFFFF;
+  --bg-surface-2: #FFFFFF;
+  --bg-sunken: #FFFFFF;
+  --bg-hover: #EDEDED;
+  --bg-active: #DBDBDB;
+  --border-default: #525252;
+  --border-strong: #1F1F1F;
+  --text-primary: #000000;
+  --text-secondary: #3A4149;
+  --text-tertiary: #3A4149;
+  --text-disabled: #6B6B6B;
+  --text-inverse: #FFFFFF;
+  --accent: #003DA6;
+  --accent-hover: #002F7F;
+  --accent-soft-bg: #EDEDED;
+  --accent-soft-text: #003DA6;
+  --focus-ring: #003DA6;
+
+  /* HC: badge tints removed — solid text + outline (border = text color). */
+  --status-success-text: #0E5C33;
+  --status-success-bg: transparent;
+  --status-success-border: #0E5C33;
+  --status-neutral-text: #3A4149;
+  --status-neutral-bg: transparent;
+  --status-neutral-border: #3A4149;
+  --status-attention-text: #6B4A00;
+  --status-attention-bg: transparent;
+  --status-attention-border: #6B4A00;
+  --status-waiting-text: #3E2FA3;
+  --status-waiting-bg: transparent;
+  --status-waiting-border: #3E2FA3;
+  --status-blocked-text: #7A3410;
+  --status-blocked-bg: transparent;
+  --status-blocked-border: #7A3410;
+  --status-danger-text: #A3110B;
+  --status-danger-bg: transparent;
+  --status-danger-border: #A3110B;
+  --status-informational-text: #003DA6;
+  --status-informational-bg: transparent;
+  --status-informational-border: #003DA6;
+
+  /* HC drops shadows entirely — borders carry separation (§5.5). */
+  --shadow-1: none;
+  --shadow-2: none;
+
+  --scrim: rgb(0 0 0 / 0.5);
+
+  color-scheme: light;
+}
+
+[data-theme="hc-dark"] {
+  /* ── §3.4 High-contrast dark ────────────────────────────────────────────── */
+  --bg-app: #000000;
+  --bg-sidebar: #000000;
+  --bg-surface: #000000;
+  --bg-surface-2: #000000;
+  --bg-sunken: #000000;
+  --bg-hover: #1A1A1A;
+  --bg-active: #262626;
+  --border-default: #6E6E6E;
+  --border-strong: #A0A0A0;
+  --text-primary: #FFFFFF;
+  --text-secondary: #C9CDD3;
+  --text-tertiary: #C9CDD3;
+  --text-disabled: #8A8A8A;
+  --text-inverse: #000000;
+  --accent: #A9C1FF;
+  --accent-hover: #C4D3FF;
+  --accent-soft-bg: #1A1A1A;
+  --accent-soft-text: #A9C1FF;
+  --focus-ring: #A9C1FF;
+
+  --status-success-text: #7EE0A8;
+  --status-success-bg: transparent;
+  --status-success-border: #7EE0A8;
+  --status-neutral-text: #C9CDD3;
+  --status-neutral-bg: transparent;
+  --status-neutral-border: #C9CDD3;
+  --status-attention-text: #F2C14E;
+  --status-attention-bg: transparent;
+  --status-attention-border: #F2C14E;
+  --status-waiting-text: #C2B6FF;
+  --status-waiting-bg: transparent;
+  --status-waiting-border: #C2B6FF;
+  --status-blocked-text: #F0A37C;
+  --status-blocked-bg: transparent;
+  --status-blocked-border: #F0A37C;
+  --status-danger-text: #FF8A7A;
+  --status-danger-bg: transparent;
+  --status-danger-border: #FF8A7A;
+  --status-informational-text: #A9C1FF;
+  --status-informational-bg: transparent;
+  --status-informational-border: #A9C1FF;
+
+  --shadow-1: none;
+  --shadow-2: none;
+
+  --scrim: rgb(0 0 0 / 0.7);
+
+  color-scheme: dark;
+}
+
+:root {
+  /* ── §4.1 Font families ─────────────────────────────────────────────────── */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code",
+    Menlo, Consolas, monospace;
+
+  /* ── §4.2 Type scale (font-scale applies here only; mono excluded) ─────── */
+  --font-scale: 1;
+  --text-2xl: calc(20px * var(--font-scale));
+  --text-2xl-lh: calc(26px * var(--font-scale));
+  --text-xl: calc(17px * var(--font-scale));
+  --text-xl-lh: calc(24px * var(--font-scale));
+  --text-lg: calc(15px * var(--font-scale));
+  --text-lg-lh: calc(22px * var(--font-scale));
+  --text-md: calc(14px * var(--font-scale));
+  --text-md-lh: calc(20px * var(--font-scale));
+  --text-sm: calc(13px * var(--font-scale));
+  --text-sm-lh: calc(18px * var(--font-scale));
+  --text-xs: calc(12px * var(--font-scale));
+  --text-xs-lh: calc(16px * var(--font-scale));
+  --text-code: 13px;
+  --text-code-lh: 20px;
+
+  /* ── §5.1 Spacing scale (4 px base) ─────────────────────────────────────── */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ── §5.3 Radii (restrained) ────────────────────────────────────────────── */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-round: 9999px;
+  /* shadcn radius base: lg = 8 (dialogs/drawers), md = 6 (cards/menus), sm = 4 (buttons/inputs) */
+  --radius: var(--radius-lg);
+
+  /* ── §6.1 Motion ────────────────────────────────────────────────────────── */
+  --dur-instant: 90ms;
+  --dur-fast: 140ms;
+  --dur-med: 200ms;
+  --dur-layout: 280ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* ── §5.2 Density modes ─────────────────────────────────────────────────── */
+:root,
+[data-density="compact"] {
+  --row-h: 32px;
+  --row-dense-h: 28px;
+  --control-h: 30px;
+  --control-sm-h: 26px;
+  --nav-row-h: 30px;
+  --topbar-h: 44px;
+  --statusbar-h: 26px;
+  --panel-pad: 16px;
+  --bubble-pad-y: 8px;
+  --bubble-pad-x: 12px;
+}
+
+[data-density="comfortable"] {
+  --row-h: 40px;
+  --row-dense-h: 36px;
+  --control-h: 36px;
+  --control-sm-h: 30px;
+  --nav-row-h: 36px;
+  --topbar-h: 48px;
+  --statusbar-h: 28px;
+  --panel-pad: 20px;
+  --bubble-pad-y: 12px;
+  --bubble-pad-x: 16px;
+}
+
+/* Coarse pointers: interactive targets forced ≥ 40 px (§5.2 touch). */
+@media (pointer: coarse) {
+  :root {
+    --min-target: 40px;
+  }
+}
+
+/* ── §6.3 Reduced motion: all durations → 1 ms ──────────────────────────── */
+[data-motion="reduced"] {
+  --dur-instant: 1ms;
+  --dur-fast: 1ms;
+  --dur-med: 1ms;
+  --dur-layout: 1ms;
+}

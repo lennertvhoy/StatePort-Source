@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/upgrade-plan.v1.schema.json",
+  "title": "StatePort upgrade plan v1",
+  "type": "object",
+  "required": ["formatVersion", "dryRun", "applied", "current", "target", "blocked", "safe", "files", "trees", "migrationSet", "migrationSetDigest", "retirementDigest", "summary", "planDigest"],
+  "properties": {
+    "formatVersion": {"const": "statedd.upgrade-plan/v1"},
+    "dryRun": {"const": true},
+    "applied": {"const": false},
+    "blocked": {"type": "boolean"},
+    "safe": {"type": "boolean"},
+    "planDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "current": {"type": "object", "required": ["id", "version", "source", "instanceId", "lockDigest"]},
+    "target": {"type": "object", "required": ["id", "version", "source"]},
+    "files": {"type": "array", "items": {"type": "object", "required": ["path", "actionType", "classification", "action"]}},
+    "trees": {"type": "array", "items": {"type": "object", "required": ["path", "actionType", "currentHash", "targetHash"]}},
+    "migrationSet": {"type": "array", "items": {"type": "object", "required": ["migrationId", "contractDigest"]}},
+    "migrationSetDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "retirementDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "entries": {"type": "array"},
+    "summary": {"type": "object"}
+  },
+  "additionalProperties": true
+}

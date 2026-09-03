@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "statedd.stateport.project_state.v1",
+  "title": "StatePort PROJECT_STATE.yaml",
+  "type": "object",
+  "required": ["metadata", "workflow", "current_state", "active_problems", "project", "status", "components", "known_limits"],
+  "additionalProperties": true,
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["updated_at", "updated_by", "version"],
+      "additionalProperties": true,
+      "properties": {
+        "updated_at": { "type": "string", "minLength": 10 },
+        "updated_by": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "const": "statedd-template-v5" }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "required": ["repo_role", "statedd_mode", "repo_mode"],
+      "additionalProperties": true,
+      "properties": {
+        "repo_role": { "type": "string", "const": "downstream_project" },
+        "statedd_mode": { "type": "string", "enum": ["bootstrap", "operating"] },
+        "repo_mode": { "type": "string", "enum": ["bootstrap", "operating"] }
+      }
+    },
+    "current_state": {
+      "type": "object",
+      "required": ["repository", "operating_mode", "project", "evidence"],
+      "additionalProperties": true,
+      "properties": {
+        "repository": { "type": "object", "additionalProperties": true },
+        "operating_mode": { "type": "object", "additionalProperties": true },
+        "project": { "type": "object", "additionalProperties": true },
+        "evidence": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "active_problems": { "type": "array" },
+    "project": {
+      "type": "object",
+      "required": ["name", "spec", "repo_path", "mode", "phase"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "spec": { "type": "string", "const": "StateDD" },
+        "repo_path": { "type": "string", "minLength": 1 },
+        "mode": { "type": "string", "enum": ["bootstrap", "operating"] },
+        "phase": { "type": "string", "enum": ["bootstrap_complete", "implementing", "operating"] },
+        "last_updated": { "type": "string", "minLength": 10 }
+      }
+    },
+    "status": { "type": "object", "additionalProperties": true },
+    "components": { "type": "object", "additionalProperties": true },
+    "known_limits": { "type": "array", "items": { "type": "string" } }
+  }
+}

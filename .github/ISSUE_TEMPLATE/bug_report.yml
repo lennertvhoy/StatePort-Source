@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible defect in a released or reviewable StatePort surface.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private conversations, learner material,
+        user instances, private paths, or vulnerability details. StatePort is
+        not yet publicly released; see SECURITY.md before reporting security
+        work — security reports must not go through public issues. Filing an
+        issue is not a code contribution: external contributions are not
+        currently accepted (see CONTRIBUTING.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Use a public version or commit identifier only.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List safe, deterministic steps and the observed result.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I have not included secrets, personal data, private paths, or security-sensitive exploit details.
+          required: true

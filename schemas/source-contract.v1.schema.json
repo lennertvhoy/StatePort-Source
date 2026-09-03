@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/source-contract.v1.schema.json",
+  "title": "StatePort explicit immutable source contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "template", "source"],
+  "properties": {
+    "formatVersion": {"const": "stateport.source-contract/v1"},
+    "template": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {"id": {"type": "string", "minLength": 1}}
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "manifestPath", "expectedTree", "expectedManifestDigest", "class", "productionEligible"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "manifestPath": {"const": ".statedd/manifest.yaml"},
+        "expectedTree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "expectedManifestDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "class": {"const": "canonical_source"},
+        "productionEligible": {"const": true}
+      }
+    }
+  }
+}

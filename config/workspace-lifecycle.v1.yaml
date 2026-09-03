@@ -1,0 +1,14 @@
+schema: stateport.workspace-budget/v1
+maxRegisteredWorktrees: 8
+maxActiveWritableWorktrees: 3
+maxUnclassifiedWorktrees: 0
+maxUnreconciledBranches: 3
+maxExpiredLeases: 0
+blockNewWorkspaceWhenInventoryUnknown: true
+blockNewWorkspaceWhenAnyPriorSliceCleanupIncomplete: true
+workspaceRoot:
+  mode: sibling_directory
+  directoryName: _worktrees
+lease:
+  defaultDurationSeconds: 14400
+  maxDurationSeconds: 86400

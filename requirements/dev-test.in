@@ -1,0 +1,6 @@
+# StatePort repository validation dependency roots. Keep runtime packages in
+# runtime-linux-amd64.in and optional providers in provider-extras.in.
+jsonschema==4.26.0
+pytest==9.0.3
+PyYAML==6.0.3
+ruff==0.16.0

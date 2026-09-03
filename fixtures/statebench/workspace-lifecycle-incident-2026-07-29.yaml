@@ -1,0 +1,11 @@
+schema: statebench.workspace-lifecycle-escaped-process-fixture/v1
+fixtureId: workspace-lifecycle-incident-2026-07-29
+incidentId: INC-2026-07-27-AUTONOMOUS-CONVERGENCE
+observedOn: 2026-07-29
+peak_registered_worktrees: 89
+local_branches: 84
+owner_intervention_required: true
+owner_intervention_should_have_been_required: false
+classification: major_process_incident
+use: permanent_regression_fixture
+authoritativePerformanceClaim: false

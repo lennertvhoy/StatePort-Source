@@ -1,0 +1,42 @@
+name: AI Vertical Preflight
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/ai-vertical-preflight.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-vertical-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-export:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, stateport]
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          show-progress: false
+          clean: true
+
+      - name: Verify exact head identity
+        run: test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+
+      - name: Archive exact tracked source
+        run: git archive --format=tar.gz -o stateport-source.tar.gz HEAD
+
+      - name: Upload exact tracked source
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stateport-source-${{ github.run_id }}
+          path: stateport-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error

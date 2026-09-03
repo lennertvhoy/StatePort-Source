@@ -1,0 +1,738 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionHostOperation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion",
+    "operationId",
+    "operation",
+    "requester",
+    "timeoutSeconds",
+    "outputByteBound"
+  ],
+  "properties": {
+    "formatVersion": {"const": "stateport.execution-host-operation/v1"},
+    "operationId": {"$ref": "#/$defs/id"},
+    "operation": {
+      "enum": [
+        "describeCapabilities",
+        "createWorkload",
+        "start",
+        "stop",
+        "status",
+        "logs",
+        "cancel",
+        "removeWorkload",
+        "openTerminal",
+        "resizeTerminal",
+        "signalTerminal",
+        "closeTerminal",
+        "execWorkload",
+        "listWorkloads",
+        "collectGarbage",
+        "runValidator",
+        "probeDeploymentTarget",
+        "applyDeployment",
+        "updateDeployment",
+        "observeDeployment",
+        "collectDeploymentLogs",
+        "restartDeployment",
+        "removeDeploymentRuntime",
+        "purgeDeploymentData"
+      ]
+    },
+    "requester": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grantId", "authorityGrantDigest"],
+      "properties": {
+        "grantId": {"$ref": "#/$defs/id"},
+        "authorityGrantDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 1200},
+    "outputByteBound": {"type": "integer", "minimum": 1, "maximum": 4194304},
+    "payload": {}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": ["probeDeploymentTarget", "applyDeployment", "updateDeployment", "observeDeployment", "collectDeploymentLogs", "restartDeployment", "removeDeploymentRuntime", "purgeDeploymentData"]
+          }
+        },
+        "required": ["operation"]
+      },
+      "else": {
+        "properties": {
+          "timeoutSeconds": {"maximum": 600}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "createWorkload"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/createPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "runValidator"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/validatorPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": ["start", "stop", "status", "logs", "cancel", "removeWorkload"]
+          }
+        },
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/workloadIdPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "openTerminal"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/openTerminalPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "resizeTerminal"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/resizeTerminalPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "signalTerminal"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/signalTerminalPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "closeTerminal"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/closeTerminalPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "execWorkload"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/execWorkloadPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "applyDeployment"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/applyDeploymentPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "updateDeployment"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/updateDeploymentPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "observeDeployment"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/observeDeploymentPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "collectDeploymentLogs"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/collectDeploymentLogsPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "restartDeployment"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/restartDeploymentPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "removeDeploymentRuntime"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/removeDeploymentRuntimePayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "purgeDeploymentData"}},
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["payload"],
+        "properties": {"payload": {"$ref": "#/$defs/purgeDeploymentDataPayload"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": ["describeCapabilities", "listWorkloads", "collectGarbage", "probeDeploymentTarget"]
+          }
+        },
+        "required": ["operation"]
+      },
+      "then": {"not": {"required": ["payload"]}}
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))/(?!.*\\\\).*$"
+    },
+    "argvItem": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?=.*\\S)[^\\u0000]+$"
+    },
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/argvItem"}
+    },
+    "absoluteArgv": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "prefixItems": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/absolutePath"},
+            {"$ref": "#/$defs/argvItem"}
+          ]
+        }
+      ],
+      "items": {"$ref": "#/$defs/argvItem"}
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference"],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/:-]{0,255}@sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "standardResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memoryMaxBytes", "pidsMax"],
+      "properties": {
+        "memoryMaxBytes": {"type": "integer", "minimum": 16777216, "maximum": 1073741824},
+        "pidsMax": {"type": "integer", "minimum": 16, "maximum": 512}
+      }
+    },
+    "validatorResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memoryMaxBytes", "cpuQuotaPercent", "pidsMax", "diskMaxBytes"],
+      "properties": {
+        "memoryMaxBytes": {"type": "integer", "minimum": 16777216, "maximum": 1073741824},
+        "cpuQuotaPercent": {"type": "integer", "minimum": 1, "maximum": 800},
+        "pidsMax": {"type": "integer", "minimum": 16, "maximum": 512},
+        "diskMaxBytes": {"type": "integer", "minimum": 16777216, "maximum": 4294967296}
+      }
+    },
+    "agentRunParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runSpecDigest", "statePackReference"],
+      "properties": {
+        "runSpecDigest": {"$ref": "#/$defs/digest"},
+        "statePackReference": {"$ref": "#/$defs/nonEmptyString"},
+        "baseRevision": {"$ref": "#/$defs/gitSha"},
+        "workSeconds": {"type": "integer", "minimum": 0, "maximum": 3600},
+        "emitBytes": {"type": "integer", "minimum": 0, "maximum": 16777216}
+      }
+    },
+    "capsuleServiceParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serviceName"],
+      "properties": {
+        "serviceName": {"$ref": "#/$defs/id"},
+        "workSeconds": {"type": "integer", "minimum": 0, "maximum": 3600},
+        "emitBytes": {"type": "integer", "minimum": 0, "maximum": 16777216}
+      }
+    },
+    "browserJourneyParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["journeyId"],
+      "properties": {
+        "journeyId": {"$ref": "#/$defs/id"},
+        "workSeconds": {"type": "integer", "minimum": 0, "maximum": 3600},
+        "emitBytes": {"type": "integer", "minimum": 0, "maximum": 16777216}
+      }
+    },
+    "terminalParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId"],
+      "properties": {
+        "sessionId": {"$ref": "#/$defs/id"},
+        "workSeconds": {"type": "integer", "minimum": 0, "maximum": 3600},
+        "emitBytes": {"type": "integer", "minimum": 0, "maximum": 16777216}
+      }
+    },
+    "cacheVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["volumeId", "mountPath", "readOnly"],
+      "properties": {
+        "volumeId": {"$ref": "#/$defs/id"},
+        "mountPath": {
+          "type": "string",
+          "pattern": "^/workspace/(?!.*(?:^|/)\\.\\.(?:/|$))[^,:\\\\]*$"
+        },
+        "readOnly": {"type": "boolean"}
+      }
+    },
+    "workspaceParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceId", "workspaceSpecDigest", "volumeName"],
+      "properties": {
+        "workspaceId": {"$ref": "#/$defs/id"},
+        "workspaceSpecDigest": {"$ref": "#/$defs/digest"},
+        "volumeName": {
+          "type": "string",
+          "pattern": "^(?=.{1,128}$)stateport-workspace-[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "baseRevision": {"$ref": "#/$defs/gitSha"},
+        "stopAfterIdle": {"type": "boolean"},
+        "shell": {"$ref": "#/$defs/absoluteArgv"},
+        "networkMode": {"enum": ["none", "developer"]},
+        "cacheVolumes": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/cacheVolume"}
+        },
+        "cpuQuotaPercent": {"type": "integer", "minimum": 1, "maximum": 800},
+        "diskMaxBytes": {"type": "integer", "minimum": 16777216, "maximum": 4294967296},
+        "workSeconds": {"type": "integer", "minimum": 0, "maximum": 3600},
+        "emitBytes": {"type": "integer", "minimum": 0, "maximum": 16777216}
+      }
+    },
+    "validatorParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "validatorId",
+        "validatorSpecDigest",
+        "stagingIdentityDigest",
+        "stagingPath",
+        "commandDigest",
+        "command",
+        "network",
+        "stagingReadOnly",
+        "providerAccess",
+        "runtimeSocketAccess",
+        "hostMounts"
+      ],
+      "properties": {
+        "validatorId": {"$ref": "#/$defs/id"},
+        "validatorSpecDigest": {"$ref": "#/$defs/digest"},
+        "stagingIdentityDigest": {"$ref": "#/$defs/digest"},
+        "stagingPath": {"$ref": "#/$defs/absolutePath"},
+        "commandDigest": {"$ref": "#/$defs/digest"},
+        "command": {"$ref": "#/$defs/argv"},
+        "network": {"const": "disabled"},
+        "stagingReadOnly": {"const": true},
+        "providerAccess": {"const": false},
+        "runtimeSocketAccess": {"const": false},
+        "hostMounts": {"type": "array", "maxItems": 0},
+        "workSeconds": {"type": "integer", "minimum": 0, "maximum": 3600},
+        "emitBytes": {"type": "integer", "minimum": 0, "maximum": 16777216}
+      }
+    },
+    "sealedWorkload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "workloadId",
+        "image",
+        "parameters",
+        "timeoutSeconds",
+        "outputByteBound",
+        "resources"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "agent-run",
+            "capsule-service",
+            "browser-journey",
+            "terminal",
+            "workspace",
+            "validator-run"
+          ]
+        },
+        "workloadId": {"$ref": "#/$defs/id"},
+        "image": {"$ref": "#/$defs/image"},
+        "parameters": {"type": "object"},
+        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "outputByteBound": {"type": "integer", "minimum": 1, "maximum": 4194304},
+        "resources": {"type": "object"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {"const": "agent-run"},
+            "parameters": {"$ref": "#/$defs/agentRunParameters"},
+            "resources": {"$ref": "#/$defs/validatorResources"}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "capsule-service"},
+            "parameters": {"$ref": "#/$defs/capsuleServiceParameters"},
+            "resources": {"$ref": "#/$defs/standardResources"}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "browser-journey"},
+            "parameters": {"$ref": "#/$defs/browserJourneyParameters"},
+            "resources": {"$ref": "#/$defs/standardResources"}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "terminal"},
+            "parameters": {"$ref": "#/$defs/terminalParameters"},
+            "resources": {"$ref": "#/$defs/standardResources"}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "workspace"},
+            "parameters": {"$ref": "#/$defs/workspaceParameters"},
+            "resources": {"$ref": "#/$defs/standardResources"}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "validator-run"},
+            "parameters": {"$ref": "#/$defs/validatorParameters"},
+            "resources": {"$ref": "#/$defs/validatorResources"}
+          }
+        }
+      ]
+    },
+    "createPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workload"],
+      "properties": {"workload": {"$ref": "#/$defs/sealedWorkload"}}
+    },
+    "validatorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workload"],
+      "properties": {
+        "workload": {
+          "allOf": [
+            {"$ref": "#/$defs/sealedWorkload"},
+            {"properties": {"kind": {"const": "validator-run"}}}
+          ]
+        }
+      }
+    },
+    "workloadIdPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workloadId"],
+      "properties": {"workloadId": {"$ref": "#/$defs/id"}}
+    },
+    "openTerminalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workloadId", "sessionId", "columns", "rows"],
+      "properties": {
+        "workloadId": {"$ref": "#/$defs/id"},
+        "sessionId": {"$ref": "#/$defs/id"},
+        "columns": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "rows": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "resizeTerminalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "columns", "rows"],
+      "properties": {
+        "sessionId": {"$ref": "#/$defs/id"},
+        "columns": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "rows": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "signalTerminalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "signal"],
+      "properties": {
+        "sessionId": {"$ref": "#/$defs/id"},
+        "signal": {"enum": ["SIGINT", "SIGQUIT", "SIGTSTP"]}
+      }
+    },
+    "closeTerminalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId"],
+      "properties": {"sessionId": {"$ref": "#/$defs/id"}}
+    },
+    "execWorkloadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workloadId", "argv"],
+      "properties": {
+        "workloadId": {"$ref": "#/$defs/id"},
+        "argv": {"$ref": "#/$defs/argv"}
+      }
+    },
+    "nullableDigest": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]
+    },
+    "digestMap": {
+      "type": "object",
+      "maxProperties": 256,
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"$ref": "#/$defs/digest"}
+    },
+    "idMap": {
+      "type": "object",
+      "maxProperties": 256,
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"$ref": "#/$defs/id"}
+    },
+    "nullableObject": {
+      "oneOf": [{"type": "null"}, {"type": "object"}]
+    },
+    "deploymentSourceArchive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formatVersion", "archiveDigest", "archiveBytes", "contextDigest", "fileCount"],
+      "properties": {
+        "formatVersion": {"const": "stateport.deployment-context-archive/v1"},
+        "archiveDigest": {"$ref": "#/$defs/digest"},
+        "archiveBytes": {"type": "integer", "minimum": 1, "maximum": 603979776},
+        "contextDigest": {"$ref": "#/$defs/digest"},
+        "fileCount": {"type": "integer", "minimum": 1, "maximum": 10000}
+      }
+    },
+    "deploymentFailpoint": {
+      "enum": [null, "after_volume_creation", "after_image_build", "after_first_service_creation", "after_predecessor_stopped"]
+    },
+    "deploymentControlContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formatVersion", "operationId", "authority", "contextDigest"],
+      "properties": {
+        "formatVersion": {"const": "stateport.deployment-control-context/v1"},
+        "operationId": {"$ref": "#/$defs/id"},
+        "contextDigest": {"$ref": "#/$defs/digest"},
+        "authority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requestId", "decisionDigest", "action", "actorId", "grantId", "grantDigest", "runId", "profile", "policy", "scope", "decision", "sourceIdentity", "reservationId", "reservationDigest", "claimId", "claimDigest"],
+          "properties": {
+            "requestId": {"$ref": "#/$defs/id"},
+            "decisionDigest": {"$ref": "#/$defs/digest"},
+            "action": {"enum": ["apply_deployment", "observe_deployment", "collect_deployment_logs", "restart_deployment", "remove_deployment_runtime", "purge_deployment_data"]},
+            "actorId": {"$ref": "#/$defs/id"},
+            "grantId": {"$ref": "#/$defs/id"},
+            "grantDigest": {"$ref": "#/$defs/digest"},
+            "runId": {"$ref": "#/$defs/digest"},
+            "profile": {},
+            "policy": {},
+            "scope": {"type": "object"},
+            "decision": {"type": "object"},
+            "sourceIdentity": {"oneOf": [{"type": "null"}, {"type": "object"}]},
+            "reservationId": {"$ref": "#/$defs/id"},
+            "reservationDigest": {"$ref": "#/$defs/digest"},
+            "claimId": {"$ref": "#/$defs/id"},
+            "claimDigest": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    "applyDeploymentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deploymentId", "plan", "sourceArchive", "failpoint", "controlContext"],
+      "properties": {
+        "deploymentId": {"$ref": "#/$defs/id"},
+        "plan": {"type": "object"},
+        "sourceArchive": {"$ref": "#/$defs/deploymentSourceArchive"},
+        "failpoint": {"$ref": "#/$defs/deploymentFailpoint"},
+        "controlContext": {"$ref": "#/$defs/deploymentControlContext"}
+      }
+    },
+    "updateDeploymentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deploymentId", "plan", "predecessorPlan", "predecessorImages", "infrastructure", "sourceArchive", "failpoint", "controlContext"],
+      "properties": {
+        "deploymentId": {"$ref": "#/$defs/id"},
+        "plan": {"type": "object"},
+        "predecessorPlan": {"type": "object"},
+        "predecessorImages": {"$ref": "#/$defs/digestMap"},
+        "infrastructure": {"$ref": "#/$defs/nullableObject"},
+        "sourceArchive": {"$ref": "#/$defs/deploymentSourceArchive"},
+        "failpoint": {"$ref": "#/$defs/deploymentFailpoint"},
+        "controlContext": {"$ref": "#/$defs/deploymentControlContext"}
+      }
+    },
+    "observeDeploymentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deploymentId", "spec", "expectedRevision", "expectedImages", "verifyHealth", "infrastructure", "controlContext"],
+      "properties": {
+        "deploymentId": {"$ref": "#/$defs/id"},
+        "spec": {"type": "object"},
+        "expectedRevision": {"$ref": "#/$defs/nullableDigest"},
+        "expectedImages": {"$ref": "#/$defs/digestMap"},
+        "verifyHealth": {"type": "boolean"},
+        "infrastructure": {"$ref": "#/$defs/nullableObject"},
+        "controlContext": {"$ref": "#/$defs/deploymentControlContext"}
+      }
+    },
+    "collectDeploymentLogsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deploymentId", "spec", "serviceId", "tail", "expectedRevision", "controlContext"],
+      "properties": {
+        "deploymentId": {"$ref": "#/$defs/id"},
+        "spec": {"type": "object"},
+        "serviceId": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]},
+        "tail": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "expectedRevision": {"$ref": "#/$defs/nullableDigest"},
+        "controlContext": {"$ref": "#/$defs/deploymentControlContext"}
+      }
+    },
+    "restartDeploymentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deploymentId", "spec", "expectedRevision", "expectedImages", "infrastructure", "controlContext"],
+      "properties": {
+        "deploymentId": {"$ref": "#/$defs/id"},
+        "spec": {"type": "object"},
+        "expectedRevision": {"$ref": "#/$defs/nullableDigest"},
+        "expectedImages": {"$ref": "#/$defs/digestMap"},
+        "infrastructure": {"$ref": "#/$defs/nullableObject"},
+        "controlContext": {"$ref": "#/$defs/deploymentControlContext"}
+      }
+    },
+    "removeDeploymentRuntimePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deploymentId", "spec", "expectedRevision", "recoveryOperation", "controlContext"],
+      "properties": {
+        "deploymentId": {"$ref": "#/$defs/id"},
+        "spec": {"type": "object"},
+        "expectedRevision": {"$ref": "#/$defs/nullableDigest"},
+        "recoveryOperation": {"enum": [null, "apply", "remove"]},
+        "controlContext": {"$ref": "#/$defs/deploymentControlContext"}
+      }
+    },
+    "purgeDeploymentDataPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deploymentId", "spec", "expectedVolumes", "expectedRevision", "recoverInterrupted", "controlContext"],
+      "properties": {
+        "deploymentId": {"$ref": "#/$defs/id"},
+        "spec": {"type": "object"},
+        "expectedVolumes": {"$ref": "#/$defs/idMap"},
+        "expectedRevision": {"$ref": "#/$defs/digest"},
+        "recoverInterrupted": {"type": "boolean"},
+        "controlContext": {"$ref": "#/$defs/deploymentControlContext"}
+      }
+    }
+  }
+}

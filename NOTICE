@@ -1,0 +1,14 @@
+StatePort
+Copyright (C) 2026 Lennert Van Hoyweghen
+
+Unless a file states otherwise, StatePort software, configuration, and
+StateSpec artifacts in this repository are licensed under the GNU Affero
+General Public License, version 3 or (at your option) any later version
+(AGPL-3.0-or-later). The canonical AGPL-3.0 text is in LICENSE.
+
+Human-readable documentation is licensed under Creative Commons Attribution
+4.0 International (CC BY 4.0). The canonical legal text is in
+LICENSES/CC-BY-4.0.txt and the scope is described in LICENSES.md.
+
+Third-party components, dependencies, and assets retain their own license
+notices. This NOTICE does not grant trademark rights.

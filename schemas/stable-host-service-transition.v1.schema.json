@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/stable-host-service-transition.v1.schema.json",
+  "title": "StatePort stable host service transition v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "releaseId", "targetId", "topologyDigest", "hostIdentityDigest", "portReservationReceiptDigest", "observedInventoryDigest", "desiredPlanDigest", "actions", "effectBoundary", "transitionDigest"],
+  "properties": {
+    "schema": {"const": "stateport.stable-host-service-transition/v1"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "hostIdentityDigest": {"$ref": "#/$defs/digest"},
+    "portReservationReceiptDigest": {"$ref": "#/$defs/digest"},
+    "observedInventoryDigest": {"$ref": "#/$defs/digest"},
+    "desiredPlanDigest": {"$ref": "#/$defs/digest"},
+    "actions": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["serviceId", "action", "observedImageDigest", "desiredImageDigest", "contractVersion", "reason"],
+        "properties": {
+          "serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
+          "action": {"enum": ["create", "retain", "replace"]},
+          "observedImageDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+          "desiredImageDigest": {"$ref": "#/$defs/digest"},
+          "contractVersion": {"type": "integer", "minimum": 1, "maximum": 65535},
+          "reason": {"enum": ["missing", "exact-identity", "compatible-explicit-replacement"]}
+        }
+      }
+    },
+    "effectBoundary": {"const": "separate-host-authority-never-revision-activation"},
+    "transitionDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

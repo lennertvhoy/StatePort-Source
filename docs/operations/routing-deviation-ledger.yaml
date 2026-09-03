@@ -1,0 +1,67 @@
+formatVersion: stateport.routing-deviation-ledger/v1
+ledgerVersion: 1
+entries:
+  - entryId: assignment-13-sol-max-misroute
+    assignment: assignment-13
+    intendedProfile: terra-high
+    actualProfile: gpt-5.6-sol/max
+    reason: The assignment was routed to gpt-5.6-sol/max instead of Terra High; the exact underlying router cause was not preserved.
+    incrementalCost:
+      availability: unknown
+      amountMinor: null
+      currency: null
+      notes: Assignment-scoped usage and price telemetry was not preserved, so the incremental misroute and rerun cost is unknown.
+    producedWork:
+      commits:
+        status: exact
+        values:
+          - 6f49b99564bfaefc8f1d0aecef23d81b34b6cd11
+          - dd12d96be9b006032f42302290d16282c313daa1
+      files:
+        status: exact
+        values:
+          - packages/execution-host/src/execution_host/__init__.py
+          - packages/execution-host/src/execution_host/runtime.py
+          - packages/external-engine-runtime/src/external_engine_runtime/runtime.py
+          - packages/governed-runner/README.md
+          - packages/governed-runner/src/governed_runner/__init__.py
+          - packages/governed-runner/src/governed_runner/cockpit.py
+          - packages/governed-runner/src/governed_runner/managed.py
+          - packages/portable-execution/src/stateport_portable_execution/runtime.py
+          - packages/runtime-contracts/src/runtime_contracts/__init__.py
+          - packages/runtime-contracts/src/runtime_contracts/contracts.py
+          - packages/sandbox-runtime/src/sandbox_runtime/boundary.py
+          - schemas/runtime-profile.v1.schema.json
+          - scripts/test_checklistdd_execution.py
+          - scripts/test_external_engine_runtime.py
+          - scripts/test_managed_cockpit.py
+          - scripts/test_provider_operation_matrix.py
+          - scripts/test_runtime_contracts.py
+          - scripts/test_sandbox_runtime.py
+    testResult:
+      status: passed
+      summary: The preserved assignment record reports 52 focused tests, 11 managed-only tests, and a root full suite of 521 passed with 4 skipped; the independent review reran 52 focused tests successfully but reproduced two missing safety cases.
+    rerun:
+      occurred: true
+      profile: terra-high
+      trigger: model_identity_only
+      allowedReason: null
+      worktreeIsolation: same_modified_worktree
+      compliance: historical_noncompliance
+    review:
+      disposition: rejected_with_reproduced_defects
+      reviewerAssignment: MEGA005-A03-assignment-13-followup
+      access: read-only
+      originalImplementationOwner: false
+      worktreeIsolation: clean_detached_worktree
+      inspectedCommitOrDiff: true
+      freshFocusedTests: passed
+      independent: true
+      notes: Bound to commit 6f49b995 and tree 0dc8845f. The reviewer reproduced an escaped session descendant falsely reported cleaned and a cancellation request lost before backend registration. Valid provider-neutral contracts were retained; later atomic registration, generation-bound cleanup, quarantine, and regressions in f32443f repaired these defects and were separately accepted with bounded followups by MEGA005-A02.
+    retainedWork:
+      status: retained
+      description: Provider-neutral contracts, managed fake execution, staging disclosures, event normalization, redaction, resume binding, verification, receipts, and RunBundle integration were retained; only reproduced safety defects received narrow later repairs.
+    discardedWork:
+      attribution: unknown_exact
+      description: Duplicate work occurred, but the preserved history does not support exact file- or commit-level attribution of discarded output.
+    correctiveConfigurationAction: Enforce the versioned routing-deviation policy, forbid model-identity-only invalidation or reruns, require exact-output review in a separate read-only detached worktree, and retain valid output while repairing only reproduced defects. Assignment 13 was not rerun again; the repaired current head is governed by the accepted MEGA005-A02 hardening review.

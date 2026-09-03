@@ -1,0 +1,25 @@
+# Example Terraform variables for the alpha dev stack.
+# Copy to envs/dev.tfvars and fill in real values. Never commit dev.tfvars.
+# Placeholder values only — no secrets belong in this file.
+
+location     = "belgiumcentral"
+environment  = "dev"
+project_name = "stateport"
+
+vm_size          = "Standard_B2s"
+data_disk_size_gb = 64
+
+# Default: no SSH inbound at all. To enable operator SSH, list YOUR current
+# public IP only, e.g.: allowed_ssh_cidrs = ["203.0.113.10/32"]
+allowed_ssh_cidrs = []
+
+# Your SSH public key (authorized_keys line). Public keys are not secrets.
+# Generate one with: ssh-keygen -t ed25519 -C stateport-alpha-operator
+admin_ssh_public_key = "ssh-ed25519 AAAA...REPLACE-WITH-YOUR-PUBLIC-KEY... operator@example.invalid"
+
+# Time-to-live tag; the stack must be destroyed within this window.
+ttl = "72h"
+
+# Recipient of the machine-enforced EUR 30 monthly budget alert (resource-
+# group consumption budget, fires at 90% of actual spend).
+budget_notification_email = "operator@example.invalid"

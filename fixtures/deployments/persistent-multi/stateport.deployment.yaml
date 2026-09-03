@@ -1,0 +1,92 @@
+schema: stateport.deployment/v1
+metadata:
+  deploymentId: placeholder
+  applicationId: persistent-multi
+  name: Persistent multi-service fixture
+source:
+  repositoryIdentity: null
+  repositoryRoot: null
+  projectPath: .
+  commit: null
+  treeDigest: null
+  dirty: null
+  dirtyDigest: null
+  dirtyPolicy: refuse
+  descriptorDigest: null
+target:
+  adapter: rootless-podman-local
+  targetId: local
+  architecture: linux-amd64
+  identityDigest: null
+services:
+  - id: writer
+    sourcePath: .
+    build:
+      mode: source
+      context: .
+      containerfile: Containerfile
+      generated: false
+    image:
+      reference: null
+      acceptedDigest: null
+    runtime:
+      command: [python3, app.py]
+      workdir: /app
+      user: {mode: nonroot, uid: 10001, gid: 10001}
+      readOnlyRoot: true
+    ports:
+      - {name: http, containerPort: 8080, hostAddress: 127.0.0.1, hostPort: 0}
+    health:
+      type: http
+      path: /health
+      portName: http
+      command: [python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+      intervalSeconds: 2
+      timeoutSeconds: 3
+      startPeriodSeconds: 5
+    resources: {memoryLimit: 128m, cpuLimit: 0.5, pidsLimit: 64}
+    storage:
+      - {id: app-data, mountPath: /data, persistence: retained}
+    secrets: []
+    environment: {SERVICE_ID: writer}
+    networks: [internal]
+  - id: reader
+    sourcePath: .
+    build:
+      mode: source
+      context: .
+      containerfile: Containerfile
+      generated: false
+    image:
+      reference: null
+      acceptedDigest: null
+    runtime:
+      command: [python3, app.py]
+      workdir: /app
+      user: {mode: nonroot, uid: 10001, gid: 10001}
+      readOnlyRoot: true
+    ports:
+      - {name: http, containerPort: 8080, hostAddress: 127.0.0.1, hostPort: 0}
+    health:
+      type: http
+      path: /health
+      portName: http
+      command: [python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+      intervalSeconds: 2
+      timeoutSeconds: 3
+      startPeriodSeconds: 5
+    resources: {memoryLimit: 128m, cpuLimit: 0.5, pidsLimit: 64}
+    storage:
+      - {id: app-data, mountPath: /data, persistence: retained}
+    secrets: []
+    environment: {SERVICE_ID: reader}
+    networks: [internal]
+networks:
+  - {id: internal, public: false}
+authority:
+  grantId: null
+  requireApproval: [first_apply]
+  automaticWithReceipt: [health_check, restart, log_collection, observe, remove_runtime_preserve_data]
+policy:
+  ordinaryRemovePreservesData: true
+  rollbackOnFailedHealth: true

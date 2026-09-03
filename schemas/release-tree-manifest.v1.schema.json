@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/release-tree-manifest.v1.schema.json",
+  "title": "StatePort deterministic local release-tree manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "excludedPaths", "files"],
+  "properties": {
+    "formatVersion": {"const": "stateport.release-tree-manifest/v1"},
+    "excludedPaths": {
+      "const": [
+        "bundle-receipt.json",
+        "provenance/candidate-provenance.yaml",
+        "release-tree-manifest.json"
+      ]
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+          "required": ["path", "sha256", "bytes", "mode"],
+        "properties": {
+          "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 1},
+          "mode": {"enum": ["0644", "0755"]}
+        }
+      }
+    }
+  }
+}

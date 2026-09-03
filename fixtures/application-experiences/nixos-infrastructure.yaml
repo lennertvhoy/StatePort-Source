@@ -1,0 +1,85 @@
+formatVersion: stateport.application-experience/v1
+applicationId: nixos-infrastructure
+displayName: NixOS Infrastructure
+description: A user-owned NixOS infrastructure project with a governed Workbench.
+capabilities:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+  - file_viewer
+  - workbench
+  - terminal
+  - editor
+  - cto_orchestration
+views:
+  - viewId: nixos-home
+    label: Overview
+    component: application_home
+    route: /application
+    capability: progress_dashboard
+  - viewId: nixos-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+  - viewId: nixos-workbench
+    label: Workbench
+    component: development_workbench
+    route: /workbench
+    capability: workbench
+navigation:
+  - contributionId: nixos-home-nav
+    label: Overview
+    viewId: nixos-home
+    placement: application
+    order: 10
+  - contributionId: nixos-conversation-nav
+    label: Conversation
+    viewId: nixos-conversation
+    placement: conversation
+    order: 20
+  - contributionId: nixos-workbench-nav
+    label: Workbench
+    viewId: nixos-workbench
+    placement: advanced
+    order: 30
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: Infrastructure conversation
+  emptyState: Continue the infrastructure conversation with governed operations and durable receipts.
+advancedControls:
+  - controlId: nixos-files
+    label: Files
+    component: file_viewer
+    capability: file_viewer
+    order: 20
+  - controlId: nixos-terminal
+    label: Terminal
+    component: terminal_surface
+    capability: terminal
+    order: 30
+  - controlId: nixos-deployments
+    label: Deployments
+    component: progress_overview
+    capability: progress_dashboard
+    order: 35
+  - controlId: nixos-runs
+    label: Runs
+    component: run_history
+    capability: cto_orchestration
+    order: 40
+  - controlId: nixos-receipts
+    label: Receipts
+    component: receipt_list
+    capability: cto_orchestration
+    order: 50
+  - controlId: nixos-cto
+    label: CTO advisory
+    component: cto_orchestration
+    capability: cto_orchestration
+    order: 60
+platformOperations: []
+legacyAliases: []

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/canonical-source.v1.schema.json",
+  "title": "StatePort canonical source catalog descriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "sourceId", "application", "authority", "requirements", "canonicalResolution", "developmentCandidate", "trust", "status", "observations"],
+  "properties": {
+    "formatVersion": {"const": "stateport.canonical-source/v1"},
+    "sourceId": {"type": "string", "minLength": 1},
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "publicName", "legacyIdentifiers"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "publicName": {"type": "string", "minLength": 1},
+        "legacyIdentifiers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "canonicalRefPolicy", "manifestPath", "manifestContract"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^(?:https|ssh)://(?![^/?#]*@)[^/?#:@]+(?::[0-9]+)?(?:/[^?#]*)?$"},
+        "canonicalRefPolicy": {"const": "immutable_release_tag"},
+        "manifestPath": {"const": ".statedd/manifest.yaml"},
+        "manifestContract": {"const": "statedd.template-manifest/v2"}
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modules", "selfTests"],
+      "properties": {
+        "modules": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "selfTests": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "canonicalResolution": {"$ref": "#/$defs/canonicalResolution"},
+    "developmentCandidate": {
+      "type": ["object", "null"],
+      "required": ["sourceClass", "requestedRef", "identity", "releaseStatus", "verifiedModules", "verifiedSelfTests"],
+      "additionalProperties": false,
+      "properties": {
+        "sourceClass": {"const": "development_candidate"},
+        "requestedRef": {"type": "string", "minLength": 1},
+        "identity": {"$ref": "#/$defs/identity"},
+        "releaseStatus": {"const": "candidate"},
+        "verifiedModules": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "verifiedSelfTests": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "canonicalInstallAllowed", "developmentTestingAllowed"],
+      "properties": {
+        "state": {"enum": ["unverified", "development_only", "verified_release", "rejected"]},
+        "canonicalInstallAllowed": {"type": "boolean"},
+        "developmentTestingAllowed": {"type": "boolean"}
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "installable", "unresolvedReason"],
+      "properties": {
+        "code": {"enum": ["awaiting_verified_release", "source_available", "rejected"]},
+        "installable": {"type": "boolean"},
+        "unresolvedReason": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalRef", "canonicalCommit", "canonicalManifestPresent", "observedAt"],
+      "properties": {
+        "canonicalRef": {"type": "string", "minLength": 1},
+        "canonicalCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "canonicalManifestPresent": {"type": "boolean"},
+        "observedAt": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "tree", "manifestDigest", "sourceDigest"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^(?:https|ssh)://(?![^/?#]*@)[^/?#:@]+(?::[0-9]+)?(?:/[^?#]*)?$"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "manifestDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "sourceDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "identityOrNull": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/identity"}
+      ]
+    },
+    "canonicalResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceClass", "requestedRef", "identity", "releaseStatus", "verifiedModules", "verifiedSelfTests"],
+      "properties": {
+        "sourceClass": {"const": "canonical_release"},
+        "requestedRef": {"type": ["string", "null"], "pattern": "^refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"},
+        "identity": {"$ref": "#/$defs/identityOrNull"},
+        "releaseStatus": {"type": ["string", "null"], "enum": ["released", null]},
+        "verifiedModules": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "verifiedSelfTests": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

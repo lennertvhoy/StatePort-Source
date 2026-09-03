@@ -1,0 +1,3521 @@
+formatVersion: stateport.release-scan-exceptions/v1
+resolvedOn: "2026-08-29"
+# Typed, expiring vulnerability-scan exceptions. An exception never weakens
+# the gate for any finding it does not exactly name: the collector fails the
+# image on every unexplained Critical or High finding, on an expired record,
+# on a record whose image list does not include the scanned image, and on an
+# advisory/package mismatch. Every record carries its surface, reachability
+# analysis, evidence pointer, remediation plan, and an expiry date; a release
+# assembled after expiry refuses the finding again.
+#
+# Evidence roots for the retained evaluations:
+#   ~/.local/state/stateport/missions/public-alpha-completion-20260801/
+#     release-evidence-891ab08/<image>/ (raw grype scan + scan-evaluation JSON)
+#   operator://mission-evidence/public-alpha-completion-20260803/
+#     release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/
+# The npm-bundled-tree class in stateport-dev-workspace and the whole
+# stateport-playwright npm tree were REMEDIATED (not excepted): dev-workspace
+# overlays npm 12.0.2 + brace-expansion 5.0.9 (pinned digests in
+# config/container-build-inputs.yaml); playwright removes npm from the
+# runtime image entirely. Only the true residuals below carry exceptions.
+exceptions:
+  - id: RX-2026-003
+    advisory: CVE-2026-11940
+    package: python
+    packageVersion: "3.13.14"
+    images: [stateport-web, stateport-api, stateport-worker, stateport-runner, stateport-execution-host]
+    severity: High
+    surface: >
+      CPython tarfile extraction-filter bypass. StatePort instance-backup
+      code uses tarfile, so the library surface exists in the images.
+    reachability: >
+      StatePort restores only operator-local, digest-bound backup archives
+      produced by its own backup path; tar archives are never fetched from
+      or supplied by a network attacker. The only fixed CPython is the
+      3.15 line (3.15.0b4), a beta the runtime cannot adopt; no 3.13.x fix
+      exists at scan time.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/;
+      restore path review in packages/instance-backup (operator-local
+      digest-bound archives only).
+    remediation: >
+      Rebase runtime images onto the fixed CPython release as soon as a
+      fixed 3.13.x (or stable 3.15.0) is published on the pinned base
+      image; re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-004
+    advisory: CVE-2026-11972
+    package: python
+    packageVersion: "3.13.14"
+    images: [stateport-web, stateport-api, stateport-worker, stateport-runner, stateport-execution-host]
+    severity: High
+    surface: >
+      CPython tarfile streaming EOF denial of service in the same tarfile
+      surface as RX-2026-003.
+    reachability: >
+      Same analysis as RX-2026-003: the only tarfile consumer is
+      instance-backup restoring operator-local digest-bound archives, not
+      attacker-controlled input; no fixed 3.13.x exists at scan time.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/.
+    remediation: >
+      Rebase runtime images onto the fixed CPython release when published
+      for the pinned base image; re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-005
+    advisory: CVE-2026-15308
+    package: python
+    packageVersion: "3.13.14"
+    images: [stateport-web, stateport-api, stateport-worker, stateport-runner, stateport-execution-host]
+    severity: High
+    surface: >
+      CPython html.parser CPU denial of service on crafted markup input.
+    reachability: >
+      StatePort services do not feed untrusted remote markup into Python
+      html.parser; frontend rendering happens in the browser, and no
+      package or app imports html.parser for network input (grep-verified).
+      No fixed 3.13.x exists at scan time (fix listed only on 3.15.0).
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/;
+      html.parser non-usage verified by grep over packages/ and apps/.
+    remediation: >
+      Rebase runtime images onto the fixed CPython release when published
+      for the pinned base image; re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-006
+    advisory: CVE-2026-32631
+    package: git
+    packageVersion: 2.52.0-r0
+    images: [stateport-web]
+    severity: High
+    surface: >
+      Advisory describes a Git for Windows NTLM credential/hash disclosure.
+    reachability: >
+      Platform mismatch: the shipped artifact is Alpine Linux git
+      (musl/Linux build), not Git for Windows; the Windows NTLM attack
+      path does not exist in this image. No Alpine fixed version exists
+      (fix state unknown) because the advisory does not affect this
+      platform.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-web/;
+      advisory text names Windows NTLM; image is Alpine Linux.
+    remediation: >
+      Keep Alpine git pinned and re-scan every release build; drop the
+      exception if a Linux-applicable fixed package appears.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-007
+    advisory: CVE-2007-2176
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      2007-era advisory (plugin/extension handling) matched against the
+      Playwright-bundled headless Firefox 153.0.
+    reachability: >
+      Scanner false positive: a 2007 plugin-era advisory cannot apply to a
+      2026 headless Firefox 153.0 build; grype matches on package name
+      without CPE-version reasoning. The browser runs only task-owned
+      local automation, never general browsing.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-008
+    advisory: CVE-2007-4013
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      2007-era advisory matched against Playwright-bundled headless
+      Firefox 153.0.
+    reachability: >
+      Scanner false positive as in RX-2026-007: plugin/extension-era
+      advisory, not applicable to a 2026 headless browser build used only
+      for task-owned local automation.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-009
+    advisory: CVE-2009-1597
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      2009-era advisory matched against Playwright-bundled headless
+      Firefox 153.0.
+    reachability: >
+      Scanner false positive as in RX-2026-007; not applicable to the
+      shipped 2026 headless build.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-010
+    advisory: CVE-2009-4102
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      2009-era advisory matched against Playwright-bundled headless
+      Firefox 153.0.
+    reachability: >
+      Scanner false positive as in RX-2026-007; not applicable to the
+      shipped 2026 headless build.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-011
+    advisory: CVE-2014-6492
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      2014-era advisory (Oracle-era product CVE matched by name) against
+      Playwright-bundled headless Firefox 153.0.
+    reachability: >
+      Scanner false positive as in RX-2026-007: the advisory predates the
+      shipped browser by more than a decade and concerns a different
+      product generation; the image runs task-owned automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-052
+    advisory: CVE-2026-74935
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox DOM Networking privilege-escalation advisory matched against
+      Playwright's patched Firefox 153.0 binary.
+    reachability: >
+      No arbitrary external navigation or attacker-controlled cross-origin
+      page is available in the StatePort browser-sidecar contract; only
+      task-owned local pages are exercised, with no host mounts or secrets.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-053
+    advisory: CVE-2026-74937
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox JavaScript garbage-collector use-after-free advisory in the
+      Playwright-bundled Firefox 153.0 runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages and fixtures, not
+      attacker-supplied JavaScript; the unprivileged sidecar exposes no public
+      browser endpoint, host mount, or secret.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-054
+    advisory: CVE-2026-74938
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Firefox JavaScript garbage-collector mitigation-bypass advisory matched
+      against the Playwright-bundled Firefox 153.0 runtime.
+    reachability: >
+      StatePort does not permit arbitrary external content or browser-sidecar
+      navigation; only local task pages run in an unprivileged process without
+      public control, host mounts, or secrets.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-055
+    advisory: CVE-2026-74939
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox DOM Navigation privilege-escalation advisory matched against the
+      Playwright-bundled Firefox 153.0 runtime.
+    reachability: >
+      The qualification journey has no arbitrary navigation capability and
+      exercises only task-owned local pages; browser control is not public and
+      the sidecar has no host mounts or secrets.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-056
+    advisory: CVE-2026-74941
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox CanvasWebGL privilege-escalation advisory in the Playwright
+      Firefox 153.0 browser sidecar.
+    reachability: >
+      No untrusted WebGL or external page is loaded by StatePort's qualification
+      path; the sidecar is unprivileged, private, mountless, secretless, and
+      controlled only by the task-owned local journey.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-057
+    advisory: CVE-2026-74942
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Remote Settings Client privilege-escalation advisory matched
+      against the Playwright Firefox 153.0 binary.
+    reachability: >
+      The release journey supplies no remote settings or external-navigation
+      input; it uses fixed local pages in an unprivileged sidecar with no public
+      endpoint, host mount, or secret access.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-058
+    advisory: CVE-2026-74946
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox CanvasWebGL boundary-condition privilege-escalation advisory in
+      the Playwright-bundled Firefox 153.0 browser.
+    reachability: >
+      StatePort exercises no attacker-controlled graphics page or external URL;
+      the browser remains unprivileged and task-owned, with no public control
+      endpoint, host mount, or secret exposure.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-059
+    advisory: CVE-2026-74947
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Graphics invalid-pointer privilege-escalation advisory matched
+      against the Playwright Firefox 153.0 runtime.
+    reachability: >
+      Only deterministic local StatePort pages are rendered; arbitrary remote
+      graphics content is not reachable, and the browser has no public control
+      socket, host mount, or secret.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-060
+    advisory: CVE-2026-74949
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Canvas2D use-after-free privilege-escalation advisory in the
+      Playwright-bundled Firefox 153.0 runtime.
+    reachability: >
+      The qualification path does not load attacker-controlled Canvas2D or
+      external pages; the unprivileged sidecar is mountless, secretless, and
+      not exposed through a browser control endpoint.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-061
+    advisory: CVE-2026-74950
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Downloads API privilege-escalation advisory matched against the
+      Playwright Firefox 153.0 browser sidecar.
+    reachability: >
+      The release journey performs no arbitrary downloads or external browsing;
+      browser pages are task-owned and local, while the process is unprivileged
+      and receives no host mounts, secrets, or public control endpoint.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-062
+    advisory: CVE-2026-74952
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Application Update privilege-escalation advisory matched against
+      the Playwright-bundled Firefox 153.0 browser.
+    reachability: >
+      Playwright's sidecar does not perform application updates during the
+      StatePort journey; it loads fixed local pages only and has no public
+      endpoint, host mount, or secret access.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-063
+    advisory: CVE-2026-74953
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Networking Cookies privilege-escalation advisory in the
+      Playwright-bundled Firefox 153.0 browser sidecar.
+    reachability: >
+      No attacker-controlled origin or cookie exchange is reachable: the
+      journey uses task-owned local pages, no external navigation, and an
+      unprivileged sidecar without public control, mounts, or secrets.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-064
+    advisory: CVE-2026-74954
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Storage Cache API side-channel information-disclosure advisory
+      matched against Playwright Firefox 153.0.
+    reachability: >
+      Qualification uses fixed local fixtures and does not expose attacker and
+      victim origins or external navigation; the browser has no public control
+      endpoint, host mount, or secret.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-065
+    advisory: CVE-2026-74955
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Request Handling privilege-escalation advisory matched against
+      the Playwright-bundled Firefox 153.0 runtime.
+    reachability: >
+      No arbitrary request handling or external navigation is permitted by the
+      sidecar contract; only local task pages run in an unprivileged process
+      without public control, host mounts, or secrets.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-066
+    advisory: CVE-2026-74956
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Firefox Service Workers same-origin-policy bypass advisory in the
+      Playwright-bundled Firefox 153.0 browser.
+    reachability: >
+      The qualification path does not register attacker-controlled service
+      workers or mix external origins; pages are local and task-owned, with no
+      public browser endpoint, host mount, or secret.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-067
+    advisory: CVE-2026-74958
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox WebRTC information-disclosure advisory matched against the
+      Playwright Firefox 153.0 browser sidecar.
+    reachability: >
+      StatePort's browser journey exercises no WebRTC peer or media stream and
+      accepts no external page; the unprivileged sidecar has no public control,
+      host mount, or secret access.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-068
+    advisory: CVE-2026-74962
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Networking Cookies site-isolation advisory matched against the
+      Playwright-bundled Firefox 153.0 browser.
+    reachability: >
+      No attacker-controlled cross-site content or external navigation enters
+      the qualification path; only local task pages run without public control,
+      host mounts, or secrets.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-069
+    advisory: CVE-2026-74964
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Firefox Graphics integer-overflow advisory matched against the
+      Playwright-bundled Firefox 153.0 browser.
+    reachability: >
+      The browser renders only fixed StatePort local pages and fixtures, not
+      attacker-controlled graphics; it is unprivileged and has no public
+      control endpoint, host mount, or secret.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-070
+    advisory: CVE-2026-74965
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Shell Integration privilege-escalation advisory in the
+      Playwright-bundled Firefox 153.0 runtime.
+    reachability: >
+      The sidecar has no host-shell integration or host mounts and runs only
+      task-owned local pages; no external navigation, public control endpoint,
+      or secret is available to browser content.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-071
+    advisory: CVE-2026-74969
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Layout Text and Fonts use-after-free advisory matched against the
+      Playwright Firefox 153.0 browser sidecar.
+    reachability: >
+      Only repository-owned local content is rendered and no attacker font or
+      external page is supplied; the unprivileged browser has no public control,
+      host mount, or secret.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-072
+    advisory: CVE-2026-74983
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Firefox Data Loss Prevention mitigation-bypass advisory matched against
+      Playwright's Firefox 153.0 browser sidecar.
+    reachability: >
+      No DLP policy input or attacker-controlled external page is exercised;
+      the journey uses local task pages in an unprivileged, mountless and
+      secretless sidecar without public browser control.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-073
+    advisory: CVE-2026-74987
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla memory-safety advisory matched against the Playwright Firefox
+      153.0 browser binary.
+    reachability: >
+      StatePort supplies no attacker-controlled browser content or external
+      navigation in qualification; the unprivileged sidecar has no public
+      control endpoint, host mount, or secret, so the reported content path is
+      not exercised.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-074
+    advisory: CVE-2026-74990
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla memory-safety advisory matched against the Playwright Firefox
+      153.0 browser binary.
+    reachability: >
+      The qualification path uses only fixed local StatePort pages, with no
+      arbitrary navigation or attacker content; browser control is not public
+      and the unprivileged sidecar has no host mount or secret.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-075
+    advisory: CVE-2026-75874
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Firefox Remote Settings Client sandbox-escape advisory matched against
+      the Playwright-bundled Firefox 153.0 runtime.
+    reachability: >
+      No remote settings, external navigation, or attacker-controlled page is
+      reachable in the release journey; the browser runs unprivileged with no
+      public control endpoint, host mount, or secret access.
+    evidence: >
+      Fresh Grype 0.116.1 scan of the preserved Playwright SBOM at
+      /tmp/opencode/stateport-playwright-fresh.grype.json; Mozilla MFSA 2026-74.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-076
+    advisory: CVE-2026-74936
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v2 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v2.evidence/;
+      fixed versions begin at Firefox 140.14.0 and 153.1.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-077
+    advisory: CVE-2026-74940
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v2 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v2.evidence/;
+      fixed version begins at Firefox 154.0.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-078
+    advisory: CVE-2026-74943
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v2 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v2.evidence/;
+      fixed versions begin at Firefox 115.39.0, 140.14.0, and 153.1.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-079
+    advisory: CVE-2026-74944
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v2 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v2.evidence/;
+      fixed versions begin at Firefox 140.14.0 and 153.1.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-080
+    advisory: CVE-2026-74961
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v2 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v2.evidence/;
+      fixed version begins at Firefox 153.1.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-081
+    advisory: CVE-2026-74979
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v2 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v2.evidence/;
+      fixed versions begin at Firefox 153.1.0 and 154.0.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-082
+    advisory: CVE-2026-74988
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v2 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v2.evidence/;
+      fixed version begins at Firefox 153.1.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-083
+    advisory: CVE-2026-74989
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v4 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/d02ffa2a/.candidate-v4.evidence/;
+      fixed version begins at Firefox 154.0.0.
+    remediation: >
+      Remove immediately when stable Playwright ships a newer patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-08-31"
+  - id: RX-2026-012
+    advisory: CVE-2025-3887
+    package: gstreamer1.0-plugins-bad
+    packageVersion: 1.24.2-1ubuntu4
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Ubuntu gstreamer bad-plugins library inside the Playwright browser
+      image; upstream disposition wont-fix with no published fix version.
+    reachability: >
+      The library is present as a browser media-codec dependency, but the
+      sidecar only loads task-owned local pages and fixtures in headless
+      automation; it never decodes attacker-supplied media streams. The
+      publisher marks the issue wont-fix, so no upgrade path exists.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/;
+      fixState wont-fix in the scan.
+    remediation: >
+      Track the Ubuntu gstreamer packages; rebase the Playwright image
+      base when the package set changes; re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-013
+    advisory: CVE-2025-3887
+    package: libgstreamer-plugins-bad1.0-0
+    packageVersion: 1.24.2-1ubuntu4
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Same gstreamer bad-plugins advisory, second binary package instance
+      (shared library package) in the Playwright image.
+    reachability: >
+      Same analysis as RX-2026-012: codec dependency reachable only
+      through task-owned local automation content; no attacker media
+      input; publisher disposition wont-fix.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/;
+      fixState wont-fix in the scan.
+    remediation: >
+      Track the Ubuntu gstreamer packages; rebase the Playwright image
+      base when the package set changes; re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-014
+    advisory: CVE-2026-17950
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; advisory text scopes it to Mac.
+      Ships in the Playwright browser sidecar.
+    reachability: >
+      Playwright 1.62.1 is the latest published release and bundles
+      chromium 151.0.7922.34; no fixed Playwright/chromium build exists to
+      adopt. The sidecar runs task-owned local automation only, and the
+      advisory is platform-scoped to Mac while the image is Linux. NVD
+      severity overrides Chromium's own lower rating.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/;
+      playwright release check confirms 1.62.1 is latest at scan time.
+    remediation: >
+      Rebase the image the day a Playwright release ships the fixed
+      chromium; re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-015
+    advisory: CVE-2026-17952
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; ships in the Playwright browser
+      sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: latest Playwright bundles this
+      chromium; no fixed build exists; task-owned local automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-016
+    advisory: CVE-2026-17956
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; ships in the Playwright browser
+      sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: no fixed build available from the
+      latest Playwright release; task-owned local automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-017
+    advisory: CVE-2026-17969
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; ships in the Playwright browser
+      sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: no fixed build available from the
+      latest Playwright release; task-owned local automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-018
+    advisory: CVE-2026-17979
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; ships in the Playwright browser
+      sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: no fixed build available from the
+      latest Playwright release; task-owned local automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-019
+    advisory: CVE-2026-17989
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; ships in the Playwright browser
+      sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: no fixed build available from the
+      latest Playwright release; task-owned local automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-020
+    advisory: CVE-2026-17993
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; advisory text scopes it to
+      Windows. Ships in the Playwright browser sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: no fixed build available; platform
+      scope is Windows while the image is Linux; task-owned local
+      automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-021
+    advisory: CVE-2026-18012
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; ships in the Playwright browser
+      sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: no fixed build available from the
+      latest Playwright release; task-owned local automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-022
+    advisory: CVE-2026-18017
+    package: chrome
+    packageVersion: 151.0.7922.34
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Chromium CVE fixed in 151.0.7922.72; ships in the Playwright browser
+      sidecar.
+    reachability: >
+      Same analysis as RX-2026-014: no fixed build available from the
+      latest Playwright release; task-owned local automation only.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/missions/public-alpha-completion-20260801/release-evidence-891ab08/stateport-playwright/.
+    remediation: >
+      Rebase the image when a Playwright release ships the fixed chromium;
+      re-scan every release build.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-023
+    advisory: GHSA-x744-4wpc-v9h2
+    package: github.com/docker/docker
+    packageVersion: v28.5.1+incompatible
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Go Docker client module inside Alpine edge podman-remote;
+      the image contains a client binary and no Docker daemon.
+    reachability: >
+      The daemon invokes only fixed Podman create/start/stop/kill/inspect argv
+      through the owner-controlled rootless Unix socket. It never invokes the
+      Docker client surface, accepts network traffic, or pulls images.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      engine allowlist review is in packages/execution-host/src/execution_host/engine.py.
+    remediation: >
+      Rebuild when Alpine podman-remote carries the fixed Docker module;
+      re-scan every release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-024
+    advisory: GHSA-p77j-4mvh-x3m3
+    package: google.golang.org/grpc
+    packageVersion: v1.72.2
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Vendored Go gRPC module inside Alpine edge podman-remote, used by the
+      client binary rather than an exposed StatePort network listener.
+    reachability: >
+      The execution host has no HTTP or TCP listener and accepts only the
+      owner-controlled, peer-UID-confined Unix control socket. Its fixed
+      engine calls use the local rootless Podman socket and no pull/network path.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      socket and argv confinement are covered by the execution-host package tests.
+    remediation: >
+      Rebuild when Alpine podman-remote carries gRPC >=1.79.3 or a later fixed
+      vendored release; re-scan every release and remove this exact exception.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-025
+    advisory: GHSA-vgwf-h737-ff37
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Vendored Go crypto module inside Alpine edge podman-remote; no
+      StatePort application directly imports or exposes this module.
+    reachability: >
+      Only fixed, typed, digest-pinned workload requests reach the client;
+      the image is loopback/Unix-socket confined, uses --pull never, and gives
+      workloads no network or host mount access.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      the engine allowlist and daemon peer checks are repository evidence.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-026
+    advisory: GHSA-f5wc-c3c7-36mc
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Second advisory against the same vendored Go crypto module in the
+      client-only Alpine edge podman-remote binary.
+    reachability: >
+      The execution host exposes no network listener and sends only fixed
+      allowlisted commands to the owner-controlled rootless Podman socket;
+      arbitrary client-controlled argv and image pulls are rejected.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      fixed argv construction is tested in packages/execution-host.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-027
+    advisory: GO-2026-5026
+    package: golang.org/x/net
+    packageVersion: v0.53.0
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Go networking module inside Alpine edge podman-remote; the
+      packaged execution client is not a network-facing service.
+    reachability: >
+      Workloads run with --network none, image pulls are disabled, and the
+      client connects only to the owner-provisioned local rootless socket.
+      No attacker-controlled network stream reaches this client surface.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      network and socket restrictions are in the engine adapter.
+    remediation: >
+      Rebuild when podman-remote vendors x/net >=0.55.0; re-scan every release
+      and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-028
+    advisory: GHSA-5cgq-3rg8-m6cv
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Third distinct advisory against the same vendored Go crypto module in
+      the client-only Alpine edge podman-remote binary.
+    reachability: >
+      The peer-confined Unix control socket accepts only the StatePort control
+      UID, while engine argv, image references, mounts, capabilities, and
+      network mode are fixed or typed and re-asserted before execution.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      daemon and engine source provide the confinement evidence.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-029
+    advisory: GHSA-rm3j-f69w-wqmq
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Vendored Go crypto module advisory in the isolated execution-host
+      podman-remote client binary.
+    reachability: >
+      No public or container-network listener exists; the local engine socket
+      belongs to the execution user and all workload parameters are typed,
+      bounded, digest-pinned, and passed through a fixed command template.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      fixed template and resource bounds are tested repository behavior.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-030
+    advisory: GHSA-mh2q-q3fh-2475
+    package: go.opentelemetry.io/otel
+    packageVersion: v1.36.0
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored OpenTelemetry module inside the Alpine edge podman-remote
+      client; no StatePort telemetry endpoint is exposed by this image.
+    reachability: >
+      The image has no network listener and the execution client does not
+      accept remote telemetry payloads; only owner-controlled local engine
+      operations are issued with fixed argv.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      the image entrypoint and engine adapter are retained source evidence.
+    remediation: >
+      Rebuild when podman-remote vendors OpenTelemetry >=1.41.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-031
+    advisory: GHSA-4c29-8rgm-jvjj
+    package: github.com/moby/buildkit
+    packageVersion: v0.25.1
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored BuildKit module in Alpine edge podman-remote; this image does
+      not run BuildKit or expose a build service.
+    reachability: >
+      The execution host runs only the fixed workload lifecycle commands with
+      --pull never, --network none, no mounts, and dropped capabilities; no
+      BuildKit request path is invoked by the production adapter.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      production argv allowlisting is retained in the engine adapter.
+    remediation: >
+      Rebuild when podman-remote vendors BuildKit >=0.28.1; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-032
+    advisory: GHSA-89gr-r52h-f8rx
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Vendored Go crypto module advisory in the client-only Alpine edge
+      podman-remote binary.
+    reachability: >
+      The daemon accepts only the provisioned local Unix socket and sends
+      bounded, fixed engine operations; it does not expose a network, pull
+      images, mount host paths, or pass arbitrary argv.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      source-level confinement checks are retained in the repository.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-033
+    advisory: GHSA-4vrq-3vrq-g6gg
+    package: github.com/moby/buildkit
+    packageVersion: v0.25.1
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Second BuildKit advisory matched against the vendored client module in
+      Alpine edge podman-remote.
+    reachability: >
+      No BuildKit daemon or build API is started; only owner-controlled local
+      rootless Podman lifecycle calls are allowed and workload networking is
+      disabled.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      fixed engine command construction is retained in source and tests.
+    remediation: >
+      Rebuild when podman-remote vendors BuildKit >=0.28.1; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-034
+    advisory: GHSA-q4h4-gmj2-qvw2
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Go crypto module advisory in the isolated podman-remote client.
+    reachability: >
+      Only typed StatePort operations from the peer-UID-confined local socket
+      reach the client, with fixed argv and no remote image pull or workload
+      network path.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      the daemon contract and engine allowlist are repository evidence.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-035
+    advisory: GHSA-w879-237q-wc7r
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Go crypto module advisory in the Alpine edge podman-remote
+      client binary.
+    reachability: >
+      The client has no public listener and executes only bounded operations
+      against the owner-controlled rootless socket; arbitrary request data and
+      network access are not forwarded to the client.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      fixed command and socket boundaries are retained source evidence.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-036
+    advisory: GO-2026-5970
+    package: golang.org/x/text
+    packageVersion: v0.36.0
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Go text module advisory in Alpine edge podman-remote; the
+      execution host does not parse attacker-supplied text streams remotely.
+    reachability: >
+      Control input is peer-UID-confined local NDJSON validated against the
+      daemon contract, and the client performs only fixed local rootless
+      lifecycle operations with no public network listener.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      contract validation and peer checks are repository evidence.
+    remediation: >
+      Rebuild when podman-remote vendors x/text >=0.39.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-037
+    advisory: GO-2026-5942
+    package: golang.org/x/net
+    packageVersion: v0.53.0
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Second Go networking advisory matched against Alpine edge podman-remote
+      in the isolated execution-host image.
+    reachability: >
+      The image has no network listener, workloads run with --network none,
+      image pulling is disabled, and the only engine transport is the owner's
+      local rootless Unix socket.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      engine transport restrictions are retained in source.
+    remediation: >
+      Rebuild when podman-remote vendors x/net >=0.56.0; re-scan every release
+      and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-038
+    advisory: GHSA-f83f-xpx7-ffpw
+    package: github.com/sigstore/fulcio
+    packageVersion: v1.7.1
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Sigstore Fulcio module in Alpine edge podman-remote; the
+      execution host performs no signing or certificate issuance operation.
+    reachability: >
+      The image does not invoke cosign, Fulcio, registry pulls, or network
+      services. Its fixed client commands use only the owner-controlled local
+      rootless Podman socket.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      release signing is performed outside this runtime image.
+    remediation: >
+      Rebuild when podman-remote vendors Fulcio >=1.8.3; re-scan every release
+      and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-039
+    advisory: GHSA-f5mr-q85p-6hh6
+    package: github.com/sigstore/fulcio
+    packageVersion: v1.7.1
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Second Fulcio advisory matched against the same vendored module in the
+      client-only Alpine edge podman-remote binary.
+    reachability: >
+      No signing, certificate, registry, or network operation is reachable
+      from the fixed execution-host command paths; the runtime is confined to
+      the local rootless engine socket.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      signing toolchain separation is enforced by the release scripts.
+    remediation: >
+      Rebuild when podman-remote vendors Fulcio >=1.8.6; re-scan every release
+      and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-040
+    advisory: GHSA-hrxh-6v49-42gf
+    package: google.golang.org/grpc
+    packageVersion: v1.72.2
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Second gRPC advisory matched against the vendored module in Alpine edge
+      podman-remote, not a StatePort network service.
+    reachability: >
+      The daemon has no HTTP/TCP listener and the engine client communicates
+      only through the owner-controlled rootless Unix socket using fixed,
+      bounded operations and no image pull path.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      socket confinement and engine allowlisting are repository evidence.
+    remediation: >
+      Rebuild when podman-remote vendors gRPC >=1.82.1; re-scan every release
+      and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-041
+    advisory: GHSA-3v94-mw7p-v465
+    package: hickory-proto
+    packageVersion: 0.25.2
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored DNS protocol module in Alpine edge podman-remote; the runtime
+      workload engine is explicitly configured with network none.
+    reachability: >
+      The execution host does not accept network traffic, does not pull images,
+      and invokes only fixed local rootless Podman operations. No attacker DNS
+      response or workload network stream reaches this module.
+    evidence: >
+      Exact r5 Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r5/stateport-execution-host/;
+      network-none enforcement is retained in the engine adapter.
+    remediation: >
+      Rebuild when Alpine podman-remote ships a fixed hickory-proto version;
+      re-scan every release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-042
+    advisory: GHSA-jppx-rxg9-jmrx
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Vendored Go crypto module inside Alpine edge podman-remote; the image is
+      a client-only execution adapter rather than a network-facing service.
+    reachability: >
+      Only fixed, typed, digest-pinned workload requests reach the client; the
+      image is loopback/Unix-socket confined, uses --pull never, and gives
+      workloads no network or host mount access.
+    evidence: >
+      Exact r7b Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r7b/evidence-fast/stateport-execution-host/;
+      the engine allowlist and daemon peer checks are repository evidence.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-043
+    advisory: GHSA-x527-x647-q7gg
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    images: [stateport-execution-host]
+    severity: Critical
+    surface: >
+      Second advisory against the same vendored Go crypto module in the
+      client-only Alpine edge podman-remote binary.
+    reachability: >
+      The execution host exposes no network listener and sends only fixed
+      allowlisted commands to the owner-controlled rootless Podman socket;
+      arbitrary client-controlled argv and image pulls are rejected.
+    evidence: >
+      Exact r7b Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r7b/evidence-fast/stateport-execution-host/;
+      fixed argv construction is tested in packages/execution-host.
+    remediation: >
+      Rebuild when podman-remote vendors x/crypto >=0.52.0; re-scan every
+      release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-044
+    advisory: GHSA-rg2x-37c3-w2rh
+    package: github.com/docker/docker
+    packageVersion: v28.5.1+incompatible
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Go Docker client module inside Alpine edge podman-remote; the
+      image contains a client binary and no Docker daemon.
+    reachability: >
+      The daemon invokes only fixed Podman create/start/stop/kill/inspect argv
+      through the owner-controlled rootless Unix socket. It never invokes the
+      Docker client surface, accepts network traffic, or pulls images.
+    evidence: >
+      Exact r7b Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r7b/evidence-fast/stateport-execution-host/;
+      engine allowlist review is in packages/execution-host.
+    remediation: >
+      Rebuild when Alpine podman-remote carries the fixed Docker module;
+      re-scan every release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-045
+    advisory: GHSA-x86f-5xw2-fm2r
+    package: github.com/docker/docker
+    packageVersion: v28.5.1+incompatible
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Second advisory against the same vendored Go Docker client module in
+      Alpine edge podman-remote, not a StatePort network service.
+    reachability: >
+      The execution host has no HTTP or TCP listener and accepts only the
+      owner-controlled, peer-UID-confined Unix control socket. Its fixed
+      engine calls use the local rootless Podman socket and no pull/network
+      path.
+    evidence: >
+      Exact r7b Grype scan and evaluation are retained under
+      operator://mission-evidence/public-alpha-completion-20260803/release-evidence/alpha-build-2026-08-03-r7b/evidence-fast/stateport-execution-host/;
+      socket and argv confinement are covered by the execution-host package
+      tests.
+    remediation: >
+      Rebuild when Alpine podman-remote carries the fixed Docker module;
+      re-scan every release and remove this exact exception then.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-046
+    advisory: CVE-2026-58043
+    package: node
+    packageVersion: 22.23.2
+    images: [stateport-dev-workspace]
+    severity: High
+    surface: >
+      Node.js runtime in the optional developer-workspace profile; the image
+      is not a runtime service in the portable target topology.
+    reachability: >
+      The profile is operator-selected and has no StatePort network listener
+      or production service role. It is excluded from the default runtime
+      service set and is used only for owner-controlled development tooling.
+      The scanner reports no fixed upstream version for the pinned Node build.
+    evidence: >
+      Alpha.3 Grype scan and scan-evaluation are retained under
+      operator://alpha3-release-evidence-20260805/evidence-final/;
+      the finding is exact to stateport-dev-workspace and node 22.23.2.
+    remediation: >
+      Move the pinned Node tarball to the first fixed Node 22.x release when
+      upstream publishes one, rebuild the optional profile, re-scan it, and
+      remove this exception.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-047
+    advisory: GO-2026-6179
+    package: golang.org/x/mod
+    packageVersion: v0.37.0
+    images: [stateport-dev-workspace]
+    severity: High
+    surface: >
+      Go module checksum-database code vendored into the gh CLI binary,
+      which the optional developer-workspace image builds from the pinned
+      upstream cli/cli source commit with the pinned Go 1.26.6 toolchain.
+      The advisory describes a malicious GOPROXY forging sumdb tiles so a
+      module fetch bypasses GOSUMDB verification.
+    reachability: >
+      Exploitation requires running the Go module-fetch path (go get or go
+      mod download) against an attacker-controlled GOPROXY. gh is a GitHub
+      API CLI and never performs Go module fetches. A symbol audit of
+      /usr/local/bin/gh extracted from the built image shows only
+      golang.org/x/mod/semver and golang.org/x/mod/sumdb/note linked; the
+      vulnerable sumdb client and sumdb/tlog packages are not compiled into
+      the binary. Grype matched the module-level Go buildinfo entry only.
+    evidence: >
+      Alpha.6 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha6/evidence-4694ece0-v1/
+      (finding located at /usr/local/bin/gh); binary symbol audit of the
+      extracted gh binary. The gh build inputs are pinned in
+      config/container-build-inputs.yaml (cli/cli commit
+      55dbb4dc6b7edb10b48e3d7fc5bccd32318d1b55, Go 1.26.6 toolchain).
+    remediation: >
+      Rebuild gh from the first upstream cli/cli release that vendors
+      golang.org/x/mod >= 0.40.0 (fix published 2026-08-13), re-scan the
+      image, and remove this exception.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-048
+    advisory: GO-2026-6180
+    package: golang.org/x/mod
+    packageVersion: v0.37.0
+    images: [stateport-dev-workspace]
+    severity: High
+    surface: >
+      Second advisory against the same vendored x/mod module in the gh CLI
+      binary: a malicious GOSUMDB serving module content absent from the
+      transparency log during a Go module fetch.
+    reachability: >
+      Same analysis as RX-2026-047: the vulnerable sumdb verification client
+      and tlog packages are not compiled into the gh binary (only semver and
+      sumdb/note symbols are present), and gh performs no Go module fetches,
+      so no attacker-controlled GOPROXY or GOSUMDB response can reach this
+      code path.
+    evidence: >
+      Alpha.6 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha6/evidence-4694ece0-v1/
+      (finding located at /usr/local/bin/gh); binary symbol audit of the
+      extracted gh binary as recorded in RX-2026-047.
+    remediation: >
+      Rebuild gh from the first upstream cli/cli release that vendors
+      golang.org/x/mod >= 0.40.0, re-scan the image, and remove this
+      exception.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-050
+    advisory: GHSA-hfg8-hc9c-6c3h
+    package: github.com/moby/go-archive
+    packageVersion: v0.1.0
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Crafted tar archive can write outside the extraction directory in
+      moby/go-archive v0.1.0 (fixed in v0.3.0). The module ships transitively
+      inside the pinned podman-remote 5.8.3 binary (built from
+      containers/podman commit 93dbfd0d) that the execution-host daemon uses
+      to talk to the execution user's rootless Podman socket.
+    reachability: >
+      Not exploitable in StatePort: the advisory is exercised through
+      docker/podman copy/cp-style tar extraction of an attacker-crafted
+      archive. The StatePort execution-host daemon manages workspace
+      containers and volumes (start/stop/ledger) and never exposes a
+      container-copy or untrusted-archive-extraction surface (verified by
+      repository-wide review of packages/execution-host/src/); the daemon
+      talks only to the execution user's own confined Podman socket, and all
+      workspace archives are owner-created and digest-bound, never
+      attacker-supplied. The fixed v0.3.0 is first-observed 2026-08-19 and
+      would require rebuilding the pinned podman-remote binary and the
+      execution-host image.
+    evidence: >
+      Each candidate retains its exact stateport-execution-host Grype scan and
+      scan-evaluation JSON under the create-only release evidence root; the
+      candidate receipt binds the exact source commit and this exception-file
+      digest. GitHub advisory
+      https://github.com/moby/go-archive/security/advisories/GHSA-hfg8-hc9c-6c3h;
+      repository-wide review confirms no tar-extraction surface in
+      packages/execution-host/src/.
+    remediation: >
+      Rebuild podman-remote from a containers/podman release that vendors
+      moby/go-archive >= v0.3.0, re-scan the execution-host image, and
+      remove this exception.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-088
+    advisory: CVE-2026-74934
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 115.39/140.14/153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-089
+    advisory: CVE-2026-74957
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 140.14/153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-090
+    advisory: CVE-2026-74959
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 140.14/153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-091
+    advisory: CVE-2026-74960
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 140.14/153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-092
+    advisory: CVE-2026-74966
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-093
+    advisory: CVE-2026-74977
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-094
+    advisory: CVE-2026-74978
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-095
+    advisory: CVE-2026-74981
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-096
+    advisory: CVE-2026-74982
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-097
+    advisory: CVE-2026-74985
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-098
+    advisory: CVE-2026-74986
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox memory-safety advisory matched against the
+      Playwright-bundled Firefox 153.0 browser runtime.
+    reachability: >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar.
+    evidence: >
+      Candidate-v1 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/56d2d62d/.candidate-v1.evidence/;
+      fixed in Firefox 153.1.
+    remediation: >
+      Remove immediately when stable Playwright ships a patched Firefox;
+      re-scan every candidate and retain the exact 153.0 binding until then.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-099
+    advisory: GO-2026-4887
+    package: github.com/docker/docker
+    packageVersion: v28.5.1+incompatible
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Third-plus Go Docker client advisory matched against the vendored
+      github.com/docker/docker v28.5.1+incompatible module inside the Alpine
+      edge podman-remote binary at /usr/bin/podman-remote; the image contains
+      a client binary and no Docker daemon.
+    reachability: >
+      Identical analysis to RX-2026-023, RX-2026-044, and RX-2026-045: the
+      execution-host daemon invokes only fixed Podman create/start/stop/
+      kill/inspect argv through the owner-controlled rootless Unix socket.
+      It never invokes the Docker client surface, accepts no network
+      traffic, pulls no images, and exposes no listener. No fixed module
+      version is published at scan time (grype reports no fix).
+    evidence: >
+      Candidate-v14 Grype scan JSON under
+      ~/.local/state/stateport/qualification/J1/J1-IQ-RUN-027-fresh-candidate/.candidate-v14.evidence/stateport-execution-host.grype.json
+      (finding located at /usr/bin/podman-remote, go-module
+      github.com/docker/docker v28.5.1+incompatible); engine allowlist review
+      in packages/execution-host/src/execution_host/engine.py.
+    remediation: >
+      Rebuild when Alpine podman-remote vendors a Docker module covering
+      GO-2026-4887; re-scan every release and remove this exact exception
+      together with RX-2026-023/044/045 when the fixed vendored release lands.
+    expiresOn: "2026-09-15"
+  # Grype's NVD CPE matcher reports 152.0.7977.65 as the first fixed version
+  # for these records. These expiring exceptions remain only for historical
+  # private candidates carrying the exact 152.0.7977.64 Linux payload; the
+  # current 152.0.7977.65 pin must pass without any Chrome exception.
+  - id: RX-2026-107
+    advisory: CVE-2026-78891
+    package: &chrome_152_package chrome
+    packageVersion: &chrome_152_version "152.0.7977.64"
+    images: &chrome_152_images [stateport-playwright]
+    severity: High
+    surface: &chrome_152_surface >
+      Chromium advisory matched against the Chrome for Testing 152.0.7977.64
+      Linux payload shipped in the StatePort Playwright browser sidecar.
+    reachability: &chrome_152_reachability >
+      Qualification loads only fixed task-owned local pages; it supplies no
+      attacker-controlled external content, public browser control endpoint,
+      host mount, or secret to the unprivileged sidecar. Grype's NVD CPE rule
+      names 152.0.7977.65 as fixed, while the published Chrome for Testing
+      known-good Linux channel identifies 152.0.7977.64. This exception is
+      limited to this exact Linux image and payload version.
+    evidence: &chrome_152_evidence >
+      Fresh candidate-v21 Grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/qualification/J1/J1-IQ-RUN-027-fresh-candidate/.candidate-v21.evidence/;
+      Chrome for Testing known-good and last-known-good Linux metadata both
+      identify 152.0.7977.64 for linux64.
+    remediation: &chrome_152_remediation >
+      Re-evaluate after every Grype database and Chrome channel update; remove
+      this exact exception when a platform-correct Linux fix is recognized or
+      a later stable Linux payload is adopted, and re-scan every candidate.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-108
+    advisory: CVE-2026-78899
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-109
+    advisory: CVE-2026-78901
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-110
+    advisory: CVE-2026-78905
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-111
+    advisory: CVE-2026-78906
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-112
+    advisory: CVE-2026-78909
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-113
+    advisory: CVE-2026-78910
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-114
+    advisory: CVE-2026-78913
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-115
+    advisory: CVE-2026-78935
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-116
+    advisory: CVE-2026-78937
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-117
+    advisory: CVE-2026-78939
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-118
+    advisory: CVE-2026-78944
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-119
+    advisory: CVE-2026-78945
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-120
+    advisory: CVE-2026-78948
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-121
+    advisory: CVE-2026-78950
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-122
+    advisory: CVE-2026-78951
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-123
+    advisory: CVE-2026-78956
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-124
+    advisory: CVE-2026-78963
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-125
+    advisory: CVE-2026-78964
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-126
+    advisory: CVE-2026-78983
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-127
+    advisory: CVE-2026-78990
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-128
+    advisory: CVE-2026-79008
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-129
+    advisory: CVE-2026-79012
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-130
+    advisory: CVE-2026-79026
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-131
+    advisory: CVE-2026-79027
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-132
+    advisory: CVE-2026-79033
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-133
+    advisory: CVE-2026-79039
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-134
+    advisory: CVE-2026-79043
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-135
+    advisory: CVE-2026-79045
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-136
+    advisory: CVE-2026-79047
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-137
+    advisory: CVE-2026-79052
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-138
+    advisory: CVE-2026-79054
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-139
+    advisory: CVE-2026-79056
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-140
+    advisory: CVE-2026-79057
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-141
+    advisory: CVE-2026-79064
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-142
+    advisory: CVE-2026-79069
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-143
+    advisory: CVE-2026-79071
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-144
+    advisory: CVE-2026-79073
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-145
+    advisory: CVE-2026-79078
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-146
+    advisory: CVE-2026-79083
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-147
+    advisory: CVE-2026-79091
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-148
+    advisory: CVE-2026-79097
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-149
+    advisory: CVE-2026-79109
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-150
+    advisory: CVE-2026-79111
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-151
+    advisory: CVE-2026-79119
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-152
+    advisory: CVE-2026-79121
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-153
+    advisory: CVE-2026-79189
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: Critical
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-154
+    advisory: CVE-2026-79195
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-155
+    advisory: CVE-2026-79197
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-156
+    advisory: CVE-2026-79209
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-157
+    advisory: CVE-2026-79216
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-158
+    advisory: CVE-2026-79218
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-159
+    advisory: CVE-2026-79219
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-160
+    advisory: CVE-2026-79236
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-161
+    advisory: CVE-2026-79256
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-162
+    advisory: CVE-2026-79286
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-163
+    advisory: CVE-2026-79292
+    package: *chrome_152_package
+    packageVersion: *chrome_152_version
+    images: *chrome_152_images
+    severity: High
+    surface: *chrome_152_surface
+    reachability: *chrome_152_reachability
+    evidence: *chrome_152_evidence
+    remediation: *chrome_152_remediation
+    expiresOn: "2026-09-15"
+  - id: RX-2026-164
+    advisory: GO-2026-6179
+    package: golang.org/x/mod
+    packageVersion: v0.38.0
+    artifactPath: /usr/local/bin/gh
+    images: [stateport-dev-workspace]
+    severity: High
+    surface: >
+      Go module checksum-database code recorded in the gh 2.98.0 module graph.
+      The optional developer-workspace image builds the exact upstream cli/cli
+      commit a255baf71d13fe5947a4eb7ad521ffd412d64cee with Go 1.26.7.
+    reachability: >
+      Exploitation requires a Go module fetch against an attacker-controlled
+      GOPROXY. gh is a GitHub API CLI and never performs Go module fetches. The
+      exact stripped probe binary contains only x/mod semver and sumdb/note
+      symbols; the vulnerable sumdb client and tlog packages are not linked.
+    evidence: >
+      Candidate-v23-r36 scan evidence is retained under
+      ~/.local/state/stateport/qualification/J1/J1-IQ-RUN-027-fresh-candidate/.candidate-v23-r36.evidence/;
+      the exact gh 2.98.0 build-info, Syft, Grype, and linked-symbol evidence is
+      bound by gh-2.98.0-go6303-probe-r1/receipt.json in the same run root.
+    remediation: >
+      Rebuild gh from the first upstream cli/cli release that vendors
+      golang.org/x/mod >= 0.40.0, re-scan the image, and remove this exception.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-165
+    advisory: GO-2026-6180
+    package: golang.org/x/mod
+    packageVersion: v0.38.0
+    artifactPath: /usr/local/bin/gh
+    images: [stateport-dev-workspace]
+    severity: High
+    surface: >
+      Second advisory against the exact x/mod v0.38.0 module graph in the
+      source-built gh 2.98.0 binary: a malicious GOSUMDB can serve module
+      content absent from the transparency log during a Go module fetch.
+    reachability: >
+      Same analysis as RX-2026-164: gh has no Go module-fetch path, and the
+      exact binary links x/mod semver and sumdb/note but not the vulnerable
+      sumdb verification client or tlog packages. No untrusted proxy response
+      can reach the reported module surface through gh.
+    evidence: >
+      Exact source, toolchain, build-info, Syft, Grype, governor, and linked
+      symbol evidence is bound by
+      ~/.local/state/stateport/qualification/J1/J1-IQ-RUN-027-fresh-candidate/gh-2.98.0-go6303-probe-r1/receipt.json.
+    remediation: >
+      Rebuild gh from the first upstream cli/cli release that vendors
+      golang.org/x/mod >= 0.40.0, re-scan the image, and remove this exception.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-166
+    advisory: GO-2026-6303
+    package: golang.org/x/crypto
+    packageVersion: v0.50.0
+    artifactPath: /usr/bin/podman-remote
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      SSH server authentication callback handling in the x/crypto module
+      recorded inside the exact source-built Podman 5.8.3 remote client.
+    reachability: >
+      Exploitation requires ssh.NewServerConn and its serverAuthenticate path.
+      The exact Podman source has no caller outside vendored server.go, while
+      the r37 binary links ssh.NewClientConn but neither vulnerable server
+      symbol. StatePort forces this client through the execution user's local
+      rootless Podman Unix socket and exposes no SSH server.
+    evidence: >
+      Candidate-v24-r37 scan evidence is retained under
+      ~/.local/state/stateport/qualification/J1/J1-IQ-RUN-027-fresh-candidate/.candidate-v24-r37.evidence/;
+      exact source, archive, binary, module, symbol, and runtime-path evidence
+      is bound by podman-remote-go6303-reachability-r1/receipt.json in the same
+      run root.
+    remediation: >
+      Rebuild from the first released compatible Podman remote client that
+      vendors golang.org/x/crypto >= 0.55.0, re-scan the image, and remove this
+      exception. Do not substitute an unreleased dependency overlay.
+    expiresOn: "2026-09-15"
+  - id: RX-2026-167
+    advisory: CVE-2007-2176
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-168
+    advisory: CVE-2007-4013
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-169
+    advisory: CVE-2009-1597
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-170
+    advisory: CVE-2009-4102
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-171
+    advisory: CVE-2014-6492
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-172
+    advisory: CVE-2026-74935
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-173
+    advisory: CVE-2026-74936
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-174
+    advisory: CVE-2026-74937
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-175
+    advisory: CVE-2026-74938
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-176
+    advisory: CVE-2026-74939
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-177
+    advisory: CVE-2026-74940
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-178
+    advisory: CVE-2026-74941
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-179
+    advisory: CVE-2026-74942
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-180
+    advisory: CVE-2026-74943
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-181
+    advisory: CVE-2026-74944
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-182
+    advisory: CVE-2026-74946
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-183
+    advisory: CVE-2026-74947
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-184
+    advisory: CVE-2026-74949
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-185
+    advisory: CVE-2026-74950
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-186
+    advisory: CVE-2026-74952
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-187
+    advisory: CVE-2026-74953
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-188
+    advisory: CVE-2026-74954
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-189
+    advisory: CVE-2026-74955
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-190
+    advisory: CVE-2026-74956
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-191
+    advisory: CVE-2026-74958
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-192
+    advisory: CVE-2026-74961
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-193
+    advisory: CVE-2026-74962
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-194
+    advisory: CVE-2026-74964
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-195
+    advisory: CVE-2026-74965
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-196
+    advisory: CVE-2026-74969
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-197
+    advisory: CVE-2026-74979
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-198
+    advisory: CVE-2026-74983
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: High
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-199
+    advisory: CVE-2026-74987
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-200
+    advisory: CVE-2026-74988
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-201
+    advisory: CVE-2026-74989
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-202
+    advisory: CVE-2026-74990
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+
+  - id: RX-2026-203
+    advisory: CVE-2026-75874
+    package: firefox
+    packageVersion: "153.0"
+    images: [stateport-playwright]
+    severity: Critical
+    surface: >
+      Mozilla Firefox advisory matched against the Playwright-bundled
+      headless Firefox 153.0 browser runtime in the pinned playwright image.
+    reachability: >
+      Scanner false positive: the advisory targets a general browsing
+      surface, while the StatePort playwright sidecar runs only fixed
+      task-owned local automation with no attacker-controlled external
+      content or public browser control endpoint.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha11/evidence-r2/stateport-playwright/.
+    remediation: >
+      Keep Playwright/firefox pinned to the exact tested versions and
+      re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-204
+    advisory: GHSA-vp52-pcj8-j9qc
+    package: google.golang.org/grpc
+    packageVersion: v1.83.0
+    artifactPath: /usr/local/bin/gh
+    images: [stateport-dev-workspace]
+    severity: High
+    surface: >
+      Vendored Go gRPC module inside the pinned gh 2.98.0 CLI binary
+      (/usr/local/bin/gh) in the developer-workspace image.
+    reachability: >
+      gh is an interactive developer CLI invoked by the logged-in user for
+      explicit GitHub commands; no StatePort service exposes gRPC or a
+      network listener through this binary, and the fixed grpc v1.83.1 was
+      released the same day as this scan (2026-09-02), after the pinned
+      cli/cli source commit a255baf7 locked grpc v1.83.0.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha12/evidence-r1/stateport-dev-workspace/.
+    remediation: >
+      Rebuild gh from a cli/cli release whose go.mod carries grpc >=1.83.1
+      and re-scan every release build; exception auto-expires.
+    expiresOn: "2026-09-30"
+  - id: RX-2026-205
+    advisory: GHSA-vp52-pcj8-j9qc
+    package: google.golang.org/grpc
+    packageVersion: v1.72.2
+    artifactPath: /usr/bin/podman-remote
+    images: [stateport-execution-host]
+    severity: High
+    surface: >
+      Vendored Go gRPC module inside Alpine edge podman-remote
+      (/usr/bin/podman-remote) in the execution-host image.
+    reachability: >
+      The execution host has no HTTP or TCP listener and accepts only the
+      owner-controlled, peer-UID-confined Unix control socket. Its fixed
+      engine calls use the local rootless Podman socket and no pull/network
+      path; the vendored grpc is inside the client binary, not an exposed
+      service.
+    evidence: >
+      Raw grype scan and scan-evaluation JSON under
+      ~/.local/state/stateport/release/alpha12/evidence-r1/stateport-execution-host/.
+    remediation: >
+      Rebuild when Alpine podman-remote carries grpc >=1.83.1 or a later
+      fixed vendored release; re-scan every release and remove this exact
+      exception then.
+    expiresOn: "2026-09-30"
+

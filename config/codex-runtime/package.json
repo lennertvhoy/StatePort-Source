@@ -1,0 +1,16 @@
+{
+  "name": "stateport-codex-runtime-lock",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "@openai/codex": "0.146.0"
+  },
+  "overrides": {
+    "handlebars": "^4.7.9",
+    "picomatch": "^2.3.2",
+    "@babel/traverse": "^7.23.2",
+    "@babel/plugin-transform-modules-systemjs": "^7.29.4",
+    "http-cache-semantics": "^4.1.1"
+  }
+}

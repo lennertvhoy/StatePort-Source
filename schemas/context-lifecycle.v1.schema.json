@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatePort Context Lifecycle Policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "policyId", "budget", "compression", "handoff", "session", "contextCategories"],
+  "properties": {
+    "formatVersion": {"const": "stateport.context-lifecycle/v1"},
+    "policyId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximumInputTokens", "preferredInputTokens"],
+      "properties": {
+        "maximumInputTokens": {"type": "integer", "minimum": 1000, "maximum": 2000000},
+        "preferredInputTokens": {"type": "integer", "minimum": 1000, "maximum": 2000000}
+      }
+    },
+    "compression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "triggerRatio", "preserve"],
+      "properties": {
+        "mode": {"enum": ["automatic", "manual", "disabled"]},
+        "triggerRatio": {"type": "number", "minimum": 0.1, "maximum": 0.99},
+        "preserve": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/contextCategory"}
+        }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "triggerRatio", "createArtifact", "requireReceipt"],
+      "properties": {
+        "mode": {"enum": ["automatic", "manual", "disabled"]},
+        "triggerRatio": {"type": "number", "minimum": 0.1, "maximum": 0.99},
+        "createArtifact": {"type": "boolean"},
+        "requireReceipt": {"type": "boolean"}
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resumeOnlyWhen"],
+      "properties": {
+        "resumeOnlyWhen": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {"enum": ["same_instance", "same_workstream", "compatible_runtime_profile", "unchanged_base_snapshot", "fresh_context_manifest"]}
+        }
+      }
+    },
+    "contextCategories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included", "excluded"],
+      "properties": {
+        "included": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/contextCategory"}
+        },
+        "excluded": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {"enum": ["credentials", "raw_provider_prompt", "raw_provider_transcript", "raw_terminal_transcript", "private_unselected_data"]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "contextCategory": {
+      "enum": [
+        "active_task", "requirements", "completed_work", "pending_work", "decisions", "approvals",
+        "unresolved_risks", "exact_git_identities", "acceptance_criteria", "validation_state", "next_action",
+        "relevant_state_references", "recent_receipts", "application_state", "conversation_summary", "tool_outcomes"
+      ]
+    }
+  }
+}

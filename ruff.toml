@@ -1,0 +1,10 @@
+target-version = "py313"
+line-length = 100
+
+[lint]
+# The alpha gate starts with correctness-oriented Pyflakes/Pycodestyle rules.
+# Historic import placement, one-line fixture helpers, and unused-import debt
+# remain visible in the audit disposition, but are not hidden behind hundreds
+# of unexplained blanket suppressions. Expand this gate only by making the
+# selected repository clean first.
+select = ["E9", "F63", "F7", "F82"]

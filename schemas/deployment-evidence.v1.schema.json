@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/deployment-evidence.v1.schema.json",
+  "title": "StatePort deployment evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "evidenceId",
+    "deploymentId",
+    "kind",
+    "createdAt",
+    "payload",
+    "payloadDigest"
+  ],
+  "properties": {
+    "schema": {"const": "stateport.deployment-evidence/v1"},
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^evidence_[a-z0-9][a-z0-9._-]{0,63}_[0-9a-f]{16}$"
+    },
+    "deploymentId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "kind": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "createdAt": {"$ref": "#/$defs/timestamp"},
+    "payload": {"type": "object"},
+    "payloadDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+  }
+}

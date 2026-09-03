@@ -1,0 +1,167 @@
+formatVersion: studystate.sample.actions/v1
+application:
+  id: studystate.sample
+  descriptorVersion: studystate.sample.application/v1
+actions:
+  - formatVersion: studystate.sample.action/v1
+    id: studystate.sample.plan-next-activity/v1
+    displayName: Plan next learning activity
+    purpose: Select the next planned activity without mutating durable learning state.
+    executorCommand: scripts/study_actions.py
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, activity]}
+    contextPolicy:
+      id: studystate.sample.context/v1
+      categoryPaths: {learning_state: [state/LEARNING.yaml]}
+      includeCategories: [instance_descriptor, learning_state]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: public
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 5, steps: 1}
+  - formatVersion: studystate.sample.action/v1
+    id: studystate.sample.record-evidence/v1
+    displayName: Complete activity and record evidence
+    purpose: Propose one public-safe evidence record for an identified learning activity.
+    executorCommand: scripts/study_actions.py
+    inputSchema:
+      type: object
+      required: [activityId, evidenceSummary]
+      properties:
+        activityId: {type: string, title: Planned activity, default: evidence-practice, minLength: 1, maxLength: 80}
+        evidenceSummary: {type: string, title: "What did you learn?", minLength: 1, maxLength: 280}
+      additionalProperties: false
+    outputSchema: {type: object, required: [actionId, stateChangeProposals]}
+    contextPolicy:
+      id: studystate.sample.context/v1
+      categoryPaths: {learning_state: [state/LEARNING.yaml]}
+      includeCategories: [instance_descriptor, learning_state]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: public
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 5, steps: 1}
+  - formatVersion: studystate.sample.action/v1
+    id: studystate.sample.start-activity/v1
+    displayName: Start learning activity
+    purpose: Propose making one planned or paused activity the sole active learning activity.
+    executorCommand: scripts/study_actions.py
+    inputSchema:
+      type: object
+      required: [activityId, expectedPlanDigest]
+      properties:
+        activityId: {type: string, title: Activity to start, minLength: 1, maxLength: 80}
+        expectedPlanDigest: {type: string, title: Current plan digest, pattern: "^sha256:[0-9a-f]{64}$"}
+      additionalProperties: false
+    outputSchema: {type: object, required: [actionId, stateChangeProposals]}
+    contextPolicy:
+      id: studystate.sample.context/v1
+      categoryPaths: {learning_state: [state/LEARNING.yaml]}
+      includeCategories: [instance_descriptor, learning_state]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: public
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 5, steps: 1}
+  - formatVersion: studystate.sample.action/v1
+    id: studystate.sample.pause-activity/v1
+    displayName: Pause learning activity
+    purpose: Propose pausing the exact active activity without starting another activity.
+    executorCommand: scripts/study_actions.py
+    inputSchema:
+      type: object
+      required: [activityId, expectedPlanDigest]
+      properties:
+        activityId: {type: string, title: Active activity to pause, minLength: 1, maxLength: 80}
+        expectedPlanDigest: {type: string, title: Current plan digest, pattern: "^sha256:[0-9a-f]{64}$"}
+      additionalProperties: false
+    outputSchema: {type: object, required: [actionId, stateChangeProposals]}
+    contextPolicy:
+      id: studystate.sample.context/v1
+      categoryPaths: {learning_state: [state/LEARNING.yaml]}
+      includeCategories: [instance_descriptor, learning_state]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: public
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 5, steps: 1}
+  - formatVersion: studystate.sample.action/v1
+    id: studystate.sample.redirect-activity/v1
+    displayName: Redirect learning activity
+    purpose: Propose atomically pausing the exact active activity and starting one exact planned or paused activity.
+    executorCommand: scripts/study_actions.py
+    inputSchema:
+      type: object
+      required: [fromActivityId, toActivityId, expectedPlanDigest]
+      properties:
+        fromActivityId: {type: string, title: Active activity to pause, minLength: 1, maxLength: 80}
+        toActivityId: {type: string, title: Activity to start, minLength: 1, maxLength: 80}
+        expectedPlanDigest: {type: string, title: Current plan digest, pattern: "^sha256:[0-9a-f]{64}$"}
+      additionalProperties: false
+    outputSchema: {type: object, required: [actionId, stateChangeProposals]}
+    contextPolicy:
+      id: studystate.sample.context/v1
+      categoryPaths: {learning_state: [state/LEARNING.yaml]}
+      includeCategories: [instance_descriptor, learning_state]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: public
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 5, steps: 1}
+  - formatVersion: studystate.sample.action/v1
+    id: studystate.sample.undo-last-evidence/v1
+    displayName: Undo the last evidence update
+    purpose: Propose restoration of the exact prior learning-plan digest recorded by the last applied evidence change.
+    executorCommand: scripts/study_actions.py
+    inputSchema:
+      type: object
+      required: [expectedPlanDigest]
+      properties:
+        expectedPlanDigest: {type: string, title: Current plan digest, pattern: "^sha256:[0-9a-f]{64}$"}
+      additionalProperties: false
+    outputSchema: {type: object, required: [actionId, stateChangeProposals]}
+    contextPolicy:
+      id: studystate.sample.context/v1
+      categoryPaths: {learning_state: [state/LEARNING.yaml]}
+      includeCategories: [instance_descriptor, learning_state]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: public
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 5, steps: 1}
