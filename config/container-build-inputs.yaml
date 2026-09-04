@@ -57,7 +57,7 @@ executionHostAlpine:
     aardvark-dns: 2.1.0-r0
     catatonit: 0.2.1-r0
     conmon: 2.2.1-r0
-    containers-common: 0.64.2-r0
+    containers-common: 0.69.1-r0
     crun: 1.28-r0
     glib: 2.88.3-r0
     json-c: 0.19-r1
@@ -72,7 +72,7 @@ executionHostAlpine:
     libseccomp: 2.6.0-r2
     linux-pam: 1.7.1-r2
     netavark: 2.1.0-r0
-    passt: 2026.07.16-r0
+    passt: 2026.07.28-r0
     pcre2: 10.48-r0
     skalibs-libs: 2.15.1.0-r0
     shadow-libs: 4.18.0-r1
@@ -192,7 +192,7 @@ definitions:
   apps/worker/Dockerfile: sha256:949a106e76d6cb0016783274f80f305b801c5424024c11660bb595989b3f991f
   apps/runner/Dockerfile: sha256:2895b2ee36cebb8b9133fa930b6ef3cc88d1508dad62fe19aaccca2abdbd49a3
   images/stateport-dev-workspace/Containerfile: sha256:a7699a362e502d32281db0a6c05c5dca9369451d438297621b3e47f0232a69e8
-  images/stateport-execution-host/Containerfile: sha256:49710ab37e85b4822a3ebeb4ad89afd4844e372496f5adbece0d68a3fe3e6f2e
+  images/stateport-execution-host/Containerfile: sha256:83554c3ee7077e14f18fc856526bc63fca06dbbb55378feadeb63cb9c5af4b64
   images/stateport-playwright/Containerfile: sha256:6266c60dc0e12e8a0f0cf6bf25bedb21decc255c8ed21b5031b6e78e6e6b5cf5
   images/packaged-content.v1.yaml: sha256:afd3c567090cd6610cc177f218b172fd3ddbc2ccfd13e3d063d09019504ec915
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
