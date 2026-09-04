@@ -899,6 +899,10 @@ def _reconcile_ports_with_live_units(
     return reconciled
 
 
+def _loopback_url(port: int | None) -> str:
+    return f"http://127.0.0.1:{port}/" if port is not None else "http://127.0.0.1/"
+
+
 def _own_live_unit_ports(live_root: Path, signed_payload_digest: str) -> set[int]:
     """Host ports published by THIS release's own live accepted units.
 
@@ -4519,7 +4523,7 @@ def _execute_install(
     # From here a failure has every fact the runtime section needs: bind the
     # planned loopback URL with all services unhealthy until proven otherwise.
     web_port = ports.get("stateport-web:accepted:http")
-    local_url = f"http://127.0.0.1:{web_port}/" if web_port is not None else "http://127.0.0.1/"
+    local_url = _loopback_url(web_port)
     planned_runtime: dict[str, Any] = {
         "releaseId": str(verified.index.release_id),
         "releaseIndexDigest": index.index_digest,
@@ -4585,6 +4589,10 @@ def _execute_install(
         runner=runner,
         provisioned=execution_host_info is not None,
     )
+    # The root provisioning transaction can legitimately move a port after
+    # the plan ceremony. The live unit is authoritative for the URL printed to
+    # the user and persisted in the successful install receipt.
+    local_url = _loopback_url(ports.get("stateport-web:accepted:http"))
 
     # Start services via the systemd user manager (excluding provisioner-owned
     # control-plane units, which run under the control user).
@@ -4635,12 +4643,7 @@ def _execute_install(
     # the rootless installer must not repeat that confined socket probe.
     # local_url bound earlier reflects the plan ceremony; the gate must knock
     # on the port the started web unit actually publishes.
-    reconciled_web_port = ports.get("stateport-web:accepted:http")
-    product_gate_url = (
-        f"http://127.0.0.1:{reconciled_web_port}/"
-        if reconciled_web_port is not None
-        else local_url
-    )
+    product_gate_url = local_url
     product_gate = _verify_installed_product(
         fetcher, local_url=product_gate_url, timeout=config.health_timeout_seconds
     )

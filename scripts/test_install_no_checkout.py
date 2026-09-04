@@ -4997,6 +4997,11 @@ def test_live_reconciliation_polls_the_provisioner_rendered_ports(tmp_path: Path
     assert reconciled["stateport-web:accepted:http"] == 18264
 
 
+def test_live_reconciled_web_port_is_the_user_facing_url() -> None:
+    assert installer._loopback_url(18621) == "http://127.0.0.1:18621/"
+    assert installer._loopback_url(None) == "http://127.0.0.1/"
+
+
 def test_live_reconciliation_refuses_declared_port_missing_from_started_unit(
     tmp_path: Path,
 ) -> None:
