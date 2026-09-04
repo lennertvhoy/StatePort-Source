@@ -1,10 +1,12 @@
 /**
  * Import a local repository (catalog): discover allowlisted candidates,
  * inspect one read-only, review its exact identity and findings, then
- * register it with an explicit approval bound to the inspection digest.
+ * create an isolated managed copy for supported templates, or register an
+ * ordinary repository in place with an explicit approval bound to the
+ * inspection digest.
  *
  * The flow never touches repository code: inspection is read-only on the
- * service, and registration binds the exact inspected identity — a stale
+ * service, and either operation binds the exact inspected identity — a stale
  * digest is rejected by the service and surfaced honestly here.
  */
 import { CircleAlert, GitBranch, TriangleAlert } from 'lucide-react'
@@ -26,7 +28,13 @@ type Stage =
   | { kind: 'review'; candidate: RepositoryCandidate; inspection: RepositoryInspection }
   | { kind: 'registering'; candidate: RepositoryCandidate; inspection: RepositoryInspection }
   | { kind: 'uncertain'; name: string; reason: string }
-  | { kind: 'done'; registration: RepositoryRegistration; receipt: Receipt; name: string }
+  | {
+      kind: 'done'
+      registration: RepositoryRegistration
+      receipt: Receipt
+      name: string
+      managedCopy: boolean
+    }
 
 export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const navigate = useNavigate()
@@ -86,7 +94,7 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
     }
   }
 
-  const register = async () => {
+  const importRepository = async () => {
     if (
       stage.kind !== 'review' ||
       !approved ||
@@ -98,12 +106,20 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
     setActionError(null)
     let registration: RepositoryRegistration
     try {
-      registration = await getClient().repositoryImport.register({
+      const common = {
         candidateId: candidate.candidateId,
-        name: name.trim() || candidate.displayName,
-        inspectionDigest: inspection.inspectionDigest,
+        name: name.trim() || inspection.template?.displayName || candidate.displayName,
         approved: true,
-      })
+      }
+      registration = inspection.template
+        ? await getClient().repositoryImport.installTemplate({
+            ...common,
+            inspection,
+          })
+        : await getClient().repositoryImport.register({
+            ...common,
+            inspectionDigest: inspection.inspectionDigest,
+          })
     } catch (error) {
       setStage({ kind: 'review', candidate, inspection })
       setActionError(
@@ -133,7 +149,13 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
       if (receipt.id !== registration.receiptId || receipt.instanceId !== registration.instanceId) {
         throw new Error('The durable repository-import receipt did not match the registered application.')
       }
-      setStage({ kind: 'done', registration, receipt, name: registeredName })
+      setStage({
+        kind: 'done',
+        registration,
+        receipt,
+        name: registeredName,
+        managedCopy: Boolean(inspection.template),
+      })
     } catch (error) {
       setStage({
         kind: 'uncertain',
@@ -156,8 +178,8 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
       description="Discovery is limited to operator-allowlisted roots. Inspection is read-only — no repository code is executed."
       footer={
         stage.kind === 'review' ? (
-          <Button onClick={() => void register()} disabled={!approved} data-testid="import-register">
-            Register repository
+          <Button onClick={() => void importRepository()} disabled={!approved} data-testid="import-register">
+            {stage.inspection.template ? 'Create isolated copy' : 'Register repository'}
           </Button>
         ) : stage.kind === 'done' ? (
           <>
@@ -270,7 +292,7 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
 
           {stage.inspection.mutated !== false ? (
             <InlineNotice tone="danger">
-              The inspection did not prove that the repository was left unmodified. Registration is paused until a
+              The inspection did not prove that the repository was left unmodified. Import is paused until a
               read-only inspection explicitly reports no mutation.
             </InlineNotice>
           ) : stage.inspection.findings.some((finding) => finding.severity === 'error') ? (
@@ -279,6 +301,27 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
             </InlineNotice>
           ) : (
             <>
+              {stage.inspection.template ? (
+                <div className="rounded-md border border-border bg-surface-subtle p-3" data-testid="template-adapter-match">
+                  <p className="text-sm font-medium text-foreground">
+                    {stage.inspection.template.displayName}
+                    {stage.inspection.template.declaredVersion
+                      ? ` · ${stage.inspection.template.declaredVersion}`
+                      : ''}
+                  </p>
+                  <p className="mt-1 text-xs text-foreground-secondary">
+                    {stage.inspection.template.description}
+                  </p>
+                  <p className="mt-2 text-xs text-foreground-secondary">
+                    A committed snapshot will be copied into StatePort-managed storage with its own Git history.
+                    The source stays unchanged, uncommitted files are excluded, and only StatePort-owned actions run.
+                  </p>
+                  <p className="mt-2 font-mono text-xs text-foreground-tertiary">
+                    Adapter: {stage.inspection.template.adapterId} · Trusted actions:{' '}
+                    {stage.inspection.template.trustedActionIds.length}
+                  </p>
+                </div>
+              ) : null}
               <label className="flex flex-col gap-1 text-sm">
                 <span className="text-foreground-secondary">Application name</span>
                 <input
@@ -292,11 +335,16 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
                 <Checkbox
                   checked={approved}
                   onCheckedChange={(checked) => setApproved(checked === true)}
-                  aria-label="Approve registration of the exact inspected repository"
+                  aria-label={
+                    stage.inspection.template
+                      ? 'Approve creation of an isolated copy of the exact inspected template'
+                      : 'Approve registration of the exact inspected repository'
+                  }
                 />
                 <span className="text-foreground-secondary">
-                  Register exactly this inspected repository (commit {stage.inspection.headCommit.slice(0, 12) || 'unknown'},
-                  digest {stage.inspection.inspectionDigest.slice(0, 12)}…). If the repository changes, registration is
+                  {stage.inspection.template ? 'Copy' : 'Register'} exactly this inspected repository (commit{' '}
+                  {stage.inspection.headCommit.slice(0, 12) || 'unknown'}, digest{' '}
+                  {stage.inspection.inspectionDigest.slice(0, 12)}…). If the repository changes, the operation is
                   refused and a fresh inspection is required.
                 </span>
               </label>
@@ -317,8 +365,15 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
       {stage.kind === 'done' ? (
         <div className="flex flex-col gap-2" data-testid="import-done">
           <p className="text-sm text-foreground">
-            <span className="font-medium">{stage.name}</span> is registered. The repository itself was never
-            modified.
+            <span className="font-medium">{stage.name}</span>{' '}
+            {stage.managedCopy ? (
+              <>
+                is ready. The source repository itself was never modified; this template runs from an isolated
+                StatePort-managed copy.
+              </>
+            ) : (
+              <>is registered in place. StatePort did not modify or take ownership of the repository.</>
+            )}
           </p>
           <p className="font-mono text-xs text-foreground-tertiary">
             Repository-import receipt: {stage.receipt.id}

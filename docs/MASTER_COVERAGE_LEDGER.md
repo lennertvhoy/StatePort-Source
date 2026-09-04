@@ -6,16 +6,14 @@ Historical scope: 2026-08-01 audit-reconciliation candidate based on
 integrated (PRs #31/#32) and superseded by the Slice B convergence (PR #34)
 and the release-assembler line. Classifications below remain scoped to their
 recorded head and **must be regenerated at the final alpha candidate before
-acceptance**; current truth lives in `STATUS.md`, `PROJECT_STATE.yaml`, and
-`NEXT_ACTIONS.md`.
+acceptance**; current truth lives in `PROJECT.md`, `STATE.yaml`, and the active
+slice evidence.
 
 Active backlog item: `BL-CONTAINER-DEPLOYMENT-ALPHA-001`
 
 This is the cross-source completeness ledger originally created for the
-frontend integration and now maintained for the active alpha. It supplements,
-rather than replaces, `BACKLOG.md`,
-`PROJECT_STATE.yaml`, `NEXT_ACTIONS.md`, and `WORKLOG.md`. Current execution
-priority remains in those canonical project-state files.
+frontend integration. It is historical input, not a second current work queue;
+the one active slice in `STATE.yaml` owns current execution priority.
 
 ## Reading the ledger
 
@@ -43,8 +41,7 @@ acceptance, human acceptance, release, or superiority.
 Primary sources reconciled:
 
 1. Executable backend and tests at current HEAD.
-2. `AGENTS.md`, `STATUS.md`, `PROJECT_STATE.yaml`, `PROJECT_DNA.yaml`,
-   `NEXT_ACTIONS.md`, `BACKLOG.md`, `WORKLOG.md`.
+2. `AGENTS.md`, `PROJECT.md`, `STATE.yaml`, and its bounded evidence summary.
 3. `docs/ARCHITECTURE.md`, lifecycle/security documents, schemas, and ADRs.
 4. Current React/Vite frontend, its typed client, and Scenario Lab.
 5. Prior agent integration handoffs and completeness addenda.

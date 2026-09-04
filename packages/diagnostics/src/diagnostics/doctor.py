@@ -33,7 +33,10 @@ class DoctorConfig:
     """Inputs for :class:`Doctor`; all paths are read-only inputs."""
 
     repo_root: Path
-    config_paths: tuple[Path, ...] = (Path("PROJECT_STATE.yaml"), Path("PROJECT_ADAPTER.yaml"))
+    config_paths: tuple[Path, ...] = (
+        Path("config/application-experience-policy.yaml"),
+        Path("sources/canonical/studydd.yaml"),
+    )
     adapter_fixture: Path = Path("fixtures/host/synthetic-capabilities.json")
     ui_url: str | None = None
     api_url: str | None = None

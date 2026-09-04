@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Standalone StateSpec schema and cross-file validator for StatePort.
+"""Standalone runtime and source-contract schema validator for StatePort.
 
-Validates PROJECT_STATE.yaml and PROJECT_DNA.yaml against their JSON schemas,
-and checks that the mode in AGENTS.md and the phase in STATUS.md match the
-values recorded in PROJECT_STATE.yaml.
+Project coordination is validated separately by ``projectstate_gate.py``.
+This module validates only files and schemas consumed by the product.
 
 Intentionally stdlib-only: no PyYAML, no jsonschema.
 """
@@ -218,108 +217,12 @@ def validate_file(path: Path, schema_path: Path) -> list[ValidationIssue]:
 
 
 # ---------------------------------------------------------------------------
-# Cross-file mode / phase consistency checks
-# ---------------------------------------------------------------------------
-
-
-def strip_markdown(text: str) -> str:
-    return re.sub(r"[`_*]+", "", text)
-
-
-def extract_mode_agents(text: str) -> str | None:
-    patterns = [
-        r"currently operates in:\s*[`_*]*([^`_*#\n]+)[`_*]*",
-        r"\bMode:\s*[`_*]*([^`_*#\n]+)[`_*]*",
-    ]
-    first_match: tuple[int, str] | None = None
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            value = strip_markdown(match.group(1)).strip()
-            if first_match is None or match.start() < first_match[0]:
-                first_match = (match.start(), value)
-    return first_match[1] if first_match else None
-
-
-def extract_phase_status(text: str) -> str | None:
-    match = re.search(r"Phase:\s*(.*?);", text, re.IGNORECASE | re.DOTALL)
-    if not match:
-        return None
-    phase = strip_markdown(match.group(1)).strip()
-    phase = re.sub(r"\s+", "_", phase).lower()
-    return phase
-
-
-def validate_mode_phase(root: Path) -> list[ValidationIssue]:
-    issues: list[ValidationIssue] = []
-
-    project_state_path = root / "PROJECT_STATE.yaml"
-    agents_path = root / "AGENTS.md"
-    status_path = root / "STATUS.md"
-
-    # If PROJECT_STATE.yaml is missing or cannot be parsed, the schema-target
-    # check in validate_root already reports a single failure. Skip the
-    # mode/phase check to avoid a redundant second error.
-    if not project_state_path.exists():
-        return issues
-    try:
-        project_state = load_data(project_state_path)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, StateDDYamlError):
-        return issues
-    if not isinstance(project_state, dict):
-        return issues
-
-    project = project_state.get("project")
-    if not isinstance(project, dict):
-        issues.append(ValidationIssue("$.project", "missing or invalid project section"))
-        return issues
-
-    state_mode = project.get("mode")
-    state_phase = project.get("phase")
-
-    try:
-        agents_text = agents_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        issues.append(ValidationIssue("AGENTS.md", f"could not read file: {exc}"))
-    else:
-        agents_mode = extract_mode_agents(agents_text)
-        if agents_mode is None:
-            issues.append(ValidationIssue("AGENTS.md", "could not extract mode"))
-        elif state_mode != agents_mode:
-            issues.append(
-                ValidationIssue(
-                    "AGENTS.md",
-                    f"mode mismatch: PROJECT_STATE.yaml says {state_mode!r}, AGENTS.md says {agents_mode!r}",
-                )
-            )
-
-    try:
-        status_text = status_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        issues.append(ValidationIssue("STATUS.md", f"could not read file: {exc}"))
-    else:
-        status_phase = extract_phase_status(status_text)
-        if status_phase is None:
-            issues.append(ValidationIssue("STATUS.md", "could not extract phase"))
-        elif state_phase != status_phase:
-            issues.append(
-                ValidationIssue(
-                    "STATUS.md",
-                    f"phase mismatch: PROJECT_STATE.yaml says {state_phase!r}, STATUS.md says {status_phase!r}",
-                )
-            )
-
-    return issues
-
-
-# ---------------------------------------------------------------------------
 # CLI and orchestration
 # ---------------------------------------------------------------------------
 
 
 def root_targets(root: Path) -> list[tuple[Path, Path]]:
     return [
-        (root / "PROJECT_STATE.yaml", SCHEMA_ROOT / "project_state.schema.json"),
-        (root / "PROJECT_DNA.yaml", SCHEMA_ROOT / "project_dna.schema.json"),
         (root / "sources" / "profiles" / "studydd-local-alpha.yaml", SCHEMA_ROOT / "source-contract.v1.schema.json"),
         (root / "sources" / "canonical" / "studydd.yaml", SCHEMA_ROOT / "canonical-source.v1.schema.json"),
     ]
@@ -349,7 +252,7 @@ def validate_registered_schema_files() -> list[ValidationIssue]:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate StatePort StateSpec schemas and cross-file consistency")
+    parser = argparse.ArgumentParser(description="Validate StatePort runtime and source-contract schemas")
     parser.add_argument("root", nargs="?", default=str(ROOT), help="Repo root to validate")
     parser.add_argument("--quiet", action="store_true", help="Only print failures")
     return parser.parse_args(argv[1:])
@@ -401,15 +304,6 @@ def validate_root(root: Path, quiet: bool) -> int:
     if contract_issues:
         all_issues.append((contract_label, contract_issues))
     print_target_result(contract_label, contract_issues, quiet)
-
-    cross_label = "mode/phase consistency"
-    try:
-        cross_issues = validate_mode_phase(root)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, StateDDYamlError) as exc:
-        cross_issues = [ValidationIssue("$", f"could not validate cross-file consistency: {exc}")]
-    if cross_issues:
-        all_issues.append((cross_label, cross_issues))
-    print_target_result(cross_label, cross_issues, quiet)
 
     if all_issues:
         print(f"FAILED: {sum(len(issues) for _, issues in all_issues)} issue(s) found")

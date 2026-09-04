@@ -132,8 +132,7 @@ requires a separate platform:
 This generalizes the locked **three-level authorization** (free reads → bounded
 pre-approved grants → ask-every-time), which is already an early instance of
 oversight-as-per-action-policy. It also mirrors the failure-repair mode ladder
-in `PROJECT_DNA.yaml` (`governed_improvement_contract.modes`:
-off/observe/suggest/safe_auto_repair/managed_optimization), applied here to
+in the runtime authority policy, applied here to
 normal application operation rather than to failure recovery.
 
 ## 6. Honesty boundary — delivered versus declared
@@ -265,8 +264,8 @@ do, which files or memories are canonical, whether its own claims count as
 evidence, whether the result is accepted, or whether an unfinished run is
 complete. The full ownership table and the binding decision are
 [ADR-0003](adr/0003-application-execution-ownership-boundary.md); the
-machine-readable form is the `ownership_boundary_model` block in
-`PROJECT_DNA.yaml`.
+enforceable forms are the runtime authority, experience, and execution
+contracts.
 
 Four consequences shape every product and engineering claim:
 
@@ -300,9 +299,8 @@ are architectural questions, not confirmed implementation defects.
 
 This document is the framing source of record. It propagates to:
 
-- `PROJECT_DNA.yaml` — `project` positioning fields, the
-  `application_oversight_model` block, the `execution_provider_model` block,
-  and the `ownership_boundary_model` block.
+- `PROJECT.md` and `AGENTS.md` — outcome, durable product boundaries, and
+  human/agent authority boundaries.
 - `README.md` and `docs/ARCHITECTURE.md` — lead framing, three-layer model,
   ownership boundary, and core thesis.
 - `docs/adr/0003-application-execution-ownership-boundary.md` — the binding
@@ -313,4 +311,5 @@ This document is the framing source of record. It propagates to:
   this canonical source in a separate, scoped slice.
 - In-product copy — where framing appears in the application shell.
 
-Status of propagation is tracked in `STATUS.md` and `NEXT_ACTIONS.md`.
+Current delivery status is tracked only in `STATE.yaml` and its active evidence
+summary.

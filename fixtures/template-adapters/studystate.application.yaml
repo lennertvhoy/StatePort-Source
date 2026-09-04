@@ -1,0 +1,12 @@
+formatVersion: stateport.application/v1
+applicationId: stateport.template.studystate
+displayName: StudyState
+description: An isolated StudyState learner workspace backed by StatePort-owned actions.
+sourceProfile: managed-template:studystate
+managedTemplateAdapter: studystate
+productionEligible: true
+privacyClassification: private_by_default
+catalogVisible: false
+actionsPath: actions/studystate.yaml
+executorCommand: scripts/template_actions.py
+validationCommand: python3 -c "import pathlib,yaml; root=pathlib.Path('.'); mode=yaml.safe_load((root/'state/STUDYDD_MODE.yaml').read_text()); state=yaml.safe_load((root/'state/STUDY_STATE.yaml').read_text()); assert mode.get('mode') in {'template','bootstrap','learner_instance'} and isinstance(state.get('targets'),list)"

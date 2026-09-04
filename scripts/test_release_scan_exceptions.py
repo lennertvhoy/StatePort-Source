@@ -100,7 +100,7 @@ def test_historical_chrome_exceptions_cannot_mask_the_current_payload() -> None:
     )
     current_version = build_inputs["browserAssets"]["chrome-for-testing"]["version"]
 
-    assert current_version == "152.0.7977.65"
+    assert current_version == "152.0.7977.82"
     assert not [record for record in chrome if record.get("packageVersion") == current_version]
     assert len(historical) == 57
     assert [record["id"] for record in historical] == [

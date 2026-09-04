@@ -27,6 +27,7 @@ rules:
   - INSTALL.md
   - LICENSES.md
   - NOTICE
+  - PROJECT.md
   - README.md
   - SECURITY.md
   - SUPPORT.md
@@ -569,6 +570,7 @@ rules:
   - config/public-export-allowlist.v1.yaml
   - config/frontend-dynamic-preservation.v1.yaml
   - config/functionality-preservation.extensions/bl-ai-vertical-002.yaml
+  - config/functionality-preservation.extensions/template-lifecycle-001.yaml
   - config/functionality-preservation.v1.yaml
   - config/local-artifact-policy.v1.json
   - config/provider-runtime-inputs.yaml
@@ -593,6 +595,9 @@ rules:
   - fixtures/application-experiences/nixos-infrastructure.yaml
   - fixtures/application-experiences/study-state.yaml
   - fixtures/application-experiences/studystate-sample.yaml
+  - fixtures/application-experiences/managed-projectstate.yaml
+  - fixtures/application-experiences/managed-studystate.yaml
+  - fixtures/application-experiences/managed-template.yaml
   - fixtures/apps/checklistdd/actions.yaml
   - fixtures/apps/checklistdd/application.yaml
   - fixtures/apps/checklistdd/scripts/checklist_actions.py
@@ -605,6 +610,13 @@ rules:
   - fixtures/apps/studystate-sample/application.yaml
   - fixtures/apps/studystate-sample/scripts/study_actions.py
   - fixtures/apps/studystate-sample/state/LEARNING.yaml
+  - fixtures/template-adapters/actions/generic.yaml
+  - fixtures/template-adapters/actions/projectstate.yaml
+  - fixtures/template-adapters/actions/studystate.yaml
+  - fixtures/template-adapters/generic.application.yaml
+  - fixtures/template-adapters/projectstate.application.yaml
+  - fixtures/template-adapters/scripts/template_actions.py
+  - fixtures/template-adapters/studystate.application.yaml
   - fixtures/apps/studystate-sample/revisions/v0001/.statedd/manifest.yaml
   - fixtures/apps/studystate-sample/revisions/v0001/AGENTS.md
   - fixtures/apps/studystate-sample/revisions/v0001/actions.yaml
@@ -859,6 +871,7 @@ rules:
   - packages/persistent-app/src/stateport_persistent_app/service_process.py
   - packages/persistent-app/src/stateport_persistent_app/service_resilient_entry.py
   - packages/persistent-app/src/stateport_persistent_app/settings.py
+  - packages/persistent-app/src/stateport_persistent_app/template_adapters.py
   - packages/persistent-app/src/stateport_persistent_app/terminal_transport.py
   - packages/portable-execution/src/stateport_portable_execution/__init__.py
   - packages/portable-execution/src/stateport_portable_execution/context.py
@@ -1016,9 +1029,6 @@ rules:
   - schemas/install-receipt.v1.schema.json
   - schemas/instance.v1alpha1.schema.json
   - schemas/lock.v1.schema.json
-  - schemas/mission-envelope.v1.schema.json
-  - schemas/project_dna.schema.json
-  - schemas/project_state.schema.json
   - schemas/preview-route-receipt.v1.schema.json
   - schemas/preview-route.v1.schema.json
   - schemas/public-export-manifest.v1.schema.json
@@ -1089,7 +1099,6 @@ rules:
   - scripts/stateport-execution-host-provision
   - scripts/public_alpha_preflight.py
   - scripts/public_snapshot_audit.py
-  - scripts/reconcile_closure_evidence.py
   - scripts/release_safe_io.py
   - scripts/render_favicon.py
   - scripts/render_wsl2_install_bootstrap.py
@@ -1217,7 +1226,6 @@ rules:
   - scripts/test_public_snapshot_audit.py
   - scripts/test_python_dependency_policy.py
   - scripts/test_queued_execution_api.py
-  - scripts/test_reconcile_closure_evidence.py
   - scripts/test_recovery_mutation_security.py
   - scripts/test_release_contracts.py
   - scripts/test_release_images.py
@@ -1266,6 +1274,7 @@ rules:
   - scripts/test_telegram_adapter.py
   - scripts/test_telegram_live_launcher.py
   - scripts/test_template_validator.py
+  - scripts/test_template_import_lifecycle.py
   - scripts/test_terminal_broker.py
   - scripts/test_terminal_connection_targets.py
   - scripts/test_terminal_frontend.py
@@ -1275,8 +1284,6 @@ rules:
   - scripts/test_usage_ledger.py
   - scripts/test_validate_authority_policy.py
   - scripts/test_validate_release_disposition.py
-  - scripts/test_validate_state_consistency.py
-  - scripts/test_validate_state_file_hygiene.py
   - scripts/test_validate_workspace_lifecycle.py
   - scripts/test_validator_runtime.py
   - scripts/test_web_bundle_budget.py
@@ -1297,13 +1304,12 @@ rules:
   - scripts/validate_release_disposition.py
   - scripts/validate_repo.py
   - scripts/validate_routing_deviation_ledger.py
-  - scripts/validate_state_consistency.py
-  - scripts/validate_state_file_hygiene.py
   - scripts/validate_statespec_schema_registry.py
   - scripts/validate_terminology_policy.py
   - scripts/validate_web_bundle_budget.py
   - scripts/validate_web_dependency_audit.py
   - scripts/validate_workspace_lifecycle.py
+  - scripts/run_template_lifecycle_journey.py
   - sources/canonical/studydd.yaml
   - sources/profiles/studydd-local-alpha.yaml
   - stateport
@@ -1328,11 +1334,7 @@ rules:
   - HANDOFF_2026-09-03-ALPHA12-IMMUTABLE-INSTALLER-ARGPARSE.md
   - HANDOFF_BL_AI_VERTICAL_002.md
   - LICENSE_DECISION.md
-  - NEXT_ACTIONS.md
-  - PROJECT_ADAPTER.yaml
-  - PROJECT_DNA.yaml
-  - PROJECT_STATE.yaml
-  - STATUS.md
+  - STATE.yaml
   - WORKLOG.md
   - apps/web/assets/brand/favicon-asset-manifest.json
   - apps/web/assets/brand/favicon.svg
@@ -1477,9 +1479,7 @@ rules:
   - brand/design-tokens.json
   - brand/source-manifest.json
   - config/candidate-provenance/stateport-public-snapshot-20260730-dcfd4b8c.yaml
-  - config/mission-envelope.v1.yaml
-  - scripts/validate_mission_envelope.py
-  - scripts/test_validate_mission_envelope.py
+  - config/release-guard.v1.yaml
   - docs/BOSS_PITCH.md
   - docs/evidence/2026-07-12-bl-013a-source-boundary/README.md
   - docs/evidence/2026-07-12-bl-013a-source-boundary/git_safety_report.json
@@ -1493,6 +1493,9 @@ rules:
   - docs/evidence/2026-07-12-overnight-program-convergence/changed-contracts.md
   - docs/evidence/2026-07-12-overnight-program-convergence/cto_handoff.md
   - docs/evidence/2026-07-12-overnight-program-convergence/evidence_manifest.json
+  - evidence/one-line-release-001/summary.md
+  - evidence/template-lifecycle-001/journey.json
+  - evidence/template-lifecycle-001/summary.md
   - docs/evidence/2026-07-12-overnight-program-convergence/integration-order.md
   - docs/evidence/2026-07-12-overnight-program-convergence/known-limits.md
   - docs/evidence/2026-07-12-overnight-program-convergence/lifecycle-action-matrix.md
@@ -1681,6 +1684,9 @@ rules:
   - docs/superpowers/specs/2026-07-05-sp-001a-design.md
   - docs/superpowers/specs/2026-07-05-statedd-mode-phase-invariant-design.md
   - docs/superpowers/specs/2026-07-07-sp-001b-runner-design.md
+  - scripts/projectstate_gate.py
+  - scripts/release_guard.py
+  - scripts/test_release_guard.py
   - instances/demo-classdd/README.md
   - instances/demo-classdd/actions/.gitkeep
   - instances/demo-classdd/audit/.gitkeep

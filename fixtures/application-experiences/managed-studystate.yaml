@@ -1,0 +1,65 @@
+formatVersion: stateport.application-experience/v1
+applicationId: stateport.template.studystate
+displayName: StudyState
+description: An isolated StudyState learner workspace with trusted StatePort lifecycle actions.
+capabilities:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+views:
+  - viewId: managed-study-home
+    label: Learning
+    component: progress_overview
+    route: /application
+    capability: progress_dashboard
+  - viewId: managed-study-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+  - viewId: managed-study-action
+    label: Study action
+    component: goal_actions
+    route: /application/activity
+    capability: goal_execution
+navigation:
+  - contributionId: managed-study-home-nav
+    label: Learning
+    viewId: managed-study-home
+    placement: application
+    order: 10
+  - contributionId: managed-study-conversation-nav
+    label: Conversation
+    viewId: managed-study-conversation
+    placement: conversation
+    order: 20
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: Study conversation
+  emptyState: Start or continue a learning session in this isolated StudyState workspace.
+advancedControls:
+  - controlId: managed-study-state
+    label: Learning state
+    component: state_summary
+    capability: progress_dashboard
+    order: 10
+  - controlId: managed-study-runs
+    label: Runs
+    component: run_history
+    capability: goal_execution
+    order: 20
+  - controlId: managed-study-context
+    label: Context
+    component: context_summary
+    capability: conversation
+    order: 30
+  - controlId: managed-study-receipts
+    label: Receipts
+    component: receipt_list
+    capability: goal_execution
+    order: 40
+platformOperations: []
+legacyAliases: []

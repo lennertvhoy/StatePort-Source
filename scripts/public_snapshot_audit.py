@@ -91,11 +91,7 @@ INTERNAL_ONLY_PATHS = frozenset(
     {
         "AGENTS.md",
         "BACKLOG.md",
-        "NEXT_ACTIONS.md",
-        "PROJECT_ADAPTER.yaml",
-        "PROJECT_DNA.yaml",
-        "PROJECT_STATE.yaml",
-        "STATUS.md",
+        "STATE.yaml",
         "WORKLOG.md",
     }
 )
@@ -104,6 +100,7 @@ INTERNAL_ONLY_PREFIXES = (
     "docs/evidence/",
     "docs/history/",
     "docs/release/",
+    "evidence/",
     "instances/",
     "output/",
     "release-output/",

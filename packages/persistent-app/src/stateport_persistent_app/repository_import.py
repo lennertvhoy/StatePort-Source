@@ -28,6 +28,10 @@ from stateport_persistent_app.repository_content import (
     RepositoryContentError,
     repository_content_snapshot,
 )
+from stateport_persistent_app.template_adapters import (
+    TemplateAdapterError,
+    TemplateAdapterRegistry,
+)
 
 
 class RepositoryImportError(ValueError):
@@ -198,6 +202,8 @@ def _run_git(root: Path, args: list[str], *, timeout: float) -> str:
 def _classify_statespec(root: Path) -> dict[str, object]:
     instance = root / "instance.yaml"
     lock = root / ".statedd" / "lock.yaml"
+    project = root / "PROJECT.md"
+    state = root / "STATE.yaml"
     project_state = root / "PROJECT_STATE.yaml"
     project_dna = root / "PROJECT_DNA.yaml"
     if instance.exists() or lock.exists():
@@ -210,6 +216,30 @@ def _classify_statespec(root: Path) -> dict[str, object]:
             except (OSError, UnicodeError, yaml.YAMLError):
                 pass
         return {"classification": "invalid", "label": "Invalid StateSpec", "files": ["instance.yaml", ".statedd/lock.yaml"], "issues": ["StateSpec files are incomplete or invalid"]}
+    if project.exists() or state.exists():
+        files = [
+            name
+            for name, path in (("PROJECT.md", project), ("STATE.yaml", state))
+            if path.is_file()
+        ]
+        if len(files) == 2:
+            try:
+                state_data = yaml.safe_load(state.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, yaml.YAMLError):
+                state_data = None
+            if isinstance(state_data, dict) and state_data.get("version") == "projectstate-template-v6":
+                return {
+                    "classification": "valid_projectstate_v6",
+                    "label": "Valid ProjectState v6",
+                    "files": files,
+                    "issues": [],
+                }
+        return {
+            "classification": "invalid",
+            "label": "Invalid ProjectState v6",
+            "files": files,
+            "issues": ["ProjectState v6 files are incomplete or invalid"],
+        }
     if project_state.exists() or project_dna.exists():
         files = [name for name, path in (("PROJECT_STATE.yaml", project_state), ("PROJECT_DNA.yaml", project_dna)) if path.is_file()]
         classification = "partial" if len(files) < 2 else "legacy_supported"
@@ -219,8 +249,14 @@ def _classify_statespec(root: Path) -> dict[str, object]:
 
 
 class RepositoryInspector:
-    def __init__(self, policy: RepositorySourcePolicy) -> None:
+    def __init__(
+        self,
+        policy: RepositorySourcePolicy,
+        *,
+        template_adapters: TemplateAdapterRegistry | None = None,
+    ) -> None:
         self.policy = policy
+        self.template_adapters = template_adapters or TemplateAdapterRegistry()
 
     def local_candidates(self) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
@@ -290,6 +326,17 @@ class RepositoryInspector:
         lfs_pointers = content.lfs_pointers_detected
         submodules = (root / ".gitmodules").is_file()
         state_spec = _classify_statespec(root)
+        try:
+            template = self.template_adapters.inspect(root)
+        except TemplateAdapterError as exc:
+            template = {
+                "formatVersion": "stateport.template-adapter-match/v1",
+                "validation": {
+                    "status": "failed",
+                    "issues": [{"code": exc.code, "message": str(exc)}],
+                },
+                "repositoryCommandsExecuted": False,
+            }
         identity = {
             "sourceKind": source_kind,
             "source": source_url or source_display,
@@ -315,10 +362,11 @@ class RepositoryInspector:
             "source": source_display,
             "sourceIdentity": identity,
             "stateSpec": state_spec,
+            "template": template,
             "safetyFindings": findings,
             "resourceFindings": [],
             "inspectionPolicy": self.policy.limits.to_dict(),
             "inspectionDurationMs": round((monotonic() - started) * 1000),
             "mutated": False,
-            "inspectionDigest": _digest({"identity": identity, "stateSpec": state_spec, "findings": findings}),
+            "inspectionDigest": _digest({"identity": identity, "stateSpec": state_spec, "template": template, "findings": findings}),
         }

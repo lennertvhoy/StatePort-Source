@@ -562,6 +562,12 @@ export interface RepositoryImportClient {
   listLocalCandidates(): Promise<RepositoryCandidate[]>
   inspect(candidateId: string): Promise<RepositoryInspection>
   register(input: { candidateId: string; name: string; inspectionDigest: string; approved: boolean }): Promise<RepositoryRegistration>
+  installTemplate(input: {
+    candidateId: string
+    name: string
+    inspection: RepositoryInspection
+    approved: boolean
+  }): Promise<RepositoryRegistration>
 }
 
 /**

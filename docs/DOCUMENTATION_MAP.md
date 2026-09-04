@@ -18,8 +18,8 @@ papers follow the same boundary.
 
 | If you need to… | Start here | Then read | Evidence status |
 | --- | --- | --- | --- |
-| Understand StatePort's positioning and oversight model | [`POSITIONING.md`](POSITIONING.md) | [`ARCHITECTURE.md`](ARCHITECTURE.md), `PROJECT_DNA.yaml` (`application_oversight_model`) | Framing source; current delivery is bounded in §6 |
-| Understand who owns what across the execution seam | [`adr/0003-application-execution-ownership-boundary.md`](adr/0003-application-execution-ownership-boundary.md) | [`POSITIONING.md`](POSITIONING.md) §9, `PROJECT_DNA.yaml` (`ownership_boundary_model`) | Boundary decision only; implementation scoped under BL-BOUNDARY-001 |
+| Understand StatePort's positioning and oversight model | [`POSITIONING.md`](POSITIONING.md) | [`ARCHITECTURE.md`](ARCHITECTURE.md), `PROJECT.md` | Framing source; current delivery is in `STATE.yaml` |
+| Understand who owns what across the execution seam | [`adr/0003-application-execution-ownership-boundary.md`](adr/0003-application-execution-ownership-boundary.md) | [`POSITIONING.md`](POSITIONING.md) §9, `config/authority-policy.v1.yaml` | Boundary decision and enforceable runtime policy |
 | Understand sensitive-context and brokered-secret boundaries | [`adr/0004-sensitive-data-gateway-and-secret-broker.md`](adr/0004-sensitive-data-gateway-and-secret-broker.md) | [`THREAT_MODEL.md`](THREAT_MODEL.md), [`SECURITY.md`](SECURITY.md) | Headless automated foundation implemented; GUI, OS store, and runtime proof open |
 | Understand Stateware and StateSpec | [`README.md`](../README.md) | [`ARCHITECTURE.md`](ARCHITECTURE.md), [`NAMING.md`](NAMING.md) | Product model and terminology; not a release contract |
 | Try the local StudyState alpha | [`LOCAL_ALPHA_QUICKSTART.md`](LOCAL_ALPHA_QUICKSTART.md) | [`LOCAL_ALPHA_LIMITATIONS.md`](LOCAL_ALPHA_LIMITATIONS.md), [`LOCAL_SERVICE.md`](LOCAL_SERVICE.md) | Linux-first, local-single-user path; no clean-host, release, or human-acceptance claim |
@@ -34,7 +34,7 @@ papers follow the same boundary.
 | Evaluate safety and privacy claims | [`THREAT_MODEL.md`](THREAT_MODEL.md) | [`SECURITY.md`](SECURITY.md), [`DATA_PROCESSING.md`](DATA_PROCESSING.md), [`GDPR.md`](GDPR.md) | Design/control material; no certification claim |
 | Find bug, vulnerability, or contribution intake status | [`README.md`](../README.md) | [`SUPPORT.md`](../SUPPORT.md), [`SECURITY.md`](../SECURITY.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md) | All three public routes remain inactive; prepared templates do not activate intake |
 | Understand backups, recovery, and updates | [`BACKUP_RESTORE.md`](BACKUP_RESTORE.md) | [`INSTANCE_LIFECYCLE.md`](INSTANCE_LIFECYCLE.md), [`MASTER_COVERAGE_LEDGER.md`](MASTER_COVERAGE_LEDGER.md) | Governed restore-as-new-instance is implemented and contract-tested; in-place platform update is deliberately fail-closed in the alpha (see `packages/updater/README.md`) |
-| Inspect current evidence and open work | `docs/EVIDENCE_LOG.md` (private-internal) | `STATUS.md`, `NEXT_ACTIONS.md`, `WORKLOG.md` (all private-internal) | Current truth first; history is not current acceptance |
+| Inspect current evidence and open work | `STATE.yaml` (private-internal) | `PROJECT.md`, active `evidence/<slice>/summary.md` | One current slice; history is not current acceptance |
 | Follow public learning material | StatePort-Site `/docs/` | `/tutorials/` and `/releases/` | Public preview only; no installer or release is offered |
 
 ## Whitepaper-topic crosswalk
@@ -56,14 +56,12 @@ persistent operation safe, not the lead product outcome.
 | Governed actions, grants, and receipts | `docs/API_CONTRACT.md`, `docs/SECURITY.md` | `/docs/governance.html` |
 | Threat model, privacy, and limits | `docs/THREAT_MODEL.md`, `docs/DATA_PROCESSING.md` | `/docs/security-and-privacy.html` |
 | Host adaptation and provider declaration (opinionated providers; direct Codex evidence) | `docs/POSITIONING.md` §8, `docs/operations/CODEX_PROVIDER_SETUP.md` | `/docs/hosts-and-portability.html` |
-| Evidence vocabulary, evaluation, and roadmap | `docs/EVIDENCE_LOG.md`, `STATUS.md`, `NEXT_ACTIONS.md` | `/docs/evidence-and-roadmap.html` |
+| Evidence vocabulary, evaluation, and roadmap | `STATE.yaml`, active slice evidence | `/docs/evidence-and-roadmap.html` |
 | Definitions and frequently asked questions | `docs/NAMING.md`, `docs/REFERENCES.md` | `/docs/reference.html` |
 
 ## Maintenance rule
 
-When implementation truth changes, update the current-truth files first:
-`PROJECT_STATE.yaml`, `STATUS.md`, `NEXT_ACTIONS.md`, and `WORKLOG.md`.
-Add user- or operator-facing verified claims to `docs/EVIDENCE_LOG.md`. Then
-update this map, affected operational guides, the papers' dated evidence
-note, and the public site. Never reverse that order to make a release or
-acceptance claim look ahead of its evidence.
+When implementation truth changes, update `STATE.yaml` and the active slice's
+bounded evidence summary first. Then update this map, affected operational
+guides, the papers' dated evidence note, and the public site. Never reverse
+that order to make a release or acceptance claim look ahead of its evidence.

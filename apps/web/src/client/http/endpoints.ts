@@ -31,6 +31,8 @@ export const endpoints = {
   repositoryImportLocalCandidates: '/v1/repository-import/local-candidates',
   repositoryImportInspect: '/v1/repository-import/inspect',
   repositoryImportRegister: '/v1/repository-import/register',
+  templateImportPlan: '/v1/template-import/plan',
+  templateImportInstall: '/v1/template-import/install',
 
   // ── Global settings ───────────────────────────────────────────────────────
   settings: '/v1/settings',

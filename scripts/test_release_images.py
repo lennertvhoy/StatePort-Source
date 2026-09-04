@@ -325,6 +325,133 @@ def test_source_identity_refuses_untracked_context_contamination(
         build_release_images.source_identity("0.2.0-alpha.1")
 
 
+def test_source_identity_accepts_exact_frozen_ancestor_and_records_controller(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", "--initial-branch=main"], cwd=repository, check=True
+    )
+    (repository / "payload.txt").write_text("payload\n", encoding="utf-8")
+    subprocess.run(["git", "add", "payload.txt"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=StatePort test",
+            "-c",
+            "user.email=stateport-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "payload",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    payload_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repository / "control.txt").write_text("later control state\n", encoding="utf-8")
+    subprocess.run(["git", "add", "control.txt"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=StatePort test",
+            "-c",
+            "user.email=stateport-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "control",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    controller_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    identity, controller = build_release_images._release_identities(
+        "0.2.0-alpha.1", payload_commit, repository=repository
+    )
+
+    assert identity.commit == payload_commit
+    assert identity.tree != controller.tree
+    assert controller.commit == controller_commit
+    assert controller.payloadRelationship == "payload-is-ancestor"
+
+
+def test_source_identity_refuses_nonancestor_or_abbreviated_payload(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", "--initial-branch=main"], cwd=repository, check=True
+    )
+    (repository / "payload.txt").write_text("payload\n", encoding="utf-8")
+    subprocess.run(["git", "add", "payload.txt"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=StatePort test",
+            "-c",
+            "user.email=stateport-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "controller",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    sibling = subprocess.run(
+        ["git", "commit-tree", tree, "-m", "unrelated"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "GIT_AUTHOR_NAME": "StatePort test",
+            "GIT_AUTHOR_EMAIL": "stateport-test@example.invalid",
+            "GIT_COMMITTER_NAME": "StatePort test",
+            "GIT_COMMITTER_EMAIL": "stateport-test@example.invalid",
+        },
+    ).stdout.strip()
+
+    with pytest.raises(
+        build_release_images.ReleaseBuildError, match="must be an ancestor"
+    ):
+        build_release_images.source_identity(
+            "0.2.0-alpha.1", sibling, repository=repository
+        )
+    with pytest.raises(
+        build_release_images.ReleaseBuildError, match="one exact full commit"
+    ):
+        build_release_images.source_identity(
+            "0.2.0-alpha.1", sibling[:12], repository=repository
+        )
+
+
 def test_registry_is_loopback_http_explicit_health_checked_and_removed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

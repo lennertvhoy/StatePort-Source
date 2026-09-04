@@ -137,6 +137,9 @@ COPY packages/updater/src /workspace/packages/updater/src
 COPY schemas /workspace/schemas
 COPY fixtures/application-experiences/checklist-state.yaml /workspace/fixtures/application-experiences/checklist-state.yaml
 COPY fixtures/application-experiences/development-workspace.yaml /workspace/fixtures/application-experiences/development-workspace.yaml
+COPY fixtures/application-experiences/managed-projectstate.yaml /workspace/fixtures/application-experiences/managed-projectstate.yaml
+COPY fixtures/application-experiences/managed-studystate.yaml /workspace/fixtures/application-experiences/managed-studystate.yaml
+COPY fixtures/application-experiences/managed-template.yaml /workspace/fixtures/application-experiences/managed-template.yaml
 COPY fixtures/application-experiences/study-state.yaml /workspace/fixtures/application-experiences/study-state.yaml
 COPY fixtures/application-experiences/studystate-sample.yaml /workspace/fixtures/application-experiences/studystate-sample.yaml
 COPY fixtures/apps/checklistdd /workspace/fixtures/apps/checklistdd
@@ -144,6 +147,7 @@ COPY fixtures/apps/development-reference /workspace/fixtures/apps/development-re
 COPY fixtures/apps/studystate-sample /workspace/fixtures/apps/studystate-sample
 COPY fixtures/apps/synthetic-reference /workspace/fixtures/apps/synthetic-reference
 COPY fixtures/host/synthetic-capabilities.json /workspace/fixtures/host/synthetic-capabilities.json
+COPY fixtures/template-adapters /workspace/fixtures/template-adapters
 COPY sources/canonical/studydd.yaml /workspace/sources/canonical/studydd.yaml
 COPY sources/profiles/studydd-local-alpha.yaml /workspace/sources/profiles/studydd-local-alpha.yaml
 COPY --from=web-build /web/dist /workspace/apps/web/dist

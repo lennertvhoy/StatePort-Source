@@ -32,7 +32,7 @@ import zipfile
 import yaml
 
 from materialize_public_snapshot import SnapshotBuildError, materialize_snapshot
-from validate_mission_envelope import MissionEnvelopeError, require_guard
+from release_guard import ReleaseGuardError, require_guard
 from validate_candidate_provenance import CandidateProvenanceError, verify_release_tree
 
 
@@ -510,18 +510,88 @@ def _copy_new(source: Path, target: Path, *, mode: int | None = None) -> None:
     _write_new(target, data, mode=mode if mode is not None else 0o644)
 
 
-def _validate_source(source: Path, commit: str) -> tuple[str, int]:
+def _validate_source(source: Path, commit: str) -> tuple[str, int, dict[str, object]]:
     source = source.resolve(strict=True)
-    observed = str(_git(source, ["rev-parse", "--verify", f"{commit}^{{commit}}"])).strip()
-    head = str(_git(source, ["rev-parse", "--verify", "HEAD"])).strip()
-    if observed != commit or head != commit or OID.fullmatch(commit) is None:
-        raise PublicReleaseBuildError("source HEAD must equal one exact full commit")
+    if OID.fullmatch(commit) is None:
+        raise PublicReleaseBuildError("source payload must name one exact full commit")
     if str(_git(source, ["status", "--porcelain=v1", "--untracked-files=all"])).strip():
         raise PublicReleaseBuildError("source worktree must be clean")
+    observed = str(_git(source, ["rev-parse", "--verify", f"{commit}^{{commit}}"])).strip()
+    head = str(_git(source, ["rev-parse", "--verify", "HEAD"])).strip()
+    if observed != commit or OID.fullmatch(head) is None:
+        raise PublicReleaseBuildError("source payload commit did not resolve exactly")
+    try:
+        _git(source, ["merge-base", "--is-ancestor", commit, head])
+    except PublicReleaseBuildError as exc:
+        raise PublicReleaseBuildError(
+            "source payload commit must be an ancestor of current controller HEAD"
+        ) from exc
+    controller_tree = str(_git(source, ["rev-parse", "HEAD^{tree}"])).strip()
+    if OID.fullmatch(controller_tree) is None:
+        raise PublicReleaseBuildError("source controller tree is not an exact full tree")
     epoch_text = str(_git(source, ["show", "-s", "--format=%ct", commit])).strip()
     if not epoch_text.isdigit():
         raise PublicReleaseBuildError("source commit timestamp is invalid")
-    return str(_git(source, ["rev-parse", f"{commit}^{{tree}}"])).strip(), int(epoch_text)
+    tree = str(_git(source, ["rev-parse", f"{commit}^{{tree}}"])).strip()
+    return tree, int(epoch_text), {
+        "commit": head,
+        "tree": controller_tree,
+        "payloadRelationship": "equal" if commit == head else "payload-is-ancestor",
+        "buildTool": {
+            "path": "scripts/build_public_release_bundle.py",
+            "sha256": _sha(Path(__file__).resolve().read_bytes()),
+        },
+    }
+
+
+def _clone_frozen_payload_source(source: Path, commit: str, destination: Path) -> Path:
+    """Present a validated frozen ancestor as an exact-HEAD source checkout."""
+
+    source = source.resolve(strict=True)
+    destination = destination.expanduser().resolve()
+    if (
+        destination.exists()
+        or destination.is_symlink()
+        or not destination.parent.is_dir()
+        or destination.parent.is_symlink()
+    ):
+        raise PublicReleaseBuildError("frozen payload clone must be a new safe directory")
+    expected_tree = str(_git(source, ["rev-parse", "--verify", f"{commit}^{{tree}}"])).strip()
+    result = subprocess.run(
+        [
+            "git",
+            *GIT_SAFE_OPTIONS,
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--no-hardlinks",
+            "--no-tags",
+            str(source),
+            str(destination),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=CONTROLLED_GIT_CWD,
+        env=_hermetic_git_environment(),
+    )
+    if result.returncode != 0:
+        raise PublicReleaseBuildError(
+            f"frozen payload clone failed: {result.stderr.strip() or 'Git clone failed'}"
+        )
+    _git(destination, ["checkout", "--quiet", "--detach", commit])
+    _git(destination, ["remote", "remove", "origin"])
+    observed_head = str(_git(destination, ["rev-parse", "--verify", "HEAD"])).strip()
+    observed_tree = str(_git(destination, ["rev-parse", "--verify", "HEAD^{tree}"])).strip()
+    status = str(
+        _git(
+            destination,
+            ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
+        )
+    ).strip()
+    if observed_head != commit or observed_tree != expected_tree or status:
+        raise PublicReleaseBuildError("frozen payload clone identity or cleanliness mismatched")
+    return destination
 
 
 def _normal_clone_receipt(
@@ -1183,7 +1253,7 @@ def build_release_bundle(
         raise PublicReleaseBuildError(
             "Alpha.10 and earlier source bundles must retain their historical artifact inventory"
         )
-    tree, epoch = _validate_source(source, source_commit)
+    tree, epoch, controller = _validate_source(source, source_commit)
     output = _external_new_directory(source, output, "release output")
     candidate_id = candidate_id or _default_candidate_id(release_version, source_commit)
     if re.fullmatch(r"[a-z0-9][a-z0-9-]{2,127}", candidate_id) is None:
@@ -1193,11 +1263,14 @@ def build_release_bundle(
         prefix="stateport-public-build-", dir=output.parent
     ) as temporary_name:
         temporary = Path(temporary_name)
+        payload_source = _clone_frozen_payload_source(
+            source, source_commit, temporary / "payload-source"
+        )
         candidate = temporary / "candidate"
         evidence = temporary / "evidence"
         try:
             materialization = materialize_snapshot(
-                source,
+                payload_source,
                 source_commit,
                 policy_path,
                 detector,
@@ -1405,6 +1478,7 @@ def build_release_bundle(
             "candidateId": candidate_id,
             "sourceCommit": source_commit,
             "sourceTree": tree,
+            "controller": controller,
             "publicCommit": candidate_commit,
             "publicTree": candidate_tree,
             "publicAuthority": public_url,
@@ -1575,7 +1649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             policy_path=args.policy,
             candidate_id=args.candidate_id,
         )
-    except (MissionEnvelopeError, OSError, PublicReleaseBuildError, SnapshotBuildError, subprocess.CalledProcessError, yaml.YAMLError) as exc:
+    except (ReleaseGuardError, OSError, PublicReleaseBuildError, SnapshotBuildError, subprocess.CalledProcessError, yaml.YAMLError) as exc:
         print(json.dumps({"status": "blocked", "error": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))

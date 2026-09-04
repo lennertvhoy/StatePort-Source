@@ -214,7 +214,7 @@ def test_secret_private_path_learner_internal_symlink_and_rights_fail_closed_wit
         tmp_path,
         {
             "src/unsafe.txt": f"token={credential}\npath={private_path}\nmarker={learner_marker}\n",
-            "STATUS.md": "Internal synthetic status fixture.\n",
+            "STATE.yaml": "Internal synthetic state fixture.\n",
         },
     )
     outside = tmp_path / "outside.txt"

@@ -9,6 +9,7 @@ import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getClient, resetClientForTests } from '@/client'
+import { applicationDestinationAvailable } from '@/features/application-experience/registry'
 
 import { ImportRepositoryDrawer } from '../ImportRepositoryDrawer'
 
@@ -34,13 +35,100 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   resetClientForTests()
 })
 
 describe('ImportRepositoryDrawer', () => {
+  it('creates a detected ProjectState template as an isolated managed application', async () => {
+    const user = userEvent.setup()
+    const client = getClient()
+    const existing = (await client.applications.list()).find((instance) =>
+      applicationDestinationAvailable(instance, 'receipts'),
+    )
+    expect(existing).toBeTruthy()
+    const existingReceipt = (await client.receipts.list({ instanceId: existing!.id }))[0]
+    expect(existingReceipt).toBeTruthy()
+    const instanceId = 'template-projectstate-e2e'
+    const receiptId = 'template-import-projectstate-e2e'
+    vi.spyOn(client.repositoryImport, 'inspect').mockResolvedValue({
+      candidateId: 'cand_photography',
+      source: 'ProjectState_Template',
+      inspectionDigest: `sha256:${'d'.repeat(64)}`,
+      branch: 'main',
+      headCommit: 'c'.repeat(40),
+      dirty: true,
+      findings: [],
+      mutated: false,
+      template: {
+        formatVersion: 'stateport.template-adapter-match/v1',
+        adapterId: 'projectstate-v6',
+        applicationId: 'stateport.template.projectstate',
+        displayName: 'ProjectState',
+        description: 'A StatePort-managed ProjectState workspace.',
+        templateKind: 'projectstate_v6',
+        declaredTemplateId: 'projectstate',
+        declaredVersion: 'projectstate-template-v6',
+        markerFiles: ['PROJECT.md', 'STATE.yaml'],
+        requestedCapabilities: ['conversation', 'receipts'],
+        trustedActionIds: ['stateport.template.projectstate.inspect/v1'],
+        executionTrust: 'stateport_owned_adapter_only',
+        repositoryCommandsExecuted: false,
+        validation: { status: 'passed', issues: [] },
+      },
+    })
+    const install = vi.spyOn(client.repositoryImport, 'installTemplate').mockResolvedValue({
+      instanceId,
+      conversationId: 'conv-projectstate-e2e',
+      receiptId,
+    })
+    vi.spyOn(client.applications, 'get').mockResolvedValue({ ...existing!, id: instanceId })
+    vi.spyOn(client.receipts, 'get').mockResolvedValue({
+      ...existingReceipt!,
+      id: receiptId,
+      instanceId,
+    })
+    renderDrawer()
+
+    await user.click(await screen.findByTestId('import-candidate-photography-portfolio'))
+    const review = await screen.findByTestId('import-review')
+    expect(within(review).getByTestId('template-adapter-match').textContent).toContain('ProjectState')
+    expect(within(review).getByTestId('template-adapter-match').textContent).toContain(
+      'uncommitted files are excluded',
+    )
+    expect(screen.getByTestId('import-register').textContent).toBe('Create isolated copy')
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /approve creation of an isolated copy of the exact inspected template/i,
+      }),
+    )
+    await user.click(screen.getByTestId('import-register'))
+
+    const done = await screen.findByTestId('import-done')
+    expect(done.textContent).toContain('is ready')
+    expect(done.textContent).toContain('isolated StatePort-managed copy')
+    expect(install).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidateId: 'cand_photography',
+        approved: true,
+        inspection: expect.objectContaining({
+          template: expect.objectContaining({ adapterId: 'projectstate-v6' }),
+        }),
+      }),
+    )
+    await user.click(screen.getByTestId('import-open-application'))
+    expect((await screen.findByTestId('instance-overview')).textContent).toBe(instanceId)
+  })
+
   it('walks discovery, inspection, approval, and registration', async () => {
     const user = userEvent.setup()
-    const receiptGet = vi.spyOn(getClient().receipts, 'get')
+    const client = getClient()
+    const detected = await client.repositoryImport.inspect('cand_photography')
+    vi.spyOn(client.repositoryImport, 'inspect').mockResolvedValue({
+      ...detected,
+      template: undefined,
+    })
+    const receiptGet = vi.spyOn(client.receipts, 'get')
     renderDrawer()
 
     // Discovery lists the allowlisted candidates.
@@ -88,12 +176,14 @@ describe('ImportRepositoryDrawer', () => {
 
   it('does not claim a receipt when registration returns no receipt ID', async () => {
     const user = userEvent.setup()
-    vi.spyOn(getClient().repositoryImport, 'register').mockResolvedValue({ instanceId: 'ins-no-receipt' })
+    vi.spyOn(getClient().repositoryImport, 'installTemplate').mockResolvedValue({
+      instanceId: 'ins-no-receipt',
+    })
     renderDrawer()
 
     await user.click(await screen.findByTestId('import-candidate-photography-portfolio'))
     await screen.findByTestId('import-review')
-    await user.click(screen.getByRole('checkbox', { name: /approve registration/i }))
+    await user.click(screen.getByRole('checkbox', { name: /approve creation of an isolated copy/i }))
     await user.click(screen.getByTestId('import-register'))
 
     const uncertain = await screen.findByTestId('import-uncertain')

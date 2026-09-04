@@ -260,7 +260,12 @@ export interface RepositoryIdentity {
  * references are kept separate so they cannot be mistaken for Git evidence.
  */
 export interface ApplicationSourceIdentity {
+  /** StatePort owns an isolated working copy; the original repository is unchanged. */
+  management?: 'isolated_template'
   templateId?: string
+  adapterId?: string
+  declaredTemplateId?: string
+  declaredVersion?: string
   repository?: string
   resolvedCommit?: string
   resolvedTree?: string
@@ -273,6 +278,8 @@ export interface ApplicationSourceIdentity {
   version?: string
   productionEligible?: boolean
   productionInstallAllowed?: boolean
+  /** Import materialized the committed Git snapshot, excluding working-tree edits. */
+  workingTreeChangesExcluded?: boolean
   /** Raw compatibility reference, never presented as an exact Git commit. */
   compatibilityRevision?: string
   /** Raw compatibility tree reference paired with `compatibilityRevision`. */
@@ -1637,6 +1644,26 @@ export interface RepositoryFinding {
   message: string
 }
 
+export interface RepositoryTemplateMatch {
+  formatVersion: 'stateport.template-adapter-match/v1'
+  adapterId: string
+  applicationId: string
+  displayName: string
+  description: string
+  templateKind: string
+  declaredTemplateId?: string
+  declaredVersion?: string
+  markerFiles: string[]
+  requestedCapabilities: string[]
+  trustedActionIds: string[]
+  executionTrust: 'stateport_owned_adapter_only'
+  repositoryCommandsExecuted: false
+  validation: {
+    status: 'passed' | 'failed'
+    issues: Array<{ code: string; message: string }>
+  }
+}
+
 export interface RepositoryInspection {
   candidateId?: string
   /** Safe display source (relative location or URL), never an absolute path. */
@@ -1648,6 +1675,8 @@ export interface RepositoryInspection {
   dirty: boolean
   /** StateSpec classification reported by the inspector (opaque summary). */
   stateSpec?: unknown
+  /** A reviewed StatePort-owned adapter detected from bounded declarative markers. */
+  template?: RepositoryTemplateMatch
   findings: RepositoryFinding[]
   /** The backend inspection never mutates or executes the repository. */
   /** Undefined means the inspector did not prove that it was read-only. */

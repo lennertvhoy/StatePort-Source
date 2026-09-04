@@ -27,8 +27,8 @@ Oversight is a **per-action policy**, not a permanent label on an app or on the
 platform. One application may run routine reorganisation autonomously, ask for
 confirmation before a consequential change, and prohibit an external side effect
 unless explicitly approved. The spectrum and its mechanism mapping are defined
-in [`POSITIONING.md`](POSITIONING.md) and `PROJECT_DNA.yaml`
-(`application_oversight_model`):
+in [`POSITIONING.md`](POSITIONING.md) and the runtime authority policy in
+`config/authority-policy.v1.yaml`:
 
 - **Human-driven** — assists only when requested.
 - **Human-in-the-loop** — stops at defined approval gates.

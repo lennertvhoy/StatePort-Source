@@ -38,7 +38,7 @@ from release_safe_io import (
     write_bytes_create_only,
     write_json_create_only,
 )
-from validate_mission_envelope import require_guard
+from release_guard import require_guard
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +68,13 @@ class SourceIdentity:
     version: str
     created: str
     source_date_epoch: int
+
+
+@dataclass(frozen=True)
+class ControllerIdentity:
+    commit: str
+    tree: str
+    payloadRelationship: str
 
 
 def _run(
@@ -111,21 +118,97 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def source_identity(version: str) -> SourceIdentity:
+def _release_identities(
+    version: str,
+    source_commit: str | None = None,
+    *,
+    repository: Path = ROOT,
+) -> tuple[SourceIdentity, ControllerIdentity]:
     if _VERSION.fullmatch(version) is None:
         raise ReleaseBuildError("release image version is not a bounded semantic version")
-    dirty = _run(["git", "status", "--porcelain=v1", "--untracked-files=all"], capture=True)
+    dirty = _run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repository,
+        capture=True,
+    )
     if dirty:
         raise ReleaseBuildError(
             "release image build requires an exact clean committed tree, including untracked paths"
         )
-    commit = _run(["git", "rev-parse", "HEAD"], capture=True)
-    tree = _run(["git", "rev-parse", "HEAD^{tree}"], capture=True)
-    if re.fullmatch(r"[0-9a-f]{40}", commit) is None or re.fullmatch(r"[0-9a-f]{40}", tree) is None:
+    controller_commit = _run(["git", "rev-parse", "HEAD"], cwd=repository, capture=True)
+    controller_tree = _run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, capture=True
+    )
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", controller_commit) is None
+        or re.fullmatch(r"[0-9a-f]{40}", controller_tree) is None
+    ):
         raise ReleaseBuildError("Git source identity is not an exact SHA-1 commit and tree")
-    epoch = int(_run(["git", "show", "-s", "--format=%ct", "HEAD"], capture=True))
+    commit = controller_commit if source_commit is None else source_commit
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ReleaseBuildError("frozen release payload must name one exact full commit")
+    observed_commit = _run(
+        ["git", "rev-parse", "--verify", f"{commit}^{{commit}}"],
+        cwd=repository,
+        capture=True,
+    )
+    if observed_commit != commit:
+        raise ReleaseBuildError("frozen release payload commit did not resolve exactly")
+    try:
+        _run(
+            ["git", "merge-base", "--is-ancestor", commit, controller_commit],
+            cwd=repository,
+        )
+    except ReleaseBuildError as exc:
+        raise ReleaseBuildError(
+            "frozen release payload commit must be an ancestor of current controller HEAD"
+        ) from exc
+    tree = _run(
+        ["git", "rev-parse", "--verify", f"{commit}^{{tree}}"],
+        cwd=repository,
+        capture=True,
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", tree) is None:
+        raise ReleaseBuildError("frozen release payload tree is not an exact SHA-1 tree")
+    epoch = int(
+        _run(
+            ["git", "show", "-s", "--format=%ct", commit],
+            cwd=repository,
+            capture=True,
+        )
+    )
     created = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return SourceIdentity(commit, tree, version, created, epoch)
+    return (
+        SourceIdentity(commit, tree, version, created, epoch),
+        ControllerIdentity(
+            controller_commit,
+            controller_tree,
+            "equal" if commit == controller_commit else "payload-is-ancestor",
+        ),
+    )
+
+
+def source_identity(
+    version: str,
+    source_commit: str | None = None,
+    *,
+    repository: Path = ROOT,
+) -> SourceIdentity:
+    return _release_identities(version, source_commit, repository=repository)[0]
+
+
+def _controller_attestation(controller: ControllerIdentity) -> dict[str, Any]:
+    return {
+        **asdict(controller),
+        "buildTool": {
+            "path": "scripts/build_release_images.py",
+            "digest": sha256_file(Path(__file__).resolve()),
+        },
+        "buildInputs": {
+            "path": BUILD_INPUTS.relative_to(ROOT).as_posix(),
+            "digest": sha256_file(BUILD_INPUTS),
+        },
+    }
 
 
 def _load_builder_descriptor() -> tuple[Mapping[str, Any], str]:
@@ -360,6 +443,48 @@ def verify_locked_build_inputs() -> Mapping[str, Any]:
                 f"locked definition drifted: {rel} is {actual}, locked {digest}"
             )
     return inputs
+
+
+def verify_frozen_payload_build_contract(
+    source_commit: str, inputs: Mapping[str, Any]
+) -> None:
+    """Keep controller-only commits from changing frozen image inputs.
+
+    The build tool itself may advance after ``source_commit`` and is attested
+    separately. Every file that defines or locks image bytes must still match
+    the selected payload commit exactly; otherwise choosing an ancestor could
+    accidentally validate one definition while archiving another.
+    """
+
+    paths = {
+        BUILD_INPUTS.relative_to(ROOT).as_posix(),
+        IMAGE_SET.relative_to(ROOT).as_posix(),
+        BASE_IMAGES.relative_to(ROOT).as_posix(),
+    }
+    locks = inputs.get("locks")
+    definitions = inputs.get("definitions")
+    if not isinstance(locks, Mapping) or not isinstance(definitions, Mapping):
+        raise ReleaseBuildError("container build inputs lack frozen contract paths")
+    paths.update(str(item.get("path", "")) for item in locks.values() if isinstance(item, Mapping))
+    paths.update(str(path) for path in definitions)
+    for relative in sorted(paths):
+        path = PurePosixPath(relative)
+        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            raise ReleaseBuildError(f"frozen build contract contains an unsafe path: {relative!r}")
+        try:
+            frozen_blob = _run(
+                ["git", "rev-parse", "--verify", f"{source_commit}:{relative}"],
+                capture=True,
+            )
+        except ReleaseBuildError as exc:
+            raise ReleaseBuildError(
+                f"frozen release payload is missing build contract path: {relative}"
+            ) from exc
+        current_blob = _run(["git", "hash-object", "--", relative], capture=True)
+        if frozen_blob != current_blob:
+            raise ReleaseBuildError(
+                f"current build contract drifted from frozen payload: {relative}"
+            )
 
 
 def base_pull_commands() -> list[list[str]]:
@@ -1072,14 +1197,22 @@ def render_pull_compose(references: Mapping[str, str]) -> str:
     return yaml.safe_dump(document, sort_keys=False, width=1000)
 
 
-def build_release(*, version: str, registry: str, output_root: Path) -> dict[str, Any]:
+def build_release(
+    *,
+    version: str,
+    registry: str,
+    output_root: Path,
+    source_commit: str | None = None,
+) -> dict[str, Any]:
     # Refuse drifted reproducibility locks before any registry, context,
     # base-image pull, or Podman work.
-    verify_locked_build_inputs()
+    inputs = verify_locked_build_inputs()
     # Reject a non-local proof registry before Podman inspection, context
     # materialization, or any digest-pinned base-image pull.
     validate_registry_endpoint(registry)
-    identity = source_identity(version)
+    identity, controller_identity = _release_identities(version, source_commit)
+    verify_frozen_payload_build_contract(identity.commit, inputs)
+    controller = _controller_attestation(controller_identity)
     image_set = validate_definitions()
     builder = verify_podman_builder()
     output = prepare_output_root(output_root, repository=ROOT)
@@ -1090,6 +1223,7 @@ def build_release(*, version: str, registry: str, output_root: Path) -> dict[str
     plan = {
         "formatVersion": "stateport.release-image-build-plan/v1",
         "identity": asdict(identity),
+        "controller": controller,
         "registry": registry,
         "registryImage": REGISTRY_IMAGE,
         "context": context_receipt,
@@ -1146,6 +1280,7 @@ def build_release(*, version: str, registry: str, output_root: Path) -> dict[str
             {
                 "formatVersion": "stateport.release-image-build-failure/v1",
                 "identity": asdict(identity),
+                "controller": controller,
                 "failedAt": _utc_now(),
                 "errorType": type(failure).__name__,
                 "message": str(failure)[:1000],
@@ -1180,6 +1315,7 @@ def build_release(*, version: str, registry: str, output_root: Path) -> dict[str
     receipt = {
         "formatVersion": "stateport.release-image-build-receipt/v1",
         "identity": asdict(identity),
+        "controller": controller,
         "outputRootIdentity": output_identity,
         "builder": builder,
         "context": context_receipt,
@@ -1288,14 +1424,19 @@ def cleanup_release_registry(*, build_receipt: Path) -> dict[str, Any]:
     return cleanup
 
 
-def plan_release(*, version: str, registry: str) -> dict[str, Any]:
-    verify_locked_build_inputs()
-    identity = source_identity(version)
+def plan_release(
+    *, version: str, registry: str, source_commit: str | None = None
+) -> dict[str, Any]:
+    inputs = verify_locked_build_inputs()
+    identity, controller_identity = _release_identities(version, source_commit)
+    verify_frozen_payload_build_contract(identity.commit, inputs)
+    controller = _controller_attestation(controller_identity)
     image_set = validate_definitions()
     placeholder = Path("/EXTERNAL_STATEPORT_RELEASE_OUTPUT")
     return {
         "formatVersion": "stateport.release-image-build-plan/v1",
         "identity": asdict(identity),
+        "controller": controller,
         "registry": registry,
         "registryImage": REGISTRY_IMAGE,
         "context": {"materialization": "git-archive-exact-commit", "commit": identity.commit},
@@ -1318,6 +1459,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--registry", default="127.0.0.1:5000")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--build-receipt", type=Path)
+    parser.add_argument(
+        "--source-commit",
+        help="exact frozen payload commit (must be an ancestor of clean current HEAD)",
+    )
     args = parser.parse_args(argv)
     if args.command != "plan":
         require_guard(
@@ -1335,7 +1480,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ReleaseBuildError(f"{args.command} requires --version")
     if args.command == "plan":
         print(
-            json.dumps(plan_release(version=args.version, registry=args.registry), sort_keys=True)
+            json.dumps(
+                plan_release(
+                    version=args.version,
+                    registry=args.registry,
+                    source_commit=args.source_commit,
+                ),
+                sort_keys=True,
+            )
         )
         return 0
     if args.output_root is None:
@@ -1346,6 +1498,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 version=args.version,
                 registry=args.registry,
                 output_root=args.output_root,
+                source_commit=args.source_commit,
             ),
             sort_keys=True,
         )

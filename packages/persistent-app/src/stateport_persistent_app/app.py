@@ -49,6 +49,10 @@ from stateport_persistent_app.repository_content import (
     RepositoryContentError,
     repository_content_snapshot,
 )
+from stateport_persistent_app.template_adapters import (
+    TemplateAdapterError,
+    TemplateAdapterRegistry,
+)
 
 
 FORMAT = "stateport.persistent-local/v1"
@@ -59,6 +63,10 @@ RESTORE_APPROVAL_FORMAT = "stateport.restore-approval/v1"
 RESTORE_RECEIPT_FORMAT = "stateport.restore-receipt/v1"
 RECOVERY_STATUS_FORMAT = "stateport.recovery-status/v1"
 SOURCE_ACCESS_FORMAT = "stateport.source-access/v1"
+TEMPLATE_IMPORT_PLAN_FORMAT = "stateport.template-import-plan/v1"
+TEMPLATE_INSTALL_RECEIPT_FORMAT = "stateport.template-install-receipt/v1"
+MANAGED_INCARNATION_FORMAT = "stateport.managed-incarnation/v1"
+_MANAGED_INCARNATION_PATH = ".stateport/managed-incarnation.json"
 _RESTORE_STATUS_ARTIFACT_LIMIT = 4096
 _RESTORE_ARTIFACT_BYTES_LIMIT = 256 * 1024
 _RESTORE_INVENTORY_BYTES_LIMIT = 16 * 1024 * 1024
@@ -112,6 +120,95 @@ class ServiceError(AppError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _managed_incarnation_binding(
+    root: Path,
+    *,
+    expected_instance_id: str | None = None,
+) -> dict[str, Any]:
+    """Bind a managed root to a random marker and the marker's own inode."""
+
+    marker = root / _MANAGED_INCARNATION_PATH
+    try:
+        before = os.lstat(marker)
+    except OSError as exc:
+        raise AppError("managed instance incarnation marker is unavailable") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 4096:
+        raise AppError("managed instance incarnation marker is unsafe")
+    try:
+        descriptor = os.open(
+            marker,
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise AppError("managed instance incarnation marker is unavailable") from exc
+    try:
+        payload = os.read(descriptor, 4097)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_nlink,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_nlink,
+    )
+    if before_identity != after_identity or len(payload) > 4096:
+        raise AppError("managed instance incarnation marker changed during validation")
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AppError("managed instance incarnation marker is invalid") from exc
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"formatVersion", "instanceId", "incarnationId", "createdAt"}
+        or value.get("formatVersion") != MANAGED_INCARNATION_FORMAT
+        or not isinstance(value.get("instanceId"), str)
+        or (expected_instance_id is not None and value.get("instanceId") != expected_instance_id)
+        or not isinstance(value.get("incarnationId"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("incarnationId")))
+        or not isinstance(value.get("createdAt"), str)
+    ):
+        raise AppError("managed instance incarnation marker is invalid")
+    return {
+        "formatVersion": MANAGED_INCARNATION_FORMAT,
+        "markerPath": _MANAGED_INCARNATION_PATH,
+        "markerDigest": _digest(payload),
+        "markerFilesystem": {
+            "device": after.st_dev,
+            "inode": after.st_ino,
+            "kind": "regular_file",
+        },
+    }
+
+
+def _managed_incarnation_matches(
+    root: Path,
+    instance_id: str,
+    expected: Any,
+) -> bool:
+    if not isinstance(expected, Mapping):
+        return False
+    try:
+        observed = _managed_incarnation_binding(
+            root,
+            expected_instance_id=instance_id,
+        )
+    except AppError:
+        return False
+    return secrets.compare_digest(
+        _digest(dict(expected)),
+        _digest(observed),
+    )
 
 
 def initialize_instance_repository(root: Path | str) -> str:
@@ -693,16 +790,52 @@ class PersistentCatalog:
     def _entry(self, record: Any) -> dict[str, Any]:
         value = record.to_dict()
         metadata = dict(record.metadata)
-        value["path"] = (self.layout.instances_root / record.path).as_posix()
+        root = self.layout.instances_root / record.path
+        value["path"] = root.as_posix()
+        managed_incarnation = metadata.get("managedIncarnation")
+        if managed_incarnation is not None and value.get("pathState") == "present":
+            if not _managed_incarnation_matches(
+                root,
+                str(value.get("instanceId", "")),
+                managed_incarnation,
+            ):
+                value["pathState"] = "stale"
         value["applicationId"] = metadata.get("applicationId", "studydd")
         value["observedSource"] = dict(metadata.get("source", {}))
         value["lastVerifiedAt"] = metadata.get("lastVerifiedAt", record.last_validated_at)
         value["lastBackup"] = metadata.get("lastBackup")
         return value
 
-    def register(self, path: Path, *, instance_id: str, name: str, source: Mapping[str, Any]) -> dict[str, Any]:
+    def register(
+        self,
+        path: Path,
+        *,
+        instance_id: str,
+        name: str,
+        source: Mapping[str, Any],
+        application_id: str | None = None,
+        managed_incarnation: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         root = _safe_instance_root(path, must_exist=True)
-        metadata = {"applicationId": source.get("templateId", "studydd"), "source": {k: v for k, v in source.items() if k not in {"checkoutLocation", "profile"}}, "lastVerifiedAt": _now(), "lastBackup": None}
+        selected_application_id = application_id or source.get("templateId", "studydd")
+        metadata = {
+            "applicationId": selected_application_id,
+            "source": {
+                key: value
+                for key, value in source.items()
+                if key not in {"checkoutLocation", "profile"}
+            },
+            "lastVerifiedAt": _now(),
+            "lastBackup": None,
+        }
+        if managed_incarnation is not None:
+            observed_incarnation = _managed_incarnation_binding(
+                root,
+                expected_instance_id=instance_id,
+            )
+            if _digest(observed_incarnation) != _digest(dict(managed_incarnation)):
+                raise AppError("managed instance incarnation changed before catalog registration")
+            metadata["managedIncarnation"] = observed_incarnation
         try:
             record = self._canonical().register(root, instance_id=instance_id, name=name, metadata=metadata)
         except CatalogSchemaError as exc:
@@ -1434,6 +1567,8 @@ class SourceCache:
         checkout_root: Path,
         commit: str,
         destination: Path,
+        *,
+        from_objects: bool = False,
     ) -> list[dict[str, Any]]:
         listed = cls._run_cache_git(
             ["ls-tree", "-r", "-z", "--full-tree", commit],
@@ -1464,7 +1599,20 @@ class SourceCache:
                 raise AppError("source cache Git tree may not contain symbolic links")
             if kind != "blob" or mode not in {"100644", "100755"} or not re.fullmatch(r"[0-9a-f]{40}", object_id):
                 raise AppError("source cache Git tree may contain only regular files")
-            data, _info = cls._read_regular_file(checkout_root, relative)
+            if from_objects:
+                blob_result = cls._run_cache_git(
+                    ["cat-file", "blob", object_id],
+                    cwd=checkout_root,
+                    failure="source cache could not read the selected Git object",
+                    text=False,
+                )
+                if blob_result.returncode != 0 or not isinstance(blob_result.stdout, bytes):
+                    raise AppError("source cache could not read the selected Git object")
+                data = blob_result.stdout
+                if len(data) > cls._MAX_FILE_BYTES:
+                    raise AppError("source cache Git tree contains an oversized file")
+            else:
+                data, _info = cls._read_regular_file(checkout_root, relative)
             blob = hashlib.sha1(
                 b"blob " + str(len(data)).encode("ascii") + b"\0" + data,
                 usedforsecurity=False,
@@ -2343,6 +2491,381 @@ class PersistentApp:
             application_id=application_id,
             source=source,
         )
+
+    @staticmethod
+    def _template_match_from_inspection(inspection: Mapping[str, Any]) -> dict[str, Any]:
+        template = inspection.get("template")
+        validation = template.get("validation") if isinstance(template, Mapping) else None
+        if (
+            not isinstance(template, Mapping)
+            or template.get("formatVersion") != "stateport.template-adapter-match/v1"
+            or not isinstance(validation, Mapping)
+            or validation.get("status") != "passed"
+            or not isinstance(template.get("adapterId"), str)
+            or not isinstance(template.get("applicationId"), str)
+            or template.get("executionTrust") != "stateport_owned_adapter_only"
+            or template.get("repositoryCommandsExecuted") is not False
+        ):
+            raise AppError("repository does not expose a valid supported template contract")
+        return copy.deepcopy(dict(template))
+
+    @staticmethod
+    def _template_git_identity_from_inspection(
+        inspection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        identity = inspection.get("sourceIdentity")
+        if (
+            inspection.get("formatVersion") != "stateport.repository-inspection/v1"
+            or inspection.get("sourceKind") != "local"
+            or not isinstance(identity, Mapping)
+            or not isinstance(identity.get("headCommit"), str)
+            or not _GIT_OID.fullmatch(str(identity.get("headCommit")))
+            or not isinstance(identity.get("headTree"), str)
+            or not _GIT_OID.fullmatch(str(identity.get("headTree")))
+            or not isinstance(identity.get("dirty"), bool)
+            or not isinstance(identity.get("contentIdentity"), Mapping)
+        ):
+            raise AppError("repository inspection lacks an exact local Git identity")
+        return {
+            "sourceKind": "local_git_snapshot",
+            "resolvedCommit": str(identity["headCommit"]),
+            "resolvedTree": str(identity["headTree"]),
+            "workingTreeDirty": bool(identity["dirty"]),
+            "workingTreeChangesExcluded": True,
+            "contentIdentity": copy.deepcopy(dict(identity["contentIdentity"])),
+            "remote": identity.get("remote")
+            if isinstance(identity.get("remote"), str)
+            else None,
+        }
+
+    def plan_template_import(
+        self,
+        inspection: Mapping[str, Any],
+        *,
+        candidate_id: str,
+        instance_id: str,
+        name: str,
+    ) -> dict[str, Any]:
+        """Plan an isolated copy of one exact inspected Git template."""
+
+        _validate_id(instance_id, "instance_id")
+        if not isinstance(name, str) or not name.strip() or len(name) > 120:
+            raise AppError("template instance name is invalid")
+        if not re.fullmatch(r"repo-[0-9a-f]{32}", candidate_id):
+            raise AppError("template repository candidate identity is invalid")
+        inspection_digest = inspection.get("inspectionDigest")
+        if not isinstance(inspection_digest, str) or not _SOURCE_DIGEST.fullmatch(
+            inspection_digest
+        ):
+            raise AppError("repository inspection digest is invalid")
+        template = self._template_match_from_inspection(inspection)
+        source = self._template_git_identity_from_inspection(inspection)
+        destination = self.layout.instances_root / instance_id
+        if destination.is_symlink():
+            conflict = "symlink"
+        elif destination.exists() and (
+            not destination.is_dir() or any(destination.iterdir())
+        ):
+            conflict = "nonempty"
+        elif destination.exists():
+            conflict = "empty_directory"
+        else:
+            conflict = "none"
+        plan = {
+            "formatVersion": TEMPLATE_IMPORT_PLAN_FORMAT,
+            "operation": "template-import",
+            "candidateId": candidate_id,
+            "inspectionDigest": inspection_digest,
+            "instanceId": instance_id,
+            "name": name.strip(),
+            "destination": {
+                "kind": "stateport_managed_storage",
+                "instanceId": instance_id,
+                "conflict": conflict,
+            },
+            "source": source,
+            "template": template,
+            "effects": {
+                "sourceRepositoryMutation": False,
+                "managedCopyCreated": True,
+                "managedGitHistoryCreated": True,
+                "repositoryCommandsExecuted": False,
+                "networkAccess": False,
+            },
+            "approvalRequired": True,
+            "createdAt": _now(),
+        }
+        plan["planDigest"] = _digest(plan)
+        return plan
+
+    @staticmethod
+    def _validate_template_import_approval(
+        plan: Mapping[str, Any],
+        approval: Mapping[str, Any] | None,
+        *,
+        expected_actor_id: str,
+    ) -> None:
+        if (
+            not isinstance(approval, Mapping)
+            or set(approval) != {"decision", "actorId", "planDigest"}
+            or approval.get("decision") != "approve"
+            or approval.get("actorId") != expected_actor_id
+            or approval.get("planDigest") != plan.get("planDigest")
+        ):
+            raise ApprovalError("exact template import approval is required")
+
+    @staticmethod
+    def _make_managed_incarnation(stage: Path, instance_id: str) -> dict[str, Any]:
+        reserved = stage / ".stateport"
+        if reserved.exists() or reserved.is_symlink():
+            raise AppError("template source uses the reserved .stateport path")
+        reserved.mkdir(mode=0o700)
+        _write_json(
+            stage / _MANAGED_INCARNATION_PATH,
+            {
+                "formatVersion": MANAGED_INCARNATION_FORMAT,
+                "instanceId": instance_id,
+                "incarnationId": secrets.token_hex(32),
+                "createdAt": _now(),
+            },
+        )
+        return _managed_incarnation_binding(
+            stage,
+            expected_instance_id=instance_id,
+        )
+
+    @staticmethod
+    def _make_template_tree_writable(
+        stage: Path,
+        files: list[dict[str, Any]],
+    ) -> None:
+        for directory in sorted(
+            (item for item in stage.rglob("*") if item.is_dir()),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            if directory.is_symlink():
+                raise AppError("materialized template contains an unsafe directory")
+            os.chmod(directory, 0o700)
+        for item in files:
+            path = stage / str(item["path"])
+            os.chmod(path, 0o700 if item.get("gitMode") == "100755" else 0o600)
+
+    def install_template(
+        self,
+        plan: Mapping[str, Any],
+        approval: Mapping[str, Any] | None,
+        *,
+        source_root: Path,
+        current_inspection: Mapping[str, Any],
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Materialize and register one exact committed template snapshot."""
+
+        if (
+            plan.get("formatVersion") != TEMPLATE_IMPORT_PLAN_FORMAT
+            or plan.get("operation") != "template-import"
+            or plan.get("planDigest")
+            != _digest({key: value for key, value in plan.items() if key != "planDigest"})
+        ):
+            raise ApprovalError("template import plan digest is invalid")
+        self._validate_template_import_approval(
+            plan,
+            approval,
+            expected_actor_id=actor_id,
+        )
+        if current_inspection.get("inspectionDigest") != plan.get("inspectionDigest"):
+            raise AppError("repository identity changed after planning; inspect it again")
+        current_template = self._template_match_from_inspection(current_inspection)
+        current_source = self._template_git_identity_from_inspection(current_inspection)
+        if (
+            _digest(current_template) != _digest(plan.get("template"))
+            or _digest(current_source) != _digest(plan.get("source"))
+        ):
+            raise AppError("template or source identity changed after planning")
+        instance_id = plan.get("instanceId")
+        name = plan.get("name")
+        if not isinstance(instance_id, str):
+            raise AppError("template instance identity is invalid")
+        _validate_id(instance_id, "instance_id")
+        if not isinstance(name, str) or not name.strip() or len(name) > 120:
+            raise AppError("template instance name is invalid")
+        destination_info = plan.get("destination")
+        if (
+            not isinstance(destination_info, Mapping)
+            or destination_info.get("kind") != "stateport_managed_storage"
+            or destination_info.get("instanceId") != instance_id
+            or destination_info.get("conflict") != "none"
+        ):
+            raise AppError("template import destination is unavailable")
+        source = plan.get("source")
+        template = plan.get("template")
+        if not isinstance(source, Mapping) or not isinstance(template, Mapping):
+            raise AppError("template import source contract is invalid")
+        commit = str(source.get("resolvedCommit", ""))
+        expected_tree = str(source.get("resolvedTree", ""))
+        if not _GIT_OID.fullmatch(commit) or not _GIT_OID.fullmatch(expected_tree):
+            raise AppError("template import Git identity is invalid")
+        destination = self.layout.instances_root / instance_id
+        if destination.exists() or destination.is_symlink():
+            raise AppError("template import destination already exists")
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        stage = destination.parent / (
+            f".{instance_id}.template-import-{os.getpid()}-{secrets.token_hex(4)}"
+        )
+        if stage.exists() or stage.is_symlink():
+            raise AppError("template import staging identity already exists")
+        catalog_entry: dict[str, Any] | None = None
+        promoted_identity: tuple[int, int] | None = None
+        receipt_path = (
+            self.layout.operations_root
+            / "template-imports"
+            / f"{instance_id}.json"
+        )
+        try:
+            stage.mkdir(mode=0o700)
+            files = SourceCache._copy_verified_git_tree(
+                source_root,
+                commit,
+                stage,
+                from_objects=True,
+            )
+            if SourceCache._git_tree_id(files) != expected_tree:
+                raise AppError("materialized template differs from the planned Git tree")
+            self._make_template_tree_writable(stage, files)
+            matched = TemplateAdapterRegistry().require(
+                stage,
+                str(template.get("adapterId", "")),
+            )
+            if _digest(matched) != _digest(template):
+                raise AppError("materialized template contract differs from the inspected contract")
+            incarnation = self._make_managed_incarnation(stage, instance_id)
+            base_git = initialize_instance_repository(stage)
+            parent_fd = os.open(
+                destination.parent,
+                os.O_RDONLY
+                | os.O_CLOEXEC
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                _rename_no_replace(parent_fd, stage.name, parent_fd, destination.name)
+            finally:
+                os.close(parent_fd)
+            promoted = os.lstat(destination)
+            promoted_identity = (promoted.st_dev, promoted.st_ino)
+            incarnation = _managed_incarnation_binding(
+                destination,
+                expected_instance_id=instance_id,
+            )
+            origin = {
+                "formatVersion": "stateport.managed-template-source/v1",
+                "management": "isolated_template",
+                "templateId": str(template["applicationId"]),
+                "adapterId": str(template["adapterId"]),
+                "declaredTemplateId": template.get("declaredTemplateId"),
+                "declaredVersion": template.get("declaredVersion"),
+                "sourceKind": source.get("sourceKind"),
+                "resolvedCommit": commit,
+                "resolvedTree": expected_tree,
+                "workingTreeChangesExcluded": True,
+            }
+            catalog_entry = self.catalog.register(
+                destination,
+                instance_id=instance_id,
+                name=name.strip(),
+                source=origin,
+                application_id=str(template["applicationId"]),
+                managed_incarnation=incarnation,
+            )
+            receipt = {
+                "formatVersion": TEMPLATE_INSTALL_RECEIPT_FORMAT,
+                "operation": "template-import",
+                "instanceId": instance_id,
+                "applicationId": str(template["applicationId"]),
+                "planDigest": plan["planDigest"],
+                "inspectionDigest": plan["inspectionDigest"],
+                "source": origin,
+                "template": copy.deepcopy(dict(template)),
+                "baseGit": base_git,
+                "managedIncarnation": incarnation,
+                "catalogIdentity": {
+                    "instanceId": catalog_entry["instanceId"],
+                    "applicationId": catalog_entry["applicationId"],
+                    "createdAt": catalog_entry["createdAt"],
+                    "filesystemIdentityDigest": _digest(catalog_entry["filesystem"]),
+                },
+                "approval": {
+                    "actorId": actor_id,
+                    "decision": "approved",
+                    "planDigest": plan["planDigest"],
+                },
+                "effects": copy.deepcopy(dict(plan["effects"])),
+                "createdAt": _now(),
+            }
+            if receipt_path.exists() or receipt_path.is_symlink():
+                raise AppError("template import receipt already exists")
+            _write_json(receipt_path, receipt)
+            return {
+                "formatVersion": "stateport.template-install-result/v1",
+                "instanceId": instance_id,
+                "applicationId": str(template["applicationId"]),
+                "name": name.strip(),
+                "source": origin,
+                "template": copy.deepcopy(dict(template)),
+                "baseGit": base_git,
+                "managedIncarnationDigest": incarnation["markerDigest"],
+                "receiptDigest": _digest(receipt),
+                "sourceRepositoryMutated": False,
+                "managedCopyCreated": True,
+            }
+        except Exception:
+            catalog_removed = catalog_entry is None
+            if catalog_entry is not None:
+                catalog_removed = self.catalog.forget_if_matches(catalog_entry)
+            if receipt_path.is_file() and not receipt_path.is_symlink():
+                receipt_path.unlink()
+            if stage.exists() and not stage.is_symlink():
+                shutil.rmtree(stage, ignore_errors=True)
+            if destination.exists() and catalog_removed and promoted_identity is not None:
+                try:
+                    current = os.lstat(destination)
+                except OSError:
+                    current = None
+                if current is not None and (
+                    current.st_dev,
+                    current.st_ino,
+                ) == promoted_identity:
+                    shutil.rmtree(destination, ignore_errors=True)
+            raise
+
+    def managed_template_binding(
+        self,
+        instance_id: str,
+        *,
+        adapter_id: str,
+        application_id: str,
+    ) -> tuple[Path, dict[str, Any]]:
+        """Validate a managed template's catalog, marker, and adapter identity."""
+
+        entry, root = self._entry(instance_id)
+        metadata = entry.get("metadata")
+        source = entry.get("observedSource")
+        if (
+            entry.get("applicationId") != application_id
+            or not isinstance(metadata, Mapping)
+            or not isinstance(metadata.get("managedIncarnation"), Mapping)
+            or not isinstance(source, Mapping)
+            or source.get("formatVersion") != "stateport.managed-template-source/v1"
+            or source.get("management") != "isolated_template"
+            or source.get("adapterId") != adapter_id
+            or source.get("templateId") != application_id
+        ):
+            raise AppError("managed template catalog binding is invalid")
+        match = TemplateAdapterRegistry().require(root, adapter_id)
+        if match.get("applicationId") != application_id:
+            raise AppError("managed template adapter application identity changed")
+        return root, match
 
     def plan_create(self, *, source_profile: str, instance_id: str, name: str, owner_name: str, owner_handle: str, target_id: str, target_title: str = "", timezone: str = "UTC", learning_goal: str = "", seed_mode: str = "empty", destination: str | None = None, source_repository: str | None = None, allow_development_candidate: bool = False) -> dict[str, Any]:
         _validate_id(instance_id, "instance_id")

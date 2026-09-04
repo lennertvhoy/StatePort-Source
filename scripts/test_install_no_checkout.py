@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -76,6 +77,21 @@ HEALTH = {
     "stateport-worker": (8791, "/readyz"),
 }
 BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+
+
+def _rendered_install_invocations(text: str) -> list[list[str]]:
+    logical = text.replace("\\\n", " ")
+    invocations: list[list[str]] = []
+    for line in logical.splitlines():
+        command = line.strip()
+        if not command.startswith('python3 "$tmp/installer"'):
+            continue
+        argv = shlex.split(command)
+        if "--release-index" in argv and (
+            "--prepare-execution-host" in argv or "--confirmed-plan-digest" in argv
+        ):
+            invocations.append(argv[2:])
+    return invocations
 
 
 def _timestamp(value: datetime) -> str:
@@ -2102,6 +2118,42 @@ def test_alpha11_bootstrap_authenticates_packages_before_sudo(
     ).decode("utf-8")
 
     subprocess.run(["/bin/sh", "-n", "-c", text], check=True)
+    invocations = _rendered_install_invocations(text)
+    assert len(invocations) == 2
+    prepare = next(argv for argv in invocations if "--prepare-execution-host" in argv)
+    final = next(argv for argv in invocations if "--prepare-execution-host" not in argv)
+    required_artifact_flags = {
+        "--release-index",
+        "--bundle-root",
+        "--trust-public-key",
+        "--trust-key-id",
+        "--trust-key-fingerprint",
+        "--updater-wheel",
+        "--execution-host-provisioner",
+        "--compose",
+        "--source-archive",
+        "--release-notes",
+        "--known-limitations",
+        "--podman-package-bundle",
+        "--podman-package-preflight",
+        "--confirmed-package-plan-digest",
+        "--cosign",
+        "--installer-path",
+        "--execution-host-receipt",
+        "--state-root",
+    }
+    for argv in invocations:
+        installer._parser().parse_args(argv)
+        assert required_artifact_flags <= set(argv)
+        assert argv[argv.index("--confirmed-package-plan-digest") + 1] == (
+            "$package_plan_digest"
+        )
+    assert prepare[prepare.index("--confirmed-plan-digest") + 1] == (
+        "$package_plan_digest"
+    )
+    assert "--yes" not in prepare
+    assert final[final.index("--confirmed-plan-digest") + 1] == "$install_plan_digest"
+    assert "--yes" in final
     package_download = text.index("stateport-podman-package-bundle.tar")
     package_preflight = text.index("--verify-podman-package-bundle")
     # Host-level python venv dependency prep (universe) may precede the

@@ -57,7 +57,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from validate_mission_envelope import (  # noqa: E402
+from release_guard import (  # noqa: E402
     classify_rehearsal_baseline,
     effective_mission,
     load_envelope,

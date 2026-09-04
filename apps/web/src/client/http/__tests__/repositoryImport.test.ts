@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 import { ClientError } from '../../types'
 import { HttpTransport } from '../transport'
 import { HttpRepositoryImportClient } from '../domainsCore'
+import { mapRepositoryInspection } from '../mappers'
 import { jsonResponse, makeFakeFetch } from './helpers'
 
 const CANDIDATES = {
@@ -42,6 +43,27 @@ const INSPECTION = {
 }
 
 const STATUS = { ok: true, result: { state: 'connected', actor: { role: 'local_user', actorId: 'local-user' } } }
+
+const TEMPLATE_INSPECTION = {
+  ...INSPECTION,
+  inspectionDigest: `sha256:${'d'.repeat(64)}`,
+  template: {
+    formatVersion: 'stateport.template-adapter-match/v1',
+    adapterId: 'projectstate-v6',
+    applicationId: 'stateport.template.projectstate',
+    displayName: 'ProjectState',
+    description: 'An isolated ProjectState workspace.',
+    templateKind: 'projectstate_v6',
+    declaredTemplateId: 'projectstate',
+    declaredVersion: 'projectstate-template-v6',
+    markerFiles: ['PROJECT.md', 'STATE.yaml'],
+    requestedCapabilities: ['conversation', 'progress_dashboard'],
+    trustedActionIds: ['stateport.template.projectstate.inspect/v1'],
+    executionTrust: 'stateport_owned_adapter_only',
+    repositoryCommandsExecuted: false,
+    validation: { status: 'passed', issues: [] },
+  },
+}
 
 type RegistrationMismatch =
   | 'entry-instance'
@@ -120,6 +142,78 @@ describe('HttpRepositoryImportClient', () => {
     expect(inspection.dirty).toBe(false)
     expect(inspection.mutated).toBe(false)
     expect(inspection.findings).toHaveLength(1)
+  })
+
+  it('plans and installs a detected template as an isolated managed copy', async () => {
+    const planDigest = `sha256:${'a'.repeat(64)}`
+    const receiptDigest = `sha256:${'b'.repeat(64)}`
+    const fake = makeFakeFetch([
+      ['GET', '/v1/status', jsonResponse(STATUS)],
+      [
+        'POST',
+        '/v1/template-import/plan',
+        (call) => {
+          const body = call.body as Record<string, string>
+          return jsonResponse({
+            ok: true,
+            result: {
+              formatVersion: 'stateport.template-import-plan/v1',
+              operation: 'template-import',
+              candidateId: body.candidateId,
+              inspectionDigest: body.inspectionDigest,
+              instanceId: body.instanceId,
+              name: body.name,
+              template: TEMPLATE_INSPECTION.template,
+              planDigest,
+            },
+          })
+        },
+      ],
+      [
+        'POST',
+        '/v1/template-import/install',
+        (call) => {
+          const body = call.body as { plan: Record<string, string> }
+          return jsonResponse({
+            ok: true,
+            result: {
+              formatVersion: 'stateport.template-install-result/v1',
+              instanceId: body.plan.instanceId,
+              applicationId: 'stateport.template.projectstate',
+              conversationId: 'conv_template',
+              receiptId: 'template-import-abc',
+              receiptDigest,
+              sourceRepositoryMutated: false,
+              managedCopyCreated: true,
+            },
+          })
+        },
+      ],
+    ])
+    const client = new HttpRepositoryImportClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    const inspection = mapRepositoryInspection(TEMPLATE_INSPECTION)
+    const result = await client.installTemplate({
+      candidateId: 'cand_alpha',
+      name: 'My ProjectState',
+      inspection,
+      approved: true,
+    })
+
+    const planCall = fake.callsTo('/v1/template-import/plan')[0]
+    const planned = planCall.body as Record<string, string>
+    expect(planned.instanceId).toMatch(/^template-[0-9a-f]{16}$/)
+    expect(planned.inspectionDigest).toBe(TEMPLATE_INSPECTION.inspectionDigest)
+    const installCall = fake.callsTo('/v1/template-import/install')[0]
+    expect((installCall.body as { approval: object }).approval).toEqual({
+      decision: 'approve',
+      actorId: 'local-user',
+      planDigest,
+    })
+    expect(result).toEqual({
+      instanceId: planned.instanceId,
+      conversationId: 'conv_template',
+      receiptId: 'template-import-abc',
+    })
   })
 
   it('preserves a missing mutation claim as unknown', async () => {

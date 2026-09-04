@@ -3936,6 +3936,39 @@ export class MockClient implements StatePortClient {
         dirty: false,
         findings: [],
         mutated: false,
+        template: candidateId === 'cand_reading'
+          ? {
+              formatVersion: 'stateport.template-adapter-match/v1',
+              adapterId: 'studystate',
+              applicationId: 'stateport.template.studystate',
+              displayName: 'StudyState',
+              description: 'An isolated StudyState learner workspace.',
+              templateKind: 'studystate',
+              declaredTemplateId: 'studystate',
+              declaredVersion: '0.6.0',
+              markerFiles: ['state/STUDYDD_MODE.yaml', 'state/STUDY_STATE.yaml'],
+              requestedCapabilities: ['conversation', 'progress_dashboard', 'goal_execution'],
+              trustedActionIds: ['stateport.template.studystate.inspect/v1'],
+              executionTrust: 'stateport_owned_adapter_only',
+              repositoryCommandsExecuted: false,
+              validation: { status: 'passed', issues: [] },
+            }
+          : {
+              formatVersion: 'stateport.template-adapter-match/v1',
+              adapterId: 'projectstate-v6',
+              applicationId: 'stateport.template.projectstate',
+              displayName: 'ProjectState',
+              description: 'An isolated ProjectState workspace.',
+              templateKind: 'projectstate_v6',
+              declaredTemplateId: 'projectstate',
+              declaredVersion: 'projectstate-template-v6',
+              markerFiles: ['PROJECT.md', 'STATE.yaml'],
+              requestedCapabilities: ['conversation', 'progress_dashboard', 'goal_execution', 'workbench'],
+              trustedActionIds: ['stateport.template.projectstate.inspect/v1'],
+              executionTrust: 'stateport_owned_adapter_only',
+              repositoryCommandsExecuted: false,
+              validation: { status: 'passed', issues: [] },
+            },
       }
     },
     register: async (input) => {
@@ -4001,6 +4034,12 @@ export class MockClient implements StatePortClient {
       const registration: RepositoryRegistration = { instanceId: id, conversationId, receiptId: receipt.id }
       return registration
     },
+    installTemplate: async (input) => this.repositoryImport.register({
+      candidateId: input.candidateId,
+      name: input.name,
+      inspectionDigest: input.inspection.inspectionDigest,
+      approved: input.approved,
+    }),
   }
 
   // ── platform deployments / authority / updater / preview routes ──────────────

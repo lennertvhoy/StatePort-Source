@@ -12,6 +12,7 @@ import zipfile
 import pytest
 import yaml
 import build_public_release_bundle as bundle
+import export_public_candidate as public_export
 import validate_candidate_provenance as provenance
 from build_public_release_bundle import (
     PublicReleaseBuildError,
@@ -77,8 +78,15 @@ def _locked_wheel_bytes(package: str, version: str) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as wheel:
         prefix = f"{package}-{version}.dist-info"
-        wheel.writestr(f"{prefix}/METADATA", f"Metadata-Version: 2.1\nName: {package}\nVersion: {version}\n")
-        wheel.writestr(f"{prefix}/WHEEL", "Wheel-Version: 1.0\nGenerator: synthetic\n")
+        for relative, content in (
+            (
+                f"{prefix}/METADATA",
+                f"Metadata-Version: 2.1\nName: {package}\nVersion: {version}\n",
+            ),
+            (f"{prefix}/WHEEL", "Wheel-Version: 1.0\nGenerator: synthetic\n"),
+        ):
+            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            wheel.writestr(info, content)
     return output.getvalue()
 
 
@@ -160,6 +168,73 @@ def _candidate(tmp_path: Path) -> tuple[Path, str, str]:
         "candidate",
     )
     return candidate, _git(candidate, "rev-parse", "HEAD"), _git(candidate, "rev-parse", "HEAD^{tree}")
+
+
+def test_source_validator_accepts_frozen_ancestor_and_attests_current_controller(
+    tmp_path: Path,
+) -> None:
+    candidate, payload_commit, payload_tree = _candidate(tmp_path)
+    (candidate / "CONTROL_STATE.md").write_text("later controller state\n", encoding="utf-8")
+    _git(candidate, "add", "CONTROL_STATE.md")
+    _git(
+        candidate,
+        "-c",
+        "user.name=StatePort test",
+        "-c",
+        "user.email=stateport-test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "controller state",
+    )
+    controller_commit = _git(candidate, "rev-parse", "HEAD")
+
+    tree, epoch, controller = bundle._validate_source(candidate, payload_commit)
+
+    assert tree == payload_tree
+    assert epoch > 0
+    assert controller["commit"] == controller_commit
+    assert controller["tree"] == _git(candidate, "rev-parse", "HEAD^{tree}")
+    assert controller["payloadRelationship"] == "payload-is-ancestor"
+    assert controller["buildTool"]["path"] == "scripts/build_public_release_bundle.py"
+
+
+def test_frozen_payload_clone_satisfies_nested_exact_head_verifier(tmp_path: Path) -> None:
+    candidate, payload_commit, payload_tree = _candidate(tmp_path)
+    (candidate / "CONTROL_STATE.md").write_text("later controller state\n", encoding="utf-8")
+    _git(candidate, "add", "CONTROL_STATE.md")
+    _git(
+        candidate,
+        "-c",
+        "user.name=StatePort test",
+        "-c",
+        "user.email=stateport-test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "controller state",
+    )
+    with pytest.raises(public_export.ExportError, match="HEAD does not equal"):
+        public_export._verify_source(candidate, payload_commit)
+
+    payload_source = bundle._clone_frozen_payload_source(
+        candidate, payload_commit, tmp_path / "payload-source"
+    )
+
+    observed_tree, _entries = public_export._verify_source(payload_source, payload_commit)
+    assert observed_tree == payload_tree
+    assert _git(payload_source, "rev-parse", "HEAD") == payload_commit
+    assert _git(payload_source, "status", "--porcelain=v1") == ""
+    assert _git(payload_source, "remote") == ""
+
+
+def test_source_validator_refuses_dirty_or_abbreviated_payload(tmp_path: Path) -> None:
+    candidate, payload_commit, _payload_tree = _candidate(tmp_path)
+    with pytest.raises(PublicReleaseBuildError, match="one exact full commit"):
+        bundle._validate_source(candidate, payload_commit[:12])
+    (candidate / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(PublicReleaseBuildError, match="worktree must be clean"):
+        bundle._validate_source(candidate, payload_commit)
 
 
 def test_execution_host_identity_contract_paths_are_public_policy_bound() -> None:

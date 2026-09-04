@@ -35,6 +35,14 @@ interface SourcePresentation {
 }
 
 function sourcePresentation(source: ApplicationSourceIdentity): SourcePresentation {
+  if (source.management === 'isolated_template') {
+    return {
+      label: 'StatePort-managed template copy',
+      state: 'success',
+      detail: 'This instance is an isolated copy of the committed Git snapshot. The original repository remains unchanged, and only reviewed StatePort actions can run.',
+    }
+  }
+
   if (
     source.ownership === 'user_owned_repository' ||
     source.sourceKind === 'local'
@@ -129,7 +137,11 @@ function IdentityFact({ label, value }: { label: string; value: string }) {
 
 function ExactSourceIdentity({ source }: { source: ApplicationSourceIdentity }) {
   const facts = [
+    source.management ? ['Management', source.management] : null,
     source.templateId ? ['Template ID', source.templateId] : null,
+    source.adapterId ? ['Adapter ID', source.adapterId] : null,
+    source.declaredTemplateId ? ['Declared template', source.declaredTemplateId] : null,
+    source.declaredVersion ? ['Declared version', source.declaredVersion] : null,
     source.version ? ['Version', source.version] : null,
     source.repository ? ['Repository', source.repository] : null,
     source.resolvedCommit ? ['Git commit', source.resolvedCommit] : null,
@@ -149,6 +161,9 @@ function ExactSourceIdentity({ source }: { source: ApplicationSourceIdentity }) 
     source.sourceAccessClass ? ['Effective access', source.sourceAccessClass] : null,
     source.productionInstallAllowed !== undefined
       ? ['Production install', source.productionInstallAllowed ? 'allowed' : 'blocked']
+      : null,
+    source.workingTreeChangesExcluded !== undefined
+      ? ['Working-tree edits', source.workingTreeChangesExcluded ? 'excluded' : 'included']
       : null,
   ].filter((fact): fact is [string, string] => fact !== null)
 

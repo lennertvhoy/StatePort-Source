@@ -33,9 +33,9 @@ override.
 
 ## Authority sources and storage
 
-Stable defaults and non-negotiable boundaries belong in `PROJECT_DNA.yaml` and
-the tracked policy. Current state records only non-sensitive grant identifiers,
-mode, and exceptional blocks. Complete active grants, revocations, pauses,
+Stable product boundaries belong in `PROJECT.md` and `AGENTS.md`; enforceable
+runtime defaults belong in the tracked policy. Complete active grants,
+revocations, pauses,
 scope-closure markers, and action receipts live below
 `$XDG_STATE_HOME/stateport/authority/repositories/<repository-key>` with private
 directory and file modes. Secret values and sensitive capability bindings do

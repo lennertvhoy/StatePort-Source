@@ -88,16 +88,12 @@ FORBIDDEN_PUBLIC_PATHS = frozenset(
         "BACKLOG.md",
         "HANDOFF_BL_AI_VERTICAL_002.md",
         "LICENSE_DECISION.md",
-        "NEXT_ACTIONS.md",
-        "PROJECT_ADAPTER.yaml",
-        "PROJECT_DNA.yaml",
-        "PROJECT_STATE.yaml",
-        "STATUS.md",
+        "STATE.yaml",
         "WORKLOG.md",
         "config/public-release-policy.yaml",
     }
 )
-FORBIDDEN_PUBLIC_PREFIXES = ("docs/evidence/", "docs/release/", "release/")
+FORBIDDEN_PUBLIC_PREFIXES = ("docs/evidence/", "docs/release/", "evidence/", "release/")
 CONTROLLED_GIT_CWD = Path("/")
 GIT_SAFE_OPTIONS = (
     "-c",

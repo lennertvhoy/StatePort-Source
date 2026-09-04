@@ -1,10 +1,9 @@
 # Roadmap
 
 > Where StatePort is, what comes next, and what this document deliberately
-> does not promise. Current truth lives in `STATUS.md`,
-> `PROJECT_STATE.yaml`, and `NEXT_ACTIONS.md`; requirement-level detail lives
-> in `BACKLOG.md` and `docs/MASTER_COVERAGE_LEDGER.md`. This map is not
-> acceptance evidence.
+> does not promise. This is a historical planning map whose dated sections do
+> not override `PROJECT.md`, `STATE.yaml`, or the active slice evidence. It is
+> not current status or acceptance evidence.
 
 ## Where we are (2026-08-02)
 

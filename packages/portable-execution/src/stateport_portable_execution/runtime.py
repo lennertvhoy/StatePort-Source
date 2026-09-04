@@ -1586,6 +1586,48 @@ class PortableExecutionService:
         if not isinstance(profile, str) or not profile:
             raise PortableExecutionError("application source profile is missing")
         try:
+            if profile.startswith("managed-template:"):
+                profile_adapter = profile.removeprefix("managed-template:")
+                source = entry.get("observedSource")
+                adapter_id = (
+                    str(source.get("adapterId", ""))
+                    if isinstance(source, Mapping)
+                    else ""
+                )
+                configured_adapter = descriptor.get("managedTemplateAdapter")
+                configured_adapters = descriptor.get("managedTemplateAdapters")
+                adapter_allowed = (
+                    configured_adapter == adapter_id == profile_adapter
+                    or (
+                        profile_adapter == "generic"
+                        and isinstance(configured_adapters, list)
+                        and adapter_id in configured_adapters
+                    )
+                )
+                if not adapter_id or not adapter_allowed:
+                    raise PortableExecutionError("managed template adapter profile is invalid")
+                try:
+                    managed_root, _match = self.app.managed_template_binding(
+                        instance_id,
+                        adapter_id=adapter_id,
+                        application_id=str(entry.get("applicationId", "")),
+                    )
+                except AppError as exc:
+                    raise PortableExecutionError(
+                        "managed template identity is unavailable"
+                    ) from exc
+                descriptor_path = descriptor.get("descriptorPath")
+                if not isinstance(descriptor_path, str):
+                    raise PortableExecutionError("managed template descriptor path is missing")
+                source_root = (self.repo_root / descriptor_path).parent.resolve()
+                trusted_root = (self.repo_root / "fixtures/template-adapters").resolve()
+                try:
+                    source_root.relative_to(trusted_root)
+                except ValueError as exc:
+                    raise PortableExecutionError(
+                        "managed template adapter escaped the trusted registry"
+                    ) from exc
+                return managed_root, source_root, descriptor
             if profile.startswith("fixture:"):
                 descriptor_path = descriptor.get("descriptorPath")
                 if not isinstance(descriptor_path, str):

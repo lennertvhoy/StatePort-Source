@@ -16,10 +16,14 @@ def discover_application_descriptors(root: Path) -> list[dict[str, Any]]:
     """
 
     fixture_root = root / "fixtures" / "apps"
+    adapter_root = root / "fixtures" / "template-adapters"
     descriptors: list[dict[str, Any]] = []
     if not fixture_root.is_dir():
         return descriptors
-    for path in sorted(fixture_root.glob("*/application.yaml")):
+    paths = list(fixture_root.glob("*/application.yaml"))
+    if adapter_root.is_dir() and not adapter_root.is_symlink():
+        paths.extend(adapter_root.glob("*.application.yaml"))
+    for path in sorted(paths):
         value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         if not isinstance(value, dict) or value.get("formatVersion") != "stateport.application/v1":
             raise ValueError(f"invalid application descriptor: {path}")
@@ -27,4 +31,7 @@ def discover_application_descriptors(root: Path) -> list[dict[str, Any]]:
             raise ValueError(f"application descriptor lacks applicationId: {path}")
         value["descriptorPath"] = path.relative_to(root).as_posix()
         descriptors.append(value)
+    identities = [str(item["applicationId"]) for item in descriptors]
+    if len(identities) != len(set(identities)):
+        raise ValueError("application descriptor identities are ambiguous")
     return descriptors

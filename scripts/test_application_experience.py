@@ -251,10 +251,10 @@ def test_atm10_guide_is_a_conversation_only_application() -> None:
 def test_functionality_preservation_manifest_covers_routes_buttons_apis_and_aliases() -> None:
     counts = validate()
     assert counts == {
-        "descriptors": 6,
+        "descriptors": 9,
         "routes": 15,
         "controls": 60,
-        "apis": 139,
+        "apis": 141,
         "capabilities": 18,
         "aliases": 10,
         "dynamicControls": 12,

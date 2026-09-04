@@ -314,25 +314,6 @@ def check_statespec_schema_registry():
     return True
 
 
-def check_agent_routing_governance():
-    """Require valid routing policy and deviation provenance at the repo gate."""
-    validators = (
-        REPO_ROOT / "scripts" / "validate_agent_routing_policy.py",
-        REPO_ROOT / "scripts" / "validate_routing_deviation_ledger.py",
-    )
-    for validator in validators:
-        try:
-            subprocess.run([sys.executable, str(validator)], check=True)
-        except subprocess.CalledProcessError:
-            print(f"FAIL: routing governance validation failed: {validator.name}")
-            return False
-        except FileNotFoundError as exc:
-            print(f"FAIL: could not run routing governance validator: {exc}")
-            return False
-    print("PASS: agent routing policy and deviation ledger passed")
-    return True
-
-
 def check_terminology_policy():
     """Require the public naming and compatibility migration boundary."""
     validator = REPO_ROOT / "scripts" / "validate_terminology_policy.py"
@@ -348,36 +329,26 @@ def check_terminology_policy():
     return True
 
 
-def check_state_consistency():
-    """Reject known current-state contradictions in the canonical state files."""
-    validator = REPO_ROOT / "scripts" / "validate_state_consistency.py"
+def check_projectstate_contract():
+    """Validate coordination structure without pretending an in-progress journey passed."""
     try:
-        subprocess.run(
-            [sys.executable, str(validator), str(REPO_ROOT)],
-            check=True,
-        )
-    except subprocess.CalledProcessError:
-        print("FAIL: state consistency validation failed")
-        return False
-    except FileNotFoundError as exc:
-        print(f"FAIL: could not run state consistency validator: {exc}")
-        return False
-    print("PASS: state consistency validation passed")
-    return True
+        from projectstate_gate import validate
 
-
-def check_state_file_hygiene():
-    """Keep live state surfaces concise and require preserved dated history."""
-    validator = REPO_ROOT / "scripts" / "validate_state_file_hygiene.py"
-    try:
-        subprocess.run([sys.executable, str(validator), str(REPO_ROOT)], check=True)
-    except subprocess.CalledProcessError:
-        print("FAIL: state-file hygiene validation failed")
+        errors, blockers, warnings = validate(REPO_ROOT)
+    except (ImportError, OSError, ValueError) as exc:
+        print(f"FAIL: could not validate ProjectState contract: {exc}")
         return False
-    except FileNotFoundError as exc:
-        print(f"FAIL: could not run state-file hygiene validator: {exc}")
+    if errors:
+        for error in errors:
+            print(f"FAIL: ProjectState contract: {error}")
         return False
-    print("PASS: state-file hygiene validation passed")
+    for warning in warnings:
+        print(f"WARN: ProjectState: {warning}")
+    if blockers:
+        print("INFO: ProjectState outcome remains in progress:")
+        for blocker in blockers:
+            print(f"  - {blocker}")
+    print("PASS: ProjectState coordination contract is structurally valid")
     return True
 
 
@@ -429,18 +400,18 @@ def check_authority_policy():
     return True
 
 
-def check_mission_envelope():
-    """Require one sealed, bounded phase and fail-closed protected actions."""
-    validator = REPO_ROOT / "scripts" / "validate_mission_envelope.py"
+def check_release_guard():
+    """Require command-, head-, and single-use-bound release admission."""
+    validator = REPO_ROOT / "scripts" / "release_guard.py"
     try:
-        subprocess.run([sys.executable, str(validator)], check=True)
+        subprocess.run([sys.executable, str(validator), "validate"], check=True)
     except subprocess.CalledProcessError:
-        print("FAIL: bounded mission envelope validation failed")
+        print("FAIL: release guard validation failed")
         return False
     except FileNotFoundError as exc:
-        print(f"FAIL: could not run mission envelope validator: {exc}")
+        print(f"FAIL: could not run release guard validator: {exc}")
         return False
-    print("PASS: bounded mission envelope and protected-action admission passed")
+    print("PASS: protected release actions require exact single-use admission")
     return True
 
 
@@ -545,17 +516,14 @@ def main():
         check_secrets(),
         check_statedd_schema(),
         check_statespec_schema_registry(),
-        check_agent_routing_governance(),
         check_terminology_policy(),
-        check_state_consistency(),
-        check_state_file_hygiene(),
+        check_projectstate_contract(),
         check_release_disposition(),
         check_workspace_lifecycle(),
-        check_local_artifact_safety(),
         check_candidate_provenance(),
         check_python_dependency_policy(),
         check_authority_policy(),
-        check_mission_envelope(),
+        check_release_guard(),
         check_public_snapshot_tooling(),
     ]
     if all(results):

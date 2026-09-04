@@ -5,8 +5,8 @@
 This is a dated historical ledger. The opening paragraph and the `220`-test
 count below describe the 2026-07-12 freeze only; they are not current-head
 status. Remote CI later resumed and passed the six-job exact-head validation
-for private Slice A PRs #29 and #30. Current truth and current suite results
-live in `STATUS.md`, `PROJECT_STATE.yaml`, and `docs/EVIDENCE_LOG.md`.
+for private Slice A PRs #29 and #30. Current outcome and observed status live
+in `PROJECT.md`, `STATE.yaml`, and the active slice's bounded evidence summary.
 
 At this 2026-07-12 freeze, no remote acceptance freeze existed. The local lifecycle, StateIR/StatePack, governed API, bearer/pinned-offline-OIDC binding, governance primitives, governed echo-run contract, approval-bound queue, durable usage ledger, kernel-backed lease, isolated worker staging, explicitly enabled immutable-image executor, disabled-by-default Compose worker, StateBench contracts, contribution bundle, container contract, GUI, and Compose-shape candidates passed that slice's complete 220-test suite and repository validation. Remote CI was then unverified because the observed workflow was blocked before steps by account billing limits. Hosted identity lifecycle, automatic upgrade apply, migration execution, arbitrary mutation, distributed worker execution, live benchmark evidence, and performance claims remained out of scope for that freeze.
 

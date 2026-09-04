@@ -70,7 +70,7 @@ from validate_candidate_provenance import (  # noqa: E402
     CandidateProvenanceError,
     validate_contract as validate_candidate_contract,
 )
-from validate_mission_envelope import require_guard  # noqa: E402
+from release_guard import require_guard  # noqa: E402
 from build_release_images import (  # noqa: E402
     ReleaseBuildError,
     oci_archive_manifest_bytes,

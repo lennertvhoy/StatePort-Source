@@ -50,6 +50,7 @@ import type {
   OperationRecord,
   Receipt,
   RecoveryStatus,
+  RepositoryInspection,
   RenameFileResult,
   RestoreApproval,
   RestorePlan,
@@ -556,6 +557,20 @@ async function externalInstanceIdForInspection(inspectionDigest: string): Promis
   return `ins-${hex}`
 }
 
+async function managedTemplateInstanceIdForInspection(inspectionDigest: string): Promise<string> {
+  if (!crypto.subtle) {
+    throw new ClientError(
+      'unavailable',
+      'This browser context cannot derive a deterministic template identity',
+      { detail: 'Template import requires WebCrypto SHA-256 (secure context).' },
+    )
+  }
+  const canonical = `stateport:managed-template:${inspectionDigest}`
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical))
+  const hex = [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join('')
+  return `template-${hex}`
+}
+
 export class HttpCatalogClient implements CatalogClient {
   private readonly transport: HttpTransport
 
@@ -737,6 +752,75 @@ export class HttpRepositoryImportClient implements RepositoryImportClient {
       inspectionDigest: input.inspectionDigest,
       instanceId,
     })
+  }
+
+  async installTemplate(input: {
+    candidateId: string
+    name: string
+    inspection: RepositoryInspection
+    approved: boolean
+  }) {
+    const template = input.inspection.template
+    if (!input.approved) {
+      throw new ClientError('validation', 'Template installation requires an explicit approval')
+    }
+    if (!template || template.validation.status !== 'passed') {
+      throw new ClientError('validation', 'No validated template adapter is available for this repository')
+    }
+    const actorId = await this.currentActorId()
+    const instanceId = await managedTemplateInstanceIdForInspection(input.inspection.inspectionDigest)
+    const planPayload = await this.transport.request(endpoints.templateImportPlan, {
+      method: 'POST',
+      body: {
+        candidateId: input.candidateId,
+        inspectionDigest: input.inspection.inspectionDigest,
+        instanceId,
+        name: input.name,
+      },
+      schema: unknownPayload,
+    })
+    const plan = z
+      .object({
+        formatVersion: z.literal('stateport.template-import-plan/v1'),
+        operation: z.literal('template-import'),
+        candidateId: z.literal(input.candidateId),
+        inspectionDigest: z.literal(input.inspection.inspectionDigest),
+        instanceId: z.literal(instanceId),
+        name: z.string().min(1),
+        planDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+        template: z.object({
+          adapterId: z.literal(template.adapterId),
+          applicationId: z.literal(template.applicationId),
+        }).passthrough(),
+      })
+      .passthrough()
+      .parse(planPayload)
+    const resultPayload = await this.transport.request(endpoints.templateImportInstall, {
+      method: 'POST',
+      body: {
+        plan,
+        approval: { decision: 'approve', actorId, planDigest: plan.planDigest },
+      },
+      schema: unknownPayload,
+    })
+    const result = z
+      .object({
+        formatVersion: z.literal('stateport.template-install-result/v1'),
+        instanceId: z.literal(instanceId),
+        applicationId: z.literal(template.applicationId),
+        conversationId: z.string().min(1),
+        receiptId: z.string().min(1),
+        receiptDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+        sourceRepositoryMutated: z.literal(false),
+        managedCopyCreated: z.literal(true),
+      })
+      .passthrough()
+      .parse(resultPayload)
+    return {
+      instanceId: result.instanceId,
+      conversationId: result.conversationId,
+      receiptId: result.receiptId,
+    }
   }
 }
 

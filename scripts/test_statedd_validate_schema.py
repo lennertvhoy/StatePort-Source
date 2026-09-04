@@ -48,7 +48,7 @@ def test_root_passes() -> None:
     run([str(ROOT)], expect_success=True)
 
 
-def test_missing_project_state_fails() -> None:
+def test_missing_product_contracts_fail() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         run([tmpdir], expect_success=False)
 
@@ -95,55 +95,22 @@ def test_copy_repo_to_excludes_scratch_and_destination() -> None:
         assert list(destination.rglob("repo")) == []
 
 
-def test_mode_mismatch_fails() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        repo_copy = Path(tmpdir) / "repo"
-        _copy_repo_to(repo_copy)
-
-        agents_path = repo_copy / "AGENTS.md"
-        agents_text = agents_path.read_text(encoding="utf-8")
-        agents_text = agents_text.replace(
-            "- **Mode:** operating", "- **Mode:** bootstrap"
-        )
-        agents_path.write_text(agents_text, encoding="utf-8")
-
-        result = run([str(repo_copy)], cwd=repo_copy, expect_success=False)
-        assert "mode mismatch:" in result.stdout, result.stdout
-
-
-def test_phase_mismatch_fails() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        repo_copy = Path(tmpdir) / "repo"
-        _copy_repo_to(repo_copy)
-
-        status_path = repo_copy / "STATUS.md"
-        status_text = status_path.read_text(encoding="utf-8")
-        mutated = status_text.replace("**Phase:** operating;", "**Phase:** bootstrap_complete;")
-        # A stale marker must fail loudly here instead of silently passing the
-        # unchanged copy through the validator.
-        assert mutated != status_text, "STATUS.md phase marker drifted; update this fixture"
-        status_path.write_text(mutated, encoding="utf-8")
-
-        result = run([str(repo_copy)], cwd=repo_copy, expect_success=False)
-        assert "phase mismatch:" in result.stdout, result.stdout
-
-
-def test_missing_agents_md_fails() -> None:
+def test_coordination_files_are_not_product_schema_inputs() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_copy = Path(tmpdir) / "repo"
         _copy_repo_to(repo_copy)
         (repo_copy / "AGENTS.md").unlink()
-        result = run([str(repo_copy)], cwd=repo_copy, expect_success=False)
-        assert "AGENTS.md" in result.stdout, result.stdout
-
-
-def test_missing_status_md_fails() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        repo_copy = Path(tmpdir) / "repo"
-        _copy_repo_to(repo_copy)
-        (repo_copy / "STATUS.md").unlink()
-        result = run([str(repo_copy)], cwd=repo_copy, expect_success=False)
-        assert "STATUS.md" in result.stdout, result.stdout
+        for name in (
+            "PROJECT_STATE.yaml",
+            "PROJECT_DNA.yaml",
+            "PROJECT_ADAPTER.yaml",
+            "STATUS.md",
+            "NEXT_ACTIONS.md",
+        ):
+            path = repo_copy / name
+            if path.exists():
+                path.unlink()
+        run([str(repo_copy)], cwd=repo_copy, expect_success=True)
 
 
 # ---------------------------------------------------------------------------
@@ -350,11 +317,8 @@ def test_check_secrets_env_and_extensionless() -> None:
 
 if __name__ == "__main__":
     test_root_passes()
-    test_missing_project_state_fails()
-    test_mode_mismatch_fails()
-    test_phase_mismatch_fails()
-    test_missing_agents_md_fails()
-    test_missing_status_md_fails()
+    test_missing_product_contracts_fail()
+    test_coordination_files_are_not_product_schema_inputs()
     test_additional_properties_false_without_properties()
     test_main_py_does_not_mutate_sys_path_on_import()
     test_run_instance_cmd_catches_unexpected_exception()

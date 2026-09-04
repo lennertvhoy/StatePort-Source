@@ -54,6 +54,8 @@ def _canonical_digest(value: object) -> str:
 SECURED_POST_ROUTES = (
     ("/v1/repository-import/inspect", "file_workspace_access_denied"),
     ("/v1/repository-import/register", "file_workspace_access_denied"),
+    ("/v1/template-import/plan", "file_workspace_access_denied"),
+    ("/v1/template-import/install", "file_workspace_access_denied"),
     ("/v1/instances/security-fixture/infrastructure/plan", "file_workspace_access_denied"),
     ("/v1/instances/security-fixture/infrastructure/approve", "file_workspace_access_denied"),
     ("/v1/instances/security-fixture/infrastructure/run", "file_workspace_access_denied"),

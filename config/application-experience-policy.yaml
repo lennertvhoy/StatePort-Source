@@ -41,6 +41,28 @@ applicationGrants:
     - cto_orchestration
     - benchmark_evidence
     - backup
+  stateport.template.projectstate:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+    - file_viewer
+    - workbench
+    - terminal
+    - editor
+    - backup
+  stateport.template.studystate:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+  stateport.template.generic:
+    - conversation
+    - progress_dashboard
+    - goal_execution
+    - proactive_notifications
+    - file_viewer
+    - backup
   nixos-infrastructure:
     - conversation
     - progress_dashboard

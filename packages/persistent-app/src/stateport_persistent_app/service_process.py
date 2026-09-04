@@ -1377,6 +1377,119 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.server.repository_inspector.inspect_public_url(body["url"])
                 self._send(200, {"ok": True, "result": result})
                 return
+            if path == "/v1/template-import/plan":
+                self._mutation_security("template import planning")
+                self._strict_body(
+                    body,
+                    {"candidateId", "inspectionDigest", "instanceId", "name"},
+                )
+                candidate_id = body.get("candidateId")
+                inspection_digest = body.get("inspectionDigest")
+                instance_id = body.get("instanceId")
+                name = body.get("name")
+                if not all(
+                    isinstance(value, str) and value
+                    for value in (
+                        candidate_id,
+                        inspection_digest,
+                        instance_id,
+                        name,
+                    )
+                ):
+                    raise RepositoryImportError(
+                        "template_import_invalid",
+                        "template import planning details are invalid",
+                    )
+                inspection = self.server.repository_inspector.inspect_candidate(
+                    candidate_id
+                )
+                if inspection.get("inspectionDigest") != inspection_digest:
+                    raise RepositoryImportError(
+                        "repository_inspection_stale",
+                        "repository identity changed; inspect it again",
+                    )
+                result = app.plan_template_import(
+                    inspection,
+                    candidate_id=candidate_id,
+                    instance_id=instance_id,
+                    name=name,
+                )
+                self._send(200, {"ok": True, "result": result})
+                return
+            if path == "/v1/template-import/install":
+                self._mutation_security("template import installation")
+                self._strict_body(body, {"plan", "approval"})
+                plan = body.get("plan")
+                approval = body.get("approval")
+                if not isinstance(plan, dict) or not isinstance(approval, dict):
+                    raise RepositoryImportError(
+                        "template_import_invalid",
+                        "template import plan and approval are required",
+                    )
+                candidate_id = plan.get("candidateId")
+                if not isinstance(candidate_id, str):
+                    raise RepositoryImportError(
+                        "template_import_invalid",
+                        "template import candidate identity is invalid",
+                    )
+                inspection = self.server.repository_inspector.inspect_candidate(
+                    candidate_id
+                )
+                source_path = (
+                    self.server.repository_inspector.policy.resolve_candidate(
+                        candidate_id
+                    )
+                )
+                result = app.install_template(
+                    plan,
+                    approval,
+                    source_root=source_path,
+                    current_inspection=inspection,
+                    actor_id=self.server.actor_id,
+                )
+                instance_id = str(result["instanceId"])
+                grant = self.server.ensure_instance_capability_grant(instance_id)
+                thread, _participant_id, _binding = (
+                    self.server.conversation_for_instance(instance_id)
+                )
+                activity_receipt = {
+                    "formatVersion": "stateport.template-import-activity/v1",
+                    "receiptId": "template-import-"
+                    + str(result["receiptDigest"])[7:31],
+                    "receiptType": "stateport.template-import-activity/v1",
+                    "action": "template.import",
+                    "status": "completed",
+                    "sourceKind": "managed_template_import",
+                    "createdAt": datetime.now(timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "instanceId": instance_id,
+                    "applicationId": result["applicationId"],
+                    "templateAdapterId": result["template"]["adapterId"],
+                    "source": result["source"],
+                    "installReceiptDigest": result["receiptDigest"],
+                    "capabilityGrantDigest": grant.get("grantDigest"),
+                    "conversationId": thread.conversation_id,
+                    "ownership": "StatePort-managed isolated copy; source repository unchanged",
+                }
+                self.server.activity_receipts.record_receipt(
+                    instance_id=instance_id,
+                    receipt=activity_receipt,
+                )
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "result": {
+                            **result,
+                            "grant": grant,
+                            "conversationId": thread.conversation_id,
+                            "receiptId": activity_receipt["receiptId"],
+                        },
+                    },
+                )
+                return
             if path == "/v1/repository-import/register":
                 self._mutation_security("repository registration")
                 self._strict_body(body, {"candidateId", "inspectionDigest", "instanceId", "name", "approval"})
@@ -3712,6 +3825,8 @@ class AppServer(ThreadingHTTPServer):
         actor_permissions = self.experience_policy.permissions_for(self.actor_role)
         canonical_source = self.source_app().canonical_source_registry()[0]
         for descriptor in self.execution.applications():
+            if descriptor.get("catalogVisible") is False:
+                continue
             application_id = str(descriptor.get("applicationId", ""))
             eligibility = self.execution.browser_fixture_install_eligibility(application_id)
             application_identity = self.execution.application_identity(application_id)

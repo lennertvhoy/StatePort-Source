@@ -803,7 +803,11 @@ const applicationSourceWire = z
   .object({
     formatVersion: z.string().nullish(),
     kind: z.string().nullish(),
+    management: z.literal('isolated_template').nullish(),
     templateId: provenanceIdentifierWire.nullish(),
+    adapterId: provenanceIdentifierWire.nullish(),
+    declaredTemplateId: provenanceIdentifierWire.nullish(),
+    declaredVersion: sourceVersionWire.nullish(),
     repository: z.string().min(1).max(512).nullish(),
     requestedRef: z.string().min(1).max(256).nullish(),
     resolvedCommit: z.string().min(1).max(160).nullish(),
@@ -818,6 +822,7 @@ const applicationSourceWire = z
     sourceKind: provenanceIdentifierWire.nullish(),
     ownership: provenanceIdentifierWire.nullish(),
     version: sourceVersionWire.nullish(),
+    workingTreeChangesExcluded: z.boolean().nullish(),
     // Existing user-owned repository observation fields.
     source: z.string().min(1).max(512).nullish(),
     remote: z.string().min(1).max(512).nullish(),
@@ -1066,7 +1071,11 @@ function mapApplicationProvenance(
   }
 
   const source: ApplicationProvenance['source'] = {
+    management: sourcePayload.management ?? undefined,
     templateId: sourcePayload.templateId ?? undefined,
+    adapterId: sourcePayload.adapterId ?? undefined,
+    declaredTemplateId: sourcePayload.declaredTemplateId ?? undefined,
+    declaredVersion: sourcePayload.declaredVersion ?? undefined,
     repository: sourcePayload.repository
       ? safeSourceRepository(sourcePayload.repository)
       : undefined,
@@ -1081,6 +1090,7 @@ function mapApplicationProvenance(
     version,
     productionEligible: sourcePayload.productionEligible ?? undefined,
     productionInstallAllowed: sourcePayload.productionInstallAllowed ?? undefined,
+    workingTreeChangesExcluded: sourcePayload.workingTreeChangesExcluded ?? undefined,
     compatibilityRevision,
     compatibilityTree,
   }
@@ -4073,6 +4083,59 @@ export function mapRepositoryInspection(payload: unknown): RepositoryInspection 
       })
     }
   }
+  let template: RepositoryInspection['template']
+  if (payload.template !== null && payload.template !== undefined) {
+    if (!isRecord(payload.template)) failClosed('template adapter result was not an object')
+    const value = payload.template
+    const validation = isRecord(value.validation) ? value.validation : undefined
+    const issues = Array.isArray(validation?.issues)
+      ? validation.issues.flatMap((issue) =>
+          isRecord(issue) && typeof issue.code === 'string' && typeof issue.message === 'string'
+            ? [{ code: issue.code, message: issue.message }]
+            : [],
+        )
+      : []
+    if (validation?.status === 'passed') {
+      if (
+        value.formatVersion !== 'stateport.template-adapter-match/v1' ||
+        typeof value.adapterId !== 'string' ||
+        typeof value.applicationId !== 'string' ||
+        typeof value.displayName !== 'string' ||
+        typeof value.description !== 'string' ||
+        typeof value.templateKind !== 'string' ||
+        !Array.isArray(value.markerFiles) ||
+        !value.markerFiles.every((item) => typeof item === 'string') ||
+        !Array.isArray(value.requestedCapabilities) ||
+        !value.requestedCapabilities.every((item) => typeof item === 'string') ||
+        !Array.isArray(value.trustedActionIds) ||
+        !value.trustedActionIds.every((item) => typeof item === 'string') ||
+        value.executionTrust !== 'stateport_owned_adapter_only' ||
+        value.repositoryCommandsExecuted !== false
+      ) {
+        failClosed('template adapter result was incomplete')
+      }
+      template = {
+        formatVersion: value.formatVersion,
+        adapterId: value.adapterId,
+        applicationId: value.applicationId,
+        displayName: value.displayName,
+        description: value.description,
+        templateKind: value.templateKind,
+        declaredTemplateId:
+          typeof value.declaredTemplateId === 'string' ? value.declaredTemplateId : undefined,
+        declaredVersion:
+          typeof value.declaredVersion === 'string' ? value.declaredVersion : undefined,
+        markerFiles: value.markerFiles,
+        requestedCapabilities: value.requestedCapabilities,
+        trustedActionIds: value.trustedActionIds,
+        executionTrust: value.executionTrust,
+        repositoryCommandsExecuted: false,
+        validation: { status: 'passed', issues },
+      }
+    } else if (validation?.status !== 'failed') {
+      failClosed('template adapter validation status was missing')
+    }
+  }
   return {
     candidateId: typeof payload.candidateId === 'string' ? payload.candidateId : undefined,
     source: typeof payload.source === 'string' ? payload.source : '',
@@ -4081,6 +4144,7 @@ export function mapRepositoryInspection(payload: unknown): RepositoryInspection 
     headCommit: typeof identity.headCommit === 'string' ? identity.headCommit : '',
     dirty: identity.dirty === true,
     stateSpec: payload.stateSpec,
+    template,
     findings,
     mutated: typeof payload.mutated === 'boolean' ? payload.mutated : undefined,
   }

@@ -1,5 +1,5 @@
 formatVersion: stateport.container-build-inputs/v1
-resolvedOn: "2026-08-29"
+resolvedOn: "2026-09-04"
 platform: linux/amd64
 
 builder:
@@ -181,20 +181,20 @@ upstreamTools:
 
 browserAssets:
   chrome-for-testing:
-    version: 152.0.7977.65
-    uri: https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.65/linux64/chrome-linux64.zip
-    digest: sha256:94d9948bdeb73ded607ae7ea0c0f19fc0b36387b79bd1f5699402de835a6801c
+    version: 152.0.7977.82
+    uri: https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chrome-linux64.zip
+    digest: sha256:0704631fb3e4f741092e08f55272f90abc3e307f991f05f332924364415b02e0
     installPath: /ms-playwright/chromium-1234/chrome-linux64
 
 definitions:
   apps/api/Dockerfile: sha256:2e34fd416b94a84adcd8c27315dc24eeab3a38ca122d59d3a91b6c92f28f7d38
-  apps/web/Dockerfile: sha256:bdbab4e4091d9e84287dd32e612ee40ff0bf4b7ff9b04d8d4303a1ce0392fcb5
+  apps/web/Dockerfile: sha256:b19e5ea3d4908b9a797fe26a1c9d3a3e313cc08b141ab308d0350f39e5b1dbc9
   apps/worker/Dockerfile: sha256:949a106e76d6cb0016783274f80f305b801c5424024c11660bb595989b3f991f
   apps/runner/Dockerfile: sha256:2895b2ee36cebb8b9133fa930b6ef3cc88d1508dad62fe19aaccca2abdbd49a3
   images/stateport-dev-workspace/Containerfile: sha256:a7699a362e502d32281db0a6c05c5dca9369451d438297621b3e47f0232a69e8
   images/stateport-execution-host/Containerfile: sha256:83554c3ee7077e14f18fc856526bc63fca06dbbb55378feadeb63cb9c5af4b64
-  images/stateport-playwright/Containerfile: sha256:6266c60dc0e12e8a0f0cf6bf25bedb21decc255c8ed21b5031b6e78e6e6b5cf5
-  images/packaged-content.v1.yaml: sha256:afd3c567090cd6610cc177f218b172fd3ddbc2ccfd13e3d063d09019504ec915
+  images/stateport-playwright/Containerfile: sha256:c0c36820945e04b5eb451a02e7ae7d6ce939ca76a58c5ee3ecd606cd2eae8c28
+  images/packaged-content.v1.yaml: sha256:8ff27e398c16fb8cd103f70f59b136691454a414b3502b0c09a99c2046888878
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
 
 requirements:

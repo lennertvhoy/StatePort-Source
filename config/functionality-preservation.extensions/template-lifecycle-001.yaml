@@ -1,0 +1,23 @@
+formatVersion: stateport.functionality-preservation-extension/v1
+scope: template-lifecycle-001
+apiOperations:
+  - id: post-template-import-plan
+    method: POST
+    path: /v1/template-import/plan
+    classification: application-native
+    status: foundation
+    migrationBehavior: Plans an isolated managed copy bound to one inspected Git commit, tree, adapter, destination, and authenticated actor without mutating the source repository.
+    test: scripts/test_template_import_lifecycle.py
+    evidence:
+      file: packages/persistent-app/src/stateport_persistent_app/service_process.py
+      contains: 'if path == "/v1/template-import/plan"'
+  - id: post-template-import-install
+    method: POST
+    path: /v1/template-import/install
+    classification: application-native
+    status: foundation
+    migrationBehavior: Materializes only committed regular files into StatePort-managed storage, creates an independent Git base and incarnation marker, and registers trusted StatePort-owned actions after exact approval.
+    test: scripts/test_template_import_lifecycle.py
+    evidence:
+      file: packages/persistent-app/src/stateport_persistent_app/service_process.py
+      contains: 'if path == "/v1/template-import/install"'

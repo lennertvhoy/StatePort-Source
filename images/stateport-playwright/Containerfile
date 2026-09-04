@@ -51,19 +51,19 @@ RUN export HOME=/tmp/stateport-build-home \
 # only that browser payload with the digest-pinned scanner-fixed Linux Chrome
 # for Testing build qualified against the exact Playwright runtime.
 RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
-       -o /tmp/chrome-linux64-152.0.7977.65.zip \
-       https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.65/linux64/chrome-linux64.zip \
-    && echo "94d9948bdeb73ded607ae7ea0c0f19fc0b36387b79bd1f5699402de835a6801c  /tmp/chrome-linux64-152.0.7977.65.zip" | sha256sum -c - \
+       -o /tmp/chrome-linux64-152.0.7977.82.zip \
+       https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chrome-linux64.zip \
+    && echo "0704631fb3e4f741092e08f55272f90abc3e307f991f05f332924364415b02e0  /tmp/chrome-linux64-152.0.7977.82.zip" | sha256sum -c - \
     && apt-get update \
     && apt-get install --no-install-recommends -y unzip=6.0-28ubuntu4.1 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /var/log/apt/history.log /var/log/apt/term.log /var/log/apt/eipp.log.xz \
       /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
     && rm -rf /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
-    && unzip -q /tmp/chrome-linux64-152.0.7977.65.zip -d /tmp \
+    && unzip -q /tmp/chrome-linux64-152.0.7977.82.zip -d /tmp \
     && mv /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
     && test -x /ms-playwright/chromium-1234/chrome-linux64/chrome \
-    && rm -f /tmp/chrome-linux64-152.0.7977.65.zip
+    && rm -f /tmp/chrome-linux64-152.0.7977.82.zip
 
 ENV HOME=/home/stateport \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
