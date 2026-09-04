@@ -804,6 +804,7 @@ def test_plan_binds_identity_contract_subids_and_steps() -> None:
     assert "d /run/stateport/execution-control 2750 stateport-exec stateport-execution-control -\n" in tmpfiles["content"]
     quadlets = [write for write in plan["writes"] if write["path"].endswith(".container")]
     assert len(quadlets) == 1 and quadlets[0]["owner"] == "stateport-exec:stateport-exec"
+    assert "PodmanArgs=--runtime=/usr/libexec/stateport/crun" in quadlets[0]["content"]
     assert "PodmanArgs=--group-add=keep-groups" in quadlets[0]["content"]
     assert "GroupAdd=" not in quadlets[0]["content"]
     assert "UserNS=keep-id:uid=65532,gid=65532" in quadlets[0]["content"]
@@ -851,6 +852,45 @@ def test_plan_binds_identity_contract_subids_and_steps() -> None:
     assert "/usr/bin/env" in exec_probe and "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/65532/bus" in exec_probe
     # Deterministic for a fixed verified release.
     assert _plan()["planDigest"] == plan["planDigest"]
+
+
+def test_plan_provisions_template_import_root_for_bound_installer_client() -> None:
+    document = fixtures.release_index()
+    target = deepcopy(document["signed"]["targets"][0])
+    web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
+    web["readOnlyHostMounts"] = [
+        {
+            "name": "template-sources",
+            "hostPath": "/var/lib/stateport/imports",
+            "mountPath": "/imports",
+            "purpose": "template-sources",
+            "sourceOwner": "installer-client",
+            "sourceGroup": "stateport-execution-control",
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+        }
+    ]
+    plan = prov.render_provisioning_plan(
+        target,
+        document["signed"]["images"],
+        verification_basis="signature-verified-test",
+        client_user="operator",
+        client_uid=1000,
+        client_gid=1000,
+    )
+    assert plan["directories"][-2:] == [
+        {"path": "/var/lib/stateport", "mode": "0755", "owner": "root:root"},
+        {
+            "path": "/var/lib/stateport/imports",
+            "mode": "0750",
+            "owner": "operator:stateport-execution-control",
+        },
+    ]
+    assert "/var/lib/stateport/imports" in next(
+        step["directories"]
+        for step in plan["steps"]
+        if step["step"] == "create-host-directories"
+    )
 
 
 def test_plan_refuses_a_target_without_stable_execution_host() -> None:

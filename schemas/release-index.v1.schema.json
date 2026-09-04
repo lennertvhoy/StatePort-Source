@@ -480,6 +480,25 @@
             }
           }
         },
+        "readOnlyHostMounts": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "hostPath", "mountPath", "purpose", "sourceOwner", "sourceGroup", "mode", "environmentVariable"],
+            "properties": {
+              "name": {"const": "template-sources"},
+              "hostPath": {"const": "/var/lib/stateport/imports"},
+              "mountPath": {"const": "/imports"},
+              "purpose": {"const": "template-sources"},
+              "sourceOwner": {"const": "installer-client"},
+              "sourceGroup": {"const": "stateport-execution-control"},
+              "mode": {"const": "ro"},
+              "environmentVariable": {"const": "STATEPORT_REPOSITORY_ROOTS"}
+            }
+          }
+        },
         "resources": {
           "type": "object",
           "additionalProperties": false,

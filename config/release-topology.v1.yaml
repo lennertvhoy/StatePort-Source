@@ -187,6 +187,15 @@ targets:
             validation:
               mode: read-only-snapshot-copy
               authority: exact-backup-receipt-required
+        readOnlyHostMounts:
+          - name: template-sources
+            hostPath: /var/lib/stateport/imports
+            mountPath: /imports
+            purpose: template-sources
+            sourceOwner: installer-client
+            sourceGroup: stateport-execution-control
+            mode: ro
+            environmentVariable: STATEPORT_REPOSITORY_ROOTS
         resources:
           memoryMaxBytes: 2147483648
           cpuQuotaPercent: 200

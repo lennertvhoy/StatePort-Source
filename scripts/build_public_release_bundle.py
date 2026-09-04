@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from hashlib import sha256
+from hashlib import md5, sha256
 import io
 import json
+import lzma
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -93,8 +94,14 @@ PODMAN_REQUIRED_PACKAGES = frozenset({
     "aardvark-dns", "catatonit", "conmon", "containers-storage", "dbus-user-session",
     "fuse-overlayfs", "golang-github-containers-common", "golang-github-containers-image",
     "libslirp0", "libsubid4", "netavark", "podman", "python3-venv", "runc", "skopeo",
-    "slirp4netns", "uidmap",
+    "slirp4netns", "stateport-crun", "uidmap",
 })
+STATEPORT_CRUN_VERSION = "1.28-1stateport1~24.04.1"
+STATEPORT_CRUN_UPSTREAM_VERSION = "1.28"
+STATEPORT_CRUN_SHA256 = "2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42"
+STATEPORT_CRUN_SOURCE_URL = (
+    "https://github.com/containers/crun/releases/download/1.28/crun-1.28-linux-amd64"
+)
 
 
 def _release_version(value: str) -> re.Match[str]:
@@ -343,6 +350,177 @@ def _tar_info(name: str, *, size: int = 0, directory: bool = False) -> tarfile.T
     info.uname = info.gname = ""
     info.size = size
     return info
+
+
+def _deterministic_tar_bytes(
+    entries: Sequence[tuple[str, bytes | None, int]], *, epoch: int
+) -> bytes:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as archive:
+        for name, payload, mode in entries:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE if payload is None else tarfile.REGTYPE
+            info.size = 0 if payload is None else len(payload)
+            info.mode = mode
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "root"
+            info.mtime = epoch
+            archive.addfile(info, None if payload is None else io.BytesIO(payload))
+    return stream.getvalue()
+
+
+def _ar_member(name: str, payload: bytes, *, epoch: int) -> bytes:
+    archive_name = name + "/"
+    if len(archive_name) > 16:
+        raise PublicReleaseBuildError(f"Debian ar member name is too long: {name}")
+    header = (
+        f"{archive_name:<16}{epoch:<12}{0:<6}{0:<6}{'100644':<8}{len(payload):<10}`\n"
+    ).encode("ascii")
+    if len(header) != 60:
+        raise PublicReleaseBuildError("Debian ar member header is malformed")
+    return header + payload + (b"\n" if len(payload) % 2 else b"")
+
+
+def _stateport_crun_deb(binary: bytes, *, epoch: int) -> bytes:
+    control = (
+        "Package: stateport-crun\n"
+        f"Version: {STATEPORT_CRUN_VERSION}\n"
+        "Section: admin\n"
+        "Priority: optional\n"
+        "Architecture: amd64\n"
+        "Maintainer: StatePort release engineering <release-engineering@stateport.invalid>\n"
+        "Homepage: https://github.com/containers/crun\n"
+        "Description: pinned static crun runtime for StatePort confined groups\n"
+        " StatePort selects this runtime explicitly for rootless units whose narrow\n"
+        " Unix-socket contract requires OCI keep-groups semantics.\n"
+    ).encode("utf-8")
+    provenance = _json_bytes(
+        {
+            "architecture": "linux-amd64",
+            "binaryPath": "/usr/libexec/stateport/crun",
+            "license": "GPL-2.0-or-later",
+            "name": "crun",
+            "sha256": "sha256:" + STATEPORT_CRUN_SHA256,
+            "source": STATEPORT_CRUN_SOURCE_URL,
+            "version": STATEPORT_CRUN_UPSTREAM_VERSION,
+        }
+    )
+    copyright_notice = (
+        "This package redistributes the official crun 1.28 static Linux AMD64 release binary.\n"
+        f"Source: {STATEPORT_CRUN_SOURCE_URL}\n"
+        "License: GPL-2.0-or-later\n"
+        "Upstream copyright belongs to Giuseppe Scrivano and the crun contributors.\n"
+        "The complete corresponding source is available from the upstream release repository.\n"
+    ).encode("utf-8")
+    data_files = {
+        "usr/libexec/stateport/crun": binary,
+        "usr/share/doc/stateport-crun/copyright": copyright_notice,
+        "usr/share/doc/stateport-crun/runtime-source.json": provenance,
+    }
+    md5sums = (
+        "\n".join(
+            f"{md5(payload, usedforsecurity=False).hexdigest()}  {name}"
+            for name, payload in sorted(data_files.items())
+        )
+        + "\n"
+    ).encode("ascii")
+    control_tar = _deterministic_tar_bytes(
+        [
+            ("./", None, 0o755),
+            ("./control", control, 0o644),
+            ("./md5sums", md5sums, 0o644),
+        ],
+        epoch=epoch,
+    )
+    data_tar = _deterministic_tar_bytes(
+        [
+            ("./", None, 0o755),
+            ("./usr/", None, 0o755),
+            ("./usr/libexec/", None, 0o755),
+            ("./usr/libexec/stateport/", None, 0o755),
+            ("./usr/libexec/stateport/crun", binary, 0o755),
+            ("./usr/share/", None, 0o755),
+            ("./usr/share/doc/", None, 0o755),
+            ("./usr/share/doc/stateport-crun/", None, 0o755),
+            ("./usr/share/doc/stateport-crun/copyright", copyright_notice, 0o644),
+            ("./usr/share/doc/stateport-crun/runtime-source.json", provenance, 0o644),
+        ],
+        epoch=epoch,
+    )
+    preset = 9 | lzma.PRESET_EXTREME
+    members = (
+        ("debian-binary", b"2.0\n"),
+        ("control.tar.xz", lzma.compress(control_tar, format=lzma.FORMAT_XZ, preset=preset)),
+        ("data.tar.xz", lzma.compress(data_tar, format=lzma.FORMAT_XZ, preset=preset)),
+    )
+    return b"!<arch>\n" + b"".join(
+        _ar_member(name, payload, epoch=epoch) for name, payload in members
+    )
+
+
+def build_stateport_crun_package(*, binary: Path, output: Path, epoch: int) -> dict[str, object]:
+    """Package the exact upstream static crun binary as a reproducible Debian input."""
+
+    if (
+        binary.is_symlink()
+        or not binary.is_file()
+        or _sha(binary.read_bytes()) != STATEPORT_CRUN_SHA256
+    ):
+        raise PublicReleaseBuildError("static crun input is absent or differs from the pinned hash")
+    version = subprocess.run(
+        [str(binary.resolve()), "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+    )
+    if version.returncode != 0 or version.stdout.splitlines()[:1] != ["crun version 1.28"]:
+        raise PublicReleaseBuildError("static crun input does not report the pinned version")
+    if epoch < 1 or output.exists() or output.is_symlink() or not output.parent.is_dir():
+        raise PublicReleaseBuildError("stateport-crun output or source epoch is invalid")
+    payload = _stateport_crun_deb(binary.read_bytes(), epoch=epoch)
+    if payload != _stateport_crun_deb(binary.read_bytes(), epoch=epoch):
+        raise PublicReleaseBuildError("stateport-crun package build is not deterministic")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        metadata = subprocess.run(
+            ["dpkg-deb", "--field", str(temporary), "Package", "Version", "Architecture"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+        )
+        fields = dict(line.split(": ", 1) for line in metadata.stdout.splitlines() if ": " in line)
+        if metadata.returncode != 0 or fields != {
+            "Package": "stateport-crun",
+            "Version": STATEPORT_CRUN_VERSION,
+            "Architecture": "amd64",
+        }:
+            raise PublicReleaseBuildError("generated stateport-crun Debian metadata is invalid")
+        os.rename(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "formatVersion": "stateport.runtime-package-build/v1",
+        "output": str(output),
+        "package": "stateport-crun",
+        "version": STATEPORT_CRUN_VERSION,
+        "architecture": "amd64",
+        "upstreamSha256": STATEPORT_CRUN_SHA256,
+        "sha256": _sha(output.read_bytes()),
+        "bytes": output.stat().st_size,
+    }
 
 
 def build_podman_package_bundle(*, lock: Path, package_dir: Path, output: Path) -> dict[str, object]:
@@ -1599,6 +1777,23 @@ def build_release_bundle(
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     guard_command = sys.argv if argv is None else [str(Path(__file__)), *arguments]
+    if arguments[:1] == ["runtime-package"]:
+        runtime_parser = argparse.ArgumentParser(
+            description="Build the pinned StatePort crun Debian package"
+        )
+        runtime_parser.add_argument("command", choices=("runtime-package",))
+        runtime_parser.add_argument("--binary", type=Path, required=True)
+        runtime_parser.add_argument("--output", type=Path, required=True)
+        runtime_parser.add_argument("--source-date-epoch", type=int, required=True)
+        runtime_args = runtime_parser.parse_args(arguments)
+        require_guard("candidate_construction", guard_command)
+        result = build_stateport_crun_package(
+            binary=runtime_args.binary,
+            output=runtime_args.output,
+            epoch=runtime_args.source_date_epoch,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
     if arguments[:1] == ["package-bundle"]:
         package_parser = argparse.ArgumentParser(
             description="Build a deterministic Podman package closure from an exact lock"

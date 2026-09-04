@@ -2171,6 +2171,10 @@ def test_stable_execution_host_has_separate_operational_lifecycle_and_normal_cli
     ]
     assert client_units
     assert all(b"PodmanArgs=--group-add=keep-groups" in content for content in client_units)
+    assert all(
+        b"PodmanArgs=--runtime=/usr/libexec/stateport/crun" in content
+        for content in client_units
+    )
     assert all(b"GroupAdd=" not in content for content in client_units)
     stable_files = render_stable_host_quadlet_bundle(
         verified.target, verified.index.document["signed"]["images"]
@@ -2181,6 +2185,7 @@ def test_stable_execution_host_has_separate_operational_lifecycle_and_normal_cli
     host_unit = stable_files["host/stateport-exec/stateport-execution-host.container"]
     assert b"UserNS=keep-id:uid=65532,gid=65532" in host_unit
     assert b"PodmanArgs=--group-add=keep-groups" in host_unit
+    assert b"PodmanArgs=--runtime=/usr/libexec/stateport/crun" in host_unit
     assert b"GroupAdd=" not in host_unit
     assert b"Volume=%t/podman:/run/stateport-engine:rw" in host_unit
     assert b"Environment=STATEPORT_ENGINE_SOCKET=/run/stateport-engine/podman.sock" in host_unit
@@ -3506,6 +3511,36 @@ def test_internal_cli_emitter_parser_pairs_share_the_i3_helper() -> None:
         text = source.read_text(encoding="utf-8")
         assert "parse_last_line_json" in text, f"{source} must use the shared I3 helper"
         assert hand_rolled not in text, f"{source} re-introduced a hand-rolled last-line parse"
+
+
+def test_web_template_source_mount_is_read_only_and_uses_pinned_group_runtime() -> None:
+    value = _stable_execution_index()
+    service = value["signed"]["targets"][0]["services"][0]
+    service["readOnlyHostMounts"] = [
+        {
+            "name": "template-sources",
+            "hostPath": "/var/lib/stateport/imports",
+            "mountPath": "/imports",
+            "purpose": "template-sources",
+            "sourceOwner": "installer-client",
+            "sourceGroup": "stateport-execution-control",
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+        }
+    ]
+    _refresh_index_topology(value)
+    verified = verify_release_index(value, policy=_policy(), verifier=_EphemeralTestVerifier())
+    files = render_quadlet_bundle(verified.target, verified.index.document["signed"]["images"])
+    web_units = [
+        content
+        for path, content in files.items()
+        if "stateport-web" in Path(path).name and path.endswith(".container.in")
+    ]
+    assert web_units
+    assert all(b"Volume=/var/lib/stateport/imports:/imports:ro" in unit for unit in web_units)
+    assert all(b"Environment=STATEPORT_REPOSITORY_ROOTS=/imports" in unit for unit in web_units)
+    assert all(b"PodmanArgs=--runtime=/usr/libexec/stateport/crun" in unit for unit in web_units)
+    assert all(b"Volume=/var/lib/stateport/imports:/imports:rw" not in unit for unit in web_units)
 
 
 def test_same_lane_predecessor_identity_rules() -> None:
@@ -4253,6 +4288,10 @@ def test_stable_execution_host_has_separate_operational_lifecycle_and_normal_cli
     ]
     assert client_units
     assert all(b"PodmanArgs=--group-add=keep-groups" in content for content in client_units)
+    assert all(
+        b"PodmanArgs=--runtime=/usr/libexec/stateport/crun" in content
+        for content in client_units
+    )
     assert all(b"GroupAdd=" not in content for content in client_units)
     stable_files = render_stable_host_quadlet_bundle(
         verified.target, verified.index.document["signed"]["images"]
@@ -4263,6 +4302,7 @@ def test_stable_execution_host_has_separate_operational_lifecycle_and_normal_cli
     host_unit = stable_files["host/stateport-exec/stateport-execution-host.container"]
     assert b"UserNS=keep-id:uid=65532,gid=65532" in host_unit
     assert b"PodmanArgs=--group-add=keep-groups" in host_unit
+    assert b"PodmanArgs=--runtime=/usr/libexec/stateport/crun" in host_unit
     assert b"GroupAdd=" not in host_unit
     assert b"Volume=%t/podman:/run/stateport-engine:rw" in host_unit
     assert b"Environment=STATEPORT_ENGINE_SOCKET=/run/stateport-engine/podman.sock" in host_unit
@@ -5588,5 +5628,3 @@ def test_internal_cli_emitter_parser_pairs_share_the_i3_helper() -> None:
         text = source.read_text(encoding="utf-8")
         assert "parse_last_line_json" in text, f"{source} must use the shared I3 helper"
         assert hand_rolled not in text, f"{source} re-introduced a hand-rolled last-line parse"
-
-

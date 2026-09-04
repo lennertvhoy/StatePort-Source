@@ -126,6 +126,7 @@ PODMAN_PACKAGE_VERSIONS = {
     "podman": "5.4.2+ds1-2stateport2~24.04.1",
     "python3-venv": "3.12.3-0ubuntu2.1",
     "runc": "1.3.4-0ubuntu1~24.04.1",
+    "stateport-crun": "1.28-1stateport1~24.04.1",
     "slirp4netns": "1.2.1-1build2",
     "skopeo": "1.13.3+ds1-2build2",
     "uidmap": "1:4.13+dfsg1-4ubuntu3.2",
@@ -1495,6 +1496,8 @@ class VM:
                     f"{shlex.quote(json.dumps(PODMAN_PACKAGE_VERSIONS, sort_keys=True))};"
                     "test \"$(podman --version)\" = 'podman version 5.4.2';"
                     "test \"$(podman info --format '{{.Host.Security.Rootless}}|{{.Host.OCIRuntime.Name}}|{{.Host.NetworkBackend}}')\" = 'true|runc|netavark';"
+                    "test \"$(/usr/libexec/stateport/crun --version | head -n 1)\" = 'crun version 1.28';"
+                    "test \"$(sha256sum /usr/libexec/stateport/crun | cut -d' ' -f1)\" = '2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42';"
                     "test -z \"$(dpkg --audit)\";"
                     "sudo systemctl restart apparmor;"
                     "podman run --rm docker.io/library/alpine:3.21 true;"

@@ -27,8 +27,8 @@ template actions work together; success is not limited to a compiled frontend.
   actions, execute approved work, persist results, and recover safely.
 - Proven journeys for the actual ProjectState template, actual StudyState
   template, and an independent third valid template.
-- Additive Alpha.14 release artifacts; all earlier published bytes remain
-  immutable.
+- Additive Alpha.15 release artifacts; all earlier published bytes and the
+  unpublished defective Alpha.14 candidate remain immutable.
 
 ## Non-goals
 

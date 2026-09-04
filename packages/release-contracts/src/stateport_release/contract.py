@@ -91,7 +91,12 @@ _LEGACY_ARTIFACT_IDS = frozenset(
 )
 _ALPHA10_ARTIFACT_IDS = _LEGACY_ARTIFACT_IDS | {"executionHostProvisioner"}
 _ARTIFACT_IDS = _ALPHA10_ARTIFACT_IDS | {"podmanPackageBundle"}
-_PODMAN_PACKAGE_NAMES = frozenset(
+CONFINED_GROUP_OCI_RUNTIME_PATH = "/usr/libexec/stateport/crun"
+CONFINED_GROUP_OCI_RUNTIME_VERSION = "1.28"
+CONFINED_GROUP_OCI_RUNTIME_SHA256 = (
+    "sha256:2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42"
+)
+_LEGACY_PODMAN_PACKAGE_NAMES = frozenset(
     {
         "aardvark-dns",
         "catatonit",
@@ -112,6 +117,7 @@ _PODMAN_PACKAGE_NAMES = frozenset(
         "uidmap",
     }
 )
+_PODMAN_PACKAGE_NAMES = _LEGACY_PODMAN_PACKAGE_NAMES | {"stateport-crun"}
 _UPDATE_STEPS = (
     "verify",
     "backup",
@@ -1050,11 +1056,21 @@ def render_quadlet_bundle(
                     }
                 )
                 lines.append(f"Volume={volume_name}.volume:{volume['mountPath']}:rw")
+            for mount in sorted(
+                service.get("readOnlyHostMounts", ()), key=lambda item: item["name"]
+            ):
+                lines.extend(
+                    [
+                        f"Volume={mount['hostPath']}:{mount['mountPath']}:ro",
+                        f"Environment={mount['environmentVariable']}={mount['mountPath']}",
+                    ]
+                )
             if service["capabilities"]["controlContract"] == "narrow-unix-client":
                 if not isinstance(execution_contract, Mapping):
                     raise ReleaseContractError(f"service {service_id} lacks stable daemon contract")
                 lines.extend(
                     [
+                        f"PodmanArgs=--runtime={CONFINED_GROUP_OCI_RUNTIME_PATH}",
                         "PodmanArgs=--group-add=keep-groups",
                         f"Volume={execution_contract['hostDirectory']}:"
                         f"{execution_contract['containerDirectory']}:ro",
@@ -1203,7 +1219,12 @@ def render_stable_host_quadlet_bundle(
             # Rootless bind-mount traversal depends on the host execution-control
             # supplemental group. This does not map that GID for chown; the
             # privileged provisioner separately refuses that unsupported claim.
-            lines.append("PodmanArgs=--group-add=keep-groups")
+            lines.extend(
+                [
+                    f"PodmanArgs=--runtime={CONFINED_GROUP_OCI_RUNTIME_PATH}",
+                    "PodmanArgs=--group-add=keep-groups",
+                ]
+            )
         socket = service["socket"]
         if socket is not None:
             container_directory = socket["hostDirectory"]
@@ -3756,6 +3777,31 @@ def _validate_contract_cross_fields(value: Mapping[str, Any], schema: str) -> No
                 package_artifact = artifact_by_id["podmanPackageBundle"]
                 package_records = package_installation["packages"]
                 transaction = package_installation["transaction"]
+                requires_confined_runtime = (
+                    value["release"]["version"] == "0.1.0-alpha.15"
+                    or "stateport-crun" in package_records
+                )
+                required_package_names = (
+                    _PODMAN_PACKAGE_NAMES
+                    if requires_confined_runtime
+                    else _LEGACY_PODMAN_PACKAGE_NAMES
+                )
+                expected_package_runtime = {
+                    "podmanMinimumVersion": "5.4.2",
+                    "runcMinimumVersion": "1.3.4",
+                    "slirp4netnsMinimumVersion": "1.2.1",
+                    "ociRuntime": "runc",
+                    "networkBackend": "netavark",
+                }
+                if requires_confined_runtime:
+                    expected_package_runtime.update(
+                        {
+                            "supplementaryGroupRuntime": "crun",
+                            "supplementaryGroupRuntimePath": CONFINED_GROUP_OCI_RUNTIME_PATH,
+                            "supplementaryGroupRuntimeVersion": CONFINED_GROUP_OCI_RUNTIME_VERSION,
+                            "supplementaryGroupRuntimeSha256": CONFINED_GROUP_OCI_RUNTIME_SHA256,
+                        }
+                    )
                 package_plan = {
                     "releaseIndexDigest": package_installation["releaseIndexDigest"],
                     "signedPayloadDigest": package_installation["signedPayloadDigest"],
@@ -3774,13 +3820,7 @@ def _validate_contract_cross_fields(value: Mapping[str, Any], schema: str) -> No
                         }
                         for name in sorted(package_records)
                     },
-                    "runtimeContract": {
-                        "podmanMinimumVersion": "5.4.2",
-                        "runcMinimumVersion": "1.3.4",
-                        "slirp4netnsMinimumVersion": "1.2.1",
-                        "ociRuntime": "runc",
-                        "networkBackend": "netavark",
-                    },
+                    "runtimeContract": expected_package_runtime,
                 }
                 installed_state = {
                     name: {
@@ -3799,7 +3839,7 @@ def _validate_contract_cross_fields(value: Mapping[str, Any], schema: str) -> No
                     or package_artifact.get("mediaType")
                     not in {None, "application/vnd.stateport.podman-package-bundle+tar"}
                     or package_installation["targetId"] != target["targetId"]
-                    or not _PODMAN_PACKAGE_NAMES <= set(package_records)
+                    or not required_package_names <= set(package_records)
                     or set(transaction) != set(package_records)
                     or package_installation["changedPackages"]
                     != sorted(
@@ -3819,6 +3859,29 @@ def _validate_contract_cross_fields(value: Mapping[str, Any], schema: str) -> No
                         "minimumVersion"
                     ]
                     != "1.2.1"
+                    or (
+                        requires_confined_runtime
+                        and (
+                            package_installation["dependencies"]["stateport-crun"][
+                                "minimumVersion"
+                            ]
+                            != CONFINED_GROUP_OCI_RUNTIME_VERSION
+                            or package_installation["runtime"]
+                            != {
+                                "ociRuntime": "runc",
+                                "networkBackend": "netavark",
+                                "supplementaryGroupRuntime": "crun",
+                                "supplementaryGroupRuntimePath": CONFINED_GROUP_OCI_RUNTIME_PATH,
+                                "supplementaryGroupRuntimeVersion": CONFINED_GROUP_OCI_RUNTIME_VERSION,
+                                "supplementaryGroupRuntimeSha256": CONFINED_GROUP_OCI_RUNTIME_SHA256,
+                            }
+                        )
+                    )
+                    or (
+                        not requires_confined_runtime
+                        and package_installation["runtime"]
+                        != {"ociRuntime": "runc", "networkBackend": "netavark"}
+                    )
                     or re.match(
                         rf"^{re.escape(value['host']['podmanVersion'])}(?:[+~]|$)",
                         package_installation["packages"]["podman"]["version"],
@@ -4901,6 +4964,26 @@ def _validate_cross_fields(
                 }:
                     raise ReleaseContractError(
                         f"service {service_id} revision-scoped validation volume is not disposable"
+                    )
+            read_only_mounts = service.get("readOnlyHostMounts", ())
+            if read_only_mounts:
+                expected_template_mount = {
+                    "name": "template-sources",
+                    "hostPath": "/var/lib/stateport/imports",
+                    "mountPath": "/imports",
+                    "purpose": "template-sources",
+                    "sourceOwner": "installer-client",
+                    "sourceGroup": "stateport-execution-control",
+                    "mode": "ro",
+                    "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+                }
+                if (
+                    service_id != "stateport-web"
+                    or list(read_only_mounts) != [expected_template_mount]
+                    or service["capabilities"]["controlContract"] != "narrow-unix-client"
+                ):
+                    raise ReleaseContractError(
+                        f"service {service_id} has an unauthorized host template-source mount"
                     )
             capabilities = service["capabilities"]
             if capabilities["podmanSocketAccess"] != "none":

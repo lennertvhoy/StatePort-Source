@@ -1054,7 +1054,7 @@ def _preflight_topology(topology: Mapping[str, Any]) -> None:
     }
     service_fields = {
         "serviceId", "imageId", "trustDomain", "quadletOwner", "revisionScoped",
-        "runAsUser", "readOnlyRoot", "health", "ports", "writableVolumes",
+        "runAsUser", "readOnlyRoot", "health", "ports", "writableVolumes", "readOnlyHostMounts",
         "resources", "capabilities",
     }
     host_service_fields = service_fields | {

@@ -1493,6 +1493,7 @@ rules:
   - docs/evidence/2026-07-12-overnight-program-convergence/changed-contracts.md
   - docs/evidence/2026-07-12-overnight-program-convergence/cto_handoff.md
   - docs/evidence/2026-07-12-overnight-program-convergence/evidence_manifest.json
+  - evidence/one-line-release-001/alpha14-rejection.md
   - evidence/one-line-release-001/summary.md
   - evidence/template-lifecycle-001/journey.json
   - evidence/template-lifecycle-001/summary.md

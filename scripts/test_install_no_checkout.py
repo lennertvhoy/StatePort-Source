@@ -400,6 +400,7 @@ PACKAGE_VERSIONS = {
     "podman": "5.4.2+ds1-2stateport2~24.04.1",
     "python3-venv": "3.12.3-0ubuntu2.1",
     "runc": "1.3.4-0ubuntu1~24.04.1",
+    "stateport-crun": "1.28-1stateport1~24.04.1",
     "slirp4netns": "1.2.1-1build2",
     "skopeo": "1.13.3+ds1-2build2",
     "uidmap": "1:4.13+dfsg1-4ubuntu3.2",
@@ -844,6 +845,17 @@ class FakeRunner:
             if "OCIRuntime.Name" in call[-1]:
                 return installer.Completed(0, "runc|netavark\n", "")
             return installer.Completed(0, ("true" if self.rootless else "false") + "\n", "")
+        if call == (installer._CONFINED_GROUP_RUNTIME_PATH, "--version"):
+            return installer.Completed(0, "crun version 1.28\ncommit: fixture\n", "")
+        if call == ("sha256sum", "--binary", installer._CONFINED_GROUP_RUNTIME_PATH):
+            return installer.Completed(
+                0,
+                installer._CONFINED_GROUP_RUNTIME_SHA256.removeprefix("sha256:")
+                + "  "
+                + installer._CONFINED_GROUP_RUNTIME_PATH
+                + "\n",
+                "",
+            )
         if call[:2] == ("dpkg-query", "--show"):
             version = PACKAGE_VERSIONS.get(call[-1])
             if version is None:
@@ -2310,6 +2322,10 @@ def test_installed_podman_package_evidence_binds_exact_runtime() -> None:
         "slirp4netnsMinimumVersion": "1.2.1",
         "ociRuntime": "runc",
         "networkBackend": "netavark",
+        "supplementaryGroupRuntime": "crun",
+        "supplementaryGroupRuntimePath": installer._CONFINED_GROUP_RUNTIME_PATH,
+        "supplementaryGroupRuntimeVersion": installer._CONFINED_GROUP_RUNTIME_VERSION,
+        "supplementaryGroupRuntimeSha256": installer._CONFINED_GROUP_RUNTIME_SHA256,
     }
     package_plan = {
         "releaseIndexDigest": "sha256:" + "1" * 64,
@@ -2368,7 +2384,15 @@ def test_installed_podman_package_evidence_binds_exact_runtime() -> None:
     )
     assert result["dependencies"]["runc"]["minimumVersion"] == "1.3.4"
     assert result["dependencies"]["slirp4netns"]["minimumVersion"] == "1.2.1"
-    assert result["runtime"] == {"ociRuntime": "runc", "networkBackend": "netavark"}
+    assert result["dependencies"]["stateport-crun"]["minimumVersion"] == "1.28"
+    assert result["runtime"] == {
+        "ociRuntime": "runc",
+        "networkBackend": "netavark",
+        "supplementaryGroupRuntime": "crun",
+        "supplementaryGroupRuntimePath": installer._CONFINED_GROUP_RUNTIME_PATH,
+        "supplementaryGroupRuntimeVersion": installer._CONFINED_GROUP_RUNTIME_VERSION,
+        "supplementaryGroupRuntimeSha256": installer._CONFINED_GROUP_RUNTIME_SHA256,
+    }
     assert result["dpkgAudit"] == "clean"
 
 
@@ -2488,6 +2512,10 @@ def test_alpha11_install_receipt_binds_authenticated_package_results(
     assert package_result["runtime"] == {
         "ociRuntime": "runc",
         "networkBackend": "netavark",
+        "supplementaryGroupRuntime": "crun",
+        "supplementaryGroupRuntimePath": installer._CONFINED_GROUP_RUNTIME_PATH,
+        "supplementaryGroupRuntimeVersion": installer._CONFINED_GROUP_RUNTIME_VERSION,
+        "supplementaryGroupRuntimeSha256": installer._CONFINED_GROUP_RUNTIME_SHA256,
     }
     validate_install_receipt(receipt)
     tampered = json.loads(json.dumps(receipt))

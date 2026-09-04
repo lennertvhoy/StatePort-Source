@@ -37,6 +37,7 @@ PODMAN_REQUIRED_PACKAGES = frozenset(
         "netavark",
         "podman",
         "runc",
+        "stateport-crun",
         "slirp4netns",
         "uidmap",
     }

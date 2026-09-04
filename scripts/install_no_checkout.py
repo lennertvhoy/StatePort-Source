@@ -168,7 +168,16 @@ _BUNDLE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,118}\.sigstore\.json$")
 _CHANNELS = ("alpha", "stable", "owner-dogfood")
 _SUPPLEMENTARY_ARTIFACTS = ("compose", "sourceArchive", "releaseNotes", "knownLimitations")
 _PODMAN_PACKAGE_NAMES = frozenset({"aardvark-dns", "netavark", "podman"})
-_PODMAN_RUNTIME_DEPENDENCIES = {"runc": "1.3.4", "slirp4netns": "1.2.1"}
+_CONFINED_GROUP_RUNTIME_PATH = "/usr/libexec/stateport/crun"
+_CONFINED_GROUP_RUNTIME_VERSION = "1.28"
+_CONFINED_GROUP_RUNTIME_SHA256 = (
+    "sha256:2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42"
+)
+_PODMAN_RUNTIME_DEPENDENCIES = {
+    "runc": "1.3.4",
+    "slirp4netns": "1.2.1",
+    "stateport-crun": _CONFINED_GROUP_RUNTIME_VERSION,
+}
 _PODMAN_REQUIRED_PACKAGE_NAMES = frozenset(
     {
         *_PODMAN_PACKAGE_NAMES,
@@ -1664,6 +1673,10 @@ def verify_podman_package_bundle(
                 "slirp4netnsMinimumVersion": "1.2.1",
                 "ociRuntime": "runc",
                 "networkBackend": "netavark",
+                "supplementaryGroupRuntime": "crun",
+                "supplementaryGroupRuntimePath": _CONFINED_GROUP_RUNTIME_PATH,
+                "supplementaryGroupRuntimeVersion": _CONFINED_GROUP_RUNTIME_VERSION,
+                "supplementaryGroupRuntimeSha256": _CONFINED_GROUP_RUNTIME_SHA256,
             },
         }
         return {
@@ -1801,6 +1814,10 @@ def verify_installed_podman_packages(
             "slirp4netnsMinimumVersion": "1.2.1",
             "ociRuntime": "runc",
             "networkBackend": "netavark",
+            "supplementaryGroupRuntime": "crun",
+            "supplementaryGroupRuntimePath": _CONFINED_GROUP_RUNTIME_PATH,
+            "supplementaryGroupRuntimeVersion": _CONFINED_GROUP_RUNTIME_VERSION,
+            "supplementaryGroupRuntimeSha256": _CONFINED_GROUP_RUNTIME_SHA256,
         }
         or preflight.get("packagePlanDigest")
         != _sha256_digest(_canonical_subset_bytes(package_plan))
@@ -1865,6 +1882,27 @@ def verify_installed_podman_packages(
         raise InstallerRefusal(
             "package_runtime_mismatch", "Podman did not select the qualified runc/netavark runtime"
         )
+    confined_runtime = runner.run([_CONFINED_GROUP_RUNTIME_PATH, "--version"], timeout=30)
+    confined_version = (
+        confined_runtime.stdout.splitlines()[0]
+        if confined_runtime.stdout.splitlines()
+        else ""
+    )
+    confined_digest = runner.run(
+        ["sha256sum", "--binary", _CONFINED_GROUP_RUNTIME_PATH], timeout=30
+    )
+    confined_digest_fields = confined_digest.stdout.strip().split()
+    if (
+        confined_runtime.returncode != 0
+        or confined_version != f"crun version {_CONFINED_GROUP_RUNTIME_VERSION}"
+        or confined_digest.returncode != 0
+        or not confined_digest_fields
+        or "sha256:" + confined_digest_fields[0] != _CONFINED_GROUP_RUNTIME_SHA256
+    ):
+        raise InstallerRefusal(
+            "package_runtime_mismatch",
+            "the installed supplementary-group runtime differs from pinned crun 1.28",
+        )
     audit = runner.run(["dpkg", "--audit"], timeout=60)
     if audit.returncode != 0 or audit.stdout.strip() or audit.stderr.strip():
         raise InstallerRefusal(
@@ -1911,7 +1949,14 @@ def verify_installed_podman_packages(
             }
             for name, floor in sorted(_PODMAN_RUNTIME_DEPENDENCIES.items())
         },
-        "runtime": {"ociRuntime": selected[0], "networkBackend": selected[1]},
+        "runtime": {
+            "ociRuntime": selected[0],
+            "networkBackend": selected[1],
+            "supplementaryGroupRuntime": "crun",
+            "supplementaryGroupRuntimePath": _CONFINED_GROUP_RUNTIME_PATH,
+            "supplementaryGroupRuntimeVersion": _CONFINED_GROUP_RUNTIME_VERSION,
+            "supplementaryGroupRuntimeSha256": _CONFINED_GROUP_RUNTIME_SHA256,
+        },
         "dpkgAudit": "clean",
     }
 

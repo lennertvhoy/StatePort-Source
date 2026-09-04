@@ -1121,3 +1121,30 @@ def test_local_qualification_provenance_validates_through_complete_contract(tmp_
     value["artifacts"]["normalCloneReceipt"]["bytes"] = len(receipt_bytes)
 
     validate_contract(value, SCHEMA)
+
+
+def test_stateport_crun_debian_package_is_deterministic_and_installs_exact_binary(
+    tmp_path: Path,
+) -> None:
+    binary = b"fixture-static-crun\n"
+    first = bundle._stateport_crun_deb(binary, epoch=1788220800)
+    second = bundle._stateport_crun_deb(binary, epoch=1788220800)
+    assert first == second
+
+    package = tmp_path / "stateport-crun.deb"
+    package.write_bytes(first)
+    metadata = subprocess.run(
+        ["dpkg-deb", "--field", str(package), "Package", "Version", "Architecture"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Package: stateport-crun\n" in metadata
+    assert f"Version: {bundle.STATEPORT_CRUN_VERSION}\n" in metadata
+    assert "Architecture: amd64\n" in metadata
+
+    extracted = tmp_path / "extracted"
+    subprocess.run(["dpkg-deb", "--extract", str(package), str(extracted)], check=True)
+    runtime = extracted / "usr/libexec/stateport/crun"
+    assert runtime.read_bytes() == binary
+    assert runtime.stat().st_mode & 0o111

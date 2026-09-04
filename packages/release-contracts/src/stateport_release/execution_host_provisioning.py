@@ -68,6 +68,9 @@ from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from . import PORTABLE_LINUX_TARGET_ID, WSL2_TARGET_ID, observe_linux_substrate
 
 from .contract import (
+    CONFINED_GROUP_OCI_RUNTIME_PATH,
+    CONFINED_GROUP_OCI_RUNTIME_SHA256,
+    CONFINED_GROUP_OCI_RUNTIME_VERSION,
     PinnedPublicKeyIdentity,
     ReleaseContractError,
     ReleaseVerificationPolicy,
@@ -101,6 +104,8 @@ CONTROL_SYSTEMD_USER_DIR = f"{CONTROL_CONFIG_DIR}/systemd/user"
 SERVICE_STATE_ROOT = f"{EXEC_HOME}/stateport-execution-host"
 STATE_DIR = f"{SERVICE_STATE_ROOT}/state"
 GRANTS_DIR = f"{STATE_DIR}/grants"
+TEMPLATE_IMPORT_PARENT = "/var/lib/stateport"
+TEMPLATE_IMPORT_ROOT = f"{TEMPLATE_IMPORT_PARENT}/imports"
 SUBUID_PATH = "/etc/subuid"
 SUBGID_PATH = "/etc/subgid"
 LINGER_DIR = "/var/lib/systemd/linger"
@@ -847,6 +852,34 @@ def render_provisioning_plan(
             "owner": f"{CONTROL_USER}:{CONTROL_USER}",
         },
     ]
+    template_mounts = [
+        mount
+        for service in target.get("services", ())
+        for mount in service.get("readOnlyHostMounts", ())
+    ]
+    if template_mounts:
+        expected_template_mount = {
+            "name": "template-sources",
+            "hostPath": TEMPLATE_IMPORT_ROOT,
+            "mountPath": "/imports",
+            "purpose": "template-sources",
+            "sourceOwner": "installer-client",
+            "sourceGroup": EXEC_GROUP,
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+        }
+        if template_mounts != [expected_template_mount]:
+            raise ReleaseContractError("installed template-source mount contract is malformed")
+        directories.extend(
+            [
+                {"path": TEMPLATE_IMPORT_PARENT, "mode": "0755", "owner": "root:root"},
+                {
+                    "path": TEMPLATE_IMPORT_ROOT,
+                    "mode": "0750",
+                    "owner": f"{allowed_client}:{EXEC_GROUP}",
+                },
+            ]
+        )
     steps: list[dict[str, Any]] = [
         {
             "step": "verify-rootless-supplementary-group-contract",
@@ -1122,18 +1155,16 @@ def render_provisioning_plan(
         "socketMode": contract["socketMode"],
         "rootlessSupplementaryGroupContract": {
             "quadletDirective": "PodmanArgs=--group-add=keep-groups",
-            # The sealed Noble podman bundle ships runc (the installer refuses
-            # crun-dependent podman packages), and the whole control-plane and
-            # qualification line runs rootless podman under runc.  The
-            # execution-host image is a standard OCI image, so the host runtime
-            # contract is the runtime the release actually ships and qualifies.
-            "requiredOciRuntime": "runc",
+            "requiredOciRuntime": "crun",
+            "runtimePath": CONFINED_GROUP_OCI_RUNTIME_PATH,
+            "runtimeVersion": CONFINED_GROUP_OCI_RUNTIME_VERSION,
+            "runtimeSha256": CONFINED_GROUP_OCI_RUNTIME_SHA256,
             "userNamespace": "keep-id",
             "socketGroup": EXEC_GROUP,
-            "status": "supported-by-host-numeric-identity-contract",
+            "status": "supported-by-pinned-runtime-contract",
             "detail": (
-                "keep-id preserves the execution UID/GID while the setgid host directory and "
-                "keep-groups preserve confined access for the intentionally unmapped socket group"
+                "the digest-pinned static crun runtime implements keep-groups; keep-id preserves "
+                "the execution UID/GID while the setgid host directory preserves confined access"
             ),
         },
         "image": {"imageId": str(image["imageId"]), "reference": reference, "digest": digest},
@@ -2106,10 +2137,48 @@ def _require(condition: bool, step: str, detail: str) -> None:
 
 def _default_rootless_group_probe(plan: Mapping[str, Any]) -> Mapping[str, Any]:
     contract = plan["rootlessSupplementaryGroupContract"]
+    runtime = Path(str(contract.get("runtimePath", "")))
+    expected_digest = str(contract.get("runtimeSha256", ""))
+    expected_version = str(contract.get("runtimeVersion", ""))
+    if (
+        not runtime.is_absolute()
+        or runtime != Path(CONFINED_GROUP_OCI_RUNTIME_PATH)
+        or runtime.is_symlink()
+        or not runtime.is_file()
+    ):
+        return {
+            "supported": False,
+            "mechanism": contract.get("quadletDirective", ""),
+            "detail": f"pinned supplementary-group runtime is unavailable: {runtime}",
+        }
+    observed_digest = "sha256:" + hashlib.sha256(runtime.read_bytes()).hexdigest()
+    completed = subprocess.run(
+        [str(runtime), "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        env=_ROOT_COMMAND_ENV,
+    )
+    first_line = completed.stdout.splitlines()[0] if completed.stdout.splitlines() else ""
+    supported = (
+        contract.get("status") == "supported-by-pinned-runtime-contract"
+        and expected_digest == CONFINED_GROUP_OCI_RUNTIME_SHA256
+        and observed_digest == expected_digest
+        and expected_version == CONFINED_GROUP_OCI_RUNTIME_VERSION
+        and completed.returncode == 0
+        and first_line == f"crun version {expected_version}"
+    )
     return {
-        "supported": contract["status"] == "supported-by-host-numeric-identity-contract",
+        "supported": supported,
         "mechanism": contract["quadletDirective"],
-        "detail": contract["detail"],
+        "detail": (
+            contract["detail"]
+            if supported
+            else f"pinned runtime identity mismatch: digest={observed_digest}, version={first_line!r}"
+        ),
     }
 
 
@@ -3864,6 +3933,7 @@ def _step_unit(ctx: _Apply, unit: str, *, step: str) -> dict[str, Any]:
             f"unit {unit} is not active after {action} (rc={completed.returncode}): "
             f"{completed.stderr.strip()[:200]}"
         )
+        container_log = ""
         try:
             logs = _run(
                 ctx,
@@ -3880,10 +3950,46 @@ def _step_unit(ctx: _Apply, unit: str, *, step: str) -> dict[str, Any]:
                 step=step,
                 timeout=60,
             )
-            if logs.stdout.strip():
-                detail += " | container: " + logs.stdout.strip()[:400]
+            container_log = logs.stdout.strip() or logs.stderr.strip()
+            if container_log:
+                detail += " | container: " + container_log[:400]
+                _write_diagnostic_sidecar(
+                    ctx, f"{unit.removesuffix('.service')}.log.txt", container_log
+                )
         except Exception:  # noqa: BLE001 — diagnostics are best-effort
             pass
+        try:
+            status = _run(
+                ctx,
+                _as_exec(
+                    ctx,
+                    [
+                        _TRUSTED_EXECUTABLES["systemctl"],
+                        "--user",
+                        "status",
+                        unit,
+                        "--full",
+                        "--no-pager",
+                        "-n",
+                        "80",
+                    ],
+                ),
+                step=step,
+                timeout=60,
+            )
+            status_text = status.stdout.strip() or status.stderr.strip()
+            if status_text:
+                detail += " | status: " + status_text[:240]
+                _write_diagnostic_sidecar(
+                    ctx, f"{unit.removesuffix('.service')}.status.txt", status_text
+                )
+        except Exception:  # noqa: BLE001 — diagnostics are best-effort
+            pass
+        _write_diagnostic_sidecar(
+            ctx,
+            f"{unit.removesuffix('.service')}.start-stderr.txt",
+            completed.stderr.strip(),
+        )
         _require(False, step, detail)
     _verify_unit_durable(ctx, unit, after, step=step)
     detail = "" if completed.returncode == 0 else f"postcondition observed after rc={completed.returncode}"
@@ -5271,7 +5377,22 @@ def apply_verified_plan(
         raise ProvisioningRefusal(
             "the simulated rootless-group support seam cannot bypass the real host contract"
         )
-    group_probe = rootless_group_probe or _default_rootless_group_probe
+    if rootless_group_probe is not None:
+        group_probe = rootless_group_probe
+    elif layout.root == Path("/"):
+        group_probe = _default_rootless_group_probe
+    else:
+        # A descriptor-root simulation cannot execute a binary inside that
+        # synthetic filesystem. It still validates the exact plan identity;
+        # only the real root transaction may assert clean-host execution.
+        group_probe = lambda plan: {
+            "supported": plan["rootlessSupplementaryGroupContract"].get("status")
+            == "supported-by-pinned-runtime-contract",
+            "mechanism": plan["rootlessSupplementaryGroupContract"].get(
+                "quadletDirective", ""
+            ),
+            "detail": "descriptor-root simulation of the pinned runtime contract",
+        }
     clock = clock if clock is not None else (lambda: datetime.now(timezone.utc))
     images = verified.index.document["signed"]["images"]
     plan = render_provisioning_plan(

@@ -1541,6 +1541,19 @@ def test_canonical_topology_declares_one_separate_wsl2_target() -> None:
     target = topology["targets"][0]
     assert target["targetId"] == "wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet"
     assert target["hostBaseline"] == target["targetId"]
+    web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
+    assert web["readOnlyHostMounts"] == [
+        {
+            "name": "template-sources",
+            "hostPath": "/var/lib/stateport/imports",
+            "mountPath": "/imports",
+            "purpose": "template-sources",
+            "sourceOwner": "installer-client",
+            "sourceGroup": "stateport-execution-control",
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+        }
+    ]
 
 
 def test_same_lane_older_predecessor_embedding_is_allowed(
