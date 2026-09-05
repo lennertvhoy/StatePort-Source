@@ -491,30 +491,89 @@ def boot_retained_vm(
 
 
 def verify_installed_image_digests(vm: VM, expected: dict[str, str]) -> dict[str, object]:
-    """Prove the running accepted control units pin exactly the candidate's
-    control-service images.  Workload images in the index (runner, playwright,
-    execution-host, dev-workspace) never deploy as system units."""
-    control_services = ("stateport-web", "stateport-api", "stateport-worker")
-    expected = {k: v for k, v in expected.items() if k in control_services}
-    script = r"""
+    """Check declared units and independently inspect running accepted containers.
+
+    Unit text is deployment intent, not evidence of the executing image. Only
+    narrow inspect fields leave the guest; raw inspect/environment/auth data is
+    never returned or included in a refusal.
+    """
+    services = ("stateport-web", "stateport-api", "stateport-worker")
+    digest_pattern = r"sha256:[0-9a-f]{64}"
+    if any(not isinstance(expected.get(sid), str) or re.fullmatch(digest_pattern, expected[sid]) is None for sid in services):
+        raise ValueError("candidate must identify every control-service image by digest")
+    expected = {sid: expected[sid] for sid in services}
+    unit_script = r"""
+set -eu
 for f in /var/lib/stateport-control/.config/containers/systemd/*.container; do
   [ -f "$f" ] || continue
   grep -q '^Label=io.stateport.profile=accepted$' "$f" || continue
-  sid=$(sed -n 's/^Label=io.stateport.service.id=//p' "$f" | head -n 1)
-  img=$(sed -n 's/^Image=//p' "$f" | head -n 1)
-  case "$img" in *@sha256:*) dig=$(printf %s "$img" | sed 's/.*@//');; *) dig="";; esac
-  printf '%s\t%s\n' "$sid" "$dig"
+  sid=$(sed -n 's/^Label=io.stateport.service.id=//p' "$f")
+  img=$(sed -n 's/^Image=//p' "$f")
+  name=$(sed -n 's/^ContainerName=//p' "$f")
+  case "$img" in *@sha256:*) dig=${img##*@};; *) dig="invalid";; esac
+  printf '%s\t%s\t%s\n' "$sid" "$dig" "$name"
 done
 """
-    result = vm.ssh(f"sudo sh -c {shlex.quote(script)}")
-    observed = {
-        parts[0]: parts[1]
-        for line in result.stdout.splitlines()
-        if len(parts := line.strip().split("\t")) == 2
+    unit_result = vm.ssh(f"sudo sh -c {shlex.quote(unit_script)}", check=False, timeout=60)
+    unit_rows: dict[str, list[tuple[str, str]]] = {sid: [] for sid in services}
+    bad_units = unit_result.returncode != 0
+    for line in unit_result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or parts[0] not in unit_rows or re.fullmatch(digest_pattern, parts[1]) is None or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", parts[2]) is None:
+            bad_units = True
+            continue
+        unit_rows[parts[0]].append((parts[1], parts[2]))
+    declared = {sid: rows[0][0] for sid, rows in unit_rows.items() if len(rows) == 1}
+    declared_mismatches = {
+        sid: {"expected": expected[sid], "observed": declared.get(sid),
+              "reason": "unit-read-failed-or-malformed" if bad_units else "unit-count-or-digest-mismatch"}
+        for sid in services if bad_units or len(unit_rows[sid]) != 1 or declared.get(sid) != expected[sid]
     }
-    mismatches = {
-        sid: {"expected": digest, "observed": observed.get(sid)}
-        for sid, digest in expected.items()
-        if observed.get(sid) != digest
-    }
-    return {"observed": observed, "mismatches": mismatches}
+    # Select by service/profile labels, then inspect immutable container IDs and
+    # recheck labels/running state: a stopped or replaced container cannot pass
+    # merely because a unit or an earlier ps snapshot looked correct.
+    live_script = control_user_env() + r"""
+set -eu
+for sid in stateport-web stateport-api stateport-worker; do
+  ids=$(run_control podman ps --no-trunc --filter status=running --filter "label=io.stateport.service.id=$sid" --filter label=io.stateport.profile=accepted --format '{{.ID}}')
+  set -- $ids
+  if [ "$#" -ne 1 ]; then
+    printf '%s\tinvalid-running-count\n' "$sid"
+    continue
+  fi
+  for id in $ids; do
+    case "$id" in *[!0-9a-f]*|"") exit 3;; esac
+    [ "${#id}" -eq 64 ] || exit 3
+    printf '%s\t' "$sid"
+    run_control podman container inspect --format '{{.Id}}\t{{.ImageDigest}}\t{{.State.Running}}\t{{index .Config.Labels "io.stateport.service.id"}}\t{{index .Config.Labels "io.stateport.profile"}}\t{{.Name}}' "$id" 2>/dev/null
+done
+done
+"""
+    live_script = live_script.replace(r"\t", "\t")
+    live_result = vm.ssh(
+        "sudo runuser -u stateport-control -- bash -c " + shlex.quote(live_script),
+        check=False, timeout=60,
+    )
+    live_rows: dict[str, list[dict[str, str]]] = {sid: [] for sid in services}
+    bad_live = live_result.returncode != 0
+    for line in live_result.stdout.splitlines():
+        # The bounded Go template contains actual tab separators.
+        parts = line.split("\t")
+        if (len(parts) != 7 or parts[0] not in live_rows
+                or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None
+                or re.fullmatch(digest_pattern, parts[2]) is None
+                or parts[3] != "true" or parts[4] != parts[0] or parts[5] != "accepted"
+                or re.fullmatch(r"/?[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", parts[6]) is None):
+            bad_live = True
+            continue
+        live_rows[parts[0]].append({"containerId": parts[1], "imageDigest": parts[2], "name": parts[6].lstrip("/")})
+    containers = {sid: rows[0] for sid, rows in live_rows.items() if len(rows) == 1}
+    observed = {sid: row["imageDigest"] for sid, row in containers.items()}
+    mismatches = dict(declared_mismatches)
+    for sid in services:
+        if (bad_live or len(live_rows[sid]) != 1 or observed.get(sid) != expected[sid]
+                or len(unit_rows[sid]) != 1 or containers.get(sid, {}).get("name") != unit_rows[sid][0][1]):
+            mismatches[sid] = {"expected": expected[sid], "observed": observed.get(sid),
+                              "reason": "live-inspection-failed-or-malformed" if bad_live else "running-container-count-identity-or-digest-mismatch"}
+    return {"observed": observed, "declared": declared, "containers": containers,
+            "declaredMismatches": declared_mismatches, "mismatches": mismatches}

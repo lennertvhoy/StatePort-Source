@@ -188,13 +188,13 @@ browserAssets:
 
 definitions:
   apps/api/Dockerfile: sha256:2e34fd416b94a84adcd8c27315dc24eeab3a38ca122d59d3a91b6c92f28f7d38
-  apps/web/Dockerfile: sha256:b19e5ea3d4908b9a797fe26a1c9d3a3e313cc08b141ab308d0350f39e5b1dbc9
+  apps/web/Dockerfile: sha256:47913635b565fe4bf9b96c6ac106461c3a7286847bbf6527af56f1d1a4f8303f
   apps/worker/Dockerfile: sha256:949a106e76d6cb0016783274f80f305b801c5424024c11660bb595989b3f991f
   apps/runner/Dockerfile: sha256:2895b2ee36cebb8b9133fa930b6ef3cc88d1508dad62fe19aaccca2abdbd49a3
   images/stateport-dev-workspace/Containerfile: sha256:a7699a362e502d32281db0a6c05c5dca9369451d438297621b3e47f0232a69e8
   images/stateport-execution-host/Containerfile: sha256:83554c3ee7077e14f18fc856526bc63fca06dbbb55378feadeb63cb9c5af4b64
   images/stateport-playwright/Containerfile: sha256:c0c36820945e04b5eb451a02e7ae7d6ce939ca76a58c5ee3ecd606cd2eae8c28
-  images/packaged-content.v1.yaml: sha256:8ff27e398c16fb8cd103f70f59b136691454a414b3502b0c09a99c2046888878
+  images/packaged-content.v1.yaml: sha256:4c34dbaa74b96fc3bcc5d2c061f7992c4d2513d3b80fab8fead207e2d217818c
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
 
 requirements:

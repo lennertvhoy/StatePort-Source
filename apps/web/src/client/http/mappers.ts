@@ -823,6 +823,14 @@ const applicationSourceWire = z
     ownership: provenanceIdentifierWire.nullish(),
     version: sourceVersionWire.nullish(),
     workingTreeChangesExcluded: z.boolean().nullish(),
+    // The service includes a bounded digest/count summary for registered roots.
+    // Accept its exact contract without retaining filesystem content in the UI.
+    contentIdentity: z.object({
+      formatVersion: z.literal('stateport.repository-content-identity/v1'),
+      manifestDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+      fileCount: z.number().int().nonnegative().max(50_000),
+      totalBytes: z.number().int().nonnegative().max(512 * 1024 * 1024),
+    }).strict().nullish(),
     // Existing user-owned repository observation fields.
     source: z.string().min(1).max(512).nullish(),
     remote: z.string().min(1).max(512).nullish(),
@@ -4132,7 +4140,14 @@ export function mapRepositoryInspection(payload: unknown): RepositoryInspection 
         repositoryCommandsExecuted: false,
         validation: { status: 'passed', issues },
       }
-    } else if (validation?.status !== 'failed') {
+    } else if (validation?.status === 'failed') {
+      // A rejected template must not fall through to ordinary repository
+      // registration merely because no supported adapter was returned.
+      findings.push(...(issues.length > 0 ? issues : [{
+        code: 'template_contract_invalid',
+        message: 'The template contract failed validation. Correct it before importing.',
+      }]).map((issue) => ({ ...issue, severity: 'error' as const })))
+    } else {
       failClosed('template adapter validation status was missing')
     }
   }

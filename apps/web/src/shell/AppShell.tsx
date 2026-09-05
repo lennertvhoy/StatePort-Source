@@ -86,6 +86,7 @@ function BuiltInCommands() {
     const list: ShellCommand[] = [
       // ── Navigation ────────────────────────────────────────────────────────
       { id: 'nav.applications', title: 'Go to Applications', group: 'Navigation', icon: LayoutGrid, run: () => void navigate('/applications') },
+      { id: 'nav.platform', title: 'Go to Platform', group: 'Navigation', icon: Settings, keywords: ['runtime', 'execution host', 'deployments', 'updates', 'sources', 'authority', 'provider'], run: () => void navigate('/platform') },
       { id: 'nav.catalog', title: 'Go to Catalog', group: 'Navigation', icon: Package, run: () => void navigate('/catalog') },
       { id: 'nav.approvals', title: 'Go to Approvals', group: 'Navigation', icon: ShieldCheck, shortcut: 'mod+shift+a', run: () => void navigate('/approvals') },
       { id: 'nav.settings', title: 'Go to Settings', group: 'Navigation', icon: Settings, shortcut: 'mod+,', run: () => void navigate('/settings') },

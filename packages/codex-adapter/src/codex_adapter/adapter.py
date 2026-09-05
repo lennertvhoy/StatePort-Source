@@ -188,7 +188,9 @@ class CodexAdapter:
                 staging_root,
                 timeout_seconds=float(spec.budgets["timeSeconds"]),
                 max_output_bytes=min(spec.budgets["steps"] * 256 * 1024, 4 * 1024 * 1024),
-                environment=environment or filtered_environment(),
+                environment=environment or filtered_environment(
+                    allow=("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "CODEX_HOME"),
+                ),
                 on_started=on_started,
                 on_finished=on_finished,
                 process_generation=process_generation,

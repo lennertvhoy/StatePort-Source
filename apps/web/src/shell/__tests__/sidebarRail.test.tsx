@@ -8,7 +8,7 @@
  *   explicit user override;
  * - startup reconciliation respects an explicit user sidebar choice.
  */
-import { act, cleanup, render, renderHook, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 
@@ -145,5 +145,24 @@ describe('useSavedNavigationSettings', () => {
     await act(async () => {})
     expect(useWorkspaceStore.getState().sidebar).toBe('expanded')
     expect(useWorkspaceStore.getState().sidebarAutoCollapseBelowPx).toBe(1100)
+  })
+})
+
+
+describe('platform discoverability and service keyboard access', () => {
+  it('keeps Platform active on its existing deep destinations', () => {
+    render(<MemoryRouter initialEntries={['/execution-host']}><Sidebar /></MemoryRouter>)
+    const platform = screen.getByRole('link', { name: 'Platform' })
+    expect(platform.getAttribute('href')).toBe('/platform')
+    expect(platform.getAttribute('aria-current')).toBe('page')
+  })
+
+  it('opens service details from a real keyboard-focusable trigger', async () => {
+    render(<MemoryRouter><Sidebar /></MemoryRouter>)
+    const trigger = screen.getByRole('button', { name: 'Local service status' })
+    trigger.focus()
+    expect(document.activeElement).toBe(trigger)
+    fireEvent.click(trigger)
+    expect(await screen.findByTestId('service-status-popover')).toBeTruthy()
   })
 })

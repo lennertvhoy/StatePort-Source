@@ -893,6 +893,59 @@ def test_plan_provisions_template_import_root_for_bound_installer_client() -> No
     )
 
 
+def test_provider_home_plan_is_fixed_private_and_not_installer_owned() -> None:
+    document = fixtures.release_index()
+    target = deepcopy(document["signed"]["targets"][0])
+    web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
+    web["providerHome"] = dict(prov.PROVIDER_HOME_CONTRACT)
+    plan = prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="test", client_user="operator", client_uid=1000, client_gid=1000)
+    assert plan["directories"][-2:] == [
+        {"path": "/var/lib/stateport-control/provider-auth", "mode": "0700", "owner": "stateport-control:stateport-control"},
+        {"path": prov.PROVIDER_HOME_CONTRACT["hostPath"], "mode": "0700", "owner": "stateport-control:stateport-control"},
+    ]
+    web["providerHome"]["hostPath"] = "/home/operator/.codex"
+    with pytest.raises(ReleaseContractError, match="provider home contract"):
+        prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="test")
+
+
+def test_provider_directory_reuses_exact_identity_without_reading_contents(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(layout=prov.HostLayout(tmp_path), journal=[])
+    path = "/var/lib/stateport-control/provider-auth/codex"
+    args = {"mode": 0o700, "uid": os.getuid(), "gid": os.getgid(), "step": "create-host-directories", "refuse_existing_mismatch": True}
+    assert prov._ensure_directory_converged(context, path, **args)
+    leaf = tmp_path / path.lstrip("/")
+    # An unreadable synthetic child proves reuse does not enumerate or copy
+    # provider-owned content. This is not an authentication fixture.
+    marker = leaf / "provider-owned-synthetic-state"
+    marker.write_text("retained across restart")
+    marker.chmod(0)
+    identity = marker.stat().st_ino
+    assert prov._ensure_directory_converged(context, path, **args) is False
+    assert marker.stat().st_ino == identity
+    assert stat.S_IMODE(marker.stat().st_mode) == 0
+    with pytest.raises(prov.StepFailed, match="refusing to take it over"):
+        prov._ensure_directory_converged(context, path, **(args | {"uid": os.getuid() + 1}))
+    assert leaf.stat().st_uid == os.getuid()
+    leaf.chmod(0o755)
+    with pytest.raises(prov.StepFailed, match="refusing to take it over"):
+        prov._ensure_directory_converged(context, path, **args)
+    assert stat.S_IMODE(leaf.stat().st_mode) == 0o755
+
+
+def test_provider_directory_refuses_symlink_without_touching_target(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(layout=prov.HostLayout(tmp_path), journal=[])
+    target = tmp_path / "foreign"
+    target.mkdir()
+    (tmp_path / "provider").symlink_to(target, target_is_directory=True)
+    with pytest.raises(prov.StepFailed, match="not a real directory"):
+        prov._ensure_directory_converged(context, "/provider", mode=0o700, uid=os.getuid(), gid=os.getgid(), step="create-host-directories", refuse_existing_mismatch=True)
+    assert list(target.iterdir()) == []
+
+
 def test_plan_refuses_a_target_without_stable_execution_host() -> None:
     value = fixtures.release_index()
     target = value["signed"]["targets"][0]

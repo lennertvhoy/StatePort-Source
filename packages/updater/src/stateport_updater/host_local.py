@@ -80,6 +80,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -105,6 +106,7 @@ from .engine import (
     UpdateHostError,
 )
 from .models import version_key
+from stateport_release.contract import PROVIDER_HOME_CONTRACT
 from .safe_io import (
     SafeIOError,
     create_bytes,
@@ -242,6 +244,36 @@ def _installation_volume_keys(
             )
         }
     )
+
+
+def _require_provisioned_provider_home(target: Mapping[str, Any]) -> None:
+    """Observe only directory metadata; provider-owned files are never opened."""
+    homes = [service.get("providerHome") for service in target["services"] if "providerHome" in service]
+    if not homes:
+        return
+    if homes != [PROVIDER_HOME_CONTRACT]:
+        raise UpdateHostError("provider_home_provisioning_required", "successor provider home is not the supported signed contract", effect="not_applied")
+    descriptors: list[int] = []
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptors.append(os.open("/", flags))
+        for component in Path(PROVIDER_HOME_CONTRACT["hostPath"]).parts[1:]:
+            descriptors.append(os.open(component, flags, dir_fd=descriptors[-1]))
+            if component in {"stateport-control", "provider-auth", "codex"}:
+                info = os.fstat(descriptors[-1])
+                if info.st_uid != 65531 or info.st_gid != 65531:
+                    raise OSError("provider directory ownership differs")
+                if component != "stateport-control" and stat.S_IMODE(info.st_mode) != 0o700:
+                    raise OSError("provider directory mode differs")
+    except OSError as exc:
+        raise UpdateHostError(
+            "provider_home_provisioning_required",
+            "successor requires its fixed private Codex home; run the signature-verified StatePort provisioner for this successor before retrying. The updater will not create or take over provider authentication directories.",
+            effect="not_applied",
+        ) from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _revision_hex(
@@ -954,6 +986,7 @@ class LocalPodmanHost:
     # ------------------------------------------------------------------
 
     def preflight(self, release: Any) -> Mapping[str, Any]:
+        _require_provisioned_provider_home(release.verified.target)
         self._run(
             [self.podman, "version"],
             timeout=60,
@@ -1627,6 +1660,7 @@ class LocalPodmanHost:
         # installation volumes are never recreated.
         successor = self._release_index(plan, "successor")
         target = _signed_target(successor, self.target_id)
+        _require_provisioned_provider_home(target)
         data_bindings: dict[str, str] = {}
         for volume_key in _installation_volume_keys(target):
             data_name = _data_volume_name(genesis_hex, volume_key)

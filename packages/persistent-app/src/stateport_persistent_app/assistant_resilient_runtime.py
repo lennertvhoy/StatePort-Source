@@ -194,14 +194,14 @@ class AssistantProcessor(CancellableAssistantProcessor):
                 lease_token=claim.lease_token,
                 reply_message_id=reply_id,
             )
-        except Exception as exc:
+        except Exception:
             try:
                 outcome = self.work_store.requeue_delivery(
                     work_id=claim.work_id,
                     attempt_id=claim.attempt_id,
                     lease_token=claim.lease_token,
                     code="assistant_delivery_failed",
-                    message=(str(exc) or type(exc).__name__)[:2048],
+                    message=self._failure_message("assistant_delivery_failed"),
                 )
                 self._log_event(
                     "assistant_delivery_requeued",

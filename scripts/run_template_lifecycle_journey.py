@@ -257,12 +257,20 @@ def run(projectstate: Path, studystate: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="stateport-template-journey-") as temporary:
         temp = Path(temporary)
         generic = _create_generic_template(temp / "sources" / "generic-template")
+        invalid = _create_generic_template(temp / "sources" / "invalid-template")
+        (invalid / "template.yaml").write_text(
+            "apiVersion: statedd.stateport.io/v1alpha1\nkind: Template\n"
+            "metadata: {id: invalid-template, name: Invalid, version: '1.0.0'}\n",
+            encoding="utf-8",
+        )
+        _git(invalid, "add", "template.yaml")
+        _git(invalid, "commit", "-q", "-m", "invalid manifest refusal fixture")
         source_before["statespec-template"] = _source_status(generic)
         os.environ["XDG_CONFIG_HOME"] = str(temp / "xdg" / "config")
         os.environ["XDG_DATA_HOME"] = str(temp / "xdg" / "data")
         os.environ["XDG_STATE_HOME"] = str(temp / "xdg" / "state")
         os.environ["STATEPORT_REPOSITORY_ROOTS"] = os.pathsep.join(
-            (str(projectstate), str(studystate), str(generic))
+            (str(projectstate), str(studystate), str(generic), str(invalid))
         )
 
         layout = LocalLayout.from_environment()
@@ -277,6 +285,29 @@ def run(projectstate: Path, studystate: Path) -> dict[str, Any]:
             if "stateport-build" not in frontend and "<div id=\"root\"></div>" not in frontend:
                 raise RuntimeError("production frontend shell was not served")
             candidates = browser.request("/v1/repository-import/local-candidates")["candidates"]
+            rejected = [candidate for candidate in candidates
+                        if candidate.get("inspection", {}).get("template", {}).get("validation", {}).get("status") == "failed"]
+            if len(rejected) != 1:
+                raise RuntimeError("invalid template was not reported as a failed contract")
+            rejected_candidate = rejected[0]
+            rejected_digest = rejected_candidate["inspection"]["inspectionDigest"]
+            try:
+                browser.request("/v1/repository-import/register", body={
+                    "candidateId": rejected_candidate["candidateId"],
+                    "inspectionDigest": rejected_digest,
+                    "instanceId": "journey-invalid-template",
+                    "name": "Invalid template must not register",
+                    "approval": {"decision": "approve", "actorId": "local-user", "proposalDigest": rejected_digest},
+                })
+            except RuntimeError as exc:
+                if "template_contract_invalid" not in str(exc):
+                    raise
+            else:
+                raise RuntimeError("invalid template fell through to ordinary repository registration")
+            if (layout.instances_root / "journey-invalid-template").exists():
+                raise RuntimeError("invalid template created a partial instance")
+            if any(entry.get("instanceId") == "journey-invalid-template" for entry in app.catalog.list()):
+                raise RuntimeError("invalid template created a partial catalog registration")
             by_adapter: dict[str, dict[str, Any]] = {}
             for candidate in candidates:
                 inspection = candidate.get("inspection", {})
@@ -332,6 +363,7 @@ def run(projectstate: Path, studystate: Path) -> dict[str, Any]:
             "frontendServed": True,
             "sourceRepositoriesUnchanged": True,
             "restartContinuity": "passed",
+            "invalidTemplateRegistration": "refused_without_managed_instance",
             "templates": imported,
         }
 

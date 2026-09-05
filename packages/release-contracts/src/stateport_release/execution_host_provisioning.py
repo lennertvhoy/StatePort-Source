@@ -71,6 +71,7 @@ from .contract import (
     CONFINED_GROUP_OCI_RUNTIME_PATH,
     CONFINED_GROUP_OCI_RUNTIME_SHA256,
     CONFINED_GROUP_OCI_RUNTIME_VERSION,
+    PROVIDER_HOME_CONTRACT,
     PinnedPublicKeyIdentity,
     ReleaseContractError,
     ReleaseVerificationPolicy,
@@ -880,6 +881,19 @@ def render_provisioning_plan(
                 },
             ]
         )
+    provider_services = [service for service in target.get("services", ()) if "providerHome" in service]
+    if provider_services:
+        if len(provider_services) != 1 or (
+            provider_services[0].get("serviceId") != "stateport-web"
+            or provider_services[0].get("quadletOwner") != CONTROL_USER
+            or provider_services[0].get("runAsUser") != 65532
+            or provider_services[0]["providerHome"] != PROVIDER_HOME_CONTRACT
+        ):
+            raise ReleaseContractError("installed provider home contract is malformed")
+        directories.extend([
+            {"path": "/var/lib/stateport-control/provider-auth", "mode": "0700", "owner": f"{CONTROL_USER}:{CONTROL_USER}"},
+            {"path": PROVIDER_HOME_CONTRACT["hostPath"], "mode": "0700", "owner": f"{CONTROL_USER}:{CONTROL_USER}"},
+        ])
     steps: list[dict[str, Any]] = [
         {
             "step": "verify-rootless-supplementary-group-contract",
@@ -1528,6 +1542,7 @@ def _ensure_directory_converged(
     uid: int,
     gid: int,
     step: str,
+    refuse_existing_mismatch: bool = False,
 ) -> bool:
     """Create missing components (rejecting symlink components), then apply
     and OBSERVE exact numeric ownership and mode on the leaf.
@@ -1554,6 +1569,8 @@ def _ensure_directory_converged(
         before = os.fstat(descriptor)
         owner_changed = before.st_uid != uid or before.st_gid != gid
         mode_changed = stat.S_IMODE(before.st_mode) != mode
+        if refuse_existing_mismatch and path not in created_paths and (owner_changed or mode_changed):
+            raise StepFailed(step, "provider-owned directory ownership or mode differs; refusing to take it over")
         metadata_entry: dict[str, Any] | None = None
         if (owner_changed or mode_changed) and path not in created_paths:
             metadata_entry = {
@@ -2728,6 +2745,9 @@ def _step_directories(ctx: _Apply) -> dict[str, Any]:
                 uid=account.uid,
                 gid=group.gid,
                 step=step,
+                **({"refuse_existing_mismatch": True} if str(spec["path"]) in {
+                    "/var/lib/stateport-control/provider-auth", PROVIDER_HOME_CONTRACT["hostPath"],
+                } else {}),
             )
             or changed
         )

@@ -1755,35 +1755,57 @@ class ExecutionHostDaemon:
             return str(exc)[:200]
         return None
 
+    @staticmethod
+    def _container_identity_error(
+        workload_id: str, entry: Mapping[str, Any] | None, info: Mapping[str, Any]
+    ) -> str | None:
+        """One established identity contract for cleanup and explicit controls."""
+        labels = info.get("labels")
+        if entry is None:
+            return "no durable workload owns the container name"
+        if not isinstance(labels, Mapping):
+            return "container has no label mapping"
+        if labels.get(MANAGED_LABEL_KEY) != "true":
+            return "container lacks the managed label"
+        if labels.get(WORKLOAD_LABEL) != workload_id:
+            return "container workload label does not match"
+        if labels.get(KIND_LABEL) != entry["spec"].get("kind"):
+            return "container kind label does not match"
+        if info.get("imageDigest") != entry["spec"]["image"]["reference"].rsplit("@", 1)[1]:
+            return "container image digest does not match the sealed spec"
+        return None
+
+    def _assert_owned_container(
+        self, entry: Mapping[str, Any], *, allow_absent: bool = False
+    ) -> None:
+        workload_id = str(entry["workloadId"])
+        info = self._safe_inspect(workload_id)
+        if info.get("present") is None:
+            raise _Refusal("container-identity-unavailable", "container identity could not be inspected")
+        if info.get("present") is not True:
+            if allow_absent:
+                return
+            raise _Refusal("container-absent", "the managed container is absent; no engine action was attempted")
+        error = self._container_identity_error(workload_id, entry, info)
+        if error is not None:
+            raise _Refusal("foreign-container", error)
+
     def _cleanup_engine_effect(
         self, workload_id: str, *, snapshot_path: str | None = None
     ) -> tuple[bool, str, dict[str, Any]]:
         """Stop and remove an engine effect, verifying absence rather than calls."""
-        self._close_sessions_for(workload_id)
         initial = self._safe_inspect(workload_id)
         if initial.get("present") is None:
             residual = self._residual_evidence(workload_id)
             return False, "container identity could not be inspected", residual
         if initial.get("present") is True:
             entry = self._ledger_required().get(workload_id)
-            labels = initial.get("labels")
-            identity_error: str | None = None
-            if entry is None:
-                identity_error = "no durable workload owns the container name"
-            elif not isinstance(labels, Mapping):
-                identity_error = "container has no label mapping"
-            elif labels.get(MANAGED_LABEL_KEY) != "true":
-                identity_error = "container lacks the managed label"
-            elif labels.get(WORKLOAD_LABEL) != workload_id:
-                identity_error = "container workload label does not match"
-            elif labels.get(KIND_LABEL) != entry["spec"].get("kind"):
-                identity_error = "container kind label does not match"
-            elif initial.get("imageDigest") != entry["spec"]["image"]["reference"].rsplit("@", 1)[1]:
-                identity_error = "container image digest does not match the sealed spec"
+            identity_error = self._container_identity_error(workload_id, entry, initial)
             if identity_error is not None:
                 residual = self._residual_evidence(workload_id)
                 residual["identityMismatch"] = identity_error
                 return False, f"foreign container refused: {identity_error}", residual
+        self._close_sessions_for(workload_id)
         call_errors: list[str] = []
         if initial.get("present") is True:
             try:
@@ -2358,6 +2380,7 @@ class ExecutionHostDaemon:
                 "invalid-state", f"workload is {entry['state']}; only a created workload can start"
             )
         self._assert_activation_authority(entry, grant)
+        self._assert_owned_container(entry)
         try:
             self._engine.start(entry["workloadId"], timeout=request["timeoutSeconds"])
         except EngineError as exc:
@@ -2416,6 +2439,7 @@ class ExecutionHostDaemon:
         entry = self._entry_required(payload["workloadId"])
         if entry["state"] in contract.TERMINAL_STATES:
             raise _Refusal("invalid-state", f"workload is already {entry['state']}")
+        self._assert_owned_container(entry)
         is_workspace = entry["spec"].get("kind") == "workspace"
         if is_workspace:
             self._close_sessions_for(entry["workloadId"])
@@ -2503,6 +2527,7 @@ class ExecutionHostDaemon:
         grant: Mapping[str, Any] | None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         entry = self._entry_required(payload["workloadId"])
+        self._assert_owned_container(entry)
         bound = min(request["outputByteBound"], entry["spec"]["outputByteBound"])
         try:
             logs = self._engine.logs(entry["workloadId"], max_bytes=bound)
@@ -2847,6 +2872,7 @@ class ExecutionHostDaemon:
                 self._empty_observed(),
                 {"outcome": "not-required", "detail": "reservation cancelled"},
             )
+        self._assert_owned_container(entry, allow_absent=True)
         self._close_sessions_for(entry["workloadId"])
         snapshot_path = (
             str(entry["validatorSnapshotPath"])
@@ -2935,27 +2961,20 @@ class ExecutionHostDaemon:
         ledger = self._ledger_required()
         entry = self._entry_required(payload["workloadId"])
         is_workspace = entry["spec"].get("kind") == "workspace"
-        self._close_sessions_for(entry["workloadId"])
-        if entry["state"] in {"created", "running"}:
-            try:
-                self._engine.stop(entry["workloadId"], timeout=2)
-            except EngineError as exc:
-                raise _Refusal("engine-failure", str(exc)) from exc
-        try:
-            self._engine.remove(entry["workloadId"], force=True)
-        except EngineError as exc:
+        self._assert_owned_container(entry, allow_absent=True)
+        snapshot_path = str(entry["validatorSnapshotPath"]) if entry.get("validatorSnapshotPath") else None
+        complete, cleanup_detail, _residual = self._cleanup_engine_effect(
+            entry["workloadId"], snapshot_path=snapshot_path
+        )
+        if not complete:
             self._record_post_effect_reconciliation(
                 entry["workloadId"],
                 kind="remove-engine-failure",
-                detail=str(exc),
+                detail=cleanup_detail,
                 target_state="removed",
-                snapshot_path=(
-                    str(entry["validatorSnapshotPath"])
-                    if entry.get("validatorSnapshotPath")
-                    else None
-                ),
+                snapshot_path=snapshot_path,
             )
-            raise _Refusal("engine-failure", str(exc)) from exc
+            raise _Refusal("engine-failure", "workload removal could not verify container absence")
         try:
             self._transition_snapshot(
                 ledger,

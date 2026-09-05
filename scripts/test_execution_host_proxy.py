@@ -146,7 +146,12 @@ class FakeDaemon:
                             },
                         }
                     elif request["operation"] == "listWorkloads":
-                        result = []
+                        # Match the production daemon's object projection. A
+                        # historical bare array masked the UI inventory bug.
+                        result = {"workloads": [
+                            {"workloadId": "project-work", "kind": "workspace", "state": "running"},
+                            {"workloadId": "study-work", "kind": "job", "state": "created"},
+                        ]}
                     elif request["operation"] == "probeDeploymentTarget":
                         result = {
                             "outcome": "succeeded",
@@ -282,7 +287,20 @@ def test_pass_new_live_daemon_answers_through_proxy(short_tmp: Path) -> None:
 
     listed = proxy.list()
     assert listed["accepted"] is True
-    assert listed["result"] == []
+    assert listed["result"] == {"workloads": [
+        {"workloadId": "project-work", "kind": "workspace", "state": "running"},
+        {"workloadId": "study-work", "kind": "job", "state": "created"},
+    ]}
+    assert listed["receipt"]["resultDigest"] == daemon_contract.canonical_digest(listed["result"])
+
+    # Existing proxy methods must retain the selected workload identity rather
+    # than silently substituting the historical default development workspace.
+    for action, workload_id in (("stop", "project-work"), ("cancel", "study-work")):
+        result = getattr(proxy, action)(workload_id)
+        assert result["accepted"] is True
+        assert result["receipt"]["workloadId"] == workload_id
+        assert daemon.requests[-1]["operation"] == action
+        assert daemon.requests[-1]["payload"] == {"workloadId": workload_id}
 
     ran = proxy.status_of("w-1")
     assert ran["accepted"] is True

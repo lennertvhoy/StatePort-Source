@@ -97,6 +97,11 @@ containers, files, or volumes are convergence, and every step touches only
 names from the durable record — never a glob, never a foreign resource, and
 no external side-effect reversal is ever claimed.
 
+Provider-owned Codex sign-in stays outside these volumes and survives both
+uninstall and purge. Use ``codex logout`` in the installed provider environment
+before runtime removal when sign-out is intended; no credential files are read
+or deleted by StatePort cleanup.
+
 No ``curl | sh``, no mutable tags, no shell, no silent fallback.  Every
 refusal is typed and durable; where the receipt schema has every required
 fact, a failed run writes a schema-conformant receipt with ``result:
@@ -208,6 +213,13 @@ _WSL_ROOTFS_IDENTITY = {
 UPDATE_TRUST_ROOT_SCHEMA = "stateport.internal-update-trust-root/v1"
 INSTALL_TRUST_SCHEMA = "stateport.internal-install-trust/v1"
 UNINSTALL_RECEIPT_SCHEMA = "stateport.internal-install-uninstall-receipt/v1"
+_PROVIDER_AUTH_HOME = "/var/lib/stateport-control/provider-auth/codex"
+_PROVIDER_AUTH_MOUNT = f"Volume={_PROVIDER_AUTH_HOME}:/var/lib/stateport-provider/codex:rw"
+_PROVIDER_LOGOUT_GUIDANCE = (
+    "Provider-owned Codex sign-in is preserved, including after purge. "
+    "To clear sign-in, run codex logout in the installed provider environment "
+    "before removing its runtime. StatePort does not read or delete the authentication files."
+)
 ACCEPTED_ACTIVATION_TARGET = "stateport-accepted.target"
 CONTROL_IDENTITY = "stateport-control"
 # Durable root-owned tool locations installed by the privileged materialize
@@ -3715,6 +3727,18 @@ def _derive_control_plane_materialization(
     return control_plane
 
 
+def _require_retained_provider_home_plan(existing: Mapping[str, Any], rendered: Mapping[str, Any]) -> None:
+    """Never let historical plan reuse erase a successor's fixed provider home."""
+    paths = {_PROVIDER_AUTH_HOME, str(PurePosixPath(_PROVIDER_AUTH_HOME).parent)}
+    required = [entry for entry in rendered.get("directories", ()) if isinstance(entry, Mapping) and entry.get("path") in paths]
+    retained = [entry for entry in existing.get("directories", ()) if isinstance(entry, Mapping) and entry.get("path") in paths]
+    if required and retained != required:
+        raise InstallerRefusal(
+            "provider_home_reprovisioning_required",
+            "the receipt-bound provisioning plan does not declare this successor's exact private provider home; run the signature-verified provisioner for the successor before retrying",
+        )
+
+
 def _emit_execution_host_provisioning_plan(
     config: InstallConfig,
     *,
@@ -3846,6 +3870,7 @@ def _emit_execution_host_provisioning_plan(
                     "provisioning_plan_environment_changed",
                     "the receipt-bound provisioning plan has a different control-plane identity environment and requires explicit reprovisioning",
                 )
+            _require_retained_provider_home_plan(existing_plan, plan)
             # Provisioning creates the users and directories that influence a
             # fresh render. Reuse the already signed and receipt-bound plan.
             plan = dict(existing_plan)
@@ -4948,6 +4973,7 @@ class _RemovalPlan:
     data_volumes: tuple[str, ...]
     snapshot_volumes: tuple[str, ...]
     control_units: tuple[str, ...] = ()
+    preserved_provider_paths: tuple[str, ...] = ()
 
 
 def _union_removal_plans(plans: Sequence[_RemovalPlan]) -> _RemovalPlan:
@@ -4962,6 +4988,7 @@ def _union_removal_plans(plans: Sequence[_RemovalPlan]) -> _RemovalPlan:
             sorted({name for plan in plans for name in plan.snapshot_volumes})
         ),
         control_units=tuple(sorted({unit for plan in plans for unit in plan.control_units})),
+        preserved_provider_paths=tuple(sorted({path for plan in plans for path in plan.preserved_provider_paths})),
     )
 
 
@@ -5131,6 +5158,7 @@ def _derive_removal_plan(
     quadlet_files: list[str] = []
     control_units: list[str] = []
     data_volume_keys: set[str] = set()
+    provider_paths: set[str] = set()
     for artifact in manifest["artifacts"]:
         if not isinstance(artifact, dict):
             raise InstallerRefusal(
@@ -5178,6 +5206,13 @@ def _derive_removal_plan(
         if artifact.get("owner") == "stateport-control":
             control_units.append(live_relative.removesuffix(".container"))
         data_volume_keys.update(_ACCEPTED_VOLUME_TOKEN.findall(text))
+        if (
+            artifact.get("profile") == "accepted"
+            and artifact.get("owner") == "stateport-control"
+            and _PROVIDER_AUTH_MOUNT in text.splitlines()
+            and "Environment=CODEX_HOME=/var/lib/stateport-provider/codex" in text.splitlines()
+        ):
+            provider_paths.add(_PROVIDER_AUTH_HOME)
         quadlet_files.append(live_relative)
     snapshot_volumes: list[str] = []
     for key, name in sorted(manifest["validationVolumeBindings"].items()):
@@ -5195,6 +5230,7 @@ def _derive_removal_plan(
         data_volumes=tuple(sorted(_volume_names(volume_hex, key)[0] for key in data_volume_keys)),
         snapshot_volumes=tuple(snapshot_volumes),
         control_units=tuple(sorted(control_units)),
+        preserved_provider_paths=tuple(sorted(provider_paths)),
     )
 
 
@@ -5455,6 +5491,13 @@ def _validate_uninstall_receipt(receipt: Mapping[str, Any]) -> None:
     for field in ("startedAt", "finishedAt"):
         if not isinstance(receipt.get(field), str):
             fail(f"{field} is missing")
+    provider = receipt.get("providerAuthentication")
+    if provider is not None:
+        if not isinstance(provider, dict) or provider.get("preservedPaths") not in ([], [_PROVIDER_AUTH_HOME]):
+            fail("provider authentication preservation is malformed")
+        expected_guidance = _PROVIDER_LOGOUT_GUIDANCE if provider["preservedPaths"] else None
+        if provider.get("guidance") != expected_guidance:
+            fail("provider authentication guidance is inconsistent")
 
 
 def uninstall(
@@ -5494,7 +5537,7 @@ def _uninstall_inner(
     if config.purge and config.confirm_purge != str(record["installedIdentityId"]):
         raise InstallerRefusal(
             "purge_confirmation_required",
-            "--purge destroys all installation data and requires --confirm-purge naming the "
+            "--purge destroys recorded StatePort data, preserves provider-owned sign-in, and requires --confirm-purge naming the "
             "exact installed identity ID from updater/trust/install-trust.json",
         )
     signed_hex = str(record["signedPayloadDigest"]).removeprefix("sha256:")
@@ -5571,7 +5614,11 @@ def _uninstall_inner(
             },
             "preserved": {
                 "volumes": list(preserved_volumes),
-                "paths": list(preserved_paths),
+                "paths": sorted(set(preserved_paths) | set(plan.preserved_provider_paths)),
+            },
+            "providerAuthentication": {
+                "preservedPaths": list(plan.preserved_provider_paths),
+                "guidance": _PROVIDER_LOGOUT_GUIDANCE if plan.preserved_provider_paths else None,
             },
             "startedAt": _timestamp(started),
             "finishedAt": _timestamp(clock()),
@@ -5597,9 +5644,9 @@ def _uninstall_inner(
         return InstallOutcome(
             status="succeeded",
             code="purged",
-            message="runtime, genesis data volumes, and state root contents removed; the "
+            message=("runtime, genesis data volumes, and state root contents removed; the "
             "purge receipt survives beside the state root and no external side-effect "
-            "reversal is claimed",
+            "reversal is claimed" + (". " + _PROVIDER_LOGOUT_GUIDANCE if plan.preserved_provider_paths else "")),
             receipt_path=receipt_path,
         )
 
@@ -5632,7 +5679,7 @@ def _uninstall_inner(
             "are preserved and receipted"
             if changed
             else "the installation was already uninstalled; observed convergence receipted"
-        ),
+        ) + (". " + _PROVIDER_LOGOUT_GUIDANCE if plan.preserved_provider_paths else ""),
         receipt_path=receipt_path,
         converged=not changed,
     )

@@ -114,6 +114,18 @@ function registrationResult(
 }
 
 describe('HttpRepositoryImportClient', () => {
+  it.each([{ issues: [] }, { issues: [{ code: 'statespec_template_invalid', message: 'spec is required' }] }])(
+    'keeps failed template validation blocking for $issues', ({ issues }) => {
+      const inspection = mapRepositoryInspection({
+        ...INSPECTION,
+        template: { validation: { status: 'failed', issues }, repositoryCommandsExecuted: false },
+      })
+      expect(inspection.template).toBeUndefined()
+      expect(inspection.findings.some((finding) => finding.severity === 'error')).toBe(true)
+      if (issues.length) expect(inspection.findings).toContainEqual({ ...issues[0], severity: 'error' })
+    },
+  )
+
   it('maps allowlisted local candidates', async () => {
     const fake = makeFakeFetch([
       ['GET', '/v1/repository-import/local-candidates', jsonResponse({ ok: true, result: CANDIDATES })],

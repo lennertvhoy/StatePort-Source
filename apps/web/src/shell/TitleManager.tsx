@@ -9,6 +9,7 @@ import { useLocation } from 'react-router-dom'
 import { useInstanceName } from './data'
 
 const GLOBAL_TITLES: Record<string, string> = {
+  platform: 'Platform',
   applications: 'Applications',
   catalog: 'Catalog',
   sources: 'Application Sources',

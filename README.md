@@ -9,9 +9,16 @@ progress, evidence, and history live in a durable local repository instead of
 only in a chat session. The application is the product people use; lifecycle,
 policy, validation, execution-host adapters, and receipts stay behind it.
 
-This repository currently provides a **Linux-first, local, single-user alpha**.
-It is useful for development and evaluation, but it is not a public release,
-hosted service, production deployment, or canonical StudyState release.
+StatePort has published signed alpha artifacts for **Windows 11, WSL2, Ubuntu
+24.04 AMD64**. Publication is not complete-product or native qualification.
+The current public Alpha.16 installer has a reproduced predecessor-signature
+preflight failure; do not use it for a fresh installation until a corrected
+additive successor is qualified. Earlier published artifacts are immutable.
+See the [public installation guidance](https://lennertvhoy.github.io/StatePort-Site/)
+and [current release status](https://lennertvhoy.github.io/StatePort-Site/releases/).
+
+The source workflow below is a local development/evaluation lane. It is not the
+anonymous installed-user journey or evidence of support for native Linux.
 
 - **Public product name:** StatePort
 - **Product category:** Stateware
@@ -78,9 +85,9 @@ Those results do **not** establish any of the following:
 - clean-host installation on a stranger's machine;
 - exact-head remote CI acceptance for this expanded alpha candidate (Slice A's
   exact-head private CI passed; that result does not transfer to later slices);
-- a tagged or published release (a signed release index exists as private
-  candidate evidence; tagging and publication remain open);
-- production, hosted, multi-user, macOS, Windows, or ARM64 support;
+- complete-product or native qualification of the published alpha artifacts;
+- production, hosted, multi-user, macOS, ARM64, or Windows outside the stated
+  WSL2 qualification target;
 - independent security review, penetration testing, or compliance
   certification;
 - product-owner, external-user, or stranger acceptance; or

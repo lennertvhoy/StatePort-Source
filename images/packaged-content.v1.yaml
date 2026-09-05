@@ -61,6 +61,8 @@ profiles:
   stateport-web:
     buildOnlySources:
       - apps/web
+      - config/codex-runtime/package.json
+      - config/codex-runtime/package-lock.json
     finalImageSources:
       - VERSION
       - apps/admin-cli/src

@@ -480,6 +480,19 @@
             }
           }
         },
+        "providerHome": {
+          "type": "object", "additionalProperties": false,
+          "required": ["provider", "hostPath", "mountPath", "owner", "mode", "environmentVariable", "validation"],
+          "properties": {
+            "provider": {"const": "codex"},
+            "hostPath": {"const": "/var/lib/stateport-control/provider-auth/codex"},
+            "mountPath": {"const": "/var/lib/stateport-provider/codex"},
+            "owner": {"const": "stateport-control"},
+            "mode": {"const": "0700"},
+            "environmentVariable": {"const": "CODEX_HOME"},
+            "validation": {"const": "ephemeral-empty"}
+          }
+        },
         "readOnlyHostMounts": {
           "type": "array",
           "maxItems": 4,

@@ -427,6 +427,75 @@ def test_phase0_receipt_binds_index_archives_and_bootstrap() -> None:
         rehearsal.validate_phase0_receipt(changed, expected)
 
 
+def test_local_public_refuses_changed_bootstrap_before_signature_or_vm(tmp_path, monkeypatch):
+    calls = []
+
+    def changed(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "different release", "")
+
+    monkeypatch.setattr(rehearsal, "run", changed)
+    with pytest.raises(ValueError, match="public candidate mismatch for install.sh"):
+        rehearsal.public_binding(tmp_path)
+    assert len(calls) == 1
+    assert not (tmp_path / "public-inputs/install.sh").exists()
+
+
+@pytest.mark.parametrize("failure", ["admission", "prepare", "boot", "setup", "install", "install-rerun", "cleanup", None])
+def test_local_rehearsal_retains_failure_and_cleans_only_owned_files(tmp_path, monkeypatch, failure):
+    vm_dir = tmp_path / "vm"
+    vm_dir.mkdir()
+    for name in ("vm.qcow2", "seed.iso", "id_ed25519", "id_ed25519.pub", "user-data", "console.log"):
+        (vm_dir / name).write_text("owned fixture")
+    foreign = tmp_path / "foreign.qcow2"
+    foreign.write_text("untouched")
+    stopped = []
+
+    def step(name):
+        def invoke(*args, **kwargs):
+            if failure == name:
+                raise RuntimeError("injected " + name)
+        return invoke
+
+    monkeypatch.setattr(rehearsal.VM, "phase_gate", step("admission"))
+    monkeypatch.setattr(rehearsal.VM, "prepare", step("prepare"))
+    monkeypatch.setattr(rehearsal.VM, "boot", step("boot"))
+    monkeypatch.setattr(rehearsal.VM, "setup", step("setup"))
+
+    def rehearse(vm, *args, **kwargs):
+        vm.current_receipt = {"result": "passed", "phases": {"install": {"ok": True}}}
+        if failure in {"install", "install-rerun"}:
+            vm.current_receipt["phases"][failure] = {"ok": False, "stdoutTail": "retained failure"}
+            raise RuntimeError("injected " + failure)
+        return vm.current_receipt
+
+    def teardown(vm):
+        stopped.append(True)
+        if failure == "cleanup":
+            raise RuntimeError("injected cleanup")
+
+    monkeypatch.setattr(rehearsal.VM, "rehearse", rehearse)
+    monkeypatch.setattr(rehearsal.VM, "teardown", teardown)
+    status = rehearsal.run_local_vm(tmp_path, {})
+    receipt = json.loads((tmp_path / "receipt.json").read_text())
+    assert status == (0 if failure is None else 1)
+    assert receipt["result"] == ("passed" if failure is None else "failed")
+    assert stopped == [True]
+    assert foreign.read_text() == "untouched"
+    assert (vm_dir / "console.log").exists()
+    assert (vm_dir / "vm.qcow2").exists() == (failure == "cleanup")
+    if failure in {"install", "install-rerun"}:
+        assert receipt["phases"][failure]["stdoutTail"] == "retained failure"
+
+
+def test_fresh_rehearsal_refuses_existing_overlay(tmp_path):
+    (tmp_path / "vm.qcow2").write_text("unique guest")
+    vm = rehearsal.VM(tmp_path, tmp_path, tmp_path)
+    with pytest.raises(ValueError, match="existing overlay"):
+        vm.prepare()
+    assert (tmp_path / "vm.qcow2").read_text() == "unique guest"
+
+
 def test_failure_watcher_captures_transient_web_runtime_evidence() -> None:
     watcher = rehearsal.FAILURE_WATCHER
     assert "sleep 0.1" in watcher
@@ -646,3 +715,145 @@ def test_build_refuses_integrated_phase_execution_without_separate_guards(
             ]
         )
     assert candidate.INTEGRATED_PHASE_REFUSAL in str(main_refused.value)
+
+
+@pytest.mark.parametrize('native', [False, True])
+def test_full_journey_needs_no_separate_phase0_but_rejects_stale_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: bool,
+) -> None:
+    """Fixture-only CLI admission: actual guest probes still own qualification."""
+    site = tmp_path / 'site'
+    (site / 'download').mkdir(parents=True)
+    (site / 'download/install.sh').write_text('fixture')
+    archives = tmp_path / 'archives'
+    archives.mkdir()
+    (archives / 'fixture.oci.tar').write_bytes(b'fixture')
+    binding = {'bootstrapDigest': 'sha256:' + 'a' * 64}
+    monkeypatch.setattr(rehearsal, 'require_guard', lambda *args: None)
+    monkeypatch.setattr(rehearsal, 'phase0_binding', lambda *args: binding)
+    class GuestReached(RuntimeError):
+        pass
+    def reached(*args, **kwargs):
+        raise GuestReached('guest construction reached')
+    monkeypatch.setattr(rehearsal, 'NativeWSL' if native else 'VM', reached)
+    argv = ['wsl2_rehearsal.py', '--site-root', str(site), '--archive-root', str(archives),
+            '--version', '0.1.0-alpha.999', '--receipt-out', str(tmp_path / 'receipt.json')]
+    if native:
+        argv += ['--native-wsl2', '--public-transport']
+    monkeypatch.setattr(sys, 'argv', argv)
+    with pytest.raises(GuestReached):
+        rehearsal.main()
+    stale = tmp_path / 'stale.json'
+    stale.write_text(json.dumps({'mode': 'phase0-transport', 'result': 'failed', 'binding': binding}))
+    monkeypatch.setattr(sys, 'argv', [*argv, '--phase0-receipt', str(stale)])
+    with pytest.raises(SystemExit, match='full J1 mode refused'):
+        rehearsal.main()
+
+@pytest.mark.parametrize('missing_binary', [False, True])
+def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatch, missing_binary):
+    from qualification import journey_common
+    observed = dict(executableInstalled=not missing_binary, configured=False, connected=False,
+                    authenticationStatus='unverified', requestStatus='unverified', telemetryStatus='unavailable')
+    requests = []
+    class Client:
+        def __init__(self, *_): pass
+        def handshake(self): pass
+        def request(self, method, path):
+            requests.append((method, path))
+            if path == '/v1/execution-host':
+                return {'executionHost': {'status': 'available', 'grantBound': True}}
+            assert path == '/v1/provider/status'
+            return {'result': observed}
+    monkeypatch.setattr(journey_common, 'GuestJsonClient', Client)
+    monkeypatch.setattr(journey_common, 'discover_services', lambda _: {'stateport-web': {'port': 8080}})
+    monkeypatch.setattr(journey_common, 'wait_service_healthy', lambda *a, **k: None)
+    monkeypatch.setattr(journey_common, 'verify_installed_image_digests', lambda *a: {'mismatches': {}})
+    binding = {'images': {}, 'providerRuntimeRequired': True}
+    if missing_binary:
+        with pytest.raises(ValueError, match='provider observations'):
+            rehearsal.installed_service_smoke(object(), binding)
+    else:
+        assert rehearsal.installed_service_smoke(object(), binding)['providerFreshObservations'] == observed
+    assert requests == [('GET', '/v1/execution-host'), ('GET', '/v1/provider/status')]
+
+
+def _image_identity_fixture(*, units=None, live=None, unit_exit=0, live_exit=0):
+    from qualification import journey_common
+    import subprocess
+    names = ('stateport-web', 'stateport-api', 'stateport-worker')
+    expected = {name: 'sha256:' + char * 64 for name, char in zip(names, 'abc')}
+    if units is None:
+        units = '\n'.join(f'{name}\t{expected[name]}\tcontainer-{name}' for name in names)
+    if live is None:
+        live = '\n'.join(f'{name}\t{char * 64}\t{expected[name]}\ttrue\t{name}\taccepted\tcontainer-{name}' for name, char in zip(names, 'def'))
+    class VM:
+        def __init__(self): self.commands = []
+        def ssh(self, command, **kwargs):
+            self.commands.append(command)
+            assert kwargs == {'check': False, 'timeout': 60}
+            output, code = (units, unit_exit) if len(self.commands) == 1 else (live, live_exit)
+            return subprocess.CompletedProcess(command, code, output, 'SECRET_INSPECT_STDERR_CANARY')
+    vm = VM()
+    return journey_common, vm, expected
+
+
+def test_installed_image_identity_observes_running_containers_separately_from_units():
+    common, vm, expected = _image_identity_fixture()
+    result = common.verify_installed_image_digests(vm, expected)
+    assert result['mismatches'] == {}
+    assert result['declared'] == expected == result['observed']
+    assert result['containers']['stateport-web']['containerId'] == 'd' * 64
+    assert 'sudo runuser -u stateport-control' in vm.commands[1]
+    assert 'podman ps --no-trunc --filter status=running' in vm.commands[1]
+    assert 'label=io.stateport.profile=accepted' in vm.commands[1]
+    assert 'podman container inspect --format' in vm.commands[1]
+    assert '{{.ImageDigest}}' in vm.commands[1]
+    assert '{{.Id}}\t{{.ImageDigest}}' in vm.commands[1]
+    assert r'{{.Id}}\t{{.ImageDigest}}' not in vm.commands[1]
+    assert vm.commands[1].index('invalid-running-count') < vm.commands[1].index('podman container inspect')
+    assert '.Config.Env' not in vm.commands[1] and '{{json .}}' not in vm.commands[1]
+
+
+@pytest.mark.parametrize('defect', ['zero', 'duplicate', 'stopped', 'wrong-profile', 'wrong-label', 'wrong-name', 'wrong-digest', 'malformed', 'inspect-error'])
+def test_unit_digest_alone_cannot_pass_live_image_qualification(defect):
+    _, _, expected = _image_identity_fixture()
+    names = tuple(expected)
+    live = [f'{name}\t{char * 64}\t{expected[name]}\ttrue\t{name}\taccepted\tcontainer-{name}' for name, char in zip(names, 'def')]
+    exit_code = 0
+    if defect == 'zero': live.pop(0)
+    elif defect == 'duplicate': live.append(live[0])
+    elif defect == 'stopped': live[0] = live[0].replace('\ttrue\t', '\tfalse\t')
+    elif defect == 'wrong-profile': live[0] = live[0].replace('\taccepted\t', '\tvalidation\t')
+    elif defect == 'wrong-label': live[0] = live[0].replace('\tstateport-web\taccepted', '\tstateport-api\taccepted')
+    elif defect == 'wrong-name': live[0] = live[0].replace('container-stateport-web', 'foreign-container')
+    elif defect == 'wrong-digest': live[0] = live[0].replace(expected['stateport-web'], 'sha256:' + '0' * 64)
+    elif defect == 'malformed': live[0] = 'SECRET_INSPECT_STDOUT_CANARY'
+    else: exit_code = 125
+    common, vm, expected = _image_identity_fixture(live='\n'.join(live), live_exit=exit_code)
+    result = common.verify_installed_image_digests(vm, expected)
+    assert result['declaredMismatches'] == {}
+    assert 'stateport-web' in result['mismatches']
+    assert 'SECRET_INSPECT' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('defect', ['duplicate', 'missing', 'wrong-digest', 'read-error'])
+def test_declared_unit_identity_remains_an_independent_gate(defect):
+    _, _, expected = _image_identity_fixture()
+    units = [f'{name}\t{digest}\tcontainer-{name}' for name, digest in expected.items()]
+    if defect == 'duplicate': units.append(units[0])
+    elif defect == 'missing': units.pop(0)
+    elif defect == 'wrong-digest': units[0] = units[0].replace(expected['stateport-web'], 'sha256:' + '0' * 64)
+    common, vm, expected = _image_identity_fixture(units='\n'.join(units), unit_exit=1 if defect == 'read-error' else 0)
+    result = common.verify_installed_image_digests(vm, expected)
+    assert result['observed'] == expected
+    assert 'stateport-web' in result['declaredMismatches']
+    assert 'stateport-web' in result['mismatches']
+    assert 'SECRET_INSPECT' not in json.dumps(result)
+
+
+def test_candidate_must_include_every_control_image_before_guest_access():
+    common, vm, expected = _image_identity_fixture()
+    expected.pop('stateport-worker')
+    with pytest.raises(ValueError, match='every control-service image'):
+        common.verify_installed_image_digests(vm, expected)
+    assert vm.commands == []

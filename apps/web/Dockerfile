@@ -20,6 +20,19 @@ ENV STATEPORT_BUILD_SOURCE_COMMIT=${STATEPORT_BUILD_SOURCE_COMMIT} \
     STATEPORT_BUILD_VERSION=${STATEPORT_BUILD_VERSION}
 RUN npm run build
 
+# Codex remains the supported provider. Install only the locked native runtime
+# in the control service that actually owns assistant execution; no Node/npm,
+# credentials or provider session state enter the final image.
+FROM docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS provider-build
+WORKDIR /provider
+COPY config/codex-runtime/package.json config/codex-runtime/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev --audit=false --fund=false \
+    && mkdir /out \
+    && cp node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex /out/codex \
+    && cp node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path/rg /out/rg \
+    && chmod 0555 /out/codex /out/rg \
+    && /out/codex --version | grep -Fx "codex-cli 0.146.0"
+
 FROM docker.io/library/python:3.13-alpine3.23@sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76
 ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
 ARG STATEPORT_BUILD_SOURCE_TREE=unknown
@@ -43,7 +56,7 @@ LABEL org.opencontainers.image.title="StatePort Web" \
       io.stateport.image.role="control-web" \
       io.stateport.component.preview-gateway="same-origin-web-process" \
       io.stateport.packaged-content="stateport.packaged-content/v1" \
-      io.stateport.provider.executables="none"
+      io.stateport.provider.executables="codex"
 
 # The AppServer validates the exact runtime Git identity of the mounted
 # product root (_validate_product_root) and executes approved filesystem
@@ -78,6 +91,14 @@ RUN if [ "${STATEPORT_BUILD_SOURCE_DATE_EPOCH}" != "unknown" ]; then \
     && chmod 0555 /usr/local/bin/stateport-healthcheck \
     && mkdir -p /workspace /var/lib/stateport/config /var/lib/stateport/data /var/lib/stateport/state \
     && chown -R 65532:65532 /workspace /var/lib/stateport
+# This directory is deliberately outside StatePort data/config/backup roots.
+# The signed topology supplies a provider-owned mount; without it read-only
+# container roots refuse authentication instead of writing auth into product data.
+RUN mkdir -p /var/lib/stateport-provider/codex \
+    && chown 65532:65532 /var/lib/stateport-provider/codex \
+    && chmod 0700 /var/lib/stateport-provider/codex
+COPY --from=provider-build /out/codex /usr/local/bin/codex
+COPY --from=provider-build /out/rg /usr/local/bin/rg
 WORKDIR /workspace
 
 # Final-image product content is an exact positive allowlist mirrored by
@@ -183,6 +204,7 @@ ENV HOME=/var/lib/stateport \
     XDG_CONFIG_HOME=/var/lib/stateport/config \
     XDG_DATA_HOME=/var/lib/stateport/data \
     XDG_STATE_HOME=/var/lib/stateport/state \
+    CODEX_HOME=/var/lib/stateport-provider/codex \
     STATEPORT_PACKAGED_PRODUCT=1 \
     STATEPORT_PRODUCT_ROOT=/workspace \
     STATEPORT_BUILD_SOURCE_COMMIT=${STATEPORT_BUILD_SOURCE_COMMIT} \

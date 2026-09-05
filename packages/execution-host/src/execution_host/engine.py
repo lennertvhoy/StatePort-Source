@@ -20,12 +20,15 @@ import json
 import os
 import pty
 import re
+import selectors
+import signal
 import struct
 import subprocess
 import termios
+import time
 from typing import Any, Mapping, Sequence
 
-from .daemon_contract import MAX_REQUEST_TIMEOUT_SECONDS
+from .daemon_contract import MAX_OUTPUT_BYTES, MAX_REQUEST_TIMEOUT_SECONDS
 
 
 MANAGED_LABEL_KEY = "io.stateport.execution.managed"
@@ -655,16 +658,72 @@ class PodmanCliEngine:
         }
 
     def logs(self, workload_id: str, *, max_bytes: int) -> dict[str, Any]:
-        completed = self._run(["logs", container_name(workload_id)])
-        if completed.returncode != 0:
-            raise EngineError(f"workload logs failed: {completed.stderr.strip()[:300]}")
-        data = completed.stdout.encode("utf-8", "replace")
-        truncated = len(data) > max_bytes
-        return {
-            "bytes": data[:max_bytes].decode("utf-8", "replace"),
-            "byteCount": min(len(data), max_bytes),
-            "truncated": truncated,
-        }
+        """Drain CLI pipes with a bounded prefix, never capture the whole log.
+
+        Continue draining without retaining overflow so a natural nonzero exit
+        remains an error. Stderr is discarded, not copied to public diagnostics.
+        The fixed timeout also bounds an endless or stalled log producer.
+        """
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 1 <= max_bytes <= MAX_OUTPUT_BYTES:
+            raise EngineError("log byte bound is outside policy")
+        deadline = time.monotonic() + min(30, MAX_REQUEST_TIMEOUT_SECONDS)
+        try:
+            process = subprocess.Popen(
+                [self._binary, "logs", container_name(workload_id)],
+                env=self._env(), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError:
+            raise EngineError("workload logs could not start; check the execution engine") from None
+        retained = bytearray()
+        truncated = False
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None and process.stderr is not None
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        try:
+            while selector.get_map():
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    raise EngineError("workload logs timed out; retry after checking the execution engine")
+                for key, _ in selector.select(timeout=min(0.05, remaining_time)):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    elif key.data == "stdout":
+                        remaining_bytes = max_bytes - len(retained)
+                        retained.extend(chunk[:remaining_bytes])
+                        truncated = truncated or len(chunk) > remaining_bytes
+            try:
+                returncode = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise EngineError("workload logs timed out; retry after checking the execution engine") from None
+            if returncode != 0:
+                raise EngineError("workload logs failed; check workload state and the execution engine")
+        except OSError:
+            raise EngineError("workload logs could not be read; check the execution engine") from None
+        finally:
+            selector.close()
+            process.stdout.close()
+            process.stderr.close()
+            # Kill only this newly-created CLI process group, including a child
+            # that retained a pipe after its leader exited. Never signal a
+            # workload container or a shared engine process.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                raise EngineError("workload log reader cleanup did not complete") from None
+        decoded = retained.decode("utf-8", "replace").encode("utf-8")
+        if len(decoded) > max_bytes:
+            truncated = True
+        output = decoded[:max_bytes].decode("utf-8", "ignore")
+        return {"bytes": output, "byteCount": len(output.encode("utf-8")), "truncated": truncated}
 
     def list_managed(self) -> list[dict[str, Any]]:
         completed = self._run(

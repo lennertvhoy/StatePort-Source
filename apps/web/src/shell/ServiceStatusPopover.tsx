@@ -23,12 +23,12 @@ export function ServiceStatusPopover({ children }: { children: ReactNode }) {
   const status = useSessionStore((s) => s.serviceStatus)
   const navigate = useNavigate()
   const presentation = localServicePresentation(status?.state ?? 'unknown')
-  const runtime = status?.runtime
+  const runtime = status?.state === 'connected' || status?.state === 'degraded' ? status.runtime : undefined
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="right" align="end" sideOffset={8} className="w-80 bg-surface p-0" data-testid="service-status-popover">
+      <PopoverContent side="right" align="end" sideOffset={8} className="w-80 max-w-[calc(100vw-1rem)] bg-surface p-0" data-testid="service-status-popover">
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           <presentation.icon className="size-4 text-foreground-secondary" aria-hidden="true" />
           <span className="text-sm font-medium text-foreground">Local service — {presentation.label}</span>
@@ -105,10 +105,10 @@ export function ServiceStatusPopover({ children }: { children: ReactNode }) {
               variant="ghost"
               onClick={() => {
                 setOpen(false)
-                void navigate('/settings/advanced')
+                void navigate('/platform')
               }}
             >
-              Review endpoint
+              Review readiness
             </Button>
           </div>
         </div>

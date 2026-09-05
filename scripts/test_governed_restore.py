@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime as real_datetime
 from argparse import Namespace
 import json
 import os
@@ -325,6 +326,33 @@ def _planned(app: PersistentApp, source_id: str = "restore-source") -> tuple[dic
         actor_role="local_operator",
     )
     return plan, approval
+
+
+def test_same_second_backups_keep_distinct_verified_recovery_points(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _app(tmp_path, monkeypatch)
+    root = _instance(app)
+    before = _digest_tree(root)
+
+    class FixedClock(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 5, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(persistent_app_module, "datetime", FixedClock)
+    first = app.backup("restore-source")
+    second = app.backup("restore-source")
+    assert first["archive"] != second["archive"]
+    assert first["backupReceipt"]["receiptId"] != second["backupReceipt"]["receiptId"]
+    for backup in (first, second):
+        assert Path(backup["archive"]).is_file()
+        plan = app.restore_plan(
+            "restore-source", backup_receipt_id=backup["backupReceipt"]["receiptId"],
+            destination_instance_id="restored-backup", destination_name="Restored backup",
+        )
+        assert plan["planDigest"]
+    assert _digest_tree(root) == before
 
 
 def test_governed_restore_is_path_free_new_identity_and_idempotent(

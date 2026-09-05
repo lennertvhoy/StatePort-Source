@@ -20,4 +20,4 @@ codex:
     requiredExecFlags: [--json, --ephemeral, --sandbox]
     authenticationBoundary: operator-owned CODEX_HOME volume
     credentialsInImage: false
-    installedOnlyIn: [stateport-dev-workspace]
+    installedOnlyIn: [stateport-dev-workspace, stateport-web]

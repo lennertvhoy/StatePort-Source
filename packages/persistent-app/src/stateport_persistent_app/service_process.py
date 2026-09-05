@@ -1037,6 +1037,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             platform_surface.require_platform_operator_for_path(self.server, path)
             app = self.server.source_app()
+            if path == "/v1/provider/status":
+                status = self.server.provider_setup.status()
+                if not self.server._provider_execution_allowed:
+                    status["connected"] = False
+                    status["detail"] = "Provider execution is disabled in the validation release profile. Inspect status in the accepted installed runtime before enabling provider work."
+                self._send(200, {"ok": True, "result": status})
+                return
             if path == "/v1/settings":
                 self._send(200, {"ok": True, "result": self.server.settings_store().projection()})
                 return
@@ -1368,6 +1375,11 @@ class Handler(BaseHTTPRequestHandler):
             parts = [unquote(part) for part in path.split("/") if part]
             attachment_upload = len(parts) == 5 and parts[:2] == ["v1", "instances"] and parts[3:] == ["conversation", "attachments"]
             body = self._body(maximum_bytes=ConversationAttachmentStore.MAX_BYTES * 2 if attachment_upload else 64 * 1024)
+            if path in {"/v1/provider/configure", "/v1/provider/verify", "/v1/provider/disconnect"}:
+                platform_surface.require_platform_operator(self.server)
+                self._strict_body(body, {"model"} if path.endswith("/configure") else set())
+                self._send(200, {"ok": True, "result": self.server.provider_action(path.rsplit("/", 1)[1], body)})
+                return
             if path == "/v1/repository-import/inspect":
                 self._mutation_security("repository inspection")
                 self._strict_body(body, {"candidateId"} if "candidateId" in body else {"url"})
@@ -1507,6 +1519,9 @@ class Handler(BaseHTTPRequestHandler):
                 inspection_digest = inspection.get("inspectionDigest")
                 if inspection_digest != body.get("inspectionDigest") or approval.get("proposalDigest") != inspection_digest:
                     raise RepositoryImportError("repository_inspection_stale", "repository identity changed; inspect it again")
+                template = inspection.get("template")
+                if isinstance(template, dict) and isinstance(template.get("validation"), dict) and template["validation"].get("status") == "failed":
+                    raise RepositoryImportError("template_contract_invalid", "The template contract failed validation; correct it before importing")
                 source_identity = inspection.get("sourceIdentity")
                 if not isinstance(source_identity, dict):
                     raise RepositoryImportError("repository_identity_missing", "repository identity is unavailable")
@@ -2706,8 +2721,11 @@ class AppServer(ThreadingHTTPServer):
         self._terminal_sockets_mutex = threading.Condition(threading.Lock())
         self._terminal_sockets: set[socket.socket] = set()
         self._terminal_closing = False
+        from .provider_setup import ProviderSetup
+        self.provider_setup = ProviderSetup(layout.config_root, layout.state_root)
         self._assistant_processor: object = None
-        if os.environ.get("STATEPORT_ASSISTANT_PROCESSOR_ENABLED", "").strip().lower() in {"1", "true", "yes"}:
+        self._provider_execution_allowed = os.environ.get("STATEPORT_RELEASE_PROFILE", "").strip().lower() != "validation"
+        if self._provider_execution_allowed and not self.provider_setup.disabled_path.exists() and (self.provider_setup.profile_path.exists() or os.environ.get("STATEPORT_ASSISTANT_PROCESSOR_ENABLED", "").strip().lower() in {"1", "true", "yes"}):
             from stateport_persistent_app.assistant_processor import AssistantProcessor
             self._assistant_processor = AssistantProcessor(
                 self.conversations,
@@ -2722,6 +2740,66 @@ class AppServer(ThreadingHTTPServer):
             raise
         if self._assistant_processor is not None:
             self._assistant_processor.start()
+
+    def _stop_provider_processor(self):
+        processor = self._assistant_processor
+        if processor is None:
+            return
+        processor.shutdown()
+        if not processor.shutdown_complete:
+            raise RuntimeError("provider processor is still stopping; retry after it stops")
+        processor.work_store.cancel_queued_for_disconnect()
+        self._assistant_processor = None
+
+    def provider_action(self, action, body):
+        from .provider_router import ProviderRouter
+        from .assistant_processor import AssistantProcessor
+        with self.provider_setup.lock:
+            if not self._provider_execution_allowed and action in {"configure", "verify"}:
+                raise PermissionError("provider execution is disabled in the validation release profile")
+            if action == "verify":
+                return self.provider_setup.verify()
+            if action == "disconnect":
+                result = self.provider_setup.disconnect()
+                self._stop_provider_processor()
+                return result
+            # Validate before interrupting active work.
+            model = body.get("model")
+            if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}", model):
+                raise ValueError("provider configuration is invalid")
+            candidate = None
+            try:
+                # Keep the durable refusal marker throughout preparation. A
+                # failed constructor or cursor write must not enable replay on
+                # the next service restart.
+                self.provider_setup.disconnect()
+                self._stop_provider_processor()
+                ProviderRouter.configure_codex(
+                    self.provider_setup.profile_path,
+                    model_identifier=model, time_seconds=30, steps=2,
+                )
+                candidate = AssistantProcessor(
+                    self.conversations,
+                    router=ProviderRouter(self.provider_setup.profile_path),
+                    log_writer=lambda msg: (self.log.write(msg), self.log.flush()),
+                )
+                candidate.work_store.cancel_queued_for_disconnect()
+                candidate.activate_current_messages()
+                self._assistant_processor = candidate
+                self.provider_setup.disabled_path.unlink()
+                candidate.start()
+                self.provider_setup.authentication = self.provider_setup.request = "unverified"
+                self.provider_setup.detail = "Model saved. Authenticate using Codex in this runtime, then verify. StatePort never reads or copies credentials."
+                return self.provider_setup.status()
+            except Exception:
+                # A start can fail after creating its thread. Restore durable
+                # refusal first, then retain any processor whose shutdown has
+                # not completed so a retry cannot create a competing owner.
+                self.provider_setup.disconnect()
+                if candidate is not None:
+                    self._assistant_processor = candidate
+                    self._stop_provider_processor()
+                raise RuntimeError("provider setup failed; StatePort provider work remains disabled") from None
 
     @staticmethod
     def _vite_assets(web_root: Path) -> frozenset[str]:

@@ -8,7 +8,6 @@ from pathlib import Path
 import sqlite3
 import stat
 import threading
-import traceback
 from typing import Callable
 
 from external_engine_runtime import ProcessIdentity, TemporaryWorkspace
@@ -180,6 +179,16 @@ class AssistantProcessor:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=timeout)
+
+    @property
+    def shutdown_complete(self) -> bool:
+        return not self._thread.is_alive()
+
+    def activate_current_messages(self) -> None:
+        """Explicit provider setup accepts future messages, preserving old transcript."""
+        self.activate()
+        for conversation_id, sequence in self._positions(self._read_conversation_rows()).items():
+            self._reconciliation.advance(conversation_id, sequence)
 
     @property
     def running(self) -> bool:
@@ -363,7 +372,7 @@ class AssistantProcessor:
                 processed = False
                 self._log_event(
                     "assistant_processor_poll_error",
-                    traceback.format_exc(),
+                    "The assistant poll failed; check local service and durable work status.",
                 )
             if not processed:
                 self._stop.wait(timeout=self._poll_interval)
@@ -424,12 +433,8 @@ class AssistantProcessor:
                 "provider_invocation_failed",
                 str(exc),
             )
-        except Exception as exc:
-            self._fail_claim(
-                claim,
-                "assistant_invocation_failed",
-                str(exc) or type(exc).__name__,
-            )
+        except Exception:
+            self._fail_claim(claim, "assistant_invocation_failed", "")
 
     def _record_process_identity(
         self,
@@ -476,12 +481,8 @@ class AssistantProcessor:
                 lease_token=claim.lease_token,
                 reply_message_id=reply_id,
             )
-        except Exception as exc:
-            self._fail_claim(
-                claim,
-                "assistant_delivery_failed",
-                str(exc) or type(exc).__name__,
-            )
+        except Exception:
+            self._fail_claim(claim, "assistant_delivery_failed", "")
 
     def _existing_reply_id(self, claim: AssistantClaim) -> str | None:
         presentation = self._conversations.presentation(
@@ -847,6 +848,29 @@ class AssistantProcessor:
             lines.extend(("", _ATM10_RESPONSE_GUIDANCE))
         return "\n\n".join(lines)
 
+    @staticmethod
+    def _failure_message(code: str, provider_reason: str = "") -> str:
+        """Only fixed public diagnostics cross the durable error boundary.
+
+        Exception text can contain prompts, account identifiers or credentials.
+        Matching an exact known reason keeps useful diagnostics without treating
+        arbitrary provider/OS/library messages as safe to persist.
+        """
+        if code == "provider_invocation_failed":
+            return {
+                "provider_disconnected": "Provider is disconnected. Enable it in Coding provider settings before sending new work.",
+                "provider_timed_out": "The provider exceeded its time budget. Review the request and provider status before retrying.",
+                "provider_cancelled": "The provider request was cancelled. No automatic retry was scheduled.",
+                "provider_output_limited": "The provider exceeded its output bound. Reduce the request before retrying.",
+                "provider_execution_unavailable": "The provider could not execute in this runtime. Check Coding provider settings and runtime permissions.",
+                "provider_failed": "The provider request failed. Verify the connection and model in Coding provider settings before retrying.",
+            }.get(provider_reason, "The provider request failed. Check Coding provider settings and the work status before retrying.")
+        return {
+            "assistant_invocation_failed": "The assistant could not prepare or record this request. Check the application context and durable work status before retrying.",
+            "assistant_delivery_failed": "The assistant reply could not be recorded. Inspect durable work status; do not resubmit while delivery recovery is pending.",
+            "assistant_result_invalid": "The durable provider result has no usable assistant response. Inspect the work status before retrying.",
+        }.get(code, "Assistant work failed. Inspect the work status before retrying.")
+
     def _fail_claim(
         self,
         claim: AssistantClaim,
@@ -859,12 +883,12 @@ class AssistantProcessor:
                 attempt_id=claim.attempt_id,
                 lease_token=claim.lease_token,
                 code=code,
-                message=message[:2048],
+                message=self._failure_message(code, message),
             )
         except Exception:
             self._log_event(
                 "assistant_processor_failure_persist_error",
-                f"work={claim.work_id} error={traceback.format_exc()}",
+                f"work={claim.work_id} failure could not be recorded; inspect durable work status before retrying.",
             )
 
     def _log_event(self, event: str, detail: str) -> None:

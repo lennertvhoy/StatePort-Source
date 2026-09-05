@@ -19,12 +19,13 @@ import {
   PanelLeftOpen,
   Plus,
   Settings,
+  Server,
   ShieldCheck,
   X,
 } from 'lucide-react'
-import type { ComponentType } from 'react'
+import type { ComponentProps, ComponentType } from 'react'
 import { useEffect } from 'react'
-import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import type { ApplicationInstance } from '@/client'
 import { BrandLockup, BrandMark, StatusDot, Tooltip } from '@/components'
@@ -75,6 +76,7 @@ function useDestinations(): Destination[] {
       badge: pendingApprovals,
       badgeError: pendingApprovalsError != null,
     },
+    { to: '/platform', label: 'Platform', icon: Server, isActive: (p) => ['/platform', '/sources', '/execution-host', '/deployments', '/authority', '/updater', '/preview-routes', '/statebench'].some((route) => p === route || p.startsWith(`${route}/`)) },
     { to: '/settings', label: 'Settings', icon: Settings, isActive: (p) => p.startsWith('/settings') },
   ]
 }
@@ -124,11 +126,12 @@ function ExpandedContent({ onNavigate }: { onNavigate?: () => void }) {
         {destinations.map((dest) => {
           const active = dest.isActive(location.pathname)
           return (
-            <NavLink
+            <Link
               key={dest.to}
               to={dest.to}
               onClick={onNavigate}
               data-active={active}
+              aria-current={active ? 'page' : undefined}
               className={cn(
                 'nav-item relative flex h-nav-row items-center gap-2 rounded-sm px-3 text-sm font-medium transition-colors duration-instant',
                 active
@@ -143,7 +146,7 @@ function ExpandedContent({ onNavigate }: { onNavigate?: () => void }) {
               ) : dest.badge ? (
                 <CountBadge count={dest.badge} label={`${dest.badge} pending approvals`} />
               ) : null}
-            </NavLink>
+            </Link>
           )
         })}
       </nav>
@@ -216,10 +219,11 @@ function AppRow({
   const active = pathname.startsWith(`/app/${instance.id}`)
   const health = instanceHealthPresentation(instance.health)
   return (
-    <NavLink
+    <Link
       to={`/app/${instance.id}`}
       onClick={onNavigate}
       data-active={active}
+      aria-current={active ? 'page' : undefined}
       role="listitem"
       className={cn(
         'nav-item flex h-nav-row items-center gap-2 rounded-sm px-3 text-sm transition-colors duration-instant',
@@ -229,7 +233,7 @@ function AppRow({
       <InstanceGlyphTile instance={instance} />
       <span className="min-w-0 flex-1 truncate">{instance.name}</span>
       <StatusDot state={health.state} label={health.label} showLabel={false} />
-    </NavLink>
+    </Link>
   )
 }
 
@@ -257,16 +261,16 @@ function UtilityRow({
   )
 }
 
-function ServiceUtilityRow() {
+function ServiceUtilityRow(props: ComponentProps<'button'>) {
   const status = useSessionStore((s) => s.serviceStatus)
   const state = status?.state ?? 'unknown'
   const label =
     state === 'connected' ? 'Connected' : state === 'degraded' ? 'Service degraded' : state === 'offline' ? 'Service offline' : 'Not checked'
   return (
-    <span className="flex h-nav-row w-full items-center gap-2 rounded-sm px-3 text-sm text-foreground">
+    <button {...props} type="button" aria-label="Local service status" className="flex h-nav-row w-full items-center gap-2 rounded-sm px-3 text-sm text-foreground">
       <ServiceStateIcon state={state} />
       <span className="truncate">{label}</span>
-    </span>
+    </button>
   )
 }
 
@@ -311,13 +315,13 @@ function RailContent() {
         </Tooltip>
       </div>
       <Tooltip content="Applications" side="right">
-        <NavLink
+        <Link
           to="/applications"
           aria-label="StatePort — Applications"
           className="mt-2 inline-flex min-h-10 min-w-10 items-center justify-center rounded-sm text-foreground"
         >
           <BrandMark size={24} />
-        </NavLink>
+        </Link>
       </Tooltip>
 
       <nav aria-label="Primary" className="mt-1 flex flex-col items-center gap-1">
@@ -335,10 +339,11 @@ function RailContent() {
                     : dest.label
               }
             >
-              <NavLink
+              <Link
                 to={dest.to}
                 aria-label={dest.label}
                 data-active={active}
+                aria-current={active ? 'page' : undefined}
                 className={cn(
                   'nav-item relative inline-flex h-9 w-9 items-center justify-center rounded-sm transition-colors duration-instant',
                   active
@@ -350,7 +355,7 @@ function RailContent() {
                 {dest.badge || dest.badgeError ? (
                   <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-status-neutral" aria-hidden="true" />
                 ) : null}
-              </NavLink>
+              </Link>
             </Tooltip>
           )
         })}
@@ -364,10 +369,11 @@ function RailContent() {
           const health = instanceHealthPresentation(instance.health)
           return (
             <Tooltip key={instance.id} side="right" content={`${instance.name} · ${health.label}`}>
-              <NavLink
+              <Link
                 to={`/app/${instance.id}`}
                 aria-label={`${instance.name} — ${health.label}`}
                 data-active={active}
+                aria-current={active ? 'page' : undefined}
                 className={cn(
                   'nav-item relative inline-flex h-8 w-8 items-center justify-center rounded-sm transition-colors duration-instant',
                   active ? 'bg-accent-soft' : 'hover:bg-hover',
@@ -389,7 +395,7 @@ function RailContent() {
                   )}
                   aria-hidden="true"
                 />
-              </NavLink>
+              </Link>
             </Tooltip>
           )
         })}
@@ -412,9 +418,9 @@ function RailContent() {
           </button>
         </Tooltip>
         <ServiceStatusPopover>
-          <span className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-sm hover:bg-hover">
+          <button type="button" aria-label="Local service status" className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-sm hover:bg-hover">
             <RailServiceIcon />
-          </span>
+          </button>
         </ServiceStatusPopover>
       </div>
     </div>
@@ -463,9 +469,9 @@ export function Sidebar() {
       ) : (
         <>
           <div className="flex h-topbar shrink-0 items-center justify-between border-b border-border pl-4 pr-2">
-            <NavLink to="/applications" aria-label="StatePort — Applications" className="rounded-sm">
+            <Link to="/applications" aria-label="StatePort — Applications" className="rounded-sm">
               <BrandLockup />
-            </NavLink>
+            </Link>
             <Tooltip content={`Collapse sidebar · ${MOD_LABEL}+B`}>
               <button
                 type="button"

@@ -165,6 +165,11 @@ def _predecessor_bundle_downloads(
             (
                 f'get "$RELEASE_ROOT/predecessor-bundle/{bundle_name}" "$tmp/predecessor-bundle/{bundle_name}" "predecessor signature bundle"',
                 f'check "{_sha256(bundle).removeprefix("sha256:")}" "$tmp/predecessor-bundle/{bundle_name}"',
+                # The predecessor verifier uses the same content-addressed
+                # layout as the current index and image signatures. A flat
+                # download alone is insufficient on a fresh installation.
+                f'mkdir -p -m 700 "$tmp/{_sha256(bundle).removeprefix("sha256:")}"',
+                f'install -m 600 "$tmp/predecessor-bundle/{bundle_name}" "$tmp/{_sha256(bundle).removeprefix("sha256:")}/{bundle_name}"',
             )
         )
     return downloads

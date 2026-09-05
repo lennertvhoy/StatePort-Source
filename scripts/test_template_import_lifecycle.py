@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +129,37 @@ def test_registry_recognizes_projectstate_studystate_and_native_templates(
     match = registry.require(native)
     assert match["adapterId"] == "statespec-template"
     assert match["applicationId"] == "stateport.template.generic"
+
+
+@pytest.mark.parametrize("invalid_spec", [None, {}, {"allowedActions": [{"name": "run", "level": "L99"}]}])
+def test_invalid_statespec_refuses_import_without_partial_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_spec: object,
+) -> None:
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    source = _statespec_repository(sources / "invalid")
+    marker = source / "template.yaml"
+    descriptor = yaml.safe_load(marker.read_text())
+    if invalid_spec is None:
+        descriptor.pop("spec")
+    elif invalid_spec == {}:
+        descriptor["spec"] = {}
+    else:
+        descriptor["spec"].update(invalid_spec)
+    marker.write_text(yaml.safe_dump(descriptor))
+    _git(source, "add", "template.yaml")
+    _git(source, "commit", "-q", "-m", "invalid contract")
+    monkeypatch.setenv("STATEPORT_REPOSITORY_ROOTS", str(sources))
+    layout = LocalLayout(tmp_path / "config", tmp_path / "data", tmp_path / "state")
+    layout.initialize()
+    app = PersistentApp(layout)
+    inspector = RepositoryInspector(RepositorySourcePolicy(layout))
+    inspected = _inspection(inspector, source, sources)
+    assert inspected["template"]["validation"]["status"] == "failed"
+    with pytest.raises(AppError, match="valid supported template contract"):
+        _install(app, inspected, source, "invalid-template")
+    assert not (layout.instances_root / "invalid-template").exists()
+    assert not (layout.operations_root / "template-imports" / "invalid-template.json").exists()
 
 
 def test_template_import_copies_only_the_committed_tree_and_runs_trusted_action(

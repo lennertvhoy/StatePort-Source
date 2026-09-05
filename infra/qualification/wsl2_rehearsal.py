@@ -49,8 +49,10 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -58,6 +60,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from release_guard import (  # noqa: E402
+    authorize_guard,
     classify_rehearsal_baseline,
     effective_mission,
     load_envelope,
@@ -562,6 +565,8 @@ def phase0_binding(site_root: Path, version: str, archive_root: Path) -> dict[st
         "signedPayloadDigest": "sha256:" + hashlib.sha256(_canonical_json(signed)).hexdigest(),
         "bootstrapDigest": "sha256:" + hashlib.sha256(bootstrap_path.read_bytes()).hexdigest(),
         "archives": archives,
+        "images": {item["imageId"]: item["digest"] for item in images},
+        "providerRuntimeRequired": any(service.get("providerHome") for target in signed.get("targets", []) for service in target.get("services", [])),
     }
     artifacts = signed.get("artifacts") if isinstance(signed, dict) else None
     package_bundle = artifacts.get("podmanPackageBundle") if isinstance(artifacts, dict) else None
@@ -594,6 +599,7 @@ class VM:
         diagnostic_reuse: bool = False,
         public_transport: bool = False,
         memory_mib: int = QUALIFICATION_VM_MEMORY_MIB,
+        base_image: Path | None = None,
     ):
         self.work = work
         self.site_root = site_root
@@ -602,6 +608,8 @@ class VM:
         self.diagnostic_reuse = diagnostic_reuse
         self.public_transport = public_transport
         self.memory_mib = memory_mib
+        self.base_image = base_image
+        self.current_receipt: dict = {}
         self.proc: subprocess.Popen | None = None
         self.key = work / "id_ed25519"
         self.public_transport_boundary: dict[str, object] | None = None
@@ -620,19 +628,23 @@ class VM:
                 raise SystemExit("retained diagnostic VM is incomplete")
             log(f"reusing retained diagnostic VM overlay ({self.memory_mib} MiB, 2 vCPU)")
             return
-        base = self.work / "noble-server-cloudimg-amd64.img"
+        if (self.work / "vm.qcow2").exists():
+            raise ValueError("fresh rehearsal refuses an existing overlay")
+        base = self.base_image or self.work / "noble-server-cloudimg-amd64.img"
+        base = base.resolve()
+        base.parent.mkdir(parents=True, exist_ok=True)
         if not base.exists():
             log("downloading Ubuntu 24.04 cloud image")
             run(["curl", "-fsSL", "-o", str(base) + ".part", UBUNTU_IMG_URL], timeout=1200)
             part = Path(str(base) + ".part")
-            actual = hashlib.sha256(part.read_bytes()).hexdigest()
+            actual = _sha256_file(part)
             if actual != UBUNTU_IMG_SHA256:
                 part.unlink(missing_ok=True)
                 raise SystemExit(
                     f"cloud image digest mismatch: {actual} != {UBUNTU_IMG_SHA256}"
                 )
             os.rename(part, base)
-        actual = hashlib.sha256(base.read_bytes()).hexdigest()
+        actual = _sha256_file(base)
         if actual != UBUNTU_IMG_SHA256:
             raise SystemExit(
                 f"cached cloud image digest mismatch: {actual} != {UBUNTU_IMG_SHA256}"
@@ -734,6 +746,8 @@ class VM:
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.time() + 300
         while time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"QEMU exited before SSH readiness: {self.proc.returncode}")
             if self.ssh("true", check=False).returncode == 0:
                 log("VM is up")
                 return
@@ -865,6 +879,14 @@ class VM:
                         log(f"install confirmation sent: {answer}")
             if time.time() >= deadline:
                 raise subprocess.TimeoutExpired(cmd, timeout, output=output)
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+            raise
         finally:
             try:
                 process.stdin.close()
@@ -1318,6 +1340,7 @@ class VM:
             "binding": binding,
             "phases": {},
         }
+        self.current_receipt = receipt
         receipt.update(self.transport_receipt())
         receipt["rehearsalBaseline"] = self.rehearsal_baseline
         receipt["evidenceClass"] = (
@@ -1429,8 +1452,14 @@ class VM:
                 # buffers it until the timeout fires) and the failure snapshot
                 # before teardown so a slow install can be told apart from a
                 # wedged one.
-                partial_stdout = (exc.stdout or b"").decode("utf-8", "replace")[-12000:]
-                partial_stderr = (exc.stderr or b"").decode("utf-8", "replace")[-4000:]
+                partial_stdout = exc.stdout or ""
+                partial_stderr = exc.stderr or ""
+                if isinstance(partial_stdout, bytes):
+                    partial_stdout = partial_stdout.decode("utf-8", "replace")
+                if isinstance(partial_stderr, bytes):
+                    partial_stderr = partial_stderr.decode("utf-8", "replace")
+                partial_stdout = partial_stdout[-12000:]
+                partial_stderr = partial_stderr[-4000:]
                 log(f"phase {name} TIMED OUT after {to}s")
                 receipt["phases"][name] = {
                     "ok": False, "exit": None, "timeout": to,
@@ -1473,6 +1502,10 @@ class VM:
                 self._collect_diagnostics(receipt)
                 return receipt
             log(f"phase {name} ok")
+            if name in {"install", "install-rerun"} and "images" in binding:
+                smoke_name = name + "-services"
+                receipt["phases"][smoke_name] = {"ok": False}
+                receipt["phases"][smoke_name] = installed_service_smoke(self, binding)
             if name == "install":
                 self.phase_gate("post-bootstrap-runtime-smoke")
                 package_check = (
@@ -1781,6 +1814,7 @@ fi
                 self.proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait(timeout=10)
         log("VM torn down")
 
 
@@ -1919,7 +1953,211 @@ class NativeWSL(VM):
         log("owned disposable WSL2 distribution unregistered")
 
 
+# Reviewed immutable public identities from the Alpha.16 publication evidence.
+# Updating this target is explicit; never follow the mutable installer silently.
+LOCAL_PUBLIC_VERSION = "0.1.0-alpha.16"
+LOCAL_PUBLIC_PINS = {
+    "install.sh": "6feedf5273547f4a98f5d8edb6fe24e729104ad822c4d58da70cb1f0fdad417a",
+    "release-index.json": "8dad6399e66956d1dcb5aebb5a5119c6001617b3279902f0746857b5e6bfac47",
+    "release-index.sigstore.json": "ff36ca75c5139d58a92e7d9b78a53f120aa4e4f42cdf9be35603eef3e682b557",
+    "stateport-alpha-2026-08-cosign.pub": "798d6ea6e2703993758f0fb45618b1f05b40f6ef116e7d286fd5a6867859b8ad",
+}
+
+
+def public_binding(work: Path) -> dict:
+    """Check public bytes and signature before any VM, without OCI staging."""
+    inputs = work / "public-inputs"
+    inputs.mkdir(exist_ok=True)
+    for name, expected in LOCAL_PUBLIC_PINS.items():
+        suffix = name if name == "install.sh" else f"{LOCAL_PUBLIC_VERSION}/{name}"
+        url = f"https://{HOSTNAME}/StatePort-Site/download/{suffix}"
+        fetched = run(["curl", "-fsSL", "--proto", "=https", "--tlsv1.2",
+                       "--max-time", "60", url], capture=True, timeout=75)
+        content = fetched.stdout.encode("utf-8")
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != expected:
+            raise ValueError(f"public candidate mismatch for {name}: {actual} != {expected}")
+        (inputs / name).write_bytes(content)
+    index = json.loads((inputs / "release-index.json").read_text())
+    signed = index["signed"]
+    if signed["release"]["version"] != LOCAL_PUBLIC_VERSION:
+        raise ValueError("public candidate version mismatch")
+    payload = _canonical_json(signed)
+    payload_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    if payload_digest != "sha256:5594dc7dc3711ffdfbd74da271012c02dc23e5fa626d12f59d41a768058b2bac":
+        raise ValueError("public signed payload mismatch")
+    payload_path = inputs / "release-index.signed-payload.json"
+    payload_path.write_bytes(payload)
+    # Same pinned-key/offline-log policy used by the shipped installer.
+    verified = run(["cosign", "verify-blob", "--insecure-ignore-tlog", "--bundle",
+                    str(inputs / "release-index.sigstore.json"), "--key",
+                    str(inputs / "stateport-alpha-2026-08-cosign.pub"), str(payload_path)],
+                   capture=True, timeout=120)
+    return {
+        "releaseIndexDigest": "sha256:" + LOCAL_PUBLIC_PINS["release-index.json"],
+        "signedPayloadDigest": payload_digest,
+        "bootstrapDigest": "sha256:" + LOCAL_PUBLIC_PINS["install.sh"],
+        "podmanPackageBundleDigest": signed["artifacts"]["podmanPackageBundle"]["digest"],
+        "images": {item["imageId"]: item["digest"] for item in signed["images"]},
+        "providerRuntimeRequired": any(service.get("providerHome") for target in signed.get("targets", []) for service in target.get("services", [])),
+        "signatureVerified": verified.returncode == 0,
+    }
+
+
+def installed_service_smoke(vm: VM, binding: dict) -> dict:
+    from qualification.journey_common import (
+        GuestJsonClient, discover_services, verify_installed_image_digests,
+        wait_service_healthy,
+    )
+    services = discover_services(vm)
+    for service in services:
+        wait_service_healthy(vm, services, service, deadline_s=420)
+    digests = verify_installed_image_digests(vm, binding["images"])
+    if digests["mismatches"]:
+        raise ValueError(f"installed service image mismatch: {digests['mismatches']}")
+    web = GuestJsonClient(vm, services["stateport-web"]["port"])
+    web.handshake()
+    host = web.request("GET", "/v1/execution-host").get("executionHost", {})
+    if host.get("status") != "available" or host.get("grantBound") is not True:
+        raise ValueError(f"installed execution host unavailable: {host}")
+    provider = None
+    if binding.get("providerRuntimeRequired"):
+        observed = web.request("GET", "/v1/provider/status").get("result", {})
+        expected = {"executableInstalled": True, "configured": False, "connected": False,
+                    "authenticationStatus": "unverified", "requestStatus": "unverified",
+                    "telemetryStatus": "unavailable"}
+        if any(observed.get(key) != value for key, value in expected.items()):
+            raise ValueError("fresh installed provider observations do not match the signed runtime contract")
+        provider = expected
+    return {"ok": True, "services": services, "imageDigests": digests,
+            "providerFreshObservations": provider,
+            "webSession": "passed", "executionHost": host,
+            "limitations": "Health/protocol and unauthenticated provider-presence smoke only; no real provider request or three-template qualification"}
+
+
+def finish_local_vm(vm: VM, receipt: dict) -> None:
+    """Stop our process, then remove only disposable files in our new run."""
+    try:
+        vm.teardown()
+        removed = []
+        for name in ("vm.qcow2", "seed.iso", "id_ed25519", "id_ed25519.pub", "user-data"):
+            path = vm.work / name
+            if path.exists() or path.is_symlink():
+                path.unlink()
+                removed.append(name)
+        receipt["cleanup"] = {"ok": True, "removed": removed}
+    except (Exception, SystemExit) as exc:
+        receipt["cleanup"] = {"ok": False, "error": str(exc)}
+        receipt["result"] = "failed"
+
+
+def run_local_vm(work: Path, binding: dict) -> int:
+    cache = Path.home() / ".cache/stateport/qualification/noble-server-cloudimg-amd64.img"
+    # Reuse only immutable base media, never a retained installed overlay.
+    retained_base = (Path.home() / ".local/state/stateport/release/alpha16/"
+                     "rehearsal-phase0-r1-vm/noble-server-cloudimg-amd64.img")
+    base = retained_base if retained_base.is_file() else cache
+    vm = VM(work / "vm", work / "unused-site", work / "unused-archives",
+            phase_gates=True, public_transport=True, base_image=base)
+    receipt = {"version": LOCAL_PUBLIC_VERSION, "binding": binding,
+               "evidenceClass": "simulation_only", "result": "failed", "phases": {}}
+    stage = "setup-admission"
+    try:
+        vm.phase_gate("setup")
+        stage = "prepare"
+        vm.prepare()
+        stage = "boot"
+        vm.boot()
+        stage = "setup"
+        vm.setup(LOCAL_PUBLIC_VERSION)
+        stage = "rehearse"
+        receipt = vm.rehearse(LOCAL_PUBLIC_VERSION, binding=binding)
+    except (Exception, SystemExit, KeyboardInterrupt) as exc:
+        receipt = vm.current_receipt or receipt
+        receipt.update(result="failed", failureStage=stage, error=str(exc))
+        if vm.proc is not None and vm.proc.poll() is None:
+            try:
+                vm._collect_diagnostics(receipt)
+            except (Exception, SystemExit) as diagnostic_error:
+                receipt["diagnosticsError"] = str(diagnostic_error)
+    finally:
+        finish_local_vm(vm, receipt)
+        (work / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True))
+    log(f"result: {receipt['result']} -> {work / 'receipt.json'}")
+    return 0 if receipt["result"] == "passed" else 1
+
+
+def local_public_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="One fresh local public Alpha.16 simulation")
+    parser.add_argument("--local-public", action="store_true")
+    parser.add_argument("--admitted-run", type=Path, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if args.admitted_run:
+        require_guard("qualification", sys.argv)
+        work = args.admitted_run
+        try:
+            return run_local_vm(work, public_binding(work))
+        except (Exception, SystemExit) as exc:
+            (work / "receipt.json").write_text(json.dumps({
+                "result": "failed", "evidenceClass": "simulation_only",
+                "failureStage": "public-input-verification", "error": str(exc),
+                "cleanup": {"ok": True, "vmStarted": False}}, indent=2))
+            return 1
+    parent = Path.home() / ".local/state/stateport/qualification/local-public"
+    parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="alpha16-", dir=parent))
+    log(f"fresh run evidence: {work}")
+    try:
+        for executable in ("qemu-system-x86_64", "qemu-img", "xorriso", "ssh", "ssh-keygen", "curl", "cosign"):
+            if not shutil.which(executable):
+                raise ValueError(f"missing host tool: {executable}")
+        if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+            raise ValueError("KVM is not accessible")
+        with socket.socket() as probe:
+            probe.bind((SSH_HOST, SSH_PORT))
+        public_binding(work)
+        command = [sys.executable, str(Path(__file__).resolve()), "--local-public",
+                   "--admitted-run", str(work)]
+        guard = work / "guard.json"
+        authorize_guard("qualification", command, guard)
+        env = os.environ.copy()
+        env.update(STATEPORT_RELEASE_ACTION="qualification",
+                   STATEPORT_RELEASE_GUARD_RECEIPT=str(guard),
+                   STATEPORT_GOVERNOR_STATE_DIR=str(work / "governor"),
+                   STATEPORT_GOVERNOR_REQUESTED_VM_MEMORY_MIB=str(QUALIFICATION_VM_MEMORY_MIB),
+                   STATEPORT_GOVERNOR_MEMORY_HIGH="7G", STATEPORT_GOVERNOR_MEMORY_MAX="8G",
+                   STATEPORT_HEAVY_RUNTIME_MAX="120min")
+        governor = Path.home() / ".kimi-code/governor/heavy-run.sh"
+        with (work / "command.log").open("w") as transcript:
+            with subprocess.Popen([str(governor), "8G", *command], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as proc:
+                try:
+                    for line in proc.stdout:
+                        transcript.write(line)
+                        transcript.flush()
+                        print(line, end="", flush=True)
+                    status = proc.wait()
+                except BaseException:
+                    proc.terminate()  # governor trap stops its entire owned cgroup
+                    proc.wait(timeout=60)
+                    raise
+        if not (work / "receipt.json").exists():
+            raise RuntimeError(f"governor/child exited {status} without a journey receipt; see command.log")
+        return status
+    except (Exception, SystemExit, KeyboardInterrupt) as exc:
+        failed = {
+            "result": "failed", "evidenceClass": "simulation_only",
+            "failureStage": "host-admission-or-governor", "error": str(exc)}
+        if (work / "receipt.json").is_file():
+            failed["journeyReceipt"] = json.loads((work / "receipt.json").read_text())
+        (work / "receipt.json").write_text(json.dumps(failed, indent=2))
+        log(f"refused: {exc}; evidence: {work}")
+        return 1
+
+
 def main() -> int:
+    if "--local-public" in sys.argv[1:]:
+        return local_public_main(sys.argv[1:])
     ap = argparse.ArgumentParser()
     ap.add_argument("--site-root", type=Path, required=True)
     ap.add_argument("--version", required=True)
@@ -1950,10 +2188,11 @@ def main() -> int:
         ap.error("native WSL2 owner-path qualification requires --public-transport")
     if args.native_wsl2 and (args.phase0_only or args.diagnostic or args.retained_vm_dir):
         ap.error("native WSL2 owner-path qualification is a fresh full journey only")
-    if not args.phase0_only and args.phase0_receipt is None:
-        ap.error("full J1 mode requires --phase0-receipt from the exact passed candidate")
     binding = phase0_binding(args.site_root, args.version, args.archive_root)
-    if not args.phase0_only:
+    # Full journeys execute both transport and materialization probes themselves.
+    # A separately supplied receipt is additional exact-byte evidence, never a
+    # prerequisite that forces native WSL through an unrelated QEMU run.
+    if args.phase0_receipt is not None:
         try:
             phase0 = json.loads(args.phase0_receipt.read_text(encoding="utf-8"))
             validate_phase0_receipt(phase0, binding)

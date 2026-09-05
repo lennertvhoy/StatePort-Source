@@ -344,7 +344,7 @@ def test_signed_release_notes_disclose_the_public_test_boundary() -> None:
     assert "alpha.6" not in notes.lower()
     assert "151.0.7922" not in notes
     assert "public-test candidate" in notes
-    assert "owner testing after publication" in notes
+    assert "agent-owned installed qualification before product acceptance" in notes
     assert "clean-install receipt does not yet exist" in notes
     assert "unpublished bundle" not in notes
 

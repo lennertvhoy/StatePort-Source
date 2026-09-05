@@ -25,6 +25,7 @@ async function renderAt(route: string) {
 }
 
 const STUB_ROUTES: { route: string; testId: string; name: string }[] = [
+  { route: '#/platform', testId: 'platform-page', name: 'Platform' },
   { route: '#/applications', testId: 'applications-stub', name: 'Applications' },
   { route: '#/catalog', testId: 'catalog-stub', name: 'Catalog' },
   { route: '#/sources', testId: 'source-registry-page', name: 'Application sources' },

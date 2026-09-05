@@ -239,19 +239,11 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
 
-    study = app.layout.instances_root / "live-core-study"
-    study_source = _materialize(
-        repo_root / "fixtures" / "apps" / "studystate-sample",
-        study,
-    )
-    app.catalog.register(
-        study,
-        instance_id="live-core-study",
-        name="Live Core Study",
-        source={
-            "templateId": "studystate.sample",
-            **study_source,
-        },
+    # Use the production fixture installer so revision ownership and lock identity
+    # match the runtime's trusted-action checks. A raw directory copy omits them.
+    from stateport_portable_execution import PortableExecutionService
+    PortableExecutionService(app, repo_root).install_fixture_instance(
+        "studystate.sample", "live-core-study", name="Live Core Study"
     )
 
     # Distinct public-safe repository-import candidate. It stays outside the

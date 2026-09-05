@@ -1,5 +1,47 @@
 # Clean-host qualification harness
 
+## Repeatable local public rehearsal (BL-FINISH-21A)
+
+From a clean committed StatePort checkout on the agent workstation:
+
+```sh
+python3 infra/qualification/wsl2_rehearsal.py --local-public
+```
+
+This entrypoint targets the explicitly authorized, immutable **Alpha.16**
+identity. It verifies the public bootstrap/index/key/signature against reviewed
+pins, obtains command-bound release admission, and invokes the existing
+`~/.kimi-code/governor/heavy-run.sh` with 6144 MiB guest RAM, 2 vCPUs,
+6 GiB guest swap, and a 120-minute process ceiling. The governor independently
+checks resources. No staged Site, OCI archive path, or prior phase0 receipt is
+required; the existing full guest journey runs transport/materialization probes.
+
+Each invocation creates a new private directory under
+`~/.local/state/stateport/qualification/local-public/alpha16-*` and a fresh
+overlay. It reuses only digest-verified immutable cloud media (the existing
+Alpha.16 base when present, otherwise a verified download cache). It never reuses
+installed guest state. The journey installs from anonymous Pages/GHCR, checks
+web/API/worker health and exact image references, establishes a browser session,
+checks execution-host protocol availability, and reruns the installer identically.
+Service checks run after both installs. Run the same command again only after
+the first boundary passes or its exact failure has been resolved.
+
+`receipt.json`, `command.log`, public verification inputs, governor receipts,
+and guest diagnostics are retained. Normal completion and caught failures stop
+the owned QEMU process and delete its disposable overlay, seed, and SSH keys;
+cleanup failures remain nonzero and preserve the files for investigation.
+The governor bounds abrupt failures by killing the owned process group. A forced
+termination may leave disposable files; inspect the exact recorded run directory
+before removing those files. No broad directory cleanup is performed.
+
+This is **QEMU WSL identity simulation**, never native WSL2 or fresh-Windows
+qualification. Cloud-init supplies an SSH user with passwordless sudo, disables
+some background timers, and the harness supplies kernel/Windows identity shims
+and guest swap. No runtime package is preinstalled by this public setup.
+Health/protocol checks do not prove provider use, three-template lifecycle,
+reboot recovery, or human acceptance. The other harness lanes below retain their
+existing contracts.
+
 This harness records a real guest matrix for the portable
 `linux-amd64-rootless-podman-quadlet` target. It does not emulate a guest,
 infer support from a distribution name, or turn a command exit status into a
@@ -108,9 +150,10 @@ publication.
 archives into a guest-local TLS registry before running only the bootstrap
 transport probe and materialization preflight. The receipt binds the exact
 index, signed payload, bootstrap bytes, archive bytes, and image manifest
-digests. The production bootstrap and installer remain unchanged. A full run
-requires `--phase0-receipt` and refuses unless that exact receipt passed for
-the current candidate.
+digests. The production bootstrap and installer remain unchanged. A full run executes
+transport and materialization checks before installation and no longer requires
+a separate phase-0 run. Optional `--phase0-receipt` evidence must still pass and
+match the exact current candidate; stale or failed receipts refuse.
 
 Before publication, production candidates still name their immutable
 `ghcr.io/lennertvhoy` digest references while those manifests are intentionally
@@ -122,8 +165,8 @@ Post-publication anonymous rehearsal removes this staging boundary by using the
 public Site and GHCR transports directly.
 
 Pass `--public-transport` only after the exact Site and GHCR bytes are public
-and anonymously verified. `--site-root`, `--archive-root`, and the passed
-Phase-0 receipt still bind the host-side candidate identity, but the harness
+and anonymously verified. `--site-root` and `--archive-root`
+still bind the host-side candidate identity, but the harness
 does not copy the Site or archives into the guest. It installs no rehearsal CA,
 hosts override, local registry, or registries.conf mirror, and records those
 absences before the public bootstrap fetch and install.

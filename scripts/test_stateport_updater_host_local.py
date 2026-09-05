@@ -5,9 +5,11 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,8 +48,11 @@ from stateport_updater.host_local import (  # noqa: E402
     LocalPodmanHost,
     _installation_volume_keys,
     _container_units,
+    _require_provisioned_provider_home,
     _data_volume_name,
 )
+import stateport_updater.host_local as host_module
+from stateport_release.contract import PROVIDER_HOME_CONTRACT
 from stateport_updater.installed import InstalledAuthorityAdapter  # noqa: E402
 from scripts.test_release_contracts import (  # noqa: E402
     _EphemeralTestVerifier,
@@ -67,6 +72,86 @@ from scripts.test_stateport_updater import (  # noqa: E402
 
 CURRENT_ID = "stateport-alpha-0.1.0-rc.1"
 SUCCESSOR_ID = "stateport-alpha-0.2.0-rc.1"
+
+
+@pytest.mark.parametrize("problem", ["missing", "symlink", "mode", "owner"])
+def test_provider_home_preflight_refuses_before_any_runtime_effect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str) -> None:
+    fake_root = tmp_path / "host"
+    home = fake_root / str(PROVIDER_HOME_CONTRACT["hostPath"]).lstrip("/")
+    home.mkdir(parents=True, mode=0o700)
+    home.parent.chmod(0o700)
+    if problem == "missing":
+        home.rmdir()
+    elif problem == "symlink":
+        home.rmdir()
+        home.symlink_to(tmp_path, target_is_directory=True)
+    elif problem == "mode":
+        home.chmod(0o755)
+    original_open, original_fstat = os.open, os.fstat
+    monkeypatch.setattr(host_module.os, "open", lambda path, flags, **kwargs: original_open(fake_root if path == "/" else path, flags, **kwargs))
+    def observed(fd):
+        parts = list(original_fstat(fd))
+        parts[4] = 65530 if problem == "owner" else 65531
+        parts[5] = 65531
+        return os.stat_result(parts)
+    monkeypatch.setattr(host_module.os, "fstat", observed)
+    runner = HostRunner()
+    host = _local_host(tmp_path, runner)
+    release = SimpleNamespace(verified=SimpleNamespace(target={"services": [{"providerHome": dict(PROVIDER_HOME_CONTRACT)}]}))
+    with pytest.raises(UpdateHostError, match="signature-verified StatePort provisioner") as error:
+        host.preflight(release)
+    assert error.value.code == "provider_home_provisioning_required"
+    assert runner.calls == []
+
+
+def test_provider_home_preflight_reads_no_provider_files_and_legacy_needs_no_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_root = tmp_path / "host"
+    home = fake_root / str(PROVIDER_HOME_CONTRACT["hostPath"]).lstrip("/")
+    home.mkdir(parents=True, mode=0o700)
+    home.parent.chmod(0o700)
+    marker = home / "synthetic-provider-state"
+    marker.write_text("not authentication data")
+    marker.chmod(0)
+    opened = []
+    original_open, original_fstat = os.open, os.fstat
+    def confined_open(path, flags, **kwargs):
+        opened.append(str(path))
+        return original_open(fake_root if path == "/" else path, flags, **kwargs)
+    def observed(fd):
+        parts = list(original_fstat(fd)); parts[4] = parts[5] = 65531
+        return os.stat_result(parts)
+    monkeypatch.setattr(host_module.os, "open", confined_open)
+    monkeypatch.setattr(host_module.os, "fstat", observed)
+    _require_provisioned_provider_home({"services": [{"providerHome": dict(PROVIDER_HOME_CONTRACT)}]})
+    assert marker.name not in opened
+    assert opened == ["/", "var", "lib", "stateport-control", "provider-auth", "codex"]
+    opened.clear()
+    _require_provisioned_provider_home({"services": [{}]})
+    assert opened == []
+
+
+def test_switch_rechecks_missing_provider_home_before_stopping_predecessor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = HostRunner()
+    host = _local_host(tmp_path, runner)
+    signed_hex = "a" * 64
+    context = {"releaseId": SUCCESSOR_ID, "signedDigest": "sha256:" + signed_hex, "stagedDir": signed_hex}
+    stage = host.root / "host-staged" / signed_hex
+    stage.mkdir(parents=True)
+    (stage / "materialization.json").write_text("{}")
+    target = {"targetId": host.target_id, "services": [{"providerHome": dict(PROVIDER_HOME_CONTRACT)}]}
+    index = SimpleNamespace(document={"signed": {"targets": [target]}})
+    monkeypatch.setattr(host, "_context", lambda _: context)
+    monkeypatch.setattr(host, "_completed_evidence", lambda *_: None)
+    monkeypatch.setattr(host, "_release_index", lambda *_: index)
+    monkeypatch.setattr(host, "_genesis_hex", lambda: "b" * 64)
+    monkeypatch.setattr(host_module, "read_bytes", lambda *_: b'{}')
+    fake_root = tmp_path / "empty-host"
+    fake_root.mkdir()
+    original_open = os.open
+    monkeypatch.setattr(host_module.os, "open", lambda path, flags, **kwargs: original_open(fake_root if path == "/" else path, flags, **kwargs))
+    with pytest.raises(UpdateHostError, match="signature-verified StatePort provisioner"):
+        host.switch({"planDigest": "sha256:" + "c" * 64})
+    assert runner.calls == []
 VOLUME_KEY = "stateport-web:stateport-data"
 SHARED_VOLUME_KEY = "stateport-shared:stateport-operations"
 APPLY_STEPS = (

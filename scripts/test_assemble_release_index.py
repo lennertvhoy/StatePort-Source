@@ -1535,6 +1535,8 @@ def test_sign_refuses_successor_when_authenticated_predecessor_bundle_is_removed
                 image_verifier=_image_verifier(trust_root, Path(str(successor_candidate["candidate"]))),
             )
 def test_canonical_topology_declares_one_separate_wsl2_target() -> None:
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
     topology = yaml.safe_load((ROOT / "config/release-topology.v1.yaml").read_text())
     assembler._preflight_topology(topology)
     assert len(topology["targets"]) == 1
@@ -1542,6 +1544,8 @@ def test_canonical_topology_declares_one_separate_wsl2_target() -> None:
     assert target["targetId"] == "wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet"
     assert target["hostBaseline"] == target["targetId"]
     web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
+    assert web["providerHome"] == PROVIDER_HOME_CONTRACT
+    assert all("providerHome" not in service for service in target["services"] if service["serviceId"] != "stateport-web")
     assert web["readOnlyHostMounts"] == [
         {
             "name": "template-sources",

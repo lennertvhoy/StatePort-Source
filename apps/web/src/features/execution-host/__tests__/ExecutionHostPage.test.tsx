@@ -1,171 +1,114 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { getClient, resetClientForTests } from '@/client'
-
 import ExecutionHostPage from '../ExecutionHostPage'
 
-const RECEIPT = {
-  receiptId: 'execution-host-op-fixture',
-  receiptType: 'stateport.execution-host-operation-receipt/v1' as const,
-  action: 'execution_host.createWorkload',
-  status: 'accepted' as const,
-  createdAt: '2026-08-20T00:00:00Z',
-  sourceKind: 'execution_host' as const,
-  actorId: 'local-user',
-  operationId: 'op-fixture',
-  requestDigest: `sha256:${'1'.repeat(64)}`,
-  resultDigest: `sha256:${'2'.repeat(64)}`,
-  workloadId: 'default-dev',
-}
-
+const workloads = [
+  { workloadId: 'project-work', kind: 'workspace', state: 'running', imageDigest: 'sha256:project' },
+  { workloadId: 'study-work', kind: 'job', state: 'created', imageDigest: 'sha256:study' },
+]
 beforeEach(() => {
   resetClientForTests()
-  const client = getClient()
-  vi.spyOn(client.executionHost, 'status').mockResolvedValue({
-    status: 'available',
-    contractVersion: 1,
-    engine: 'podman',
-    grantId: 'control-plane-default',
-    grantBound: true,
-  })
-  vi.spyOn(client.executionHost, 'listReceipts').mockResolvedValue({ receipts: [] })
+  vi.spyOn(getClient().executionHost, 'status').mockResolvedValue({ status: 'available', grantBound: true, grantId: 'control-plane-default' })
+  vi.spyOn(getClient().executionHost, 'listWorkloads').mockResolvedValue({ accepted: true, result: { workloads } })
+})
+afterEach(() => { cleanup(); vi.restoreAllMocks(); resetClientForTests() })
+
+it('renders every granted workload from the actual daemon object contract', async () => {
+  render(<ExecutionHostPage />)
+  expect(await screen.findByRole('article', { name: 'Workload project-work' })).toBeTruthy()
+  expect(screen.getByRole('article', { name: 'Workload study-work' })).toBeTruthy()
+  expect(screen.getByText('Image: sha256:project')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Run verification' })).toBeNull()
 })
 
-afterEach(() => {
-  cleanup()
-  vi.restoreAllMocks()
-  resetClientForTests()
+it('confirms the exact selected workload before stop and preserves the other workload', async () => {
+  const stop = vi.spyOn(getClient().executionHost, 'stopWorkload').mockResolvedValue({ accepted: true, result: { workloadId: 'project-work', state: 'stopped' } })
+  render(<ExecutionHostPage />)
+  const project = await screen.findByRole('article', { name: 'Workload project-work' })
+  fireEvent.click(within(project).getByRole('button', { name: 'Stop' }))
+  expect(stop).not.toHaveBeenCalled()
+  const dialog = await screen.findByRole('alertdialog')
+  expect(within(dialog).getByText('project-work')).toBeTruthy()
+  expect(within(dialog).getByText(/workspace volume is preserved/)).toBeTruthy()
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm operation' }))
+  await waitFor(() => expect(stop).toHaveBeenCalledExactlyOnceWith('project-work'))
+  expect(screen.getByRole('article', { name: 'Workload study-work' })).toBeTruthy()
 })
 
-describe('ExecutionHostPage J1 journey', () => {
-  it('creates only the canonical default workspace and renders its persisted receipt', async () => {
-    const client = getClient()
-    vi.spyOn(client.executionHost, 'listWorkloads').mockResolvedValue({
-      accepted: true,
-      result: [],
-    })
-    vi.spyOn(client.executionHost, 'workloadStatus')
-      .mockResolvedValueOnce({
-        accepted: true,
-        result: { workloadId: 'default-dev', state: 'created' },
-      })
-      .mockResolvedValue({
-        accepted: true,
-        result: { workloadId: 'default-dev', state: 'running' },
-      })
-    const create = vi.spyOn(client.executionHost, 'createDefaultWorkload').mockResolvedValue({
-      operationId: 'op-fixture',
-      accepted: true,
-      result: { workloadId: 'default-dev', state: 'created' },
-      receipt: RECEIPT,
-    })
-    const start = vi.spyOn(client.executionHost, 'startWorkload').mockResolvedValue({
-      operationId: 'op-start',
-      accepted: true,
-      result: { workloadId: 'default-dev', state: 'running' },
-      receipt: {
-        ...RECEIPT,
-        receiptId: 'execution-host-op-start',
-        operationId: 'op-start',
-        action: 'execution_host.start',
-      },
-    })
-    const exec = vi.spyOn(client.executionHost, 'execWorkload').mockResolvedValue({
-      operationId: 'op-exec',
-      accepted: true,
-      result: { workloadId: 'default-dev', state: 'running', output: 'stateport-j1-ok\n' },
-      receipt: {
-        ...RECEIPT,
-        receiptId: 'execution-host-op-exec',
-        operationId: 'op-exec',
-        action: 'execution_host.execWorkload',
-      },
-    })
+it('renders a grant refusal without claiming the selected workload stopped', async () => {
+  vi.spyOn(getClient().executionHost, 'stopWorkload').mockResolvedValue({ accepted: false, refusal: { reason: 'grant-revoked', detail: 'operation refused' } })
+  render(<ExecutionHostPage />)
+  fireEvent.click(within(await screen.findByRole('article', { name: 'Workload project-work' })).getByRole('button', { name: 'Stop' }))
+  fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Confirm operation' }))
+  expect(await screen.findByText(/project-work: grant-revoked/)).toBeTruthy()
+  expect(within(screen.getByRole('article', { name: 'Workload project-work' })).getByText(/Lifecycle: running/)).toBeTruthy()
+})
 
-    render(<ExecutionHostPage />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Create default workspace' }))
+it('does not treat refused or malformed inventory as empty', async () => {
+  vi.spyOn(getClient().executionHost, 'listWorkloads').mockResolvedValue({ accepted: false, refusal: { reason: 'grant-revoked' } })
+  const view = render(<ExecutionHostPage />)
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('grant-revoked'))
+  expect(screen.queryByRole('button', { name: 'Create development workspace' })).toBeNull()
+  view.unmount()
+  vi.spyOn(getClient().executionHost, 'listWorkloads').mockResolvedValue({ accepted: true, result: [] })
+  render(<ExecutionHostPage />)
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('inventory is unavailable'))
+  expect(screen.queryByText('No workloads are visible to this grant.')).toBeNull()
+})
 
-    await waitFor(() => expect(create).toHaveBeenCalledTimes(1))
-    fireEvent.click(await screen.findByRole('button', { name: 'Start' }))
-    await waitFor(() => expect(start).toHaveBeenCalledWith('default-dev'))
-    const runVerification = await screen.findByRole('button', { name: 'Run verification' })
-    await waitFor(() => expect((runVerification as HTMLButtonElement).disabled).toBe(false))
-    fireEvent.click(runVerification)
-    await waitFor(() =>
-      expect(exec).toHaveBeenCalledWith('default-dev', [
-        '/bin/sh',
-        '-lc',
-        "printf 'stateport-j1-ok\\n'",
-      ]),
-    )
-    expect(await screen.findByText('stateport-j1-ok')).toBeTruthy()
-    const receipt = await screen.findByTestId('execution-host-receipt')
-    expect(receipt.textContent).toContain('execution-host-op-exec')
-    expect(receipt.textContent).toContain('execution_host.execWorkload')
+it('scopes logs to the requested workload and handles transport failures', async () => {
+  const logs = vi.spyOn(getClient().executionHost, 'workloadLogs').mockRejectedValue(new Error('transport'))
+  render(<ExecutionHostPage />)
+  fireEvent.click(within(await screen.findByRole('article', { name: 'Workload study-work' })).getByRole('button', { name: 'Logs' }))
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('study-work: logs could not be loaded'))
+  expect(logs).toHaveBeenCalledExactlyOnceWith('study-work')
+})
+
+
+it('retains sealed development workspace creation and its refused receipt', async () => {
+  vi.spyOn(getClient().executionHost, 'listWorkloads').mockResolvedValue({ accepted: true, result: { workloads: [] } })
+  const create = vi.spyOn(getClient().executionHost, 'createDefaultWorkload').mockResolvedValue({
+    accepted: false,
+    refusal: { reason: 'workload-spec-not-granted', detail: 'sealed profile mismatch' },
+    receipt: { receiptId: 'refused-creation', receiptType: 'stateport.execution-host-operation-receipt/v1', action: 'execution_host.createWorkload', status: 'refused', createdAt: '2026-09-05T00:00:00Z', sourceKind: 'execution_host', operationId: 'create-fixture', requestDigest: 'sha256:1', resultDigest: 'sha256:2', workloadId: 'default-dev' },
   })
+  render(<ExecutionHostPage />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Create development workspace' }))
+  await waitFor(() => expect(create).toHaveBeenCalledExactlyOnceWith())
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('workload-spec-not-granted'))
+  expect(screen.getByTestId('execution-host-receipt').textContent).toContain('refused-creation')
+  expect(screen.queryByRole('article', { name: 'Workload default-dev' })).toBeNull()
+})
 
-  it('executes the fixed verification command and renders bounded output', async () => {
-    const client = getClient()
-    vi.spyOn(client.executionHost, 'listWorkloads').mockResolvedValue({
-      accepted: true,
-      result: [{ workloadId: 'default-dev' }],
-    })
-    vi.spyOn(client.executionHost, 'workloadStatus').mockResolvedValue({
-      accepted: true,
-      result: { workloadId: 'default-dev', state: 'running' },
-    })
-    const exec = vi.spyOn(client.executionHost, 'execWorkload').mockResolvedValue({
-      operationId: 'op-exec',
-      accepted: true,
-      result: { workloadId: 'default-dev', state: 'running', output: 'stateport-j1-ok\n' },
-      receipt: { ...RECEIPT, receiptId: 'execution-host-op-exec', operationId: 'op-exec', action: 'execution_host.execWorkload' },
-    })
+it('does not offer duplicate creation while the provisioned workload exists', async () => {
+  vi.spyOn(getClient().executionHost, 'listWorkloads').mockResolvedValue({ accepted: true, result: { workloads: [{ workloadId: 'default-dev', kind: 'workspace', state: 'stopped' }] } })
+  render(<ExecutionHostPage />)
+  expect(await screen.findByRole('article', { name: 'Workload default-dev' })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Create development workspace' })).toBeNull()
+})
 
-    render(<ExecutionHostPage />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Run verification' }))
+it('does not offer unsupported recreation of a removed workload ID', async () => {
+  vi.spyOn(getClient().executionHost, 'listWorkloads').mockResolvedValue({ accepted: true, result: { workloads: [{ workloadId: 'default-dev', kind: 'workspace', state: 'removed' }] } })
+  render(<ExecutionHostPage />)
+  expect(await screen.findByRole('article', { name: 'Workload default-dev' })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Create development workspace' })).toBeNull()
+  expect(screen.getByText(/recreating this workload ID is not supported here/)).toBeTruthy()
+})
 
-    await waitFor(() =>
-      expect(exec).toHaveBeenCalledWith('default-dev', [
-        '/bin/sh',
-        '-lc',
-        "printf 'stateport-j1-ok\\n'",
-      ]),
-    )
-    expect(await screen.findByText('stateport-j1-ok')).toBeTruthy()
-    expect((await screen.findByTestId('execution-host-receipt')).textContent).toContain(
-      'execution_host.execWorkload',
-    )
-  })
+it('labels truncated log output with the daemon-reported byte bound', async () => {
+  vi.spyOn(getClient().executionHost, 'workloadLogs').mockResolvedValue({ accepted: true, result: { output: 'prefix', byteCount: 6, outputByteBound: 6, truncated: true } })
+  render(<ExecutionHostPage />)
+  fireEvent.click(within(await screen.findByRole('article', { name: 'Workload study-work' })).getByRole('button', { name: 'Logs' }))
+  const logs = await screen.findByRole('region', { name: 'Logs for study-work' })
+  expect(within(logs).getByText('prefix')).toBeTruthy()
+  expect(within(logs).getByText('Output truncated: showing the first 6 bytes (response limit 6 bytes).')).toBeTruthy()
+})
 
-  it('renders a daemon refusal instead of inventing lifecycle state', async () => {
-    const client = getClient()
-    vi.spyOn(client.executionHost, 'listWorkloads').mockResolvedValue({
-      accepted: true,
-      result: [],
-    })
-    vi.spyOn(client.executionHost, 'createDefaultWorkload').mockResolvedValue({
-      accepted: false,
-      refusal: { reason: 'workload-spec-not-granted', detail: 'sealed digest mismatch' },
-    })
-
-    render(<ExecutionHostPage />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Create default workspace' }))
-
-    expect(await screen.findByText(/workload-spec-not-granted/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Create default workspace' })).toBeTruthy()
-  })
-
-  it('does not treat a refused workload inventory as an empty inventory', async () => {
-    const client = getClient()
-    vi.spyOn(client.executionHost, 'listWorkloads').mockResolvedValue({
-      accepted: false,
-      refusal: { reason: 'grant-revoked', detail: 'inventory access refused' },
-    })
-
-    render(<ExecutionHostPage />)
-
-    expect(await screen.findByText(/grant-revoked/)).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Create default workspace' })).toBeNull()
-  })
+it('does not present malformed log output as a complete empty log', async () => {
+  vi.spyOn(getClient().executionHost, 'workloadLogs').mockResolvedValue({ accepted: true, result: { unexpected: 'shape' } })
+  render(<ExecutionHostPage />)
+  fireEvent.click(within(await screen.findByRole('article', { name: 'Workload study-work' })).getByRole('button', { name: 'Logs' }))
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('logs could not be loaded'))
+  expect(screen.queryByRole('region', { name: 'Logs for study-work' })).toBeNull()
 })

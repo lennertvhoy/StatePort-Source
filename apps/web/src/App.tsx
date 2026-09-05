@@ -37,6 +37,8 @@ const WorkbenchIntegrations = lazy(() =>
     default: module.WorkbenchIntegrations,
   })),
 )
+const ProviderSettingsPage = lazy(() => import('@/features/settings/ProviderSettings').then((module) => ({ default: module.ProviderSettings })))
+const PlatformPage = lazy(() => import('@/shell/PlatformPage'))
 const ApplicationsPage = lazy(() => import('@/features/applications/ApplicationsPage'))
 const CatalogPage = lazy(() => import('@/features/catalog/CatalogPage'))
 const SourceRegistryPage = lazy(() => import('@/features/sources/SourceRegistryPage'))
@@ -104,6 +106,7 @@ export default function App() {
       <Routes>
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/applications" replace />} />
+          <Route path="platform" element={page(PlatformPage)} />
           <Route path="applications" element={page(ApplicationsPage)} />
           <Route path="catalog" element={page(CatalogPage)} />
           <Route path="sources" element={page(SourceRegistryPage)} />
@@ -117,6 +120,7 @@ export default function App() {
           <Route path="approvals" element={page(ApprovalsPage)} />
           <Route path="approvals/:approvalId" element={page(ApprovalsPage)} />
           <Route path="settings" element={page(SettingsPage)} />
+          <Route path="settings/provider" element={page(ProviderSettingsPage)} />
           <Route path="settings/:group" element={page(SettingsPage)} />
           <Route path="app/:instanceId" element={<AppContextShell />}>
             <Route index element={page(AppOverviewPage)} />
@@ -126,6 +130,7 @@ export default function App() {
             />
             <Route path="runs" element={applicationView('runs', page(RunsPage))} />
             <Route path="settings" element={page(SettingsPage)} />
+          <Route path="settings/provider" element={page(ProviderSettingsPage)} />
             <Route
               path="receipts"
               element={applicationView('receipts', page(ApplicationReceiptsPage))}

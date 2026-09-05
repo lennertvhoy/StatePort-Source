@@ -295,3 +295,136 @@ def test_durable_artifacts_exclude_credentials_and_environment_snapshots(
                 process_identity={"pid": 1, "environment": {"OPENAI_API_KEY": "x"}},
                 runtime_profile=router.runtime_profile,
             )
+
+
+_PRIVATE_EXCEPTION = 'SECRET_EXCEPTION_CANARY bearer=private-account-material'
+
+
+def _capture_processor_log(current: AssistantProcessor, root: Path) -> Path:
+    log_path = root / 'assistant.log'
+    def write_log(message: str) -> None:
+        with log_path.open('a', encoding='utf-8') as handle:
+            handle.write(message)
+    current._log = write_log
+    return log_path
+
+
+def _assert_exception_absent(root: Path, current: AssistantProcessor, work_id: str) -> None:
+    # Inspect real SQLite/WAL/log bytes as well as the public projections: hiding
+    # a message in the UI alone does not protect durable receipts or diagnostics.
+    for artifact in root.rglob('*'):
+        if artifact.is_file():
+            assert _PRIVATE_EXCEPTION.encode() not in artifact.read_bytes(), artifact
+    assert _PRIVATE_EXCEPTION not in repr(current.work_store.get(work_id))
+    assert _PRIVATE_EXCEPTION not in repr(current.work_store.event_journal(work_id))
+
+
+@pytest.mark.parametrize('boundary', ['provider', 'unexpected_provider', 'context', 'result_store'])
+def test_private_invocation_exceptions_never_enter_durable_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    conversations = FakeConversations()
+    router = SuccessfulRouter()
+    current = processor(tmp_path, conversations, router)
+    _capture_processor_log(current, tmp_path)
+    queued = enqueue(current)
+
+    def fail(*_args, **_kwargs):
+        if boundary == 'provider':
+            raise ProviderRouterError(_PRIVATE_EXCEPTION)
+        raise OSError(_PRIVATE_EXCEPTION)
+
+    if boundary in {'provider', 'unexpected_provider'}:
+        monkeypatch.setattr(router, 'invoke', fail)
+    elif boundary == 'context':
+        monkeypatch.setattr(current, '_conversation_objective', fail)
+    else:
+        monkeypatch.setattr(current.work_store, 'store_provider_result', fail)
+    assert current.process_once()
+    work_id = str(queued['workId'])
+    record = current.work_store.get(work_id)
+    assert record['state'] == 'failed'
+    assert record['error']['code'] == (
+        'provider_invocation_failed' if boundary == 'provider' else 'assistant_invocation_failed'
+    )
+    assert conversations.sent == []
+    assert current.process_once() is False
+    _assert_exception_absent(tmp_path, current, work_id)
+
+
+def test_private_reply_exception_preserves_bounded_outbox_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversations = FakeConversations()
+    router = SuccessfulRouter()
+    current = processor(tmp_path, conversations, router)
+    _capture_processor_log(current, tmp_path)
+    queued = enqueue(current)
+    work_id = str(queued['workId'])
+    assert current.process_once()
+    original_digest = current.work_store.get(work_id)['providerResultDigest']
+
+    def fail_reply(**_kwargs):
+        raise OSError(_PRIVATE_EXCEPTION)
+
+    monkeypatch.setattr(conversations, 'send_internal', fail_reply)
+    for attempt in range(3):
+        assert current.process_once()
+        record = current.work_store.get(work_id)
+        assert record['providerResultDigest'] == original_digest
+        assert record['state'] == ('failed' if attempt == 2 else 'result_ready')
+        _assert_exception_absent(tmp_path, current, work_id)
+    assert record['error']['code'] == 'assistant_delivery_failed'
+    assert router.invocations == 1
+    assert conversations.sent == []
+    assert current.process_once() is False
+
+
+def test_polling_exception_is_logged_without_traceback_or_private_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = processor(tmp_path, FakeConversations(), SuccessfulRouter())
+    log_path = _capture_processor_log(current, tmp_path)
+    queued = enqueue(current)
+    def fail_poll():
+        current._stop.set()
+        raise OSError(_PRIVATE_EXCEPTION)
+    monkeypatch.setattr(current, 'process_once', fail_poll)
+    current._run()
+    text = log_path.read_text()
+    assert 'assistant_processor_poll_error' in text
+    assert 'Traceback' not in text
+    _assert_exception_absent(tmp_path, current, str(queued['workId']))
+
+
+def test_failure_persistence_exception_is_logged_without_private_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = processor(tmp_path, FakeConversations(), FailingRouter())
+    log_path = _capture_processor_log(current, tmp_path)
+    queued = enqueue(current)
+    def fail_persistence(**_kwargs):
+        raise OSError(_PRIVATE_EXCEPTION)
+    monkeypatch.setattr(current.work_store, 'fail', fail_persistence)
+    assert current.process_once()
+    text = log_path.read_text()
+    assert 'assistant_processor_failure_persist_error' in text
+    assert 'Traceback' not in text
+    work_id = str(queued['workId'])
+    # The write failed: retain the unresolved invocation rather than invent a
+    # durable terminal transition. Existing lease recovery owns that outcome.
+    assert current.work_store.get(work_id)['state'] == 'invoking'
+    _assert_exception_absent(tmp_path, current, work_id)
+
+
+def test_only_exact_known_provider_reasons_are_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    current = processor(tmp_path, FakeConversations(), SuccessfulRouter())
+    queued = enqueue(current)
+    def timed_out(**_kwargs):
+        raise ProviderRouterError('provider_timed_out')
+    monkeypatch.setattr(current.router, 'invoke', timed_out)
+    assert current.process_once()
+    record = current.work_store.get(str(queued['workId']))
+    assert record['error']['code'] == 'provider_invocation_failed'
+    assert 'time budget' in record['error']['message']
+    assert _PRIVATE_EXCEPTION not in current._failure_message('provider_invocation_failed', 'provider_timed_out ' + _PRIVATE_EXCEPTION)

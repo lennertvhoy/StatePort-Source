@@ -17,6 +17,8 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
+from template_validator.checks import check_template_schema
+
 
 _MAX_MARKER_BYTES = 256 * 1024
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -209,6 +211,15 @@ def _native_statespec(root: Path) -> Mapping[str, Any] | None:
         or not version
     ):
         raise TemplateAdapterError("statespec_template_invalid", "template.yaml is not a valid StateSpec template descriptor")
+    issues = check_template_schema(value)
+    if issues:
+        # Reuse the public contract checks rather than treating recognition of
+        # metadata as validation. Repository actions remain declarative data.
+        raise TemplateAdapterError(
+            "statespec_template_invalid",
+            "template.yaml does not satisfy the StateSpec contract: "
+            + "; ".join(f"{issue.path}: {issue.message}" for issue in issues[:8]),
+        )
     return {
         "displayName": name if isinstance(name, str) and name.strip() else template_id,
         "templateKind": "statespec_template",

@@ -53,6 +53,20 @@ class _AnyCancelEvent:
 class CancellableAssistantWorkStore(AssistantWorkStore):
     """Add atomic cancellation transitions to the existing work authority."""
 
+    def cancel_queued_for_disconnect(self) -> int:
+        """Use existing terminal transitions after the sole processor has stopped."""
+        db = self._connect()
+        try:
+            work_ids = [str(row[0]) for row in db.execute(
+                "SELECT work_id FROM assistant_work WHERE state='queued'"
+            ).fetchall()]
+        finally:
+            db.close()
+        for work_id in work_ids:
+            self.request_cancel(work_id=work_id, code="provider_disconnected",
+                                message="Provider disconnected before this queued request began.")
+        return len(work_ids)
+
     @staticmethod
     def _cancel_error(code: str, message: str) -> dict[str, str]:
         if not isinstance(code, str) or _CANCEL_CODE.fullmatch(code) is None:
@@ -443,12 +457,8 @@ class AssistantProcessor(DurableAssistantProcessor):
                     "provider_invocation_failed",
                     str(exc),
                 )
-        except Exception as exc:
-            self._fail_claim(
-                claim,
-                "assistant_invocation_failed",
-                str(exc) or type(exc).__name__,
-            )
+        except Exception:
+            self._fail_claim(claim, "assistant_invocation_failed", "")
         finally:
             with self._cancel_mutex:
                 self._work_cancel_events.pop(claim.work_id, None)

@@ -1146,6 +1146,8 @@ rules:
   - scripts/test_authority_policy.py
   - scripts/test_candidate_provenance.py
   - scripts/test_canonical_source_service.py
+  - scripts/test_execution_host_bounded_logs.py
+  - scripts/test_execution_host_control_identity.py
   - scripts/test_execution_host_identity.py
   - scripts/test_checklistdd_execution.py
   - scripts/test_checklistdd_service.py
@@ -1728,3 +1730,26 @@ rules:
   - scripts/test_run_bundle.py
   - scripts/test_source_lifecycle_integration.py
   - scripts/test_statepack_distribution.py
+
+- id: reviewed-product-completion-source-20260905
+  classification: public-source
+  license: AGPL-3.0-or-later
+  provenanceRationale: Exact reviewed product readiness, provider metadata and template guidance implementation paths; no credentials or private evidence.
+  paths:
+  - apps/web/src/client/providerClient.ts
+  - apps/web/src/features/app-overview/__tests__/ImportedTemplateJourney.test.tsx
+  - apps/web/src/features/app-overview/components/ImportedTemplateJourney.tsx
+  - apps/web/src/features/settings/ProviderSettings.tsx
+  - apps/web/src/features/settings/__tests__/ProviderSettings.test.tsx
+  - apps/web/src/shell/PlatformPage.tsx
+  - apps/web/src/shell/ReadinessSummary.tsx
+  - apps/web/src/shell/__tests__/readiness.test.tsx
+  - packages/persistent-app/src/stateport_persistent_app/provider_setup.py
+- id: private-product-completion-evidence-20260905
+  classification: excluded
+  license: NOASSERTION
+  provenanceRationale: Internal delivery receipts and privacy canary tests remain outside the sanitized public runtime tree.
+  paths:
+  - evidence/one-line-release-001/alpha16-rehearsal-failure.json
+  - evidence/one-line-release-001/product-completion-three-template.json
+  - scripts/test_provider_setup.py

@@ -3543,6 +3543,67 @@ def test_web_template_source_mount_is_read_only_and_uses_pinned_group_runtime() 
     assert all(b"Volume=/var/lib/stateport/imports:/imports:rw" not in unit for unit in web_units)
 
 
+def test_provider_home_is_persistent_only_in_accepted_profile_and_outside_data_volumes() -> None:
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
+    value = _stable_execution_index()
+    service = value["signed"]["targets"][0]["services"][0]
+    volumes_before = deepcopy(service["writableVolumes"])
+    service["providerHome"] = dict(PROVIDER_HOME_CONTRACT)
+    _refresh_index_topology(value)
+    verified = verify_release_index(value, policy=_policy(), verifier=_EphemeralTestVerifier())
+    files = render_quadlet_bundle(verified.target, verified.index.document["signed"]["images"])
+    host_path = PROVIDER_HOME_CONTRACT["hostPath"].encode()
+    for path, content in files.items():
+        if "stateport-web" not in Path(path).name or not path.endswith(".container.in"):
+            assert host_path not in content
+            continue
+        assert b"Environment=CODEX_HOME=/var/lib/stateport-provider/codex" in content
+        assert b"UserNS=keep-id:uid=65532,gid=65532" in content
+        if "-accepted-" in path:
+            assert b"Volume=" + host_path + b":/var/lib/stateport-provider/codex:rw\n" in content
+            assert b"codex:rw,U" not in content
+        else:
+            assert host_path not in content
+            assert b"Tmpfs=/var/lib/stateport-provider/codex:rw,noexec,nosuid,nodev,size=67108864,mode=0700,uid=65532,gid=65532" in content
+    # The existing snapshot/export generation exclusively consumes these data
+    # volumes. Provider storage adds no volume or validation snapshot binding.
+    assert service["writableVolumes"] == volumes_before
+    assert not any(volume["mountPath"].startswith("/var/lib/stateport-provider") for volume in volumes_before)
+    pipeline = _revision_pipeline(value)
+    for document in (pipeline["validationBackup"], pipeline["promotionSpec"], pipeline["promotion"]):
+        assert "provider-auth" not in json.dumps(document)
+        assert "stateport-provider" not in json.dumps(document)
+        assert len(document.get("volumeBindings", document.get("requiredVolumeKeys"))) == len(volumes_before)
+
+
+def test_provider_home_cannot_be_attached_to_another_service() -> None:
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
+    document = _stable_execution_index()
+    service = document["signed"]["targets"][0]["services"][0]
+    service["providerHome"] = dict(PROVIDER_HOME_CONTRACT)
+    service["serviceId"] = "stateport-other"
+    _refresh_index_topology(document)
+    with pytest.raises(ReleaseContractError, match="unauthorized provider home"):
+        verify_release_index(document, policy=_policy(), verifier=_EphemeralTestVerifier())
+
+
+@pytest.mark.parametrize("field,value", [
+    ("hostPath", "/home/operator/.codex"), ("mountPath", "/var/lib/stateport/auth"),
+    ("provider", "other"), ("owner", "root"), ("mode", "0755"),
+    ("validation", "read-only-snapshot-copy"), ("environmentVariable", "HOME"),
+])
+def test_provider_home_refuses_contract_widening(field: str, value: str) -> None:
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["providerHome"] = dict(PROVIDER_HOME_CONTRACT) | {field: value}
+    _refresh_index_topology(document)
+    with pytest.raises(ReleaseContractError):
+        verify_release_index(document, policy=_policy(), verifier=_EphemeralTestVerifier())
+
+
 def test_same_lane_predecessor_identity_rules() -> None:
     """A shared releaseId is legal only for a strictly older same-lane version.
 

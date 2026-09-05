@@ -92,6 +92,15 @@ _LEGACY_ARTIFACT_IDS = frozenset(
 _ALPHA10_ARTIFACT_IDS = _LEGACY_ARTIFACT_IDS | {"executionHostProvisioner"}
 _ARTIFACT_IDS = _ALPHA10_ARTIFACT_IDS | {"podmanPackageBundle"}
 CONFINED_GROUP_OCI_RUNTIME_PATH = "/usr/libexec/stateport/crun"
+PROVIDER_HOME_CONTRACT = {
+    "provider": "codex",
+    "hostPath": "/var/lib/stateport-control/provider-auth/codex",
+    "mountPath": "/var/lib/stateport-provider/codex",
+    "owner": "stateport-control",
+    "mode": "0700",
+    "environmentVariable": "CODEX_HOME",
+    "validation": "ephemeral-empty",
+}
 CONFINED_GROUP_OCI_RUNTIME_VERSION = "1.28"
 CONFINED_GROUP_OCI_RUNTIME_SHA256 = (
     "sha256:2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42"
@@ -1065,6 +1074,18 @@ def render_quadlet_bundle(
                         f"Environment={mount['environmentVariable']}={mount['mountPath']}",
                     ]
                 )
+            provider_home = service.get("providerHome")
+            if provider_home is not None:
+                lines.append(f"Environment=CODEX_HOME={provider_home['mountPath']}")
+                if profile == "accepted":
+                    # Provider-owned auth is outside all copied StatePort data
+                    # generations. Do not use :U or inspect its file contents.
+                    lines.append(f"Volume={provider_home['hostPath']}:{provider_home['mountPath']}:rw")
+                else:
+                    lines.append(
+                        f"Tmpfs={provider_home['mountPath']}:rw,noexec,nosuid,nodev,"
+                        f"size=67108864,mode=0700,uid={service['runAsUser']},gid={service['runAsUser']}"
+                    )
             if service["capabilities"]["controlContract"] == "narrow-unix-client":
                 if not isinstance(execution_contract, Mapping):
                     raise ReleaseContractError(f"service {service_id} lacks stable daemon contract")
@@ -4965,6 +4986,15 @@ def _validate_cross_fields(
                     raise ReleaseContractError(
                         f"service {service_id} revision-scoped validation volume is not disposable"
                     )
+            provider_home = service.get("providerHome")
+            if provider_home is not None and (
+                provider_home != PROVIDER_HOME_CONTRACT
+                or service_id != "stateport-web"
+                or service["quadletOwner"] != "stateport-control"
+                or service["runAsUser"] != 65532
+                or service["capabilities"]["controlContract"] != "narrow-unix-client"
+            ):
+                raise ReleaseContractError(f"service {service_id} has an unauthorized provider home")
             read_only_mounts = service.get("readOnlyHostMounts", ())
             if read_only_mounts:
                 expected_template_mount = {

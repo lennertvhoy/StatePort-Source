@@ -3963,7 +3963,7 @@ class PersistentApp:
 
     def backup(self, instance_id: str) -> dict[str, Any]:
         _, root = self._entry(instance_id)
-        path = self.layout.backups_root / instance_id / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.tar"
+        path = self.layout.backups_root / instance_id / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(12)}.tar"
         result = create_backup(root, path)
         created_at = _now()
         summary = {

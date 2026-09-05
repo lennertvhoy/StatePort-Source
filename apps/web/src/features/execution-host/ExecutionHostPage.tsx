@@ -1,328 +1,155 @@
-/**
- * Execution Host — real lifecycle of the sanctioned execution-host daemon.
- *
- * This surface renders ONLY bounded daemon receipts through the sanctioned
- * control-plane proxy: execution-host health, the default developer
- * workspace's lifecycle, its bounded logs, and typed lifecycle controls.
- * Every displayed state comes from the live daemon or is explicitly
- * unavailable — no mock data is ever presented as execution.
- */
-import { useEffect, useState } from 'react'
-
+/** Grant-scoped workload observations and controls through the sanctioned proxy. */
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getClient } from '@/client'
-import type {
-  ExecutionHostOperationReceipt,
-  ExecutionHostResult,
-  ExecutionHostStatus,
-} from '@/client'
-import { useServiceStatusPolling } from '@/shell/data'
+import type { ExecutionHostOperationReceipt, ExecutionHostResult, ExecutionHostStatus } from '@/client'
+import { ConfirmDialog } from '@/components'
+import { Button } from '@/components/ui/button'
 
-const DEFAULT_WORKSPACE = 'default-dev'
-const J1_EXEC_ARGV = ['/bin/sh', '-lc', "printf 'stateport-j1-ok\\n'"]
-const POLL_MS = 4000
-
-interface LifecycleState {
+interface Workload {
+  workloadId: string
+  kind?: string
   state: string
-  exitStatus?: string | number | null
+  imageDigest?: string
   engineStatus?: string
-  imageDigest?: string | null
-  logs?: string
+  lastActivityAt?: string
 }
+type Action = 'start' | 'stop' | 'cancel' | 'remove'
 
-interface ReceiptState {
-  receiptId: string
-  action: string
-  status: string
-  createdAt: string
-  payloadDigest?: string
-}
-
-function lifecycleFromResult(result: ExecutionHostResult): LifecycleState {
-  const record = (result.result ?? {}) as Record<string, unknown>
-  return {
-    state: typeof record.state === 'string' ? record.state : 'unknown',
-    exitStatus: (record.exitStatus as string | number | null) ?? undefined,
-    engineStatus: typeof record.engineStatus === 'string' ? record.engineStatus : undefined,
-    imageDigest: result.observed?.imageDigest ?? null,
-    logs: typeof record.output === 'string' ? record.output : undefined,
+function inventory(result: ExecutionHostResult): Workload[] {
+  const record = result.result
+  const values = record && !Array.isArray(record) ? record.workloads : undefined
+  if (!Array.isArray(values) || values.some((item) => !item || typeof item.workloadId !== 'string' || typeof item.state !== 'string')) {
+    throw new Error('The service returned an invalid workload inventory. Retry or inspect diagnostics.')
   }
+  return values as Workload[]
 }
 
 export default function ExecutionHostPage() {
+  const client = getClient().executionHost
   const [status, setStatus] = useState<ExecutionHostStatus | null>(null)
-  const [lifecycle, setLifecycle] = useState<LifecycleState | null>(null)
-  const [refusal, setRefusal] = useState<{ reason?: string; detail?: string } | null>(null)
-  const [receipt, setReceipt] = useState<ReceiptState | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [workloads, setWorkloads] = useState<Workload[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  useServiceStatusPolling()
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const [receipt, setReceipt] = useState<ExecutionHostOperationReceipt | null>(null)
+  const [logs, setLogs] = useState<{ workloadId: string; output: string; byteCount: number; outputByteBound: number; truncated: boolean } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [pending, setPending] = useState<{ action: Action; workload: Workload } | null>(null)
+  const alive = useRef(true)
+  const refreshing = useRef(false)
 
-  const client = getClient()
-
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
+    if (refreshing.current) return
+    refreshing.current = true
     try {
-      const current = await client.executionHost.status()
+      const current = await client.status()
+      if (!alive.current) return
       setStatus(current)
-      if (current.status === 'available') {
-        const listed = await client.executionHost.listWorkloads()
-        if (!listed.accepted) {
-          setRefusal(listed.refusal ?? { reason: 'execution_inventory_unavailable' })
-          setLifecycle({ state: 'unavailable' })
-          await readReceipts()
-          setError(null)
-          return
-        }
-        const found = Array.isArray(listed.result)
-          ? (listed.result as Array<{ workloadId?: string }>).find(
-              (item) => item.workloadId === DEFAULT_WORKSPACE,
-            )
-          : undefined
-        if (found) {
-          setLifecycle(await readLifecycle())
-        } else {
-          setRefusal(null)
-          setLifecycle({ state: 'not_created' })
-        }
-        await readReceipts()
-      } else {
-        setLifecycle(null)
+      if (current.status !== 'available') { setWorkloads(null); setError(null); return }
+      const listed = await client.listWorkloads()
+      if (!alive.current) return
+      if (!listed.accepted) {
+        setWorkloads(null)
+        setError(`Inventory refused: ${listed.refusal?.reason ?? 'unavailable'}. ${listed.refusal?.detail ?? 'Review the execution-host grant.'}`)
+        return
       }
+      setWorkloads(inventory(listed))
       setError(null)
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : 'refresh failed')
-    }
-  }
-
-  const readReceipts = async () => {
-    const index = await client.executionHost.listReceipts()
-    const latest = index.receipts[0]
-    if (latest) setReceipt(latest)
-  }
-
-  const readLifecycle = async (): Promise<LifecycleState> => {
-    const result = await client.executionHost.workloadStatus(DEFAULT_WORKSPACE)
-    if (!result.accepted) {
-      setRefusal(result.refusal ?? { reason: 'execution_unavailable' })
-      return { state: 'unavailable' }
-    }
-    setRefusal(null)
-    return lifecycleFromResult(result)
-  }
-
-  const readLogs = async () => {
-    if (!lifecycle || lifecycle.state === 'not_created') return
-    setBusy(true)
-    try {
-      const result = await client.executionHost.workloadLogs(DEFAULT_WORKSPACE)
-      if (result.accepted) {
-        const record = (result.result ?? {}) as Record<string, unknown>
-        setLifecycle((prior) => ({
-          ...(prior ?? { state: 'unknown' }),
-          logs: typeof record.output === 'string' ? record.output : '(no log output)',
-        }))
-      } else {
-        setRefusal(result.refusal ?? { reason: 'execution_unavailable' })
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const mutate = async (operation: 'create' | 'start' | 'stop' | 'cancel' | 'remove' | 'exec') => {
-    setBusy(true)
-    try {
-      let result: ExecutionHostResult
-      if (operation === 'create') result = await client.executionHost.createDefaultWorkload()
-      else if (operation === 'start') result = await client.executionHost.startWorkload(DEFAULT_WORKSPACE)
-      else if (operation === 'stop') result = await client.executionHost.stopWorkload(DEFAULT_WORKSPACE)
-      else if (operation === 'cancel') result = await client.executionHost.cancelWorkload(DEFAULT_WORKSPACE)
-      else if (operation === 'remove') result = await client.executionHost.removeWorkload(DEFAULT_WORKSPACE)
-      else result = await client.executionHost.execWorkload(DEFAULT_WORKSPACE, J1_EXEC_ARGV)
-      if (result.accepted) {
-        setRefusal(null)
-        if (result.receipt) setReceipt(result.receipt as ExecutionHostOperationReceipt)
-        const next = await readLifecycle()
-        const record = (result.result ?? {}) as Record<string, unknown>
-        setLifecycle({
-          ...next,
-          logs:
-            operation === 'exec' && typeof record.output === 'string'
-              ? record.output
-              : next.logs,
-        })
-        await readReceipts()
-      } else {
-        setRefusal(result.refusal ?? { reason: 'execution_unavailable' })
-        if (result.receipt) setReceipt(result.receipt as ExecutionHostOperationReceipt)
-      }
-      setError(null)
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : 'operation failed')
-    } finally {
-      setBusy(false)
-    }
-  }
+    } catch {
+      if (alive.current) { setWorkloads(null); setError('Workload inventory is unavailable. Retry or inspect service diagnostics.') }
+    } finally { refreshing.current = false }
+  }, [client])
 
   useEffect(() => {
+    alive.current = true
     void refresh()
-    const timer = window.setInterval(() => void refresh(), POLL_MS)
-    return () => window.clearInterval(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    const timer = window.setInterval(() => void refresh(), 4000)
+    return () => { alive.current = false; window.clearInterval(timer) }
+  }, [refresh])
+
+  async function perform(action: Action | 'create', workloadId?: string) {
+    setBusy(true)
+    setRefusal(null)
+    try {
+      const result = action === 'create' ? await client.createDefaultWorkload()
+        : action === 'start' ? await client.startWorkload(workloadId!)
+        : action === 'stop' ? await client.stopWorkload(workloadId!)
+        : action === 'cancel' ? await client.cancelWorkload(workloadId!)
+        : await client.removeWorkload(workloadId!)
+      if (!alive.current) return
+      if (result.receipt) setReceipt(result.receipt)
+      if (!result.accepted) setRefusal(`${workloadId ?? 'Provisioned workspace'}: ${result.refusal?.reason ?? 'Operation refused'}. ${result.refusal?.detail ?? 'Review the grant and current workload state before retrying.'}`)
+      await refresh()
+    } catch {
+      if (alive.current) setRefusal(`${workloadId ?? 'Provisioned workspace'}: the operation could not be confirmed. Refresh its state before retrying.`)
+    } finally { if (alive.current) { setBusy(false); setPending(null) } }
+  }
+
+  async function readLogs(workloadId: string) {
+    setBusy(true)
+    setLogs(null)
+    setRefusal(null)
+    try {
+      const result = await client.workloadLogs(workloadId)
+      if (!alive.current) return
+      if (!result.accepted) setRefusal(`${workloadId}: ${result.refusal?.reason ?? 'Logs unavailable'}. ${result.refusal?.detail ?? ''}`)
+      else {
+        const value = result.result
+        if (!value || Array.isArray(value) || typeof value.output !== 'string' || typeof value.truncated !== 'boolean'
+          || typeof value.byteCount !== 'number' || !Number.isSafeInteger(value.byteCount) || value.byteCount < 0
+          || typeof value.outputByteBound !== 'number' || !Number.isSafeInteger(value.outputByteBound) || value.outputByteBound < 1
+          || value.byteCount > value.outputByteBound) {
+          throw new Error('Invalid bounded log response')
+        }
+        setLogs({ workloadId, output: value.output, byteCount: value.byteCount, outputByteBound: value.outputByteBound, truncated: value.truncated })
+      }
+    } catch { if (alive.current) setRefusal(`${workloadId}: logs could not be loaded. Retry or inspect diagnostics.`) }
+    finally { if (alive.current) setBusy(false) }
+  }
 
   const available = status?.status === 'available'
-  const state = lifecycle?.state ?? 'unknown'
-
   return (
-    <div className="flex h-full flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-xl font-semibold">{'Execution host'}</h1>
-        <p className="text-sm text-foreground-tertiary">
-          {'Real lifecycle of the sanctioned execution-host daemon through the control-plane proxy.'}
-        </p>
-      </div>
-
-      {error ? <div className="rounded border border-danger/40 p-3 text-sm">{error}</div> : null}
-
-      <section className="rounded border p-4">
-        <h2 className="text-sm font-medium">{'Daemon health'}</h2>
-        <div className="mt-2 flex flex-wrap gap-3 text-sm">
-          <span>
-            <strong>{'Status'}:</strong>{' '}
-            {available ? 'available' : status?.reason ?? 'unavailable'}
-          </span>
-          {status?.contractVersion !== undefined ? (
-            <span>
-              <strong>{'Contract'}:</strong>{' '}
-              v{status.contractVersion}
-            </span>
-          ) : null}
-          {status?.engine ? (
-            <span>
-              <strong>{'Engine'}:</strong> {status.engine}
-              {status.engineVersion ? ` ${status.engineVersion}` : ''}
-            </span>
-          ) : null}
-          <span>
-            <strong>{'Grant'}:</strong>{' '}
-            {status?.grantBound ? status.grantId ?? 'bound' : 'not bound'}
-          </span>
-        </div>
-        {status?.detail ? <p className="mt-2 text-xs text-foreground-tertiary">{status.detail}</p> : null}
+    <div className="flex h-full flex-col gap-4 overflow-auto p-4 md:p-6" data-testid="execution-host-page">
+      <header>
+        <h1 className="text-xl font-semibold">Execution host</h1>
+        <p className="mt-1 text-sm text-foreground-secondary">Inspect workloads visible to your execution grant. Use the application to submit approved work; controls here manage its runtime.</p>
+      </header>
+      <section className="rounded border border-border p-4" aria-label="Execution host health">
+        <h2 className="text-sm font-medium">Runtime health</h2>
+        <p className="mt-2 text-sm">Status: {available ? 'available' : status?.reason ?? 'not checked'} · Grant: {status?.grantBound ? status.grantId ?? 'bound' : 'not bound'}</p>
+        {status?.engine && <p className="mt-1 text-xs">Engine: {status.engine} {status.engineVersion}</p>}
+        {status?.detail && <p className="mt-2 text-xs text-foreground-secondary">{status.detail}</p>}
+        <Button className="mt-3" size="sm" variant="outline" disabled={busy} onClick={() => void refresh()}>Refresh workloads</Button>
       </section>
-
-      {available ? (
-        <section className="rounded border p-4">
-          <h2 className="text-sm font-medium">
-            {'Workspace'}{' '}
-            <code className="rounded bg-surface px-1">{DEFAULT_WORKSPACE}</code>
-          </h2>
-          <div className="mt-2 flex flex-wrap gap-3 text-sm">
-            <span>
-              <strong>{'Lifecycle'}:</strong> {state}
-            </span>
-            {lifecycle?.imageDigest ? (
-              <span>
-                <strong>{'Image'}:</strong>{' '}
-                <code className="rounded bg-surface px-1">{lifecycle.imageDigest.slice(0, 19)}…</code>
-              </span>
-            ) : null}
-            {lifecycle?.engineStatus ? (
-              <span>
-                <strong>{'Container'}:</strong>{' '}
-                {lifecycle.engineStatus}
-              </span>
-            ) : null}
-            {lifecycle?.exitStatus !== undefined && lifecycle.exitStatus !== null ? (
-              <span>
-                <strong>{'Exit'}:</strong> {String(lifecycle.exitStatus)}
-              </span>
-            ) : null}
-          </div>
-          {refusal ? (
-            <p className="mt-2 text-xs text-warning">
-              {refusal.reason}
-              {refusal.detail ? `: ${refusal.detail}` : ''}
-            </p>
-          ) : null}
-          <div className="mt-3 flex flex-wrap gap-2">
-            {state === 'not_created' || state === 'removed' ? (
-              <button
-                className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-                disabled={busy}
-                onClick={() => void mutate('create')}
-              >
-                {'Create default workspace'}
-              </button>
-            ) : (
-              <>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-                  disabled={busy || state === 'running'}
-                  onClick={() => void mutate('start')}
-                >
-                  {'Start'}
-                </button>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-                  disabled={busy || state !== 'running'}
-                  onClick={() => void mutate('stop')}
-                >
-                  {'Stop'}
-                </button>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-                  disabled={busy}
-                  onClick={() => void mutate('cancel')}
-                >
-                  {'Cancel'}
-                </button>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-                  disabled={busy}
-                  onClick={() => void mutate('remove')}
-                >
-                  {'Remove'}
-                </button>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-                  disabled={busy || state !== 'running'}
-                  onClick={() => void mutate('exec')}
-                >
-                  {'Run verification'}
-                </button>
-              </>
-            )}
-            <button
-              className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-              disabled={busy || state === 'not_created' || state === 'removed'}
-              onClick={() => void readLogs()}
-            >
-              {'Logs'}
-            </button>
-          </div>
-          {lifecycle?.logs !== undefined ? (
-            <pre className="mt-3 max-h-64 overflow-auto rounded bg-surface p-3 text-xs">
-              {lifecycle.logs}
-            </pre>
-          ) : null}
-          {receipt ? (
-            <div className="mt-3 rounded bg-surface p-3 text-xs" data-testid="execution-host-receipt">
-              <strong>{'Persisted receipt'}:</strong>{' '}
-              <code>{receipt.receiptId}</code>{' '}
-              <span>{receipt.action}</span>{' '}
-              <span>{receipt.status}</span>{' '}
-              <time>{receipt.createdAt}</time>
-            </div>
-          ) : null}
-        </section>
-      ) : (
-        <section className="rounded border p-4">
-          <p className="text-sm">
-            {'Execution runtime is unavailable. Install with a provisioned execution host to enable real container workloads.'}
-          </p>
+      {error && <p role="alert" className="rounded border border-border p-3 text-sm">{error}</p>}
+      {refusal && <p role="alert" className="rounded border border-border p-3 text-sm">{refusal}</p>}
+      {!available && status && <p className="text-sm">Execution runtime is unavailable. Review installation diagnostics and the provisioned execution grant.</p>}
+      {available && workloads && (
+        <section aria-label="Managed workloads" className="space-y-3">
+          <h2 className="text-base font-semibold">Managed workloads</h2>
+          <p className="text-xs text-foreground-secondary">Only grant-scoped workloads are listed. Application and run ownership are not supplied by this runtime inventory.</p>
+          {workloads.length === 0 && <p className="text-sm">No workloads are visible to this grant.</p>}
+          {!workloads.some((workload) => workload.workloadId === 'default-dev') && <div className="space-y-2"><p className="text-xs text-foreground-secondary">The provisioned development workspace uses the sealed installation profile. Creating arbitrary workload profiles is unavailable here.</p><Button size="sm" variant="outline" disabled={busy || !status.grantBound} onClick={() => void perform('create')}>Create development workspace</Button></div>}
+          {workloads.some(workload => workload.workloadId === 'default-dev' && workload.state === 'removed') && <p className="text-sm">The development container was removed. Its workspace volume and audit ledger remain; recreating this workload ID is not supported here. Review platform recovery guidance before changing preserved data.</p>}
+          {workloads.map((workload) => (
+            <article key={workload.workloadId} aria-label={`Workload ${workload.workloadId}`} className="min-w-0 rounded border border-border p-4">
+              <h3 className="break-all font-mono text-sm font-semibold">{workload.workloadId}</h3>
+              <p className="mt-2 text-sm">Kind: {workload.kind ?? 'not reported'} · Lifecycle: {workload.state} · Container: {workload.engineStatus ?? 'not reported'}</p>
+              {workload.imageDigest && <p className="mt-1 break-all font-mono text-xs">Image: {workload.imageDigest}</p>}
+              {workload.lastActivityAt && <p className="mt-1 text-xs">Last activity: <time>{workload.lastActivityAt}</time></p>}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" disabled={busy || !status.grantBound || !['created', 'stopped'].includes(workload.state)} onClick={() => void perform('start', workload.workloadId)}>Start</Button>
+                <Button size="sm" variant="outline" disabled={busy || !status.grantBound || workload.state !== 'running'} onClick={() => setPending({ action: 'stop', workload })}>Stop</Button>
+                <Button size="sm" variant="outline" disabled={busy || !status.grantBound || !['running', 'created', 'reserved'].includes(workload.state)} onClick={() => setPending({ action: 'cancel', workload })}>Cancel work</Button>
+                <Button size="sm" variant="outline" disabled={busy || !status.grantBound || workload.state === 'removed'} onClick={() => setPending({ action: 'remove', workload })}>Remove container</Button>
+                <Button size="sm" variant="outline" disabled={busy || workload.state === 'removed'} onClick={() => void readLogs(workload.workloadId)}>Logs</Button>
+              </div>
+            </article>
+          ))}
         </section>
       )}
+      {logs && <section aria-label={`Logs for ${logs.workloadId}`}><h2 className="break-all text-sm font-medium">Logs: {logs.workloadId}</h2><p className="mt-1 text-xs">{logs.truncated ? `Output truncated: showing the first ${logs.byteCount} bytes (response limit ${logs.outputByteBound} bytes).` : `${logs.byteCount} bytes returned; response limit ${logs.outputByteBound} bytes.`}</p><pre className="mt-2 max-h-64 overflow-auto rounded bg-surface p-3 text-xs">{logs.output}</pre></section>}
+      {receipt && <section data-testid="execution-host-receipt" className="break-all rounded bg-surface p-3 text-xs"><h2 className="font-medium">Persisted operation receipt</h2><p>{receipt.workloadId ?? 'Workspace'} · {receipt.action} · {receipt.status}</p><p>{receipt.receiptId} · <time>{receipt.createdAt}</time></p></section>}
+      <ConfirmDialog open={pending !== null} onOpenChange={(open) => { if (!open) setPending(null) }} title={pending?.action === 'remove' ? 'Remove workload container?' : pending?.action === 'cancel' ? 'Cancel workload?' : 'Stop workload?'} target={pending?.workload.workloadId} description="This affects the selected workload. The service rechecks its grant and current state." effect={pending?.action === 'remove' ? 'Remove its container. The daemon retains its audit ledger.' : 'Interrupt running processes; in-progress output may be incomplete.'} reversibility={pending?.workload.kind === 'workspace' ? 'The managed workspace volume is preserved. Stopped workspaces can be started again; cancelled work is not automatically resumed.' : 'The workload may reach a terminal state. Use the application to review its result and submit new work if needed.'} confirmLabel="Confirm operation" destructive onConfirm={() => pending ? perform(pending.action, pending.workload.workloadId) : undefined} />
     </div>
   )
 }

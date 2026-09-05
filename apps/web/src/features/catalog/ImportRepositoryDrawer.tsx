@@ -221,10 +221,18 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
       {stage.kind === 'candidates' ? (
         <div className="flex flex-col gap-2" data-testid="import-candidates">
           {actionError ? <InlineNotice tone="danger">{actionError}</InlineNotice> : null}
+          <InlineNotice tone="informational" title="Prepare a template source">
+            For an installed StatePort, place a Git checkout of ProjectState, StudyState, or another supported
+            template in <code>/var/lib/stateport/imports</code> inside Ubuntu, then refresh this list. Use the
+            installer user to copy the checkout, including its <code>.git</code> directory. StatePort reads this
+            folder without modifying it. Custom deployments use their operator-configured source folder.
+            Only the reviewed committed snapshot is imported; choose the intended commit before inspection.
+          </InlineNotice>
+          <Button variant="outline" onClick={load}>Refresh repositories</Button>
           {stage.candidates.length === 0 ? (
             <p className="py-4 text-sm text-foreground-secondary">
-              No repositories were found under the operator-allowlisted roots. Ask the operator to allowlist a
-              location before importing.
+              No Git repositories were found in the configured source folders. Prepare a checkout as described
+              above, then refresh. A ZIP extraction without Git history cannot establish the required commit identity.
             </p>
           ) : (
             <ul className="flex flex-col gap-1.5">
@@ -267,7 +275,7 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
             </div>
             <div className="flex gap-2">
               <dt className="w-28 shrink-0 text-foreground-secondary">Commit</dt>
-              <dd className="font-mono text-xs text-foreground">{stage.inspection.headCommit.slice(0, 12) || 'unknown'}</dd>
+              <dd className="min-w-0 break-all font-mono text-xs text-foreground">{stage.inspection.headCommit || 'unknown'}</dd>
             </div>
             <div className="flex gap-2">
               <dt className="w-28 shrink-0 text-foreground-secondary">Working tree</dt>
@@ -319,6 +327,11 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
                   <p className="mt-2 font-mono text-xs text-foreground-tertiary">
                     Adapter: {stage.inspection.template.adapterId} · Trusted actions:{' '}
                     {stage.inspection.template.trustedActionIds.length}
+                  </p>
+                  <p className="mt-2 text-xs text-foreground-secondary">
+                    Requested features: {stage.inspection.template.requestedCapabilities.join(', ') || 'none'}.
+                    These requests do not grant execution authority. Review the application’s authority and
+                    approve the exact action before running work; provider setup is separate.
                   </p>
                 </div>
               ) : null}

@@ -115,10 +115,14 @@ def _release_notes(version: str) -> bytes:
     _release_version(version)
     return (
         f"# StatePort {version} WSL2 public-test candidate\n\n"
-        "This signed candidate is intended for owner testing after publication. "
+        "This candidate requires agent-owned installed qualification before product acceptance. "
         "It packages the exact release-locked runtime inputs recorded by the candidate "
         "build and scan evidence. A real Windows 11, WSL2, and Ubuntu 24.04 clean-install "
-        "receipt does not yet exist.\n"
+        "receipt does not yet exist.\n\n"
+        "This source includes corrected predecessor-signature retention, Platform navigation "
+        "and observed readiness, supported Codex setup, grant-scoped workload controls, "
+        "validated template imports and durable recovery improvements. These implementation "
+        "claims do not transfer qualification from earlier release bytes.\n"
     ).encode("utf-8")
 
 
@@ -134,7 +138,14 @@ def _known_limitations(version: str) -> bytes:
         "substitutes for the required runtime capabilities. WSL2 is reported as "
         "`compatible_unvalidated` until a clean-install acceptance receipt exists. Human "
         "acceptance, independent security review, stability, and production qualification "
-        "are not established.\n"
+        "are not established.\n\n"
+        "Provider login is owned by Codex in a dedicated private home outside StatePort "
+        "application backups. Uninstall and purge preserve that login; use Codex logout "
+        "in the accepted runtime before removal if sign-out is wanted. Older installations "
+        "must provision the signed successor provider directory before update; the updater "
+        "refuses a missing or unsafe directory before stopping the predecessor. A real "
+        "provider request and installed upgrade/recovery still require their own evidence.\n"
+
     ).encode("utf-8")
 
 

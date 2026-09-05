@@ -29,6 +29,9 @@ template actions work together; success is not limited to a compiled frontend.
   template, and an independent third valid template.
 - Additive Alpha.15 release artifacts; all earlier published bytes and the
   unpublished defective Alpha.14 candidate remain immutable.
+- Owner-authorized 2026-09-05 continuation targets the already-published
+  Alpha.16 successor for the local public rehearsal, preserving Alpha.15 and
+  Alpha.16 bytes and all native complete-product acceptance boundaries.
 
 ## Non-goals
 

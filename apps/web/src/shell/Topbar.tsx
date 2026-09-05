@@ -81,6 +81,13 @@ function useBreadcrumb(): { instanceId?: string; leaf: string } {
     applications: 'Applications',
     catalog: 'Catalog',
     sources: 'Application Sources',
+    platform: 'Platform',
+    'execution-host': 'Execution Host',
+    deployments: 'Platform Deployments',
+    authority: 'Standing Authority',
+    updater: 'Installed Updater',
+    'preview-routes': 'Preview Routes',
+    statebench: 'StateBench Evidence',
     approvals: 'Approvals',
     settings: 'Settings',
   }

@@ -56,6 +56,7 @@ import { RECOVERY_PRESENTATION } from '@/features/applications/lib/recoveryPrese
 import { applicationDestinationAvailable } from '@/features/application-experience/registry'
 
 import { FactsStrip } from './components/FactsStrip'
+import { ImportedTemplateJourney } from './components/ImportedTemplateJourney'
 import { OverviewHeader } from './components/OverviewHeader'
 import { ChecklistSection, ProjectSection, QuickLinks, StudySection } from './components/PackageSections'
 import { ProvenanceOwnershipSection } from './components/ProvenanceOwnershipSection'
@@ -389,6 +390,7 @@ export default function AppOverviewPage() {
         ) : null}
 
         <FactsStrip instance={instance} currentViewLabel={currentViewLabel} lastReceipt={lastReceipt} hasReceipts={hasReceipts} />
+        <ImportedTemplateJourney instance={instance} />
 
         {!data.loading && feed.length > 0 ? (
           <section aria-label="Needs attention" data-testid="overview-attention-section">

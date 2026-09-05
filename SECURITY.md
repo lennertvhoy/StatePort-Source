@@ -2,9 +2,11 @@
 
 ## Reporting status
 
-**No private vulnerability-reporting route is active yet.** StatePort is not
-publicly released, and no supported version or response-time commitment has
-been published. Activating a verified private route is a release blocker.
+**No private vulnerability-reporting route is active yet.** The public source
+repository's GitHub private-reporting setting was checked on 2026-09-05 and is
+disabled. Signed alpha artifacts are already public, but no response-time
+commitment or production support is offered. Activating a verified private
+route remains a release-readiness gap.
 
 Until that route exists:
 
@@ -39,9 +41,10 @@ is explicitly published there.
 
 ## Supported versions
 
-No public version is supported yet. A supported-version table will be added
-with the first public release; source availability or a passing local check
-does not create a support commitment.
+Published Alpha.15 and Alpha.16 are evaluation artifacts, not production-qualified
+versions. Alpha.16 has a reproduced fresh-install signature-preflight defect.
+The qualification target is Windows 11 WSL2 Ubuntu 24.04 AMD64; complete native
+evidence remains pending. Publication does not create a support commitment.
 
 ## Current engineering posture
 

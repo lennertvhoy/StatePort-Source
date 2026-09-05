@@ -187,6 +187,15 @@ targets:
             validation:
               mode: read-only-snapshot-copy
               authority: exact-backup-receipt-required
+        # Provider CLI owns this persistent home. It is never a copied data volume.
+        providerHome:
+          provider: codex
+          hostPath: /var/lib/stateport-control/provider-auth/codex
+          mountPath: /var/lib/stateport-provider/codex
+          owner: stateport-control
+          mode: "0700"
+          environmentVariable: CODEX_HOME
+          validation: ephemeral-empty
         readOnlyHostMounts:
           - name: template-sources
             hostPath: /var/lib/stateport/imports

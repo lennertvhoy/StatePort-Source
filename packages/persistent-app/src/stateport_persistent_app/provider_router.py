@@ -270,6 +270,9 @@ class ProviderRouter:
         on_started: Callable[[ProcessIdentity], None] | None = None,
         on_finished: Callable[[ProcessIdentity], None] | None = None,
     ) -> ProviderInvocation:
+        if self.profile_path.with_suffix(".disabled").exists():
+            raise ProviderRouterError("provider_disconnected")
+        self._profile = self._load_profile()
         for value, label in (
             (work_id, "work_id"), (attempt_id, "attempt_id"),
             (instance_id, "instance_id"), (conversation_id, "conversation_id"),
@@ -326,14 +329,17 @@ class ProviderRouter:
         generation = "generation." + hashlib.sha256(
             f"{work_id}:{attempt_id}".encode()
         ).hexdigest()
-        result = self.adapter.execute(
-            spec,
-            staging_root,
-            cancel_event=cancel_event,
-            on_started=on_started,
-            on_finished=on_finished,
-            process_generation=generation,
-        )
+        try:
+            result = self.adapter.execute(
+                spec,
+                staging_root,
+                cancel_event=cancel_event,
+                on_started=on_started,
+                on_finished=on_finished,
+                process_generation=generation,
+            )
+        except Exception:
+            raise ProviderRouterError("provider_execution_unavailable") from None
         if not result.ok:
             if result.timed_out:
                 reason = "provider_timed_out"

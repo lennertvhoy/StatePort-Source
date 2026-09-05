@@ -47,6 +47,10 @@ function sourceRoots(parent: string): string[] {
     .filter(Boolean)
 }
 
+// Resolve the interpreter before replacing XDG roots; toolchain shims can
+// otherwise consult unrelated, untrusted configuration in the disposable home.
+const PYTHON = execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8', timeout: 5_000 }).trim()
+
 const PYTHONPATH = [
   ...sourceRoots(path.join(ROOT, 'packages')),
   ...sourceRoots(path.join(ROOT, 'apps')),
@@ -172,7 +176,7 @@ async function startService(): Promise<RunningService> {
   mkdirSync(ARTIFACT_ROOT, { recursive: true, mode: 0o700 })
   const log = openSync(path.join(ARTIFACT_ROOT, 'service.log'), 'w', 0o600)
   const child = spawn(
-    'python3',
+    PYTHON,
     [
       path.join(HERE, 'live-core-fixture.py'),
       '--port',
@@ -688,6 +692,39 @@ test('Bootstrap establishes the real session and application-scoped experience g
       },
     },
   }
+})
+
+test('Platform is reachable by keyboard and retains denied provider authority on a narrow screen', async ({ page }) => {
+  await openApplicationRoute(page, '/applications')
+  const platform = page.getByRole('navigation', { name: 'Primary', exact: true }).getByRole('link', { name: 'Platform', exact: true })
+  await platform.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByTestId('platform-page')).toBeVisible()
+  await expect(platform).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('region', { name: 'Workspace readiness' })).toContainText('Local service')
+  await expect(page.getByText('Your session does not permit platform operations.', { exact: false })).toBeVisible()
+  const provider = page.getByRole('navigation', { name: 'Platform controls' }).getByRole('link', { name: 'Provider setup', exact: false })
+  await provider.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('heading', { name: 'Coding provider' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Provider observations' })).toContainText('Billing and quota')
+  await expect(page.getByRole('button', { name: 'Save model and enable' })).toBeDisabled()
+  const session = await (await page.request.get(`${service.url}/session`)).json()
+  const denied = await page.request.post(`${service.url}/v1/provider/configure`, {
+    headers: { Origin: service.url, 'X-StatePort-CSRF': session.result.csrfToken }, data: { model: 'test-model' },
+  })
+  expect(denied.status()).toBe(403)
+  await page.setViewportSize({ width: 390, height: 844 })
+  const loginInstructions = page.getByRole('button', { name: 'Show installed login command' })
+  await loginInstructions.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByLabel('Installed Codex login command')).toBeVisible()
+  await page.getByRole('button', { name: 'Select command', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toContain('stateport_codex login')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'platform-provider-narrow.png'), fullPage: true })
+  matrix.platformReadiness = { classification: 'real AppServer browser; disposable fixture; no provider execution', keyboardNavigation: true, deniedProviderMutation: true, narrowViewport: '390x844' }
 })
 
 test('Catalog installs a reviewed fixture and imports an allowlisted repository by exact identity', async ({ page }) => {

@@ -2912,11 +2912,26 @@ def test_wsl2_bootstrap_retains_the_authenticated_predecessor_bundle(
 
     lines = wsl2_bootstrap._predecessor_bundle_downloads(candidate, document)
 
-    assert lines == [
+    assert lines[:3] == [
         'mkdir -m 700 "$tmp/predecessor-bundle"',
         'get "$RELEASE_ROOT/predecessor-bundle/release-index.sigstore.json" "$tmp/predecessor-bundle/release-index.sigstore.json" "predecessor signature bundle"',
         f'check "{digest.removeprefix("sha256:")}" "$tmp/predecessor-bundle/release-index.sigstore.json"',
     ]
+    # Exercise the generated layout through the verifier's real slot resolver.
+    # A flat predecessor download alone passed the old string-only assertion
+    # but failed on a clean guest before package admission.
+    from stateport_release.cosign import bundle_slot
+    staging = tmp_path / "fresh-bootstrap"
+    staging.mkdir()
+    script = (
+        'set -eu; tmp=$1; RELEASE_ROOT=$2; '
+        'get() { cp "$1" "$2"; }; '
+        'check() { printf "%s  %s\\n" "$1" "$2" | sha256sum -c --status; };\n'
+        + "\n".join(lines)
+    )
+    subprocess.run(["sh", "-c", script, "sh", str(staging), str(candidate)], check=True)
+    assert bundle_slot(staging, signature).read_bytes() == bundle.read_bytes()
+    assert (staging / "predecessor-bundle/release-index.sigstore.json").read_bytes() == bundle.read_bytes()
     bundle.unlink()
     with pytest.raises(ValueError, match="predecessor bundle is missing"):
         wsl2_bootstrap._predecessor_bundle_downloads(candidate, document)
@@ -3876,6 +3891,65 @@ def _run_uninstall(
 
 def _uninstall_receipts(state_root: Path) -> list[Path]:
     return sorted((state_root / "receipts").glob("uninstall_receipt_*.json"))
+
+
+def test_retained_provisioning_plan_cannot_omit_successor_provider_home() -> None:
+    required = [{"path": path, "mode": "0700", "owner": "stateport-control:stateport-control"} for path in [
+        "/var/lib/stateport-control/provider-auth", installer._PROVIDER_AUTH_HOME,
+    ]]
+    new = {"directories": required}
+    for old in ({"directories": []}, {"directories": required[:1]}, {"directories": [required[0], required[1] | {"mode": "0755"}]}):
+        with pytest.raises(installer.InstallerRefusal, match="exact private provider home"):
+            installer._require_retained_provider_home_plan(old, new)
+    installer._require_retained_provider_home_plan(new, new)
+    installer._require_retained_provider_home_plan({"directories": []}, {"directories": []})
+
+
+@pytest.mark.parametrize("purge", [False, True])
+def test_provider_auth_is_disclosed_as_preserved_without_access_or_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, purge: bool) -> None:
+    """Synthetic durable records exercise removal, without signing or auth."""
+    state = tmp_path / "installed"
+    live = tmp_path / "quadlets"
+    live.mkdir()
+    signed_hex = "a" * 64
+    trust_path = state / "updater/trust/install-trust.json"
+    trust_path.parent.mkdir(parents=True)
+    trust_path.write_text(json.dumps({
+        "schema": installer.INSTALL_TRUST_SCHEMA,
+        "releaseId": "test-provider-release",
+        "signedPayloadDigest": "sha256:" + signed_hex,
+        "releaseIndexDigest": "sha256:" + "b" * 64,
+        "installedIdentityId": "test-provider-installation",
+    }))
+    stage = state / "releases/staged" / signed_hex
+    unit_relative = "accepted/stateport-control/provider.container"
+    unit = stage / unit_relative
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Container]\nContainerName=provider-test\n" + installer._PROVIDER_AUTH_MOUNT + "\nEnvironment=CODEX_HOME=/var/lib/stateport-provider/codex\n")
+    (stage / "materialization.json").write_text(json.dumps({
+        "formatVersion": "stateport.quadlet-materialization/v2",
+        "signedPayloadDigest": "sha256:" + signed_hex,
+        "validationVolumeBindings": {},
+        "artifacts": [{"kind": "container", "profile": "accepted", "owner": "stateport-control", "liveRelativePath": "provider.container", "stagedPath": f"staged/{signed_hex}/{unit_relative}"}],
+    }))
+    read = installer._read_bounded
+    def confined_read(path, **kwargs):
+        assert not str(path).startswith(installer._PROVIDER_AUTH_HOME)
+        return read(path, **kwargs)
+    monkeypatch.setattr(installer, "_read_bounded", confined_read)
+    runner = FakeRunner()
+    result = _run_uninstall(installer.UninstallConfig(
+        state_root=state, live_quadlet_root=live, actor_id="test-operator",
+        purge=purge, confirm_purge="test-provider-installation" if purge else None,
+    ), runner=runner)
+    assert result.status == "succeeded", result.message
+    receipt = json.loads(result.receipt_path.read_text())
+    assert installer._PROVIDER_AUTH_HOME in receipt["preserved"]["paths"]
+    assert receipt["providerAuthentication"]["preservedPaths"] == [installer._PROVIDER_AUTH_HOME]
+    assert "codex logout" in receipt["providerAuthentication"]["guidance"]
+    assert "including after purge" in result.message
+    assert not any(installer._PROVIDER_AUTH_HOME in str(call) for call in runner.calls)
+    assert installer._PROVIDER_AUTH_HOME not in json.dumps(receipt["removed"])
 
 
 def test_reinstall_after_non_purge_uninstall_reinstalls(
