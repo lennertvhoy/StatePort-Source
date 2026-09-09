@@ -333,6 +333,7 @@ export function applyAppearanceToWorkspace(settings: GlobalSettings): void {
 
 /** Apply non-appearance settings to the workspace store after a save. */
 export function applySavedSettingsToWorkspace(settings: GlobalSettings): void {
+  useWorkspaceStore.getState().setRestoreWorkspaceLayouts(settings.general.restoreWorkspaceLayouts)
   useWorkspaceStore.getState().setDateTimeFormat(settings.general.dateTimeFormat)
   useWorkspaceStore.getState().setWorkbenchToolOrder(settings.navigation.workbenchToolOrder)
   applyAppearanceToWorkspace(settings)

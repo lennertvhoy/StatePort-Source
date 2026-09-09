@@ -86,6 +86,8 @@ export function useSavedNavigationSettings(): StartupFocusSession {
     let cancelled = false
     const toolOrderGeneration = useWorkspaceStore.getState().workbenchToolOrderGeneration
     const dateTimeGeneration = useWorkspaceStore.getState().dateTimeFormatGeneration
+    const layoutPersistenceGeneration = useWorkspaceStore.getState().layoutPersistenceGeneration
+    const restoredLayouts = useWorkspaceStore.getState().layouts
     void (session.settings ??= fetchBootstrapSettings())
       .then((settings) => {
         if (cancelled) return
@@ -96,6 +98,12 @@ export function useSavedNavigationSettings(): StartupFocusSession {
         }
         if (workspace.workbenchToolOrderGeneration === toolOrderGeneration) {
           workspace.setWorkbenchToolOrder(settings.navigation.workbenchToolOrder)
+        }
+        if (workspace.layoutPersistenceGeneration === layoutPersistenceGeneration) {
+          workspace.setRestoreWorkspaceLayouts(
+            settings.general.restoreWorkspaceLayouts,
+            workspace.layouts === restoredLayouts,
+          )
         }
         // No-op writes are skipped: an identical value must not notify
         // subscribers and re-render the shell for nothing.

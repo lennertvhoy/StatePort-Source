@@ -99,6 +99,8 @@ interface WorkspaceState {
   lastWorkbenchTool: WorkbenchToolId | null
   /** Per-application workbench layout. */
   layouts: Record<string, AppLayout>
+  restoreWorkspaceLayouts: boolean
+  layoutPersistenceGeneration: number
   /** Per-application open editor files (order = tab order). */
   openFiles: Record<string, OpenFile[]>
   activeFile: Record<string, string | null>
@@ -134,6 +136,7 @@ interface WorkspaceState {
   setDisableNonessentialAnimation(on: boolean): void
   setStrongFocus(on: boolean): void
   setLastOpened(instanceId: string, view?: string | null, tool?: WorkbenchToolId | null): void
+  setRestoreWorkspaceLayouts(enabled: boolean, discardRestoredLayouts?: boolean): void
   getLayout(instanceId: string): AppLayout
   setLayout(instanceId: string, patch: Partial<AppLayout>): void
   resetLayout(instanceId: string): void
@@ -181,6 +184,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       lastView: null,
       lastWorkbenchTool: null,
       layouts: {},
+      restoreWorkspaceLayouts: true,
+      layoutPersistenceGeneration: 0,
       openFiles: {},
       activeFile: {},
       cursorPositions: {},
@@ -228,6 +233,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           lastWorkbenchTool: tool ?? s.lastWorkbenchTool,
         })),
 
+      setRestoreWorkspaceLayouts: (enabled, discardRestoredLayouts = false) =>
+        set((s) => ({
+          restoreWorkspaceLayouts: enabled,
+          layoutPersistenceGeneration: s.layoutPersistenceGeneration + 1,
+          // Saving changes future restoration, while current-session editing
+          // stays usable. Bootstrap may discard untouched hydrated layouts.
+          ...(!enabled && discardRestoredLayouts ? { layouts: {} } : {}),
+        })),
       getLayout: (instanceId) => get().layouts[instanceId] ?? DEFAULT_LAYOUT,
       setLayout: (instanceId, patch) =>
         set((s) => ({
@@ -344,7 +357,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         lastInstanceId: s.lastInstanceId,
         lastView: s.lastView,
         lastWorkbenchTool: s.lastWorkbenchTool,
-        layouts: s.layouts,
+        restoreWorkspaceLayouts: s.restoreWorkspaceLayouts,
+        layouts: s.restoreWorkspaceLayouts ? s.layouts : {},
         openFiles: s.openFiles,
         activeFile: s.activeFile,
         cursorPositions: s.cursorPositions,
