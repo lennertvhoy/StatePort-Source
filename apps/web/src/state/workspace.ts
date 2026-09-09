@@ -15,6 +15,7 @@ import type { ReceiptFilter, WorkbenchToolId } from '@/client'
 export const WORKSPACE_STORAGE_KEY = 'stateport.workspace.v1'
 
 export type SidebarMode = 'expanded' | 'collapsed'
+export type DateTimeFormatSetting = 'relative' | 'absolute' | 'both'
 export type ThemeSetting = 'system' | 'light' | 'dark' | 'high_contrast'
 export type DensitySetting = 'compact' | 'comfortable'
 export type FontScaleSetting = 87.5 | 100 | 112.5 | 125
@@ -27,6 +28,17 @@ export type LayoutPreset =
   | 'conversation_terminal'
   | 'infrastructure'
   | 'review'
+
+export const DEFAULT_WORKBENCH_TOOL_ORDER: readonly WorkbenchToolId[] = [
+  'overview', 'files', 'terminal', 'deployments', 'orchestration', 'receipts',
+]
+
+/** Preferences reorder known tools; they never remove tools or add authority. */
+export function normalizeWorkbenchToolOrder(value: unknown): WorkbenchToolId[] {
+  const selected = Array.isArray(value) ? value : []
+  return [...new Set([...selected.filter((id): id is WorkbenchToolId =>
+    DEFAULT_WORKBENCH_TOOL_ORDER.includes(id)), ...DEFAULT_WORKBENCH_TOOL_ORDER])]
+}
 
 export interface AppLayout {
   navSize: number
@@ -67,8 +79,17 @@ interface WorkspaceState {
   theme: ThemeSetting
   density: DensitySetting
   fontScale: FontScaleSetting
+  panelContrast: 'default' | 'increased'
+  dateTimeFormat: DateTimeFormatSetting
+  /** Saved navigation projection, refreshed through the client each session. */
+  workbenchToolOrder: WorkbenchToolId[]
+  workbenchToolOrderGeneration: number
+  /** In-memory ordering token: even a same-value save supersedes initial GET. */
+  dateTimeFormatGeneration: number
   highContrast: boolean
+  highContrastBase: 'light' | 'dark'
   reducedMotion: boolean
+  disableNonessentialAnimation: boolean
   /** "Stronger focus indicators" accessibility setting (design.md §6.4). */
   strongFocus: boolean
 
@@ -104,8 +125,13 @@ interface WorkspaceState {
   setTheme(theme: ThemeSetting): void
   setDensity(density: DensitySetting): void
   setFontScale(scale: FontScaleSetting): void
+  setPanelContrast(contrast: 'default' | 'increased'): void
+  setDateTimeFormat(format: DateTimeFormatSetting): void
+  setWorkbenchToolOrder(order: unknown): void
   setHighContrast(on: boolean): void
+  setHighContrastBase(base: 'light' | 'dark'): void
   setReducedMotion(on: boolean): void
+  setDisableNonessentialAnimation(on: boolean): void
   setStrongFocus(on: boolean): void
   setLastOpened(instanceId: string, view?: string | null, tool?: WorkbenchToolId | null): void
   getLayout(instanceId: string): AppLayout
@@ -140,8 +166,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       theme: 'system',
       density: 'compact',
       fontScale: 100,
+      panelContrast: 'default',
+      workbenchToolOrder: [...DEFAULT_WORKBENCH_TOOL_ORDER],
+      workbenchToolOrderGeneration: 0,
+      dateTimeFormat: 'relative',
+      dateTimeFormatGeneration: 0,
       highContrast: false,
+      highContrastBase: 'dark',
       reducedMotion: false,
+      disableNonessentialAnimation: false,
       strongFocus: false,
 
       lastInstanceId: null,
@@ -173,8 +206,19 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       setTheme: (theme) => set({ theme }),
       setDensity: (density) => set({ density }),
       setFontScale: (fontScale) => set({ fontScale }),
+      setPanelContrast: (panelContrast) => set({ panelContrast }),
+      setDateTimeFormat: (dateTimeFormat) => {
+        if (!['relative', 'absolute', 'both'].includes(dateTimeFormat)) throw new Error('Unsupported date/time format')
+        set((state) => ({ dateTimeFormat, dateTimeFormatGeneration: state.dateTimeFormatGeneration + 1 }))
+      },
+      setWorkbenchToolOrder: (order) => set((state) => ({
+        workbenchToolOrder: normalizeWorkbenchToolOrder(order),
+        workbenchToolOrderGeneration: state.workbenchToolOrderGeneration + 1,
+      })),
       setHighContrast: (highContrast) => set({ highContrast }),
+      setHighContrastBase: (highContrastBase) => set({ highContrastBase }),
       setReducedMotion: (reducedMotion) => set({ reducedMotion }),
+      setDisableNonessentialAnimation: (disableNonessentialAnimation) => set({ disableNonessentialAnimation }),
       setStrongFocus: (strongFocus) => set({ strongFocus }),
 
       setLastOpened: (instanceId, view, tool) =>
@@ -290,8 +334,12 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         theme: s.theme,
         density: s.density,
         fontScale: s.fontScale,
+        panelContrast: s.panelContrast,
+        dateTimeFormat: s.dateTimeFormat,
         highContrast: s.highContrast,
+        highContrastBase: s.highContrastBase,
         reducedMotion: s.reducedMotion,
+        disableNonessentialAnimation: s.disableNonessentialAnimation,
         strongFocus: s.strongFocus,
         lastInstanceId: s.lastInstanceId,
         lastView: s.lastView,

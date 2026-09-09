@@ -17,6 +17,7 @@ import { Disclosure, InlineNotice } from '@/components'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useApplicationsPrefs } from '@/features/applications/lib/prefsStore'
+import { useSessionStore } from '@/state'
 
 const RECORD_ACTION = 'studystate.sample.record-evidence/v1'
 const START_ACTION = 'studystate.sample.start-activity/v1'
@@ -244,6 +245,7 @@ export function StudyJourney({
     setError(null)
     setOutcomeUnknown(false)
     setAppliedReceiptId(null)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
     try {
       const engines = await getClient().runs.listEngines()
       const engine = engines.find((item) => item.id === 'synthetic' && item.available)
@@ -266,6 +268,7 @@ export function StudyJourney({
     } catch (caught: unknown) {
       setError(message(caught))
     } finally {
+      releaseOperationsMutation()
       setBusy(false)
     }
   }
@@ -275,6 +278,7 @@ export function StudyJourney({
     setBusy(true)
     setError(null)
     setOutcomeUnknown(false)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
     try {
       let next = await transition(run, 'proposal-approve')
       try {
@@ -301,6 +305,7 @@ export function StudyJourney({
       setOutcomeUnknown(caught instanceof OutcomeUnknownError)
       setError(message(caught))
     } finally {
+      releaseOperationsMutation()
       setBusy(false)
     }
   }

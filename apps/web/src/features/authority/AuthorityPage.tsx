@@ -336,9 +336,9 @@ export default function AuthorityPage() {
         ) : null}
         {action.kind === 'failed' ? (
           <ErrorState
-            title="The authority action was refused"
+            title="Authority action could not be confirmed"
             error={action.error}
-            preservedNote="The authority store is unchanged by a refused request."
+            preservedNote="No success was confirmed. Refresh authority state before retrying."
           />
         ) : null}
 

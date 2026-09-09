@@ -252,14 +252,14 @@ def test_functionality_preservation_manifest_covers_routes_buttons_apis_and_alia
     counts = validate()
     assert counts == {
         "descriptors": 9,
-        "routes": 15,
-        "controls": 60,
-        "apis": 141,
+        "routes": 17,
+        "controls": 65,
+        "apis": 145,
         "capabilities": 18,
         "aliases": 10,
-        "dynamicControls": 12,
+        "dynamicControls": 15,
         "dynamicOperations": 10,
-        "dynamicBehaviors": 7,
+        "dynamicBehaviors": 10,
         "surfaceGaps": 1,
         "dynamicGaps": 0,
     }
@@ -290,7 +290,12 @@ def test_application_shell_is_app_first_and_platform_operations_are_permission_g
     # The default landing is the installed-application home, not a platform panel.
     assert '<Navigate to="/applications" replace' in app
     assert "Needs attention" in home and 'title="No applications yet"' in home
-    assert "Install a reviewed sample" in onboarding
+    readiness = (ROOT / "apps/web/src/shell/ReadinessSummary.tsx").read_text(encoding="utf-8")
+    catalog = (ROOT / "apps/web/src/features/catalog/CatalogPage.tsx").read_text(encoding="utf-8")
+    assert "<ReadinessSummary />" in onboarding
+    assert "'/catalog'" in readiness and "<Link to={check.to}" in readiness
+    assert 'data-testid={`install-${pkg.name}`}' in catalog
+    assert "onClick={() => openInstall(pkg.id)}" in catalog
     # The legacy #platform entry remains a safe normal-user return to
     # Applications. Canonical source status has its own bounded global route,
     # while exact source evidence and verification are separately role-gated.

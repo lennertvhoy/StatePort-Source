@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -28,7 +29,6 @@ ROOT = Path(__file__).resolve().parents[1]
 for source_root in sorted((ROOT / "packages").glob("*/src")):
     sys.path.insert(0, str(source_root))
 
-from stateport_persistent_app import LocalLayout, PersistentApp  # noqa: E402
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -248,6 +248,8 @@ def _install_and_execute(
 
 
 def run(projectstate: Path, studystate: Path) -> dict[str, Any]:
+    from stateport_persistent_app import LocalLayout, PersistentApp
+
     projectstate = projectstate.resolve(strict=True)
     studystate = studystate.resolve(strict=True)
     source_before = {
@@ -368,6 +370,100 @@ def run(projectstate: Path, studystate: Path) -> dict[str, Any]:
         }
 
 
+
+def installed_phase(port: int, phase: str, identity: dict[str, Any], receipt: Path) -> dict[str, Any]:
+    """Exercise an already running service; never start or modify its runtime."""
+    required = {"projectstate-v6", "studystate", "statespec-template", "invalid"}
+    sources = identity.get("sources", {})
+    if set(sources) != required or not re.fullmatch(r"[a-z][a-z0-9-]{1,40}", str(identity.get("instancePrefix", ""))):
+        raise RuntimeError("identity requires unique instancePrefix and four exact source bindings")
+    for binding in sources.values():
+        path = binding.get("path", "")
+        if not isinstance(path, str) or not path.startswith("/imports/") or any(part in {"", ".", ".."} for part in path.split("/")[1:]):
+            raise RuntimeError("source path must be an exact child of signed /imports mount")
+        if not re.fullmatch(r"[0-9a-f]{40}", str(binding.get("commit", ""))):
+            raise RuntimeError("source commit must be a full Git commit")
+    if len({item["path"] for item in sources.values()}) != 4:
+        raise RuntimeError("source paths must be distinct")
+    previous = json.loads(receipt.read_text()) if receipt.exists() else None
+    if previous is not None and previous.get("identity") != identity:
+        raise RuntimeError("existing receipt belongs to a different identity")
+    if phase == "execute" and previous is not None:
+        raise RuntimeError("execute receipt already exists; use recheck after restart")
+    if phase == "recheck" and (previous is None or previous.get("result") != "passed"):
+        raise RuntimeError("recheck requires a passed execute receipt")
+    browser = BrowserClient(port)
+    browser.establish_session()
+    browser.frontend()
+    candidates = browser.request("/v1/repository-import/local-candidates")["candidates"]
+    selected = {}
+    for adapter, binding in sources.items():
+        matches = [c for c in candidates if c.get("relativeLocation") == binding["path"].removeprefix("/imports/")
+                   and c.get("inspection", {}).get("sourceIdentity", {}).get("headCommit") == binding["commit"]]
+        if len(matches) != 1:
+            raise RuntimeError(f"exact source binding unavailable or ambiguous: {adapter}")
+        selected[adapter] = matches[0]
+    prefix = identity["instancePrefix"]
+    invalid_id = prefix + "-invalid"
+    if phase == "execute":
+        before = browser.request("/v1/instances")["instances"]
+        if any(str(item.get("instanceId", item.get("id", ""))).startswith(prefix + "-") for item in before):
+            raise RuntimeError("instance prefix already exists")
+        rejected = selected["invalid"]
+        inspection = rejected["inspection"]
+        if inspection.get("template", {}).get("validation", {}).get("status") != "failed":
+            raise RuntimeError("invalid fixture did not fail template validation")
+        digest = inspection["inspectionDigest"]
+        actor = browser.request("/v1/status")["actor"]["actorId"]
+        try:
+            browser.request("/v1/repository-import/register", body={"candidateId": rejected["candidateId"],
+                "inspectionDigest": digest, "instanceId": invalid_id, "name": "Invalid fixture",
+                "approval": {"decision": "approve", "actorId": actor, "proposalDigest": digest}})
+        except RuntimeError as exc:
+            if "template_contract_invalid" not in str(exc):
+                raise
+        else:
+            raise RuntimeError("invalid template registration was accepted")
+        if browser.request("/v1/instances")["instances"] != before:
+            raise RuntimeError("invalid template registration left visible residue")
+        records = [_install_and_execute(browser, selected[adapter], adapter_id=adapter,
+                   instance_id=prefix + "-" + adapter)
+                   for adapter in ("projectstate-v6", "studystate", "statespec-template")]
+    else:
+        records = previous["templates"]
+    if {record.get("adapterId") for record in records} != required - {"invalid"} or len(records) != 3:
+        raise RuntimeError("receipt must bind exactly three template adapters")
+    for record in records:
+        instance_id = record["instanceId"]
+        adapter = record["adapterId"]
+        current_source = selected[adapter]["inspection"]["sourceIdentity"]
+        if instance_id != prefix + "-" + adapter or record["sourceCommit"] != sources[adapter]["commit"] or record["sourceTree"] != current_source["headTree"]:
+            raise RuntimeError("receipt/source identity mismatch")
+        detail = browser.request(f"/v1/instances/{instance_id}")
+        if detail.get("instance", {}).get("pathState") != "present":
+            raise RuntimeError("durable instance unavailable")
+        for key, expected in (("adapterId", record["adapterId"]), ("resolvedCommit", record["sourceCommit"]), ("resolvedTree", record["sourceTree"])):
+            if detail.get("source", {}).get(key) != expected:
+                raise RuntimeError("durable source binding changed")
+        run = browser.request(f"/v1/runs/{record['runId']}")["run"]
+        if run.get("instanceId") != instance_id or run.get("lifecycleState") != "CLOSED" or run.get("runResult", {}).get("executionStatus") != "completed" or run.get("result", {}).get("canonicalStateUnchanged") is not True:
+            raise RuntimeError("durable completed run/result unavailable")
+        if not any(item.get("receiptId") == record["installReceiptId"] for item in browser.request(f"/v1/instances/{instance_id}/receipts")["receipts"]):
+            raise RuntimeError("durable import receipt unavailable")
+        conversation = browser.request(f"/v1/instances/{instance_id}/conversation")
+        if conversation.get("thread", {}).get("conversationId") != record["conversationId"]:
+            raise RuntimeError("durable conversation binding changed")
+    result = {"formatVersion": "stateport.template-lifecycle-journey/v1", "result": "passed",
+              "environment": "installed_qemu_simulation_staged_sources", "identity": identity,
+              "phase": phase, "templates": records, "serviceBoundary": "production_http_session_csrf",
+              "executionScope": "bundled template inspection; synthetic engine, not real-provider or workload proof",
+              "restartContinuity": "rechecked_after_external_restart" if phase == "recheck" else "awaiting_external_restart",
+              "invalidTemplateRegistration": "refused_without_visible_catalog_residue"}
+    destination = receipt if phase == "execute" else receipt.with_name(receipt.stem + ".recheck.json")
+    with destination.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return result
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -381,8 +477,19 @@ def main() -> int:
         default=ROOT.parent / "StudyState_Template",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--installed-port", type=int)
+    parser.add_argument("--phase", choices=("execute", "recheck"), default="execute")
+    parser.add_argument("--identity", type=Path, help="JSON with instancePrefix and sources: adapter -> {path, commit}")
+    parser.add_argument("--receipt", type=Path)
     arguments = parser.parse_args()
-    result = run(arguments.projectstate, arguments.studystate)
+    if arguments.installed_port is not None:
+        if arguments.identity is None or arguments.receipt is None or arguments.output is not None:
+            parser.error("installed mode requires --identity and --receipt and disallows --output")
+        result = installed_phase(arguments.installed_port, arguments.phase, json.loads(arguments.identity.read_text()), arguments.receipt)
+    else:
+        if arguments.identity is not None or arguments.receipt is not None or arguments.phase != "execute":
+            parser.error("installed identity/receipt/recheck requires --installed-port")
+        result = run(arguments.projectstate, arguments.studystate)
     encoded = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)

@@ -72,13 +72,13 @@ export function ConfirmDialog({
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogContent data-testid="confirm-dialog" className="bg-surface">
+      <AlertDialogContent data-testid="confirm-dialog" className="max-h-[calc(100dvh-2rem)] overflow-y-auto bg-surface">
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2 text-xl">
             {destructive ? <TriangleAlert className="size-5 text-status-danger" aria-hidden="true" /> : null}
             {title}
           </AlertDialogTitle>
-          {description ? <AlertDialogDescription>{description}</AlertDialogDescription> : null}
+          {description ? <AlertDialogDescription className="max-h-[40dvh] overflow-y-auto [overflow-wrap:anywhere]" tabIndex={0}>{description}</AlertDialogDescription> : null}
         </AlertDialogHeader>
 
         <div className="flex flex-col gap-2 text-sm">

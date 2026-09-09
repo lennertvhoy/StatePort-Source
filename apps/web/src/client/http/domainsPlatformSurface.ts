@@ -441,6 +441,7 @@ const updaterRollbackPlanSchema = z
 const previewRouteSchema = z
   .object({
     schema: z.literal('stateport.preview-route/v1'),
+    previewPath: z.string().nullable().optional(),
     routeId: routeIdSchema,
     capsuleId: z.string().min(1),
     serviceId: z.string().min(1),
@@ -457,7 +458,11 @@ const previewRouteSchema = z
 
 const previewRouteIndexSchema = z
   .object({
-    routes: z.array(previewRouteSchema),
+    routes: z.array(previewRouteSchema.superRefine((value, ctx) => {
+      if (value.previewPath != null && (value.status !== 'active' || value.previewPath !== `/preview/${encodeURIComponent(value.capsuleId)}/${encodeURIComponent(value.serviceId)}/`)) {
+        ctx.addIssue({ code: 'custom', path: ['previewPath'], message: 'preview path does not match gateway route' })
+      }
+    })),
   })
   .passthrough()
 
@@ -477,6 +482,9 @@ const previewReceiptSchema = z.object({
 const previewMutationSchema = previewRouteSchema.extend({
   receipt: previewReceiptSchema,
 }).superRefine((value, ctx) => {
+  if (value.previewPath != null && (value.status !== 'active' || value.previewPath !== `/preview/${encodeURIComponent(value.capsuleId)}/${encodeURIComponent(value.serviceId)}/`)) {
+    ctx.addIssue({ code: 'custom', path: ['previewPath'], message: 'preview path does not match gateway route' })
+  }
   if (value.receipt.routeId !== value.routeId) {
     ctx.addIssue({ code: 'custom', path: ['receipt', 'routeId'], message: 'receipt route does not match route' })
   }
@@ -918,11 +926,11 @@ export class HttpPreviewRoutesClient implements PreviewRoutesClient {
     return payload as unknown as PreviewRouteMutation
   }
 
-  async revoke(routeId: string, input: { reason: string }): Promise<PreviewRouteMutation> {
+  async revoke(routeId: string, input: { reason: string; expectedRouteDigest: string }): Promise<PreviewRouteMutation> {
     routeId = requiredRouteId(routeId)
     const payload = await this.transport.request(endpoints.previewRouteRevoke(routeId), {
       method: 'POST',
-      body: { reason: input.reason },
+      body: { reason: input.reason, expectedRouteDigest: requiredSha256Digest(input.expectedRouteDigest, 'expected preview route digest') },
       schema: previewMutationSchema,
     })
     if ((payload as PreviewRouteMutation).receipt.event !== 'revoked') {
@@ -933,7 +941,7 @@ export class HttpPreviewRoutesClient implements PreviewRoutesClient {
 
   async rewrite(
     routeId: string,
-    input: { revisionDigest: string; upstreamPort: number },
+    input: { revisionDigest: string; upstreamPort: number; expectedRouteDigest: string },
   ): Promise<PreviewRouteMutation> {
     routeId = requiredRouteId(routeId)
     const revisionDigest = requiredSha256Digest(input.revisionDigest, 'preview revision digest')
@@ -942,6 +950,7 @@ export class HttpPreviewRoutesClient implements PreviewRoutesClient {
       body: {
         revisionDigest,
         upstreamPort: input.upstreamPort,
+        expectedRouteDigest: requiredSha256Digest(input.expectedRouteDigest, 'expected preview route digest'),
       },
       schema: previewMutationSchema,
     })

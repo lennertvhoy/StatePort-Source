@@ -70,7 +70,7 @@ describe('mapActivityItem titles', () => {
 describe('HttpActivityClient notifications', () => {
   it('projects backend attention as notifications and keeps receipts as history', async () => {
     const fake = makeFakeFetch([
-      ['GET', '/v1/instances', jsonResponse({ ok: true, result: [{ instanceId: 'ins_1' }] })],
+      ['GET', '/v1/instances', jsonResponse({ ok: true, result: [{ instanceId: 'ins_1', name: 'Research notes' }] })],
       [
         'GET',
         '/v1/instances/ins_1/activity',
@@ -85,6 +85,7 @@ describe('HttpActivityClient notifications', () => {
       {
         id: 'recovery-backup',
         instanceId: 'ins_1',
+        instanceName: 'Research notes',
         title: 'No verified backup recorded',
         body: 'Create a backup before relying on recovery.',
         importance: 'important',
@@ -96,6 +97,57 @@ describe('HttpActivityClient notifications', () => {
       },
     ])
     expect(notifications.some((item) => item.id === 'receipt-1')).toBe(false)
+  })
+
+  it('keeps repeated attention IDs and transition versions scoped to each application', async () => {
+    const fake = makeFakeFetch([
+      ['GET', '/v1/instances/ins_1/activity', jsonResponse({ ok: true, result: PROJECTION })],
+      ['GET', '/v1/instances/ins_2/activity', jsonResponse({ ok: true, result: {
+        ...PROJECTION, instanceId: 'ins_2', attention: [{ ...ATTENTION, version: 9, title: 'Second application' }],
+      } })],
+      ['POST', '/v1/instances/ins_1/activity/recovery-backup/read', () => new Response(null, { status: 204 })],
+      ['POST', '/v1/instances/ins_1/activity/recovery-backup/acknowledge', () => new Response(null, { status: 204 })],
+      ['POST', '/v1/instances/ins_2/activity/recovery-backup/acknowledge', () => new Response(null, { status: 204 })],
+    ])
+    const client = new HttpActivityClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    await client.listAttention('ins_1')
+    await client.listAttention('ins_2')
+    await expect(client.markNotificationRead('recovery-backup')).rejects.toMatchObject({ kind: 'validation' })
+    await client.markNotificationRead('recovery-backup', { instanceId: 'ins_1' })
+    const first = await client.acknowledgeAttention('recovery-backup', { instanceId: 'ins_1' })
+    const second = await client.acknowledgeAttention('recovery-backup', { instanceId: 'ins_2' })
+    expect(first).toMatchObject({ instanceId: 'ins_1', title: ATTENTION.title, read: true, acknowledged: true })
+    expect(second).toMatchObject({ instanceId: 'ins_2', title: 'Second application', read: true, acknowledged: true })
+    expect(fake.calls.filter(call => call.method === 'POST' && call.url.includes('/activity/')).map(call => call.body))
+      .toEqual([{ expectedVersion: 3 }, { expectedVersion: 4 }, { expectedVersion: 9 }])
+  })
+
+  it('invalidates a previously known version when the refreshed projection omits it', async () => {
+    let reads = 0
+    const withoutVersion = { ...ATTENTION } as Record<string, unknown>
+    delete withoutVersion.version
+    const fake = makeFakeFetch([
+      ['GET', '/v1/instances/ins_1/activity', () => jsonResponse({ ok: true, result: {
+        ...PROJECTION, attention: [++reads === 1 ? ATTENTION : withoutVersion],
+      } })],
+    ])
+    const client = new HttpActivityClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    await client.listAttention('ins_1')
+    await client.listAttention('ins_1')
+    await expect(client.markNotificationRead('recovery-backup', { instanceId: 'ins_1' })).rejects.toMatchObject({ kind: 'unavailable' })
+    expect(fake.calls.some(call => call.method === 'POST' && call.url.includes('/activity/'))).toBe(false)
+  })
+
+  it('rejects a transition response for a different attention item', async () => {
+    const fake = makeFakeFetch([
+      ['GET', '/v1/instances/ins_1/activity', jsonResponse({ ok: true, result: PROJECTION })],
+      ['POST', '/v1/instances/ins_1/activity/recovery-backup/read', jsonResponse({ ok: true, result: {
+        attention: { ...ATTENTION, attentionId: 'different-item', readAt: '2026-07-18T10:02:00Z', version: 4 },
+      } })],
+    ])
+    const client = new HttpActivityClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    await client.listAttention('ins_1')
+    await expect(client.markNotificationRead('recovery-backup', { instanceId: 'ins_1' })).rejects.toMatchObject({ kind: 'validation' })
   })
 
   it('marks the exact attention version read and accepts the returned transition', async () => {

@@ -682,6 +682,14 @@ def sim(tmp_path: Path):
 def _apply(sim, *, revalidate=None, receipt_path=None, verified=None, **client):
     accounts, host, runner, _daemon = sim
     verified = verified or _verified()
+    # Replace only the historical synthetic revision component. Production
+    # accepts the full digest format and has no test-only parsing bypass.
+    materialization = client.get("control_plane_materialization")
+    if isinstance(materialization, dict):
+        client["control_plane_materialization"] = {
+            key.replace("accepted/revision/", "accepted/" + "0" * 64 + "/", 1): value
+            for key, value in materialization.items()
+        }
     return prov.apply_verified_plan(
         verified,
         revalidate=revalidate or (lambda: verified),
@@ -2252,12 +2260,65 @@ def test_receipt_is_durable_create_only_and_mode_0600(sim, tmp_path: Path) -> No
     on_disk = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert on_disk == receipt
     assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
-    # A rerun with the identical proven plan adopts the existing receipt
-    # instead of overwriting evidence or re-executing the transaction.
-    with pytest.raises(prov.ProvisioningConverged) as converged:
-        _apply(sim, receipt_path=receipt_path)
-    assert converged.value.receipt["receiptId"] == receipt["receiptId"]
-    assert json.loads(receipt_path.read_text(encoding="utf-8")) == receipt
+    # Reruns retain prior proof and publish a fresh observation. They use the
+    # same idempotent provisioning steps, including live protocol health.
+    original = receipt_path.read_bytes()
+    second = _apply(sim, receipt_path=receipt_path)
+    assert second["result"] == "succeeded"
+    assert second["receiptId"] != receipt["receiptId"]
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == second
+    archived = list(receipt_path.parent.glob(receipt_path.name + ".superseded-*"))
+    assert len(archived) == 1 and archived[0].read_bytes() == original
+    assert stat.S_IMODE(archived[0].stat().st_mode) == 0o600
+
+
+def test_success_receipt_does_not_skip_reinstalling_a_removed_runtime(sim, tmp_path: Path) -> None:
+    """An old healthy receipt is history after runtime removal, not live proof."""
+    _accounts, host, runner, daemon = sim
+    daemon.start()
+    receipt_path = tmp_path / "receipts" / "provision.json"
+    first = _apply(sim, receipt_path=receipt_path)
+    assert first["result"] == "succeeded"
+    original = receipt_path.read_bytes()
+    unit = host.resolve(next(
+        write["path"] for write in _plan()["writes"]
+        if write["path"].endswith("stateport-execution-host.container")
+    ))
+    unit.unlink()
+    host.units[prov.DAEMON_UNIT] = False
+    host.enabled_units.discard(prov.DAEMON_UNIT)
+    runner.calls.clear()
+
+    second = _apply(sim, receipt_path=receipt_path)
+
+    assert second["result"] == "succeeded"
+    assert second["receiptId"] != first["receiptId"]
+    assert unit.is_file()
+    assert host.units[prov.DAEMON_UNIT]
+    archived = list(receipt_path.parent.glob(receipt_path.name + ".superseded-*"))
+    assert len(archived) == 1 and archived[0].read_bytes() == original
+    assert any("health-probe" in call for call in runner.calls)
+
+
+def test_success_receipt_does_not_hide_a_new_protocol_failure(sim, tmp_path: Path) -> None:
+    _accounts, _host, runner, daemon = sim
+    daemon.start()
+    receipt_path = tmp_path / "receipts" / "provision.json"
+    first = _apply(sim, receipt_path=receipt_path)
+    assert first["result"] == "succeeded"
+    original = receipt_path.read_bytes()
+    daemon._garbage = True
+    runner.calls.clear()
+
+    second = _apply(sim, receipt_path=receipt_path)
+
+    assert second["result"] == "failed"
+    assert second["receiptId"] != first["receiptId"]
+    assert second["health"]["healthy"] is False
+    assert any("health-probe" in call for call in runner.calls)
+    archived = list(receipt_path.parent.glob(receipt_path.name + ".superseded-*"))
+    assert len(archived) == 1 and archived[0].read_bytes() == original
+    assert json.loads(receipt_path.read_text(encoding="utf-8"))["result"] == "failed"
 
 
 def test_receipt_rerun_refuses_failed_or_foreign_evidence(sim, tmp_path: Path) -> None:
@@ -3638,3 +3699,496 @@ def test_apply_cli_requires_trust_pins(tmp_path: Path) -> None:
     index_path.write_text(json.dumps(fixtures.release_index()) + "\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         prov.main(["apply", "--release-index", str(index_path)])
+
+# Workspace issuer checks below exercise source contracts and real temporary
+# filesystem refusal only; they do not establish rootless installed visibility.
+def test_workspace_operator_binds_sudo_numeric_identity(monkeypatch):
+    from types import SimpleNamespace
+    accounts = SimpleNamespace(user=lambda name: SimpleNamespace(uid=1000, gid=1000) if name == "operator" else None)
+    monkeypatch.delenv("STATEPORT_CONTROL_CLIENT_USER", raising=False)
+    monkeypatch.setenv("SUDO_USER", "operator")
+    monkeypatch.setenv("SUDO_UID", "1000")
+    monkeypatch.setenv("SUDO_GID", "1000")
+    assert prov._workspace_operator(accounts) == {"user": "operator", "uid": 1000, "gid": 1000}
+    monkeypatch.setenv("SUDO_UID", "1001")
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_operator(accounts)
+    monkeypatch.setenv("SUDO_UID", "1000")
+    monkeypatch.setenv("STATEPORT_CONTROL_CLIENT_USER", "operator")
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_operator(accounts)
+    monkeypatch.delenv("STATEPORT_CONTROL_CLIENT_USER")
+    monkeypatch.delenv("SUDO_GID")
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_operator(accounts)
+
+
+def _workspace_catalog_fixture(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from execution_host.application_workspaces import catalog_identity
+    monkeypatch.setattr(prov, "CONTROL_UID", os.getuid())
+    root = tmp_path / "volume/data/stateport/instances/example"
+    root.mkdir(parents=True, mode=0o700)
+    info = root.stat()
+    row = {"instanceId": "example", "path": "example", "status": "active", "pathState": "present",
+           "filesystem": {"device": info.st_dev, "inode": info.st_ino, "kind": "directory"},
+           "metadata": {"applicationId": "projectstate", "source": {"revision": "a" * 40}}}
+    catalog = tmp_path / "volume/data/stateport/catalog/instances.json"
+    catalog.parent.mkdir()
+    document = {"formatVersion": "stateport.instance-catalog/v1",
+                "root": {"path": "/var/lib/stateport/data/stateport/instances"}, "entries": [row]}
+    catalog.write_text(json.dumps(document))
+    catalog.chmod(0o600)
+    request = {"instanceId": "example", "applicationId": "projectstate",
+               "catalogIdentityDigest": catalog_identity({**row, "applicationId": "projectstate"})}
+    ctx = SimpleNamespace(layout=prov.HostLayout(root=tmp_path))
+    return ctx, {"mountpoint": "/volume"}, request, catalog, document, root
+
+
+def test_workspace_catalog_uses_stored_application_identity_and_detects_replacement(tmp_path, monkeypatch):
+    ctx, volume, request, catalog, document, root = _workspace_catalog_fixture(tmp_path, monkeypatch)
+    entry, digest = prov._workspace_catalog(ctx, volume, request)
+    assert entry["applicationId"] == "projectstate"
+    assert digest == prov.canonical_digest(document)
+    root.rename(root.with_name("preserved-original"))
+    root.mkdir(mode=0o700)
+    with pytest.raises(prov.ProvisioningRefusal, match="filesystem identity"):
+        prov._workspace_catalog(ctx, volume, request)
+    assert root.with_name("preserved-original").exists()
+    assert json.loads(catalog.read_text()) == document
+
+
+@pytest.mark.parametrize("mutation", [None, "directory-fsid", "marker-fsid", "marker-inode", "marker-device", "directory-device"])
+def test_workspace_catalog_stable_identity_uses_layout_descriptors(tmp_path, monkeypatch, mutation):
+    import hashlib
+    from execution_host.application_workspaces import catalog_identity
+    ctx, volume, request, catalog, document, root = _workspace_catalog_fixture(tmp_path, monkeypatch)
+    marker = root / ".stateport/managed-incarnation.json"
+    marker.parent.mkdir(mode=0o700)
+    raw = json.dumps({"formatVersion": "stateport.managed-incarnation/v1", "instanceId": "example",
+                      "incarnationId": "a" * 64, "createdAt": "2026-09-09T00:00:00Z"}).encode()
+    marker.write_bytes(raw)
+    marker.chmod(0o600)
+    row = document["entries"][0]
+    row["filesystem"]["device"] += 1000
+    row["metadata"]["filesystemId"] = f"statvfs:{os.statvfs(root).f_fsid:016x}"
+    marker_identity = {"device": marker.stat().st_dev + 1000, "inode": marker.stat().st_ino,
+                       "filesystemId": f"statvfs:{os.statvfs(marker).f_fsid:016x}", "kind": "regular_file"}
+    row["metadata"]["managedIncarnation"] = {
+        "formatVersion": "stateport.managed-incarnation/v1", "markerPath": ".stateport/managed-incarnation.json",
+        "markerDigest": "sha256:" + hashlib.sha256(raw).hexdigest(), "markerFilesystem": marker_identity,
+    }
+    if mutation == "directory-fsid":
+        row["metadata"]["filesystemId"] = "statvfs:0000000000000001"
+    elif mutation == "marker-fsid":
+        marker_identity["filesystemId"] = "statvfs:0000000000000001"
+    elif mutation == "marker-inode":
+        marker_identity["inode"] += 1000
+    elif mutation == "marker-device":
+        marker_identity["device"] = None
+    elif mutation == "directory-device":
+        row["filesystem"]["device"] = -1
+    catalog.write_text(json.dumps(document))
+    request["catalogIdentityDigest"] = catalog_identity({**row, "applicationId": "projectstate"})
+    if mutation is None:
+        entry, _ = prov._workspace_catalog(ctx, volume, request)
+        assert entry["instanceId"] == "example"
+    else:
+        with pytest.raises((prov.ProvisioningRefusal, prov.StepFailed)):
+            prov._workspace_catalog(ctx, volume, request)
+    assert marker.read_bytes() == raw
+    assert json.loads(catalog.read_text()) == document
+
+
+def test_workspace_catalog_identity_upgrade_invalidates_old_review(tmp_path, monkeypatch):
+    from execution_host.application_workspaces import catalog_identity
+    ctx, volume, request, catalog, document, root = _workspace_catalog_fixture(tmp_path, monkeypatch)
+    old_digest = request["catalogIdentityDigest"]
+    row = document["entries"][0]
+    row["metadata"]["filesystemId"] = f"statvfs:{os.statvfs(root).f_fsid:016x}"
+    catalog.write_text(json.dumps(document))
+    assert catalog_identity({**row, "applicationId": "projectstate"}) != old_digest
+    with pytest.raises(prov.ProvisioningRefusal, match="reviewed application catalog identity changed"):
+        prov._workspace_catalog(ctx, volume, request)
+
+
+@pytest.mark.parametrize("mutation", ["foreign", "archived", "escape", "source", "duplicate", "root", "symlink", "hardlink", "fifo"])
+def test_workspace_catalog_refuses_untrusted_or_changed_binding(tmp_path, monkeypatch, mutation):
+    ctx, volume, request, catalog, document, root = _workspace_catalog_fixture(tmp_path, monkeypatch)
+    row = document["entries"][0]
+    if mutation == "foreign":
+        request["applicationId"] = "other"
+    elif mutation == "archived":
+        row["status"] = "archived"
+    elif mutation == "escape":
+        row["path"] = "../example"
+    elif mutation == "source":
+        row["metadata"]["source"]["revision"] = "b" * 40
+    elif mutation == "duplicate":
+        document["entries"].append(deepcopy(row))
+    elif mutation == "root":
+        document["root"]["path"] = "/home/operator/instances"
+    catalog.write_text(json.dumps(document))
+    if mutation == "symlink":
+        root.rename(root.with_name("original"))
+        root.symlink_to(root.with_name("original"), target_is_directory=True)
+    elif mutation == "hardlink":
+        os.link(catalog, catalog.with_name("other.json"))
+    elif mutation == "fifo":
+        catalog.unlink()
+        os.mkfifo(catalog, 0o600)
+    with pytest.raises((prov.ProvisioningRefusal, prov.StepFailed)):
+        prov._workspace_catalog(ctx, volume, request)
+
+
+def test_workspace_profile_derivation_preserves_stable_exact_volume():
+    request = {"instanceId": "example", "applicationId": "projectstate", "catalogIdentityDigest": "sha256:" + "a" * 64,
+               "profileDigest": prov.DEFAULT_WORKSPACE_SPEC_DIGEST, "requestDigest": "sha256:" + "b" * 64}
+    first = prov.workspace_authority_workload(request)
+    renewed = prov.workspace_authority_workload({**request, "requestDigest": "sha256:" + "c" * 64})
+    rebound = prov.workspace_authority_workload({**request, "catalogIdentityDigest": "sha256:" + "d" * 64})
+    assert first == renewed
+    assert first["parameters"]["volumeName"] != rebound["parameters"]["volumeName"]
+    assert first["image"] == prov.default_sealed_workspace_workload()["image"]
+    assert first["parameters"]["ownership"]["applicationId"] == "projectstate"
+
+
+def test_workspace_metadata_reader_refuses_oversized_file(tmp_path):
+    path = tmp_path / "large.json"
+    path.write_bytes(b"x" * (1024 * 1024 + 1))
+    path.chmod(0o600)
+    with pytest.raises((prov.ProvisioningRefusal, prov.StepFailed)):
+        prov._workspace_json(prov.HostLayout(root=tmp_path), "/large.json", uid=os.getuid(), private=True)
+
+
+def test_workspace_signed_mount_has_exact_read_only_publication_and_context_step():
+    document = fixtures.release_index()
+    target = deepcopy(document["signed"]["targets"][0])
+    web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
+    web["readOnlyHostMounts"] = [
+        {"name": "template-sources", "hostPath": "/var/lib/stateport/imports", "mountPath": "/imports",
+         "purpose": "template-sources", "sourceOwner": "installer-client", "sourceGroup": "stateport-execution-control",
+         "mode": "ro", "environmentVariable": "STATEPORT_REPOSITORY_ROOTS"},
+        {"name": "workspace-authority", "hostPath": prov.WORKSPACE_PUBLIC_DIR, "mountPath": "/run/stateport-workspace-authority",
+         "purpose": "workspace-authority", "sourceOwner": "root", "sourceGroup": "root", "mode": "ro",
+         "environmentVariable": "STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY"},
+    ]
+    def accepted_units():
+        # Exercise resolved accepted units, not .container.in validation templates.
+        document["signed"]["targets"][0] = target
+        target["topologyDigest"] = fixtures.topology_digest(target)
+        target["quadletBundleDigest"] = fixtures.quadlet_bundle_digest(
+            fixtures.render_quadlet_bundle(target, document["signed"]["images"]))
+        document["signatures"] = [fixtures._signature(
+            fixtures.canonical_digest(document["signed"]), "release-index")]
+        accepted = fixtures._revision_pipeline(document)["accepted"]
+        return {path: value for path, value in accepted.items()
+                if "/stateport-control/" in path and path.endswith((".container", ".network"))}
+
+    materialization = accepted_units()
+    content = next(value for value in materialization.values() if b"STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY=" in value)
+    plan = prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="signature-verified-test", control_plane_materialization=materialization)
+    assert "publish-workspace-issuer-context" in [step["step"] for step in plan["steps"]]
+    materialization = content.decode()
+    assert "/etc/stateport/workspace-authority:/run/stateport-workspace-authority:ro" in json.dumps(materialization)
+    assert "STATEPORT_APPLICATION_WORKSPACE_BINDINGS=/run/stateport-workspace-authority/bindings.json" in json.dumps(materialization)
+    assert "STATEPORT_APPLICATION_WORKSPACE_BINDINGS_FORMAT=stateport.application-workspace-bindings/v2" in materialization
+    socket = target["executionContract"]
+    assert f"Volume={socket['hostDirectory']}:{socket['containerDirectory']}:ro" in materialization
+    assert f"Environment=STATEPORT_EXECUTION_SOCKET={socket['containerDirectory']}/{socket['socketName']}" in materialization
+    for key, value in (("mode", "rw"), ("hostPath", "/etc"), ("sourceOwner", "stateport-control")):
+        original = web["readOnlyHostMounts"][1][key]
+        web["readOnlyHostMounts"][1][key] = value
+        with pytest.raises(ReleaseContractError):
+            prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="signature-verified-test")
+        web["readOnlyHostMounts"][1][key] = original
+    web["readOnlyHostMounts"][1]["profileId"] = "stateport.empty-workspace-terminal/v1"
+    terminal_bundle = accepted_units()
+    terminal_content = next(value for value in terminal_bundle.values() if b"STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY=" in value)
+    assert b"Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=stateport.empty-workspace-terminal/v1" in terminal_content
+    prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="signature-verified-test",
+                                 control_plane_materialization=terminal_bundle)
+    web["readOnlyHostMounts"][1]["profileId"] = "arbitrary-widened-policy"
+    with pytest.raises(ReleaseContractError):
+        prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="signature-verified-test")
+
+
+def test_workspace_unit_projection_rejects_arbitrary_host_data_and_duplicate_identity():
+    text = "\n".join([
+        "Label=io.stateport.service.id=stateport-web", "Label=io.stateport.profile=accepted",
+        "Label=io.stateport.release.id=alpha", "Label=io.stateport.release.signed-payload=sha256:" + "a" * 64,
+        "ContainerName=accepted-web", "Image=registry.example/web@sha256:" + "b" * 64,
+        "Volume=accepted-product-data:/var/lib/stateport:rw,U",
+    ])
+    assert prov._workspace_unit_fields(text)["volumeName"] == "accepted-product-data"
+    for changed in (text.replace("accepted-product-data:", "/home/operator/data:"),
+                    text + "\nContainerName=foreign", text.replace("profile=accepted", "profile=staging")):
+        with pytest.raises(prov.ProvisioningRefusal):
+            prov._workspace_unit_fields(changed)
+
+
+def test_workspace_issuer_cli_requires_trusted_root_helper(monkeypatch):
+    monkeypatch.delenv("STATEPORT_ROOT_HELPER", raising=False)
+    with pytest.raises(prov.ProvisioningRefusal, match="trusted root helper"):
+        prov.issue_workspace_from_operator({}, reviewed_digest="sha256:" + "a" * 64)
+
+
+def test_workspace_publication_initializes_v2_once_and_refuses_legacy_migration(tmp_path):
+    from execution_host.application_workspaces import TRANSPORT_FORMAT
+    accounts = SimAccounts()
+    accounts.groups["root"] = prov.Group("root", accounts.gid, ())
+    host = SimHost(tmp_path, accounts)
+    ctx = prov._Apply(plan={}, signed_payload_digest="sha256:" + "a" * 64,
+                      runner=SimRunner(host), accounts=accounts, layout=prov.HostLayout(root=tmp_path),
+                      rootless_group_probe=lambda *_: {})
+    prov._prepare_workspace_publication(ctx)
+    path = ctx.layout.resolve(prov.WORKSPACE_BINDINGS_PATH)
+    assert json.loads(path.read_text()) == {"formatVersion": TRANSPORT_FORMAT, "bindings": []}
+    original = path.read_bytes()
+    prov._prepare_workspace_publication(ctx)
+    assert path.read_bytes() == original
+    legacy = b'{"formatVersion":"stateport.application-workspace-bindings/v1","bindings":[]}\n'
+    path.write_bytes(legacy)
+    with pytest.raises(ValueError, match="v2 format"):
+        prov._prepare_workspace_publication(ctx)
+    assert path.read_bytes() == legacy
+
+
+def test_current_default_topology_does_not_activate_unqualified_workspace_transport():
+    import yaml
+    topology = yaml.safe_load((ROOT / "config/release-topology.v1.yaml").read_text())
+    serialized = json.dumps(topology)
+    assert "STATEPORT_APPLICATION_WORKSPACE_BINDINGS" not in serialized
+    assert "workspace-authority" not in serialized
+
+
+def test_workspace_issuer_derives_transport_from_actual_default_grant():
+    from execution_host.application_workspaces import TRANSPORT_FORMAT, validate_binding_transport
+    default = next(step["grant"] for step in _plan()["steps"] if step["step"] == "provision-execution-host-grant")
+    request = {"instanceId": "example", "applicationId": "projectstate", "catalogIdentityDigest": "sha256:" + "a" * 64,
+               "profileDigest": prov.DEFAULT_WORKSPACE_SPEC_DIGEST, "requestDigest": "sha256:" + "b" * 64,
+               "createdAt": "2026-09-06T01:00:00Z", "grantExpiresAt": "2026-09-06T02:00:00Z"}
+    workload = prov.workspace_authority_workload(request)
+    grant = prov._workspace_authority_grant(request, default)
+    assert "describeCapabilities" in default["operations"]
+    assert "describeCapabilities" not in grant["operations"]
+    assert "openTerminal" not in grant["operations"]
+    assert set(grant["operations"]) <= set(default["operations"])
+    assert grant["budgets"] == default["budgets"]
+    row = {"grantId": grant["grantId"], "authorityGrantDigest": daemon_contract.canonical_digest(grant),
+           "workload": workload, "grant": grant}
+    assert validate_binding_transport({"formatVersion": TRANSPORT_FORMAT, "bindings": [row]}) == [row]
+
+
+def test_root_wrapper_retains_only_existing_sudo_identity_environment_contract():
+    # Static wrapper contract complements real numeric tuple refusal above.
+    # No sudo/root operation is performed by this source regression.
+    text = (ROOT / "scripts/stateport-execution-host-provision").read_text()
+    tail = text[text.index("unset PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP"):]
+    assert "SUDO_USER" not in tail and "SUDO_UID" not in tail and "SUDO_GID" not in tail
+    assert 'exec "$python" -I -c' in tail
+    assert 'env -i' not in tail
+    assert 'STATEPORT_ROOT_HELPER=1' in tail
+
+
+def test_terminal_profile_requires_explicit_signed_selection_and_new_context():
+    from execution_host.application_workspaces import terminal_authority_profile, TERMINAL_PROFILE_ID
+    profile = terminal_authority_profile(prov.default_sealed_workspace_workload())
+    selected_unit = f"Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE={TERMINAL_PROFILE_ID}\n"
+    digest = prov.canonical_digest(profile)
+    assert digest != prov.DEFAULT_WORKSPACE_SPEC_DIGEST
+    assert prov._workspace_selected_profile("") is None
+    assert prov._workspace_selected_profile(selected_unit) == profile
+    context = {"formatVersion": prov.WORKSPACE_TERMINAL_CONTEXT_FORMAT,
+               "authorityProfile": profile, "profileDigest": digest}
+    assert prov._workspace_context_profile(context, selected_unit) == profile
+    legacy = {"formatVersion": prov.WORKSPACE_CONTEXT_FORMAT, "profileDigest": prov.DEFAULT_WORKSPACE_SPEC_DIGEST}
+    assert prov._workspace_context_profile(legacy, "") is None
+    for value, unit in ((legacy, selected_unit), (context, ""),
+                        ({**context, "profileDigest": prov.DEFAULT_WORKSPACE_SPEC_DIGEST}, selected_unit)):
+        with pytest.raises(prov.ProvisioningRefusal):
+            prov._workspace_context_profile(value, unit)
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_selected_profile(selected_unit + selected_unit)
+    changed = deepcopy(context)
+    changed["authorityProfile"]["operations"].append("purgeDeploymentData")
+    changed["profileDigest"] = prov.canonical_digest(changed["authorityProfile"])
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_context_profile(changed, selected_unit)
+
+
+def test_terminal_profile_grant_derives_exact_operations_without_changing_default():
+    from execution_host.application_workspaces import terminal_authority_profile, TRANSPORT_FORMAT, validate_binding_transport
+    default = next(step["grant"] for step in _plan()["steps"] if step["step"] == "provision-execution-host-grant")
+    before = deepcopy(default)
+    profile = terminal_authority_profile(prov.default_sealed_workspace_workload())
+    request = {"instanceId": "example", "applicationId": "projectstate", "catalogIdentityDigest": "sha256:" + "a" * 64,
+               "profileDigest": prov.canonical_digest(profile), "requestDigest": "sha256:" + "b" * 64,
+               "createdAt": "2026-09-06T01:00:00Z", "grantExpiresAt": "2026-09-06T02:00:00Z"}
+    grant = prov._workspace_authority_grant(request, default, authority_profile=profile)
+    assert grant["operations"] == profile["operations"]
+    assert {"openTerminal", "resizeTerminal", "signalTerminal", "closeTerminal"} <= set(grant["operations"])
+    assert grant["budgets"] == default["budgets"]
+    assert default == before and "openTerminal" not in default["operations"]
+    workload = prov.workspace_authority_workload(request)
+    row = {"grantId": grant["grantId"], "authorityGrantDigest": daemon_contract.canonical_digest(grant),
+           "workload": workload, "grant": grant}
+    assert validate_binding_transport({"formatVersion": TRANSPORT_FORMAT, "bindings": [row]}) == [row]
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_authority_grant({**request, "profileDigest": prov.DEFAULT_WORKSPACE_SPEC_DIGEST}, default, authority_profile=profile)
+
+
+def test_signed_workspace_template_is_structural_and_preserves_legacy():
+    from execution_host.daemon_contract import workspace_template_for_image
+    assert workspace_template_for_image(prov.DEFAULT_WORKSPACE_IMAGE) == prov.default_sealed_workspace_workload()
+    other = 'ghcr.io/example/development@sha256:' + 'a' * 64
+    template = workspace_template_for_image(other)
+    assert template['image']['reference'] == other
+    assert template['resources'] == prov.default_sealed_workspace_workload()['resources']
+    assert template['parameters']['workspaceId'] == 'default-dev'
+    assert template['parameters']['workspaceSpecDigest'] != prov.default_sealed_workspace_workload()['parameters']['workspaceSpecDigest']
+    with pytest.raises(ValueError):
+        workspace_template_for_image('ghcr.io/example/development:latest')
+
+
+def _signed_workspace_inputs():
+    document = fixtures.release_index()
+    target = document['signed']['targets'][0]
+    images = document['signed']['images']
+    image = deepcopy(images[0])
+    image.update(imageId='stateport-dev-workspace', role='optional-profile',
+                 reference='ghcr.io/example/development@' + image['digest'])
+    images.append(image)
+    target['executionContract']['workspaceImageId'] = 'stateport-dev-workspace'
+    target['services'][0]['serviceId'] = 'stateport-web'
+    return target, images
+
+
+def test_signed_workspace_plan_binds_both_units_grant_and_image():
+    from stateport_release.contract import render_quadlet_bundle
+    target, images = _signed_workspace_inputs()
+    plan = prov.render_provisioning_plan(target, images, verification_basis="schema-only-review")
+    image = images[-1]
+    template = prov.workspace_template_for_image(image['reference'])
+    assert plan['workspaceTemplate'] == template
+    grant = next(row['grant'] for row in plan['steps'] if row['step'] == 'provision-execution-host-grant')
+    assert grant['imageReference'] == image['reference']
+    assert grant['workloadSpecDigests'] == {'default-dev': prov.canonical_digest(template)}
+    assert plan['workspaceImage']['digest'] == image['digest']
+    bundle = render_quadlet_bundle(target, images)
+    web = [content.decode() for path, content in bundle.items() if path.endswith('.container.in') and 'ContainerName=' in content.decode() and 'stateport-web' in content.decode()]
+    assert web
+    expected = 'Environment=STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE=' + image['reference']
+    assert all(expected in content for content in web)
+    daemon = next(row['content'] for row in plan['writes'] if row['path'].endswith('/stateport-execution-host.container'))
+    assert expected in daemon
+    assert prov._workspace_template_from_unit(daemon) == template
+
+
+@pytest.mark.parametrize('failure', ['missing', 'duplicate', 'role', 'signature', 'reference', 'selector'])
+def test_signed_workspace_plan_refuses_ambiguous_unverified_selection(failure):
+    target, images = _signed_workspace_inputs()
+    if failure == 'missing': images.pop()
+    if failure == 'duplicate': images.append(deepcopy(images[-1]))
+    if failure == 'role': images[-1]['role'] = 'runtime-service'
+    if failure == 'signature': images[-1]['signature']['subjectDigest'] = 'sha256:' + 'f'*64
+    if failure == 'reference': images[-1]['reference'] = 'arbitrary:latest'
+    if failure == 'selector': target['executionContract']['workspaceImageId'] = 'browser-chosen'
+    with pytest.raises(ReleaseContractError):
+        prov.render_provisioning_plan(target, images, verification_basis="schema-only-review")
+
+
+def test_signed_workspace_profile_uses_installed_pair_and_refuses_drift():
+    from execution_host.application_workspaces import terminal_authority_profile, TERMINAL_PROFILE_ID
+    reference = 'ghcr.io/example/development@sha256:' + 'c'*64
+    template = prov.workspace_template_for_image(reference)
+    pair = ('Environment=STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE=' + reference + '\n'
+            'Environment=STATEPORT_EXECUTION_HOST_WORKSPACE_SPEC_DIGEST=' + prov.canonical_digest(template) + '\n')
+    assert prov._workspace_selected_profile(pair + 'Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=' + TERMINAL_PROFILE_ID) == terminal_authority_profile(template)
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_template_from_unit(pair.replace(prov.canonical_digest(template), 'sha256:' + 'f'*64))
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_template_from_unit(pair.splitlines()[0])
+
+
+def _verified_signed_workspace():
+    target, images = _signed_workspace_inputs()
+    document = fixtures.release_index()
+    document['signed']['targets'][0] = target
+    document['signed']['images'] = images
+    target['topologyDigest'] = fixtures.topology_digest(target)
+    target['quadletBundleDigest'] = fixtures.quadlet_bundle_digest(fixtures.render_quadlet_bundle(target, images))
+    document['signatures'] = [fixtures._signature(fixtures.canonical_digest(document['signed']), 'release-index')]
+    return verify_release_index(document, policy=fixtures._policy(), verifier=fixtures._EphemeralTestVerifier())
+
+
+def test_fresh_signed_workspace_provisioning_records_dynamic_grant_and_both_images(sim):
+    sim[3].start()
+    verified = _verified_signed_workspace()
+    receipt = _apply(sim, verified=verified)
+    assert receipt['result'] == 'succeeded', receipt.get('failure')
+    reference = verified.index.document['signed']['images'][-1]['reference']
+    expected = prov.canonical_digest(prov.workspace_template_for_image(reference))
+    assert receipt['controlGrant']['imageReference'] == reference
+    assert receipt['controlGrant']['workloadSpecDigest'] == expected
+    step = next(row for row in receipt['steps'] if row['step'] == 'pull-execution-host-image')
+    assert step['workspaceImage']['observedDigest'] == verified.index.document['signed']['images'][-1]['digest']
+    assert reference in sim[1].image_store
+
+
+def test_signed_workspace_refuses_legacy_install_before_changes(sim):
+    sim[3].start()
+    initial = _apply(sim)
+    assert initial['result'] == 'succeeded'
+    host = sim[1]
+    grant_path = host.resolve(prov.GRANTS_DIR + '/control-plane-default.json')
+    unit_path = host.resolve(prov.QUADLET_DIR + '/stateport-execution-host.container')
+    before = (grant_path.read_bytes(), unit_path.read_bytes())
+    with pytest.raises(prov.ProvisioningRefusal, match='migration'):
+        _apply(sim, verified=_verified_signed_workspace())
+    assert (grant_path.read_bytes(), unit_path.read_bytes()) == before
+
+
+def test_source_profile_requires_distinct_installed_context_and_preserves_old_profiles():
+    from execution_host.application_workspaces import source_authority_profile, terminal_authority_profile, SOURCE_PROFILE_ID, TERMINAL_PROFILE_ID
+    template = prov.default_sealed_workspace_workload()
+    profile = source_authority_profile(template)
+    unit = 'Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=' + SOURCE_PROFILE_ID + '\n'
+    context = {'formatVersion': prov.WORKSPACE_SOURCE_CONTEXT_FORMAT, 'authorityProfile': profile, 'profileDigest': prov.canonical_digest(profile)}
+    assert prov._workspace_selected_profile(unit) == profile
+    assert prov._workspace_context_profile(context, unit) == profile
+    assert profile['operations'] == terminal_authority_profile(template)['operations']
+    assert profile['workload'] == template and 'sourceSeed' not in template['parameters']
+    for version in [prov.WORKSPACE_CONTEXT_FORMAT, prov.WORKSPACE_TERMINAL_CONTEXT_FORMAT]:
+        with pytest.raises(prov.ProvisioningRefusal):
+            prov._workspace_context_profile({**context, 'formatVersion': version}, unit)
+    for selected in ['', unit + unit, unit.replace(SOURCE_PROFILE_ID, TERMINAL_PROFILE_ID)]:
+        with pytest.raises(prov.ProvisioningRefusal):
+            prov._workspace_context_profile(context, selected)
+    assert prov._workspace_selected_profile('') is None
+
+
+def test_source_profile_grant_binds_revision_and_exact_seed_without_default_widening():
+    from execution_host.application_workspaces import source_authority_profile, SOURCE_REQUEST_FORMAT
+    default = next(step['grant'] for step in _plan()['steps'] if step['step'] == 'provision-execution-host-grant')
+    before = deepcopy(default)
+    profile = source_authority_profile(prov.default_sealed_workspace_workload())
+    source = {'baseRevision': 'a' * 40, 'sourceInventory': [{'path': 'README.md', 'mode': '100644', 'contentDigest': 'sha256:' + 'c' * 64}],
+              'sourceArchive': {'formatVersion': 'stateport.deployment-context-archive/v1', 'archiveDigest': 'sha256:' + 'd' * 64, 'archiveBytes': 10240, 'contextDigest': 'sha256:' + 'e' * 64, 'fileCount': 1},
+              'descriptorDigest': 'sha256:' + 'f' * 64}
+    # Derivation consumes a previously validated request; witness validation and
+    # real filesystem checks are covered by the transaction/source verifier.
+    request = {'formatVersion': SOURCE_REQUEST_FORMAT, 'instanceId': 'example', 'applicationId': 'projectstate',
+               'catalogIdentityDigest': 'sha256:' + 'a' * 64, 'profileDigest': prov.canonical_digest(profile),
+               'requestDigest': 'sha256:' + 'b' * 64, 'createdAt': '2026-09-08T13:00:00Z', 'grantExpiresAt': '2026-09-08T14:00:00Z',
+               'source': source, 'sourceDigest': prov.canonical_digest(source)}
+    workload = prov.workspace_authority_workload(request)
+    grant = prov._workspace_authority_grant(request, default, authority_profile=profile)
+    assert grant['baseRevision'] == source['baseRevision']
+    assert grant['workloadSpecDigests'] == {workload['workloadId']: prov.canonical_digest(workload)}
+    assert workload['parameters']['sourceSeed']['sourceInventory'] == source['sourceInventory']
+    assert grant['operations'] == profile['operations'] and grant['budgets'] == default['budgets']
+    assert default == before
+    from execution_host.application_workspaces import terminal_authority_profile
+    with pytest.raises(prov.ProvisioningRefusal):
+        prov._workspace_authority_grant(request, default, authority_profile=terminal_authority_profile(prov.default_sealed_workspace_workload()))

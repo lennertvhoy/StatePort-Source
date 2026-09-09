@@ -126,7 +126,7 @@ interface FilesState {
   clearReveal(): void
 
   openDocument(instanceId: string, path: string): Promise<FileDoc | null>
-  reloadDocument(instanceId: string, path: string): Promise<FileDoc | null>
+  reloadDocument(instanceId: string, path: string, reviewed?: { draft: string; revision: string }): Promise<FileDoc | null>
   closeDocument(instanceId: string, path: string): void
   setDraft(instanceId: string, path: string, draft: string): void
   discardDraft(instanceId: string, path: string): void
@@ -338,16 +338,17 @@ export const useFilesStore = create<FilesState>()((set, get) => {
       return promise
     },
 
-    reloadDocument: async (instanceId, path) => {
+    reloadDocument: async (instanceId, path, reviewed) => {
       const doc = get().docs[instanceId]?.[path]
       if (!doc) return get().openDocument(instanceId, path)
-      patchDoc(instanceId, path, { status: 'loading', error: null, conflict: null })
+      patchDoc(instanceId, path, { status: 'loading', error: null })
       try {
         const entry = await getClient().files.read(instanceId, path)
         const loaded = docFromEntry(entry)
         // Preserve an unsaved draft typed after the reload started.
         const live = get().docs[instanceId]?.[path]
-        const dirtyDraft = live && live.draft !== live.savedContent ? live.draft : null
+        const discardReviewed = reviewed && live?.draft === reviewed.draft && live?.revision === reviewed.revision
+        const dirtyDraft = live && live.draft !== live.savedContent && !discardReviewed ? live.draft : null
         setDoc(instanceId, path, dirtyDraft !== null ? { ...loaded, draft: dirtyDraft } : loaded)
         return get().docs[instanceId]?.[path] ?? null
       } catch (error) {

@@ -347,7 +347,7 @@ export default function CatalogPage() {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onSelect={() => setImportOpen(true)}>
-                  Import a local repository
+                  Import a repository
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setSecondaryNotice('template')}>
                   Create from a reviewed template
@@ -536,7 +536,7 @@ export default function CatalogPage() {
                 className="text-accent underline-offset-2 hover:underline"
                 onClick={() => setImportOpen(true)}
               >
-                Import a local repository
+                Import a repository
               </button>{' '}
               — reviewed installation stays the ordinary path.
             </p>

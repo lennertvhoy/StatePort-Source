@@ -18,7 +18,7 @@ import threading
 from typing import Any, Mapping
 
 from .daemon_contract import TERMINAL_STATES, canonical_digest
-from .engine import KIND_LABEL, MANAGED_LABEL_KEY, WORKLOAD_LABEL
+from .engine import KIND_LABEL, MANAGED_LABEL_KEY, WORKLOAD_LABEL, development_seed_identity_error
 
 
 class LedgerError(RuntimeError):
@@ -28,6 +28,14 @@ class LedgerError(RuntimeError):
 def _container_identity_error(
     entry: Mapping[str, Any], info: Mapping[str, Any]
 ) -> str | None:
+    policy_error = development_seed_identity_error(entry.get("spec", {}), info)
+    if policy_error is not None:
+        return policy_error
+    if not isinstance(info.get("containerId"), str) or not info["containerId"]:
+        return "observed container ID is unavailable"
+    expected_container_id = entry.get("containerId")
+    if expected_container_id is not None and info.get("containerId") != expected_container_id:
+        return "container ID does not match the durable ledger identity"
     workload_id = str(entry["workloadId"])
     kind = str(entry.get("spec", {}).get("kind", ""))
     labels = info.get("labels")
@@ -280,6 +288,69 @@ class OperationLedger:
         with self._lock:
             return self._read(workload_id)
 
+    def mark_source_termination(self, entry: Mapping[str, Any], *, at: str, reason: str) -> dict[str, Any]:
+        parameters = entry.get("spec", {}).get("parameters", {})
+        if "sourceArchive" not in parameters or entry.get("sourceCommandOutput") is not None or entry.get("sourceTerminationReason") is not None:
+            return dict(entry)
+        return self.transition(str(entry["workloadId"]), str(entry["state"]), at=at,
+            expect_version=int(entry["version"]), expect_states={str(entry["state"])},
+            extra={"sourceTerminationReason": reason})
+
+    def capture_source_command_output(
+        self, entry: Mapping[str, Any], engine: Any, *, at: str,
+        termination_reason: str,
+    ) -> dict[str, Any]:
+        """Persist bounded terminal command evidence before its container is removed."""
+        spec = entry.get("spec", {})
+        parameters = spec.get("parameters", {})
+        if spec.get("kind") != "agent-run" or "sourceArchive" not in parameters:
+            return dict(entry)
+        existing = entry.get("sourceCommandOutput")
+        if existing is not None:
+            if not isinstance(existing, dict) or existing.get("evidenceDigest") != canonical_digest({key: value for key, value in existing.items() if key != "evidenceDigest"}) or existing.get("specDigest") != entry["specDigest"]:
+                raise LedgerError("source command output identity is invalid")
+            return dict(entry)
+        try:
+            info = engine.inspect(entry["workloadId"])
+            if info.get("present") is False and entry.get("containerId") is None:
+                return dict(entry)  # No command started; no invented output.
+            if info.get("present") is not True or info.get("running") is not False:
+                raise LedgerError("source command terminal output is not observable")
+            identity_error = _container_identity_error(entry, info)
+            if identity_error is not None:
+                raise LedgerError("source command output belongs to a foreign container")
+            logs = engine.logs(entry["workloadId"], max_bytes=spec["outputByteBound"], expected_container_id=info["containerId"])
+        except Exception as exc:
+            raise LedgerError("source command output could not be captured; container retained") from exc
+        output = logs.get("bytes")
+        count = logs.get("byteCount")
+        truncated = logs.get("truncated")
+        if not isinstance(output, str) or not isinstance(count, int) or isinstance(count, bool) or count != len(output.encode("utf-8")) or not 0 <= count <= spec["outputByteBound"] or not isinstance(truncated, bool):
+            raise LedgerError("source command output exceeded or invalidated its bound")
+        exit_status = info.get("exitStatus")
+        if exit_status is not None and (isinstance(exit_status, bool) or not isinstance(exit_status, int)):
+            raise LedgerError("source command exit status is invalid")
+        if exit_status is None and entry.get("startedAt") is not None:
+            raise LedgerError("source command exit status is not observable")
+        termination_reason = str(entry.get("sourceTerminationReason") or termination_reason)
+        if entry.get("startedAt") is None:
+            termination_reason = "not-started"
+        evidence = {
+            "formatVersion": "stateport.source-command-output/v1",
+            "workloadId": entry["workloadId"], "specDigest": entry["specDigest"],
+            "grantId": entry["grantId"], "commandDigest": parameters["commandDigest"],
+            "sourceArchiveDigest": parameters["sourceArchive"]["archiveDigest"],
+            "exitStatus": exit_status, "terminationReason": termination_reason,
+            "output": output, "byteCount": count, "truncated": truncated,
+            "outputByteBound": spec["outputByteBound"], "recordedAt": at,
+            "durableChangedFiles": False,
+        }
+        evidence["evidenceDigest"] = canonical_digest(evidence)
+        return self.transition(str(entry["workloadId"]), str(entry["state"]), at=at,
+            expect_version=int(entry["version"]), expect_states={str(entry["state"])},
+            receipt={"kind": "source-command-output", "evidenceDigest": evidence["evidenceDigest"], "terminationReason": termination_reason},
+            extra={"sourceCommandOutput": evidence})
+
     def all(self) -> list[dict[str, Any]]:
         with self._lock:
             return self._read_all_unlocked()
@@ -366,6 +437,74 @@ class OperationLedger:
                 "exitStatus": None,
                 "receipts": [],
             }
+            _atomic_write(self._path(workload_id), entry)
+            return entry
+
+    def reserve_workspace_recovery(
+        self,
+        spec: Mapping[str, Any],
+        *,
+        at: str,
+        grant_id: str,
+        grant_epoch: int,
+        max_active: int,
+        max_per_grant: int,
+        grant_digest: str,
+    ) -> dict[str, Any]:
+        """Atomically reserve an exact, previously admitted workspace again.
+
+        Removal deliberately retains both the audit ledger and the named data
+        volume.  Recreating its container is therefore not a new admission:
+        it is allowed only for the same terminal workspace, byte-identical
+        sealed spec, and exact grant identity.  The existing entry and receipts
+        remain in place while the terminal state becomes a capacity-counted
+        reservation.
+        """
+        with self._lock:
+            workload_id = str(spec["workloadId"])
+            entry = self._read(workload_id)
+            if entry is None:
+                raise LedgerError(f"workspace {workload_id} has no recovery ledger entry")
+            if entry.get("spec", {}).get("kind") != "workspace" or spec.get("kind") != "workspace":
+                raise LedgerError(f"workload {workload_id} is not a recoverable workspace")
+            if entry.get("state") not in {"removed", "interrupted"}:
+                raise LedgerError(
+                    f"workspace {workload_id} is {entry.get('state')}; recovery requires removed or interrupted"
+                )
+            if entry.get("specDigest") != canonical_digest(spec):
+                raise LedgerError(f"workspace {workload_id} recovery spec does not match its sealed ledger")
+            if entry.get("grantId") != grant_id or entry.get("grantDigest") != grant_digest:
+                raise LedgerError(f"workspace {workload_id} recovery grant does not match its owner")
+            active = [
+                candidate
+                for candidate in self._read_all_unlocked()
+                if candidate["state"] not in TERMINAL_STATES
+            ]
+            if len(active) >= max_active:
+                raise LedgerError("daemon workload capacity is exhausted")
+            if sum(1 for candidate in active if candidate.get("grantId") == grant_id) >= max_per_grant:
+                raise LedgerError("the grant's active workload budget is exhausted")
+            recovered_from = str(entry["state"])
+            entry.update(
+                state="reserved",
+                version=int(entry.get("version", 0)) + 1,
+                updatedAt=at,
+                startedAt=None,
+                finishedAt=None,
+                exitStatus=None,
+                containerId=None,
+                grantEpoch=grant_epoch,
+            )
+            entry.setdefault("receipts", []).append(
+                {
+                    "kind": "workspace-recovery-reserved",
+                    "detail": (
+                        f"exact sealed workspace reserved from {recovered_from}; "
+                        "preserved data volume will be reattached"
+                    ),
+                    "recoveredFromState": recovered_from,
+                }
+            )
             _atomic_write(self._path(workload_id), entry)
             return entry
 
@@ -521,6 +660,22 @@ def reconcile_on_boot(ledger: OperationLedger, engine: Any, *, at: str) -> dict[
     for entry in ledger.all():
         workload_id = str(entry["workloadId"])
         is_workspace = entry.get("spec", {}).get("kind") == "workspace"
+        if is_workspace and "sourceSeed" in entry.get("spec", {}).get("parameters", {}):
+            if entry.get("sourceSeedStatus") in {"started", "failed"}:
+                report["failures"].append({"workloadId": workload_id, "error": "incomplete workspace source seed retained; operator review required"})
+                continue
+            try:
+                if entry.get("sourceSeedStatus") == "complete":
+                    engine.reconcile_workspace_seed(entry["spec"], entry["sourceSeedId"])
+                else:
+                    if engine.inspect(workload_id).get("present") is not False:
+                        raise LedgerError("unstarted seed unexpectedly has a container; retained")
+                    ledger.transition(workload_id, "interrupted", at=at, extra={"sourceSeedStatus": "not-started"}, receipt={"kind": "workspace-seed-admission-interrupted", "detail": "source admission ended before any volume effect"})
+                    report["interrupted"].append(workload_id)
+                    continue
+            except Exception as exc:
+                report["failures"].append({"workloadId": workload_id, "error": str(exc)[:300]})
+                continue
         if entry["state"] in TERMINAL_STATES:
             if entry["state"] != "removed":
                 # Terminal in the ledger but still present in the engine:
@@ -534,7 +689,11 @@ def reconcile_on_boot(ledger: OperationLedger, engine: Any, *, at: str) -> dict[
                                 {"workloadId": workload_id, "error": identity_error}
                             )
                         else:
-                            engine.remove(workload_id, force=True)
+                            if info.get("running"):
+                                entry = ledger.mark_source_termination(entry, at=at, reason="daemon-restart")
+                                engine.stop(workload_id, timeout=2, expected_container_id=info["containerId"])
+                            ledger.capture_source_command_output(entry, engine, at=at, termination_reason=str(entry["state"]))
+                            engine.remove(workload_id, force=True, expected_container_id=info["containerId"])
                             report["orphansRemoved"].append(workload_id)
                 except Exception as exc:  # reconciliation records, never hides
                     report["failures"].append({"workloadId": workload_id, "error": str(exc)[:300]})
@@ -621,8 +780,11 @@ def reconcile_on_boot(ledger: OperationLedger, engine: Any, *, at: str) -> dict[
                         {"workloadId": workload_id, "error": identity_error}
                     )
                     continue
-                engine.stop(workload_id, timeout=2)
-                engine.remove(workload_id, force=True)
+                if info.get("running") is True:
+                    entry = ledger.mark_source_termination(entry, at=at, reason="daemon-restart")
+                    engine.stop(workload_id, timeout=2, expected_container_id=info["containerId"])
+                ledger.capture_source_command_output(entry, engine, at=at, termination_reason="exited")
+                engine.remove(workload_id, force=True, expected_container_id=info["containerId"])
             ledger.transition(
                 workload_id,
                 "interrupted",
@@ -639,12 +801,14 @@ def reconcile_on_boot(ledger: OperationLedger, engine: Any, *, at: str) -> dict[
 
     ledger_ids = {str(entry["workloadId"]) for entry in ledger.all()}
     for workload_id in sorted(set(managed_by_id) - ledger_ids):
-        try:
-            engine.stop(workload_id, timeout=2)
-            engine.remove(workload_id, force=True)
-            report["orphansRemoved"].append(workload_id)
-        except Exception as exc:
-            report["failures"].append({"workloadId": workload_id, "error": str(exc)[:300]})
+        # The engine store may be shared by independent daemon state roots.
+        # Global managed labels establish no authority for this ledger. Normal
+        # create effects have a durable reservation before the engine call;
+        # missing ledger evidence must never authorize destructive recovery.
+        report["failures"].append({
+            "workloadId": workload_id,
+            "error": "managed container has no reservation in this ledger; retained for operator reconciliation",
+        })
 
     ledger.record_recovery(report, at=at)
     return report

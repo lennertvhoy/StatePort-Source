@@ -352,7 +352,7 @@ export function ProjectSection({
   infraTarget: InfrastructureTarget | null
   hasWorkbench: boolean
 }) {
-  const live = operations.find((o) => LIVE_OP_STATES.includes(o.state))
+  const live = operations.filter((o) => o.kind !== 'infrastructure_observation').find((o) => LIVE_OP_STATES.includes(o.state))
   const repo = instance.repository
   const clean = repo ? repositoryCleanPresentation(repo.clean) : null
 

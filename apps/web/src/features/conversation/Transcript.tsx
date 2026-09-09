@@ -90,6 +90,10 @@ export const Transcript = forwardRef<TranscriptHandle, TranscriptProps>(function
     getItemKey: (index) => items[index]?.key ?? index,
   })
 
+  useEffect(() => {
+    if (virtualize) virtualizer.measure()
+  }, [virtualize, settings.compactMessageLayout, virtualizer])
+
   const scrollToLatest = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
@@ -251,7 +255,7 @@ export const Transcript = forwardRef<TranscriptHandle, TranscriptProps>(function
         }}
         data-testid="transcript"
       >
-        <div className={cn('mx-auto flex flex-col gap-3', dense ? 'max-w-none' : 'max-w-[760px]')}>
+        <div className={cn('mx-auto flex flex-col', settings.compactMessageLayout ? 'gap-1.5' : 'gap-3', dense ? 'max-w-none' : 'max-w-[760px]')}>
           {virtualize ? (
             <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
               {virtualizer.getVirtualItems().map((vItem) => {
@@ -263,7 +267,7 @@ export const Transcript = forwardRef<TranscriptHandle, TranscriptProps>(function
                     data-index={vItem.index}
                     ref={virtualizer.measureElement}
                     style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vItem.start}px)` }}
-                    className="pb-3"
+                    className={settings.compactMessageLayout ? 'pb-1.5' : 'pb-3'}
                   >
                     {renderItem(item)}
                   </div>

@@ -202,14 +202,14 @@ class ExecutionHostClient:
     def describe_capabilities(self) -> dict[str, Any]:
         return self._request("describeCapabilities")
 
-    def create_workload(self, spec: Mapping[str, Any]) -> dict[str, Any]:
-        return self._request("createWorkload", {"workload": dict(spec)})
+    def create_workload(self, spec: Mapping[str, Any], *, source_fd: int | None = None) -> dict[str, Any]:
+        return self._request("createWorkload", {"workload": dict(spec)}, source_fd=source_fd)
 
-    def create_workspace(self, spec: Mapping[str, Any]) -> dict[str, Any]:
+    def create_workspace(self, spec: Mapping[str, Any], *, source_fd: int | None = None) -> dict[str, Any]:
         """Create a sealed workspace workload; host paths are not accepted."""
         if spec.get("kind") != "workspace":
             raise ValueError("create_workspace requires a workspace workload")
-        return self.create_workload(spec)
+        return self.create_workload(spec, source_fd=source_fd)
 
     def run_validator(self, workload: Mapping[str, Any]) -> dict[str, Any]:
         """Run one sealed validator workload end-to-end with digest evidence."""
@@ -218,11 +218,12 @@ class ExecutionHostClient:
         return self._request("runValidator", {"workload": dict(workload)})
 
     def open_terminal(
-        self, workload_id: str, session_id: str, *, columns: int, rows: int
+        self, workload_id: str, session_id: str, *, columns: int, rows: int, expected_container_identity_digest: str | None = None
     ) -> dict[str, Any]:
         return self._request(
             "openTerminal",
             {
+                **({"expectedContainerIdentityDigest": expected_container_identity_digest} if expected_container_identity_digest is not None else {}),
                 "workloadId": workload_id,
                 "sessionId": session_id,
                 "columns": columns,

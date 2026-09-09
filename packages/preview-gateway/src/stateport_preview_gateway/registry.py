@@ -19,6 +19,7 @@ import secrets
 import stat
 import tempfile
 from typing import Any, Callable, Iterator, Mapping
+from urllib.parse import quote
 
 from .contracts import (
     MAX_ACTIVE_ROUTES,
@@ -298,11 +299,16 @@ class PreviewRouteRegistry:
                 return None
             return validate_recovery_document(_read_json(path, "preview recovery record"))
 
+    def _projection(self, route: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+        status = self._status(route, now)
+        return {**route, "status": status,
+                "previewPath": f"/preview/{quote(route['capsuleId'], safe='')}/{quote(route['serviceId'], safe='')}/" if status == "active" else None}
+
     def _mutation_result_unlocked(
         self, route: Mapping[str, Any], receipt: Mapping[str, Any], now: datetime
     ) -> dict[str, Any]:
         return {
-            "route": {**dict(route), "status": self._status(route, now)},
+            "route": self._projection(route, now),
             "receipt": dict(receipt),
         }
 
@@ -379,6 +385,7 @@ class PreviewRouteRegistry:
         *,
         revision_digest: object,
         upstream_port: object,
+        expected_route_digest: object,
         actor: object,
     ) -> dict[str, Any]:
         """Atomically rebind a route to a new revision and loopback upstream.
@@ -389,6 +396,7 @@ class PreviewRouteRegistry:
         partial binding.
         """
 
+        expected = _revision_digest(expected_route_digest)
         selected_revision = _revision_digest(revision_digest)
         selected_port = _upstream_port(upstream_port)
         selected_actor = _actor_id(actor)
@@ -398,6 +406,8 @@ class PreviewRouteRegistry:
             current = self._load_route(str(route_id))
             if not self._route_has_receipt_unlocked(current):
                 raise PreviewGatewayError("preview_route_recovery_required", "preview route requires receipt recovery")
+            if current["routeDigest"] != expected:
+                raise PreviewGatewayError("preview_route_conflict", "preview route changed since review; refresh before retrying")
             status = self._status(current, now)
             if status == "revoked":
                 raise PreviewGatewayError(
@@ -428,7 +438,8 @@ class PreviewRouteRegistry:
             )
             return self._mutation_result_unlocked(validated, receipt, now)
 
-    def revoke(self, route_id: object, *, reason: object, actor: object) -> dict[str, Any]:
+    def revoke(self, route_id: object, *, reason: object, expected_route_digest: object, actor: object) -> dict[str, Any]:
+        expected = _revision_digest(expected_route_digest)
         selected_reason = bounded_text(reason, "preview revocation reason")
         selected_actor = _actor_id(actor)
         with _exclusive_lock(self._lock_path()):
@@ -436,6 +447,8 @@ class PreviewRouteRegistry:
             current = self._load_route(str(route_id))
             if not self._route_has_receipt_unlocked(current):
                 raise PreviewGatewayError("preview_route_recovery_required", "preview route requires receipt recovery")
+            if current["routeDigest"] != expected:
+                raise PreviewGatewayError("preview_route_conflict", "preview route changed since review; refresh before retrying")
             if current["revokedAt"] is not None:
                 raise PreviewGatewayError(
                     "preview_route_revoked", "the preview route is already revoked"
@@ -494,12 +507,12 @@ class PreviewRouteRegistry:
             route = self._load_route(str(route_id))
             if not self._route_has_receipt_unlocked(route):
                 raise PreviewGatewayError("preview_route_recovery_required", "preview route requires receipt recovery")
-            return {**route, "status": self._status(route, self._now())}
+            return self._projection(route, self._now())
 
     def list_routes(self) -> list[dict[str, Any]]:
         with _exclusive_lock(self._lock_path()):
             self._recover_unlocked()
             now = self._now()
             return [
-                {**route, "status": self._status(route, now)} for route in self._all_routes()
+                self._projection(route, now) for route in self._all_routes()
             ]

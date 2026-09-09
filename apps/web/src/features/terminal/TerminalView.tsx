@@ -191,10 +191,12 @@ export function TerminalView({
     void navigateRef.current(`/app/${instanceId}/conversation`)
   }
 
+  // Retained xterm rows must not set the viewport's intrinsic width.
+  // FitAddon measures its allocated width after reattachment/resize.
   const terminalCanvas = (
     <div
       ref={containerRef}
-      className={cn('min-h-0 flex-1 overflow-hidden', compact ? 'p-1' : 'p-2')}
+      className={cn('min-h-0 min-w-0 flex-1 overflow-hidden [contain:inline-size]', compact ? 'p-1' : 'p-2')}
       data-testid="terminal-canvas"
       onContextMenu={
         settings.rightClickBehavior === 'paste'

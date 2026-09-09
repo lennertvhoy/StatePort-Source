@@ -1,0 +1,4 @@
+# Preserve the exact upstream Tcl regression source, including blank-line spaces.
+sqlite-upstream-regression.test whitespace=-blank-at-eol
+# Patch context indicators must precede the upstream C source's literal tabs.
+*.patch whitespace=-blank-at-eol,-space-before-tab

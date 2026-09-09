@@ -58,6 +58,191 @@ HEALTH = {
 BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
 
 
+def test_registry_token_url_parses_bearer_parameters_and_preserves_scope() -> None:
+    challenge = 'Basic realm="ignored", Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:org/image:pull"'
+    assert assembler._registry_token_url(challenge, repository="org/image") == (
+        "https://ghcr.io/token?service=ghcr.io&scope=repository%3Aorg%2Fimage%3Apull"
+    )
+
+
+def test_registry_token_url_rejects_non_ghcr_realm() -> None:
+    with pytest.raises(assembler.AssemblyError, match="HTTPS token realm"):
+        assembler._registry_token_url('Bearer realm="https://evil.example/token"', repository="org/image")
+
+
+@pytest.mark.parametrize(
+    "challenge",
+    [
+        'Bearer realm="https://ghcr.io/token',
+        'Bearer realm="https://ghcr.io/token",realm="https://ghcr.io/other"',
+    ],
+)
+def test_registry_token_url_rejects_unclosed_or_duplicate_parameters(challenge: str) -> None:
+    with pytest.raises(assembler.AssemblyError):
+        assembler._registry_token_url(challenge, repository="org/image")
+
+
+@pytest.mark.parametrize("manifest", [{"schemaVersion": 2, "config": [], "layers": [{}]}, {"schemaVersion": 2, "config": {}, "layers": [None]}])
+def test_registry_manifest_rejects_malformed_config_or_layers(
+    monkeypatch: pytest.MonkeyPatch, manifest: dict[str, object]
+) -> None:
+    body = json.dumps(manifest, separators=(",", ":")).encode()
+    digest = "sha256:" + hashlib.sha256(body).hexdigest()
+    monkeypatch.setattr(assembler, "_registry_get", lambda *args, **kwargs: ({"docker-content-digest": digest}, body))
+    with pytest.raises(assembler.AssemblyError, match="config and layers|malformed layers"):
+        assembler._verify_registry_manifest(base_url="https://ghcr.io/v2/org/image", repository="org/image", expected_digest=digest, seen={digest})
+
+
+def test_registry_manifest_uses_tiny_bounded_blob_probe_and_requires_digest_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:" + "a" * 64}
+    layer = {"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": "sha256:" + "b" * 64}
+    leaf = json.dumps({"schemaVersion": 2, "config": config, "layers": [layer]}, separators=(",", ":")).encode()
+    root = json.dumps({"schemaVersion": 2, "manifests": [{"digest": "sha256:" + hashlib.sha256(leaf).hexdigest(), "platform": {"os": "linux", "architecture": "amd64"}}]}, separators=(",", ":")).encode()
+    calls: list[int] = []
+
+    def fake_get(url: str, *, repository: str, range_header: str | None = None, maximum_bytes: int = 0):
+        del repository
+        if "/manifests/" in url:
+            body = root if url.endswith(hashlib.sha256(root).hexdigest()) else leaf
+            return {"docker-content-digest": "sha256:" + hashlib.sha256(body).hexdigest()}, body
+        calls.append(maximum_bytes)
+        return {"content-range": "bytes 0-0/1"}, b"x"
+
+    monkeypatch.setattr(assembler, "_registry_get", fake_get)
+    count = assembler._verify_registry_manifest(
+        base_url="https://ghcr.io/org/image", repository="org/image",
+        expected_digest="sha256:" + hashlib.sha256(root).hexdigest(), seen={"sha256:" + hashlib.sha256(root).hexdigest()}
+    )
+    assert count == (1, 2)
+    assert calls == [assembler._MAX_REGISTRY_BLOB_PROBE_BYTES] * 2
+
+
+@pytest.mark.parametrize(
+    "blob_headers",
+    [
+        {},
+        {"content-range": "bytes 1-1/10"},
+        {"content-range": "bytes 0-0/*"},
+        {"content-range": "bytes 0-0/9"},
+    ],
+)
+def test_registry_manifest_rejects_ambiguous_or_mismatched_blob_probe(
+    monkeypatch: pytest.MonkeyPatch, blob_headers: dict[str, str]
+) -> None:
+    config = {
+        "mediaType": "application/vnd.oci.image.config.v1+json",
+        "digest": "sha256:" + "a" * 64,
+        "size": 10,
+    }
+    layer = {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar",
+        "digest": "sha256:" + "b" * 64,
+        "size": 10,
+    }
+    leaf = json.dumps(
+        {"schemaVersion": 2, "config": config, "layers": [layer]}, separators=(",", ":")
+    ).encode()
+    digest = "sha256:" + hashlib.sha256(leaf).hexdigest()
+
+    def fake_get(url: str, *, repository: str, range_header: str | None = None, maximum_bytes: int = 0):
+        del repository, range_header, maximum_bytes
+        if "/manifests/" in url:
+            return {"docker-content-digest": digest}, leaf
+        return blob_headers, b"x"
+
+    monkeypatch.setattr(assembler, "_registry_get", fake_get)
+    with pytest.raises(assembler.AssemblyError, match="blob is not readable"):
+        assembler._verify_registry_manifest(
+            base_url="https://ghcr.io/org/image",
+            repository="org/image",
+            expected_digest=digest,
+            seen={digest},
+        )
+
+
+def test_registry_manifest_accepts_a_bounded_probe_matching_declared_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = {
+        "mediaType": "application/vnd.oci.image.config.v1+json",
+        "digest": "sha256:" + "a" * 64,
+        "size": 10,
+    }
+    layer = {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar",
+        "digest": "sha256:" + "b" * 64,
+        "size": 10,
+    }
+    leaf = json.dumps(
+        {"schemaVersion": 2, "config": config, "layers": [layer]}, separators=(",", ":")
+    ).encode()
+    digest = "sha256:" + hashlib.sha256(leaf).hexdigest()
+
+    def fake_get(url: str, *, repository: str, range_header: str | None = None, maximum_bytes: int = 0):
+        del repository, range_header, maximum_bytes
+        if "/manifests/" in url:
+            return {"docker-content-digest": digest}, leaf
+        return {"content-range": "bytes 0-0/10"}, b"x"
+
+    monkeypatch.setattr(assembler, "_registry_get", fake_get)
+    assert assembler._verify_registry_manifest(
+        base_url="https://ghcr.io/org/image",
+        repository="org/image",
+        expected_digest=digest,
+        seen={digest},
+    ) == (1, 2)
+
+
+@pytest.mark.parametrize("declared_size", [True, 0, -1, "10"])
+def test_registry_manifest_rejects_malformed_blob_descriptor_size(
+    monkeypatch: pytest.MonkeyPatch, declared_size: object
+) -> None:
+    config = {
+        "mediaType": "application/vnd.oci.image.config.v1+json",
+        "digest": "sha256:" + "a" * 64,
+        "size": declared_size,
+    }
+    layer = {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar",
+        "digest": "sha256:" + "b" * 64,
+        "size": 10,
+    }
+    leaf = json.dumps(
+        {"schemaVersion": 2, "config": config, "layers": [layer]}, separators=(",", ":")
+    ).encode()
+    digest = "sha256:" + hashlib.sha256(leaf).hexdigest()
+
+    def fake_get(url: str, *, repository: str, range_header: str | None = None, maximum_bytes: int = 0):
+        del repository, range_header, maximum_bytes
+        if "/manifests/" in url:
+            return {"docker-content-digest": digest}, leaf
+        return {"content-range": "bytes 0-0/10"}, b"x"
+
+    monkeypatch.setattr(assembler, "_registry_get", fake_get)
+    with pytest.raises(assembler.AssemblyError, match="blob is not readable"):
+        assembler._verify_registry_manifest(
+            base_url="https://ghcr.io/org/image",
+            repository="org/image",
+            expected_digest=digest,
+            seen={digest},
+        )
+
+
+def test_public_transport_command_is_cli_wired(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    observed: list[tuple[Path, str]] = []
+
+    def fake_preflight(index: Path, *, image_repository: str):
+        observed.append((index, image_repository))
+        return {"result": "ok"}
+
+    monkeypatch.setattr(assembler, "public_transport_preflight", fake_preflight)
+    assert assembler.main(["public-transport", "--index", str(tmp_path / "index.json"), "--image-repository", "ghcr.io/lennertvhoy/stateport-release-017"]) == 0
+    assert observed == [(tmp_path / "index.json", "ghcr.io/lennertvhoy/stateport-release-017")]
+    assert json.loads(capsys.readouterr().out) == {"result": "ok"}
+
+
 @pytest.fixture(scope="module")
 def trust_root(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]:
     """Ephemeral, test-only Cosign key pair; never release evidence."""

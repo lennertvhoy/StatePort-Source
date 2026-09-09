@@ -1,0 +1,2233 @@
+diff --git a/include/v8-version.h b/include/v8-version.h
+index e819fef..e7adb6e 100644
+--- a/include/v8-version.h
++++ b/include/v8-version.h
+@@ -11,7 +11,7 @@
+ #define V8_MAJOR_VERSION 15
+ #define V8_MINOR_VERSION 2
+ #define V8_BUILD_NUMBER 124
+-#define V8_PATCH_LEVEL 1
++#define V8_PATCH_LEVEL 21
+ 
+ // Use 1 for candidates and 0 otherwise.
+ // (Boolean macro values are not supported by all preprocessors.)
+diff --git a/src/ast/scopes.cc b/src/ast/scopes.cc
+index d700d61..61b61e5 100644
+--- a/src/ast/scopes.cc
++++ b/src/ast/scopes.cc
+@@ -2904,6 +2904,12 @@
+     CHECK_EQ(scope_info_->scope_type(), scope_type_);
+     CHECK_EQ(scope_info_->HasContext(), NeedsContext());
+     CHECK_EQ(scope_info_->ContextLength(), num_heap_slots_);
++    if (is_function_scope()) {
++      DeclarationScope* function_scope = AsDeclarationScope();
++      CHECK_EQ(scope_info_->HasSimpleParameters(),
++               function_scope->has_simple_parameters());
++      CHECK_EQ(scope_info_->ParameterCount(), function_scope->num_parameters());
++    }
+ #ifdef DEBUG
+     // Consume the scope info.
+     it->second = {};
+diff --git a/src/builtins/builtins-inl.h b/src/builtins/builtins-inl.h
+index fa5bd0c..a2fcf92 100644
+--- a/src/builtins/builtins-inl.h
++++ b/src/builtins/builtins-inl.h
+@@ -275,8 +275,15 @@
+     return Builtins::GetStackParameterCount(builtin);
+ 
+   } else if (kind == ASM || kind == TFC) {
+-    // At the moment, all ASM builtins are varargs builtins. This is verified
+-    // in CheckFormalParameterCount.
++#if V8_ENABLE_WEBASSEMBLY
++    // WasmResume and WasmReject have fixed stack cleanup for the receiver and
++    // one explicit argument.
++    if (builtin == Builtin::kWasmResume || builtin == Builtin::kWasmReject) {
++      return JSParameterCount(1);
++    }
++#endif  // V8_ENABLE_WEBASSEMBLY
++    // Other ASM and TFC builtins with JS linkage are varargs builtins. This is
++    // verified in CheckFormalParameterCount.
+     return kDontAdaptArgumentsSentinel;
+ 
+   } else if (kind == CPP) {
+@@ -321,8 +328,6 @@
+ #ifdef V8_ENABLE_WEBASSEMBLY
+     case Builtin::kJSToWasmWrapper:
+     case Builtin::kWasmPromising:
+-    case Builtin::kWasmResume:
+-    case Builtin::kWasmReject:
+ #if V8_ENABLE_DRUMBRAKE
+     case Builtin::kJSToWasmInterpreterWrapper:
+ #endif
+diff --git a/src/builtins/builtins.cc b/src/builtins/builtins.cc
+index 853a314..dea8d24 100644
+--- a/src/builtins/builtins.cc
++++ b/src/builtins/builtins.cc
+@@ -740,8 +740,6 @@
+     // but are allowed to be installed into JSFunctions.
+     case Builtin::kJSToWasmWrapper:
+     case Builtin::kWasmPromising:
+-    case Builtin::kWasmResume:
+-    case Builtin::kWasmReject:
+ #if V8_ENABLE_DRUMBRAKE
+     case Builtin::kJSToWasmInterpreterWrapper:
+ #endif
+@@ -751,6 +749,8 @@
+     // These are core JS builtins which are instantiated lazily.
+     case Builtin::kWasmConstructorWrapper:
+     case Builtin::kWasmMethodWrapper:
++    case Builtin::kWasmResume:
++    case Builtin::kWasmReject:
+     // Well known import functions.
+     case Builtin::kWebAssemblyStringCast:
+     case Builtin::kWebAssemblyStringTest:
+diff --git a/src/builtins/setup-builtins-internal.cc b/src/builtins/setup-builtins-internal.cc
+index 3273012..93d6879 100644
+--- a/src/builtins/setup-builtins-internal.cc
++++ b/src/builtins/setup-builtins-internal.cc
+@@ -227,10 +227,18 @@
+   masm.GetCode(isolate->main_thread_local_isolate(), &desc,
+                MacroAssembler::kNoSafepointTable, handler_table_offset);
+ 
++  int parameter_count = 0;
++#if V8_ENABLE_WEBASSEMBLY
++  if (builtin == Builtin::kWasmResume || builtin == Builtin::kWasmReject) {
++    parameter_count = Builtins::GetFormalParameterCount(builtin);
++  }
++#endif  // V8_ENABLE_WEBASSEMBLY
++
+   DirectHandle<Code> code =
+       Factory::CodeBuilder(isolate, desc, CodeKind::BUILTIN)
+           .set_self_reference(masm.CodeObject())
+           .set_builtin(builtin)
++          .set_parameter_count(parameter_count)
+           .Build();
+ #if defined(V8_OS_WIN64)
+   isolate->SetBuiltinUnwindData(builtin, masm.GetUnwindInfo());
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 0da0f6d..f6af185 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -4223,7 +4223,7 @@
+   ASM_CODE_COMMENT(this);
+   DCHECK_NE(dst_object, dst_slot);
+   // If `offset` is a register, it cannot overlap with `object`.
+-  DCHECK_IMPLIES(!offset.IsImmediate(), offset.reg() != object);
++  DCHECK_IMPLIES(!offset.IsImmediate(), !offset.reg().Aliases(object));
+ 
+   // If the slot register does not overlap with the object register, we can
+   // overwrite it.
+@@ -4237,19 +4237,19 @@
+ 
+   // If the destination object register does not overlap with the offset
+   // register, we can overwrite it.
+-  if (offset.IsImmediate() || (offset.reg() != dst_object)) {
++  if (offset.IsImmediate() || !offset.reg().Aliases(dst_object)) {
+     Mov(dst_object, dst_slot);
+     Add(dst_slot, dst_slot, offset);
+     return;
+   }
+ 
+-  DCHECK_EQ(dst_object, offset.reg());
++  DCHECK(dst_object.Aliases(offset.reg()));
+ 
+   // We only have `dst_slot` and `dst_object` left as distinct registers so we
+   // have to swap them. We write this as a add+sub sequence to avoid using a
+   // scratch register.
+-  Add(dst_slot, dst_slot, dst_object);
+-  Sub(dst_object, dst_slot, dst_object);
++  Add(dst_slot, dst_slot, offset);
++  Sub(dst_object, dst_slot, offset);
+ }
+ 
+ // If lr_status is kLRHasBeenSaved, lr will be clobbered.
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index af54b3e..adfbf3f 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -2049,15 +2049,11 @@
+   void RecordScopeInfos(Tagged<HeapObject> info) {
+     Tagged<ScopeInfo> scope_info;
+     if (Is<SharedFunctionInfo>(info)) {
+-      Tagged<SharedFunctionInfo> old_sfi = Cast<SharedFunctionInfo>(info);
+-      // Also record own scope infos for SFIs.
+-      if (!old_sfi->scope_info()->IsEmpty()) {
+-        scope_info = old_sfi->scope_info();
+-      } else if (old_sfi->HasOuterScopeInfo()) {
+-        scope_info = old_sfi->GetOuterScopeInfo();
+-      } else {
+-        return;
+-      }
++      // We can get an empty scope info here for a function that is racily
++      // getting compiled, which is ok because we will revisit it during
++      // foreground merging.
++      scope_info = Cast<SharedFunctionInfo>(info)->TryGetScopeInfoForMerge();
++      if (scope_info->IsEmpty()) return;
+     } else {
+       scope_info = Cast<ScopeInfo>(info);
+     }
+@@ -2466,9 +2462,11 @@
+           Tagged<ScopeInfo> info = old_sfi->scope_info();
+           if (!info->IsEmpty()) {
+             new_sfi->SetScopeInfo(info);
+-          } else if (old_sfi->HasOuterScopeInfo()) {
+-            new_sfi->scope_info()->set_outer_scope_info(
+-                old_sfi->GetOuterScopeInfo());
++          } else {
++            Tagged<ScopeInfo> outer_info = old_sfi->TryGetOuterScopeInfo();
++            if (!outer_info->IsEmpty()) {
++              new_sfi->scope_info()->set_outer_scope_info(outer_info);
++            }
+           }
+           forwarder.AddBytecodeArray(new_sfi->GetBytecodeArray(isolate));
+         }
+diff --git a/src/common/code-memory-access.cc b/src/common/code-memory-access.cc
+index 81189ab..7af7f4a 100644
+--- a/src/common/code-memory-access.cc
++++ b/src/common/code-memory-access.cc
+@@ -431,6 +431,14 @@
+   return {it->first, it->second};
+ }
+ 
++base::Address ThreadIsolation::JitPageReference::EndOfLastAllocation() {
++  if (jit_page_->allocations_.empty()) {
++    return address_;
++  }
++  auto last = jit_page_->allocations_.rbegin();
++  return last->first + last->second.Size();
++}
++
+ // static
+ void ThreadIsolation::RegisterJitPage(Address address, size_t size) {
+   CFIMetadataWriteScope write_scope("Adding new executable memory.");
+@@ -586,6 +594,8 @@
+     JitPage* mid;
+     ConstructNew(&mid, size);
+     jit_page.Shrink(mid);
++    // Defense in depth: the cut should not be in the middle of a code object.
++    CHECK(jit_page.EndOfLastAllocation() <= jit_page.End());
+     trusted_data_.jit_pages_->emplace(addr, mid);
+     return JitPageReference(mid, addr);
+   }
+diff --git a/src/common/code-memory-access.h b/src/common/code-memory-access.h
+index 0c16621..cb649b5 100644
+--- a/src/common/code-memory-access.h
++++ b/src/common/code-memory-access.h
+@@ -282,6 +282,7 @@
+     base::Address StartOfAllocationAt(base::Address inner_pointer);
+     std::pair<base::Address, JitAllocation&> AllocationContaining(
+         base::Address addr);
++    base::Address EndOfLastAllocation();
+ 
+     bool Empty() const { return jit_page_->allocations_.empty(); }
+     void Shrink(class JitPage* tail);
+diff --git a/src/common/segmented-table.h b/src/common/segmented-table.h
+index 924398e..6b0d233 100644
+--- a/src/common/segmented-table.h
++++ b/src/common/segmented-table.h
+@@ -41,13 +41,7 @@
+   static constexpr bool kUseContiguousMemory = true;
+   static constexpr size_t kReservationSize = size;
+   static constexpr size_t kMaxCapacity = kReservationSize / kEntrySize;
+-#if defined(V8_TARGET_OS_WIN)
+-  // On windows the allocation granularity is 64KB and thus we cannot make a
+-  // segment smaller than that.
+   static constexpr bool kUseSegmentPool = false;
+-#else
+-  static constexpr bool kUseSegmentPool = kMinimumOSPageSize <= 16 * KB;
+-#endif
+   static constexpr size_t kSegmentSize = kUseSegmentPool ? 16 * KB : 64 * KB;
+ #else
+   // On 32 bit, segments are individually mapped.
+diff --git a/src/compiler/access-info.cc b/src/compiler/access-info.cc
+index f82da93..a316a72 100644
+--- a/src/compiler/access-info.cc
++++ b/src/compiler/access-info.cc
+@@ -994,6 +994,43 @@
+   return true;
+ }
+ 
++namespace {
++
++PropertyAccessInfo TryComputeDictionaryDataFieldAccessInfo(
++    Zone* zone, MapRef map, NameRef name, OptionalObjectRef handler) {
++  if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
++    return PropertyAccessInfo::Invalid(zone);
++  }
++  if (!handler.has_value() || !handler->IsSmi()) {
++    return PropertyAccessInfo::Invalid(zone);
++  }
++
++  // Receiver map must be a standard JSObject without access checks or
++  // interceptors.
++  if (!map.is_dictionary_map() || !map.IsJSObjectMap() ||
++      IsJSGlobalObjectMap(*map.object()) || map.is_access_check_needed() ||
++      map.has_named_interceptor()) {
++    return PropertyAccessInfo::Invalid(zone);
++  }
++
++  const auto smi_handler = Cast<Smi>(*handler->object());
++  const int smi_value = smi_handler.value();
++  if (LoadHandler::GetHandlerKind(smi_handler) != LoadHandler::Kind::kNormal ||
++      !LoadHandler::IsDataPropertyBits::decode(smi_value)) {
++    return PropertyAccessInfo::Invalid(zone);
++  }
++
++  uint32_t index = LoadHandler::DictionaryIndexBits::decode(smi_value);
++  if (index == LoadHandler::DictionaryIndexBits::kMax) {
++    return PropertyAccessInfo::Invalid(zone);
++  }
++
++  return PropertyAccessInfo::DictionaryDataField(
++      zone, map, OptionalJSObjectRef(), InternalIndex(index), name);
++}
++
++}  // namespace
++
+ PropertyAccessInfo AccessInfoFactory::ComputePropertyAccessInfo(
+     MapRef map, NameRef name, AccessMode access_mode,
+     OptionalObjectRef handler) const {
+@@ -1004,22 +1041,11 @@
+ 
+   JSHeapBroker::MapUpdaterGuardIfNeeded mumd_scope(broker());
+ 
+-  if (map.is_dictionary_map() && access_mode == AccessMode::kLoad &&
+-      handler.has_value() && handler->IsSmi()) {
+-    if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
+-      return Invalid();
+-    }
+-    auto smi_handler = Cast<Smi>(*handler->object());
+-    if (LoadHandler::GetHandlerKind(smi_handler) ==
+-        LoadHandler::Kind::kNormal) {
+-      if (LoadHandler::IsDataPropertyBits::decode(smi_handler.value())) {
+-        uint32_t index =
+-            LoadHandler::DictionaryIndexBits::decode(smi_handler.value());
+-        if (index != LoadHandler::DictionaryIndexBits::kMax) {
+-          return PropertyAccessInfo::DictionaryDataField(
+-              zone(), map, OptionalJSObjectRef(), InternalIndex(index), name);
+-        }
+-      }
++  if (access_mode == AccessMode::kLoad) {
++    PropertyAccessInfo access_info =
++        TryComputeDictionaryDataFieldAccessInfo(zone(), map, name, handler);
++    if (!access_info.IsInvalid()) {
++      return access_info;
+     }
+   }
+ 
+diff --git a/src/compiler/access-info.h b/src/compiler/access-info.h
+index d51bebad..7402929 100644
+--- a/src/compiler/access-info.h
++++ b/src/compiler/access-info.h
+@@ -314,6 +314,8 @@
+   PropertyAccessInfo ComputeAccessorDescriptorAccessInfo(
+       MapRef receiver_map, NameRef name, MapRef map, OptionalJSObjectRef holder,
+       InternalIndex descriptor, AccessMode access_mode) const;
++  PropertyAccessInfo ComputeDictionaryDataFieldAccessInfo(
++      MapRef map, NameRef name, OptionalObjectRef handler) const;
+ 
+   PropertyAccessInfo Invalid() const {
+     return PropertyAccessInfo::Invalid(zone());
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index e870726..0e2d9bf 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -4068,6 +4068,10 @@
+       return;
+     }
+ 
++    all_elements_kinds_equal_ = std::all_of(
++        receiver_maps.begin(), receiver_maps.end(),
++        [&](MapRef map) { return map.elements_kind() == elements_kind_; });
++
+     // TODO(jgruber): May only be needed for holey elements kinds.
+     if (!dependencies->DependOnNoElementsProtector()) return;
+ 
+@@ -4083,10 +4087,13 @@
+   Control control() const { return control_; }
+   MapInference* inference() { return &inference_; }
+   ElementsKind elements_kind() const { return elements_kind_; }
++  // False when elements_kind() is a union over differing receiver kinds.
++  bool all_elements_kinds_equal() const { return all_elements_kinds_equal_; }
+ 
+  private:
+   bool can_reduce_ = false;
+   bool has_stability_dependency_ = false;
++  bool all_elements_kinds_equal_ = false;
+   Node* receiver_;
+   Effect effect_;
+   Control control_;
+@@ -4126,6 +4133,11 @@
+   IteratingArrayBuiltinHelper h(node, broker(), jsgraph(), dependencies());
+   if (!h.can_reduce()) return h.inference()->NoChange();
+ 
++  // The union kind is only an upper bound on each receiver's own kind. Loads
++  // through it widen and are sound; stores narrow and are not. Unlike the
++  // iterating builtins, sort writes its snapshot back into the receiver.
++  if (!h.all_elements_kinds_equal()) return h.inference()->NoChange();
++
+   // Only non-holey, non-double PACKED kinds are supported.  Holey arrays need
+   // hole handling; double arrays need a FixedDoubleArray temp copy.
+   if (IsHoleyElementsKind(h.elements_kind())) return h.inference()->NoChange();
+diff --git a/src/compiler/load-elimination.cc b/src/compiler/load-elimination.cc
+index 7659f99..ca52f44 100644
+--- a/src/compiler/load-elimination.cc
++++ b/src/compiler/load-elimination.cc
+@@ -784,7 +784,8 @@
+ }
+ 
+ Reduction LoadElimination::ReduceCheckMaps(Node* node) {
+-  ZoneRefSet<Map> const& maps = CheckMapsParametersOf(node->op()).maps();
++  CheckMapsParameters const& p = CheckMapsParametersOf(node->op());
++  ZoneRefSet<Map> const& maps = p.maps();
+   Node* const object = NodeProperties::GetValueInput(node, 0);
+   Node* const effect = NodeProperties::GetEffectInput(node);
+   AbstractState const* state = node_states_.Get(effect);
+@@ -794,6 +795,12 @@
+     if (maps.contains(object_maps)) return Replace(effect);
+     // TODO(turbofan): Compute the intersection.
+   }
++  if (p.flags() & (CheckMapsFlag::kTryMigrateInstance |
++                   CheckMapsFlag::kTryMigrateInstanceAndDeopt)) {
++    state = state->KillFields(object, MaybeHandle<Name>(), zone());
++    state = state->KillConstField(
++        object, IndexRange(0, kMaxTrackedFieldsPerObject), zone());
++  }
+   state = state->SetMaps(object, maps, zone());
+   return UpdateState(node, state);
+ }
+@@ -1452,7 +1459,17 @@
+             state = state->KillElement(object, index, zone());
+             break;
+           }
+-          case IrOpcode::kCheckMaps:
++          case IrOpcode::kCheckMaps: {
++            CheckMapsParameters const& p = CheckMapsParametersOf(current->op());
++            if (p.flags() & (CheckMapsFlag::kTryMigrateInstance |
++                             CheckMapsFlag::kTryMigrateInstanceAndDeopt)) {
++              Node* const object = NodeProperties::GetValueInput(current, 0);
++              state = state->KillFields(object, MaybeHandle<Name>(), zone());
++              state = state->KillConstField(
++                  object, IndexRange(0, kMaxTrackedFieldsPerObject), zone());
++            }
++            break;
++          }
+           case IrOpcode::kStoreTypedElement: {
+             // Doesn't affect anything we track with the state currently.
+             break;
+diff --git a/src/compiler/turboshaft/store-store-elimination-reducer-inl.h b/src/compiler/turboshaft/store-store-elimination-reducer-inl.h
+index 3c4f4ed..a292ef0 100644
+--- a/src/compiler/turboshaft/store-store-elimination-reducer-inl.h
++++ b/src/compiler/turboshaft/store-store-elimination-reducer-inl.h
+@@ -230,6 +230,15 @@
+     }
+   }
+ 
++  void InvalidateBasesInRange(BlockIndex start, BlockIndex end) {
++    for (Key key : active_keys_) {
++      BlockIndex base_block = graph_.BlockOf(key.data().base);
++      if (base_block >= start && base_block <= end) {
++        Set(key, StoreObservability::kObservable);
++      }
++    }
++  }
++
+   void MarkAllStoresAsGCObservable() {
+     TRACE("> MarkAllStoresAsGCObservable");
+     for (Key key : active_keys_) {
+@@ -330,14 +339,26 @@
+       // If this block is a loop header, check if this loop needs to be
+       // revisited.
+       if (block.IsLoop()) {
++        Block* back_edge = block.LastPredecessor();
++        DCHECK_GE(back_edge->index(), block_index);
++        // Objects allocated inside the loop body belong to a specific loop
++        // iteration and are distinct across iterations. We must invalidate
++        // their store observability across the backedge so that stores to a
++        // fresh object in one iteration are not incorrectly eliminated by
++        // stores to an object from the next iteration.
++        // Note that checking the BlockIndex range [block_index,
++        // back_edge->index()] is a slight overapproximation since some blocks
++        // in this range might not belong to the loop. However, this is
++        // conservative and safe, and using LoopFinder here would be both more
++        // complicated and significantly more expensive.
++        table_.InvalidateBasesInRange(block_index, back_edge->index());
++
+         TRACE("Considering Loop revisit for " << block.index());
+         DCHECK(!table_.IsSealed());
+         bool needs_revisit = false;
+         table_.Seal(&needs_revisit);
+         TRACE("> needs_revisit=" << needs_revisit);
+         if (needs_revisit) {
+-          Block* back_edge = block.LastPredecessor();
+-          DCHECK_GE(back_edge->index(), block_index);
+           // We need a +2 to process the backedge at the next iteration:
+           //   - the `--processed` at the end of the loop will undo a +1.
+           //   - `block_index` is computed with `processed - 1`, which will undo
+@@ -374,6 +395,14 @@
+           // For now we consider only stores of fixed offsets of objects on the
+           // heap.
+           if (is_on_heap_store && is_fixed_offset_store) {
++            // If we're revisiting a loop, then {eliminable_stores_} and
++            // {mergeable_store_pairs_} might contain {index} because a previous
++            // visit of the loop decided that it could be eliminated/merged; we
++            // remove it now and might add it back below if it can still be
++            // eliminated.
++            eliminable_stores_->erase(index);
++            mergeable_store_pairs_->erase(index);
++
+             bool is_eliminable_store = false;
+             switch (table_.GetObservability(store.base(), store.offset, size)) {
+               case StoreObservability::kUnobservable:
+diff --git a/src/diagnostics/disassembler.cc b/src/diagnostics/disassembler.cc
+index d45f150..8b8a4e8 100644
+--- a/src/diagnostics/disassembler.cc
++++ b/src/diagnostics/disassembler.cc
+@@ -104,8 +104,9 @@
+     }
+ 
+ #if V8_ENABLE_WEBASSEMBLY
++    wasm::WasmCodeRefScope code_ref_scope;
+     if (auto* wasm_code = wasm::GetWasmCodeManager()->LookupCode(
+-            isolate_, reinterpret_cast<Address>(pc))) {
++            reinterpret_cast<Address>(pc))) {
+       SNPrintF(v8_buffer_, "%p  (%s)", static_cast<void*>(pc),
+                wasm::GetWasmCodeKindAsString(wasm_code->kind()));
+       return v8_buffer_.begin();
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index cb05b58..d74ba62 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -887,7 +887,7 @@
+ 
+ 
+ #ifdef V8_TARGET_ARCH_64_BIT
+-DEFINE_BOOL(additive_safe_int_feedback, true,
++DEFINE_BOOL(additive_safe_int_feedback, false,
+             "Enable the use of AdditiveSafeInteger feedback")
+ DEFINE_BOOL(turbolev_additive_safe_int_feedback, true,
+             "Enable the use of AdditiveSafeInteger feedback for Turbolev")
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index 7cabdd0..7e3add2 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -74,6 +74,7 @@
+   DirectHandle<SharedFunctionInfo> shared =
+       isolate->factory()->NewSharedFunctionInfoForBuiltin(
+           isolate->factory()->empty_string(), builtin, len, kAdapt, kind);
++  shared->set_language_mode(LanguageMode::kStrict);
+   return shared;
+ }
+ 
+diff --git a/src/maglev/maglev-code-generator.cc b/src/maglev/maglev-code-generator.cc
+index 7abc14c..d893cee 100644
+--- a/src/maglev/maglev-code-generator.cc
++++ b/src/maglev/maglev-code-generator.cc
+@@ -1549,17 +1549,9 @@
+     return kNotDuplicated;
+   }
+ 
+-  void BuildHeapNumber(const VirtualObject* vobject) {
+-    DCHECK_EQ(vobject->object_type(), vobj::ObjectType::kHeapNumber);
+-    ValueNode* value_node = vobject->get(offsetof(HeapNumber, value_));
+-    return BuildHeapNumber(value_node->Cast<Float64Constant>()->value());
+-  }
+-
+-  void BuildHeapNumber(Float64 number) {
+-    DirectHandle<Object> value =
+-        local_isolate_->factory()->NewHeapNumberFromBits<AllocationType::kOld>(
+-            number.get_bits());
+-    translation_array_builder_->StoreLiteral(GetDeoptLiteral(*value));
++  int CreateUnduplicatableId() {
++    object_ids_.push_back(kNotDuplicated);
++    return kNotDuplicated;
+   }
+ 
+   void BuildNestedValue(const ValueNode* value,
+@@ -1614,13 +1606,16 @@
+                           const InputLocation*& input_location,
+                           const VirtualObjectList& virtual_objects) {
+     vobj::ObjectType object_type = object->object_type();
+-    if (object_type == vobj::ObjectType::kHeapNumber) {
+-      // TODO(jgruber): Could we use the standard path below instead?
+-      return BuildHeapNumber(object);
+-    }
+     DCHECK_NOT_NULL(object->allocation());
++    // HeapNumbers may be mutable object fields; each materialization must
++    // create a fresh box, so they are never deduplicated.
++    // TODO(victorgomes): Constrain which objects may contain mutable
++    // HeapNumbers. Immutable HeapNumbers can be stored as a literal object
++    // instead of a captured object.
+     int dup_id =
+-        GetDuplicatedId(reinterpret_cast<intptr_t>(object->allocation()));
++        object_type == vobj::ObjectType::kHeapNumber
++            ? CreateUnduplicatableId()
++            : GetDuplicatedId(reinterpret_cast<intptr_t>(object->allocation()));
+     if (dup_id != kNotDuplicated) {
+       translation_array_builder_->DuplicateObject(dup_id);
+       object->ForEachNestedRuntimeInput(
+@@ -1788,7 +1783,7 @@
+   ZoneVector<IndirectHandle<TrustedObject>>* protected_deopt_literals_vector_;
+   ZoneVector<IndirectHandle<Object>>* deopt_literals_vector_;
+ 
+-  static const int kNotDuplicated = -1;
++  static constexpr int kNotDuplicated = -1;
+   std::vector<intptr_t> object_ids_;
+ };
+ 
+diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
+index d93cbd8..c6ae7f7 100644
+--- a/src/maglev/maglev-graph-builder.cc
++++ b/src/maglev/maglev-graph-builder.cc
+@@ -113,9 +113,9 @@
+   }
+ };
+ 
+-NodeType NodeTypeFromAccessInfo(
+-    compiler::JSHeapBroker* broker,
+-    const compiler::PropertyAccessInfo& access_info) {
++NodeType NodeTypeFromAccessInfo(compiler::JSHeapBroker* broker,
++                                const compiler::PropertyAccessInfo& access_info,
++                                compiler::OptionalMapRef stable_field_map) {
+   if (access_info.field_representation().IsSmi()) {
+     return NodeType::kSmi;
+   }
+@@ -124,8 +124,8 @@
+     return NodeType::kHeapNumber;
+   }
+ 
+-  if (access_info.field_map().has_value()) {
+-    return StaticTypeForMap(access_info.field_map().value(), broker);
++  if (stable_field_map.has_value()) {
++    return StaticTypeForMap(stable_field_map.value(), broker);
+   }
+ 
+   const auto type = access_info.field_type();
+@@ -4460,13 +4460,14 @@
+         {heap_number}, static_cast<int>(offsetof(HeapNumber, value_)));
+   }
+ 
+-  const auto node_type = NodeTypeFromAccessInfo(this->broker(), access_info);
+   compiler::OptionalMapRef stable_field_map;
+   if (access_info.field_representation().IsHeapObject() &&
+       access_info.field_map().has_value() &&
+       access_info.field_map().value().is_stable()) {
+     stable_field_map = access_info.field_map();
+   }
++  const auto node_type =
++      NodeTypeFromAccessInfo(this->broker(), access_info, stable_field_map);
+   ValueNode* value;
+   GET_VALUE_OR_ABORT(
+       value, BuildLoadTaggedField(load_source, field_index.offset(), node_type,
+@@ -9796,6 +9797,16 @@
+         " array iteration");
+   }
+ 
++  // The union kind is only an upper bound on each receiver's own kind. Loads
++  // through it widen and are sound; stores narrow and are not. Unlike the
++  // iterating builtins, sort writes its snapshot back into the receiver.
++  if (std::any_of(possible_maps->begin(), possible_maps->end(),
++                  [&](compiler::MapRef map) {
++                    return map.elements_kind() != elements_kind;
++                  })) {
++    FAIL(" to reduce Array.prototype.sort - receiver elements kinds disagree");
++  }
++
+   // Holey arrays require holes to be moved to the end of the sorted result
+   // (ECMA-262 23.1.3.30 step 5, skip-holes mode).  The insertion sort does
+   // not implement this, so bail out for any holey kind.
+diff --git a/src/maglev/maglev-ir.h b/src/maglev/maglev-ir.h
+index 58f997a..5062cc8 100644
+--- a/src/maglev/maglev-ir.h
++++ b/src/maglev/maglev-ir.h
+@@ -6004,11 +6004,9 @@
+         vobj::Field snd = FieldForOffset(offsetof(ConsString, second_));
+         return callback(slots_[snd.slot_index], snd);
+       }
+-      if (object_type() == vobj::ObjectType::kHeapNumber) {
+-        // HeapNumber materialization creates a literal object instead of
+-        // slot traversal.
+-        return true;
+-      }
++      // TODO(victorgomes): Constrain which objects may contain mutable
++      // HeapNumbers. Immutable HeapNumbers can be stored as a literal object
++      // instead of traversing their slots.
+     }
+     for (int i = 0; i < slot_count(); i++) {
+       vobj::Field field = FieldForSlot(i);
+@@ -6364,8 +6362,8 @@
+ 
+ struct VirtualHeapNumberShape : VirtualPrimitiveHeapObjectShape {
+   using T = HeapNumber;
+-  // Special handling needed; deopt materialization uses a special path.
+-  // TODO(jgruber): .. but could it take the standard path instead?
++  // Special handling needed; instances may be mutable object fields and thus
++  // must never be deduplicated in deopt frames.
+   static constexpr vobj::ObjectType kObjectType = vobj::ObjectType::kHeapNumber;
+ #define FIELD_LIST(V) V(value, offsetof(T, value_), vobj::FieldType::kFloat64)
+   DEF_SHAPE(VirtualPrimitiveHeapObjectShape, FIELD_LIST);
+diff --git a/src/maglev/maglev-known-node-aspects.h b/src/maglev/maglev-known-node-aspects.h
+index 83ae75e..6fdd8ed 100644
+--- a/src/maglev/maglev-known-node-aspects.h
++++ b/src/maglev/maglev-known-node-aspects.h
+@@ -336,6 +336,13 @@
+     }
+ #endif
+     IntersectType(possible_type);
++#ifdef DEBUG
++    DCHECK_IMPLIES(
++        !possible_maps_.is_empty() && NodeTypeCanBe(type_, NodeType::kSmi),
++        std::any_of(
++            possible_maps_.begin(), possible_maps_.end(),
++            [](compiler::MapRef map) { return map.IsHeapNumberMap(); }));
++#endif
+     return !IsEmptyNodeType(type_);
+   }
+ 
+@@ -1002,7 +1009,9 @@
+           // approximation. This filtering is done to avoid creating
+           // non-sensical types later (e.g. if we think only a non-string map
+           // is possible, after a string check).
+-          if (IsInstanceOfNodeType(possible_map, type, broker_)) {
++          if (IsInstanceOfNodeType(possible_map, type, broker_) ||
++              (possible_map.IsHeapNumberMap() &&
++               NodeTypeCanBe(type, NodeType::kSmi))) {
+             InsertMap(possible_map);
+           }
+         } else {
+@@ -1012,12 +1021,6 @@
+       if (intersect_set_.is_empty()) {
+         // TODO(marja): Refactor to return false here explicitly.
+         node_type_ = EmptyNodeType();
+-      } else if (RequestedMapsAdmitSmis()) {
+-        // Smis pass a map check against the HeapNumber map, so the check does
+-        // not prove that the object is a heap object. InsertMap accounts for
+-        // this, but the HeapNumber map might have been filtered out above (or
+-        // might not be a known possible map at all), so re-apply it here.
+-        node_type_ = maglev::UnionType(node_type_, NodeType::kSmi);
+       }
+     } else {
+       // A missing entry here means the universal set, i.e., we don't know
+diff --git a/src/objects/js-data-object-builder-inl.h b/src/objects/js-data-object-builder-inl.h
+index 9a758ec..7a1f527 100644
+--- a/src/objects/js-data-object-builder-inl.h
++++ b/src/objects/js-data-object-builder-inl.h
+@@ -235,7 +235,20 @@
+ bool JSDataObjectBuilder::TryAddFastPropertyForValue(
+     DirectHandle<InternalizedString> key, DirectHandle<Object> value) {
+   if (map_->is_deprecated()) {
+-    return false;
++    // Normally previous TryAddFastPropertyForValue wouldn't allow a deprecated
++    // map to reach here. However, we could get a deprecated map here if the
++    // property iterator's GetKey/GetValue calls deprecated the map (e.g.
++    // through recursive object literal building).
++    DirectHandle<Map> new_map = Map::Update(isolate_, map_);
++
++    // The migration target could be a dictionary map -- we can't rewind to a
++    // previous map here like we do in the GetValueFunction version of this
++    // function, or like in TryAddFastPropertyTransitionForValue, so we just
++    // have to bail out and force CreateAndInitialiseObject deal with it.
++    if (new_map->is_dictionary_map()) return false;
++
++    map_ = new_map;
++    RecalculateExtraHeapNumbersNeeded();
+   }
+ 
+   DCHECK(object_.is_null());
+@@ -259,9 +272,28 @@
+ template <typename ValueIterator>
+ inline void JSDataObjectBuilder::CreateAndInitialiseObject(
+     ValueIterator&& value_it, DirectHandle<FixedArrayBase> elements) {
++  bool needs_migration = false;
+   if (map_->is_deprecated()) {
+-    map_ = Map::Update(isolate_, map_);
+-    RecalculateExtraHeapNumbersNeeded();
++    // We could get a deprecated map here if a GetKey/GetValue deprecated the
++    // existing map_. We ideally don't want to create deprecated objects and
++    // then migrate them, so update the map first.
++    DirectHandle<Map> new_map = Map::Update(isolate_, map_);
++    if (current_property_index_ > 0 && new_map->is_dictionary_map()) {
++      // In edge cases, the migration target might be a dictionary map. We can't
++      // switch to a dictionary map when current_property_index_ > 0, because
++      // we'll have already iterated over some keys and we don't persist them
++      // anywhere but the map's descriptor array, so we have to use the
++      // deprecated map after all and migrate the object once we're done
++      // initializing it.
++      //
++      // TODO(leszeks): We _could_ immediately allocate a slow JSObject and
++      // populate it by walking the deprecated map's descriptor array to recover
++      // the keys -- this is probably overkill for this edge case though.
++      needs_migration = true;
++    } else {
++      map_ = new_map;
++      RecalculateExtraHeapNumbersNeeded();
++    }
+   }
+   // We've created a map for the first `i` property stack values (which might
+   // be all of them). We need to write these properties to a newly allocated
+@@ -312,53 +344,60 @@
+   Handle<JSObject> object = isolate_->factory()->NewJSObjectFromMap(
+       map_, AllocationType::kYoung, DirectHandle<AllocationSite>::null(),
+       NewJSObjectType::kNoEmbedderFieldsAndNoApiWrapper);
+-  DisallowGarbageCollection no_gc;
+-  Tagged<JSObject> raw_object = *object;
++  {
++    DisallowGarbageCollection no_gc;
++    Tagged<JSObject> raw_object = *object;
+ 
+-  raw_object->set_elements(*elements);
+-  Tagged<DescriptorArray> descriptors =
+-      raw_object->map()->instance_descriptors();
++    raw_object->set_elements(*elements);
++    Tagged<DescriptorArray> descriptors =
++        raw_object->map()->instance_descriptors();
+ 
+-  FoldedMutableHeapNumberAllocator hn_allocator(isolate_, &hn_allocation,
+-                                                no_gc);
++    FoldedMutableHeapNumberAllocator hn_allocator(isolate_, &hn_allocation,
++                                                  no_gc);
+ 
+-  ReadOnlyRoots roots(isolate_);
++    ReadOnlyRoots roots(isolate_);
+ 
+-  // Initialize the in-object properties up to the last added property.
+-  int current_property_offset = raw_object->GetInObjectPropertyOffset(0);
+-  for (int i = 0; i < current_property_index_; ++i) {
+-    InternalIndex descriptor_index(i);
+-    Tagged<Object> value = value_it.GetNext();
++    // Initialize the in-object properties up to the last added property.
++    int current_property_offset = raw_object->GetInObjectPropertyOffset(0);
++    for (int i = 0; i < current_property_index_; ++i) {
++      InternalIndex descriptor_index(i);
++      Tagged<Object> value = value_it.GetNext();
+ 
+-    // See comment in RegisterFieldNeedsFreshHeapNumber, we need to allocate
+-    // HeapNumbers for double representation fields when we can't make
+-    // existing HeapNumbers mutable, or when we only have a Smi value.
+-    if (heap_number_mode_ != kHeapNumbersGuaranteedUniquelyOwned ||
+-        IsSmi(value)) {
+-      PropertyDetails details = descriptors->GetDetails(descriptor_index);
+-      if (details.representation().IsDouble()) {
+-        Float64 d = Float64::hole_nan();
+-        if (IsNumber(value)) {
+-          d = Float64::FromMaybeNaN(Object::NumberValue(value));
++      // See comment in RegisterFieldNeedsFreshHeapNumber, we need to allocate
++      // HeapNumbers for double representation fields when we can't make
++      // existing HeapNumbers mutable, or when we only have a Smi value.
++      if (heap_number_mode_ != kHeapNumbersGuaranteedUniquelyOwned ||
++          IsSmi(value)) {
++        PropertyDetails details = descriptors->GetDetails(descriptor_index);
++        if (details.representation().IsDouble()) {
++          Float64 d = Float64::hole_nan();
++          if (IsNumber(value)) {
++            d = Float64::FromMaybeNaN(Object::NumberValue(value));
++          }
++          value = hn_allocator.AllocateNext(roots, d);
+         }
+-        value = hn_allocator.AllocateNext(roots, d);
+       }
+-    }
+ 
+-    DCHECK(FieldIndex::ForPropertyIndex(object->map(), i).is_inobject());
+-    DCHECK_EQ(current_property_offset,
+-              FieldIndex::ForPropertyIndex(object->map(), i).offset());
+-    DCHECK_EQ(current_property_offset,
+-              object->map()->GetInObjectPropertyOffset(i));
+-    FieldIndex index = FieldIndex::ForInObjectOffset(current_property_offset,
+-                                                     FieldIndex::kTagged);
+-    // Object is the most recent young allocation, so no write barrier
+-    // required.
+-    raw_object->RawFastInobjectPropertyAtPut(index, value, SKIP_WRITE_BARRIER);
+-    current_property_offset += kTaggedSize;
++      DCHECK(FieldIndex::ForPropertyIndex(object->map(), i).is_inobject());
++      DCHECK_EQ(current_property_offset,
++                FieldIndex::ForPropertyIndex(object->map(), i).offset());
++      DCHECK_EQ(current_property_offset,
++                object->map()->GetInObjectPropertyOffset(i));
++      FieldIndex index = FieldIndex::ForInObjectOffset(current_property_offset,
++                                                       FieldIndex::kTagged);
++      // Object is the most recent young allocation, so no write barrier
++      // required.
++      raw_object->RawFastInobjectPropertyAtPut(index, value,
++                                               SKIP_WRITE_BARRIER);
++      current_property_offset += kTaggedSize;
++    }
++    DCHECK_EQ(current_property_offset, object->map()->GetInObjectPropertyOffset(
++                                           current_property_index_));
+   }
+-  DCHECK_EQ(current_property_offset,
+-            object->map()->GetInObjectPropertyOffset(current_property_index_));
++
++  if (needs_migration) {
++    JSObject::MigrateToMap(isolate_, object, Map::Update(isolate_, map_));
++  }
+ 
+   object_ = object;
+ }
+@@ -489,7 +528,12 @@
+   if (next_map->is_dictionary_map()) return false;
+ 
+   if (next_map->is_deprecated()) {
+-    map_ = Map::Update(isolate_, next_map);
++    next_map = Map::Update(isolate_, next_map);
++    // If the migration target is a dictionary map, bail out so that we still
++    // have a fast map (otherwise we'd lose its keys, since we don't persist
++    // them anywhere else).
++    if (next_map->is_dictionary_map()) return false;
++    map_ = next_map;
+     RecalculateExtraHeapNumbersNeeded();
+   } else {
+     map_ = next_map;
+diff --git a/src/objects/scope-info.h b/src/objects/scope-info.h
+index ef57385..f60bbba 100644
+--- a/src/objects/scope-info.h
++++ b/src/objects/scope-info.h
+@@ -166,8 +166,8 @@
+ 
+   V8_EXPORT_PRIVATE bool HasInferredFunctionName() const;
+ 
+-  void SetFunctionName(Tagged<UnionOf<Smi, String>> name);
+-  void SetInferredFunctionName(Tagged<String> name);
++  V8_EXPORT_PRIVATE void SetFunctionName(Tagged<UnionOf<Smi, String>> name);
++  V8_EXPORT_PRIVATE void SetInferredFunctionName(Tagged<String> name);
+ 
+   // Does this scope belong to a function?
+   bool HasPositionInfo() const;
+diff --git a/src/objects/shared-function-info-inl.h b/src/objects/shared-function-info-inl.h
+index 46b3130..5b00130 100644
+--- a/src/objects/shared-function-info-inl.h
++++ b/src/objects/shared-function-info-inl.h
+@@ -16,6 +16,7 @@
+ #include "src/builtins/builtins.h"
+ #include "src/codegen/optimized-compilation-info.h"
+ #include "src/common/globals.h"
++#include "src/common/synchronization-point-support.h"
+ #include "src/handles/handles-inl.h"
+ #include "src/heap/heap-write-barrier-inl.h"
+ #include "src/objects/abstract-code.h"
+@@ -729,6 +730,36 @@
+   return info->OuterScopeInfo();
+ }
+ 
++Tagged<ScopeInfo> SharedFunctionInfo::TryGetScopeInfoForMerge() const {
++  Tagged<Object> maybe_scope_info = name_or_scope_info(kAcquireLoad);
++  if (IsScopeInfo(maybe_scope_info)) {
++    return Cast<ScopeInfo>(maybe_scope_info);
++  }
++  Tagged<Object> maybe_outer_scope_info_or_feedback =
++      raw_outer_scope_info_or_feedback_metadata(kAcquireLoad);
++  if (IsScopeInfo(maybe_outer_scope_info_or_feedback)) {
++    return Cast<ScopeInfo>(maybe_outer_scope_info_or_feedback);
++  }
++  return GetReadOnlyRoots().empty_scope_info();
++}
++
++Tagged<ScopeInfo> SharedFunctionInfo::TryGetOuterScopeInfo() const {
++  if (Tagged<ScopeInfo> scope_info;
++      TryCast(name_or_scope_info(kAcquireLoad), &scope_info)) {
++    if (scope_info->HasOuterScopeInfo()) {
++      return scope_info->OuterScopeInfo();
++    }
++    return GetReadOnlyRoots().empty_scope_info();
++  }
++  SYNCHRONIZATION_POINT("BeforeGetOuterScopeInfo");
++  if (Tagged<ScopeInfo> outer_scope_info;
++      TryCast(raw_outer_scope_info_or_feedback_metadata(kAcquireLoad),
++              &outer_scope_info)) {
++    return outer_scope_info;
++  }
++  return GetReadOnlyRoots().empty_scope_info();
++}
++
+ void SharedFunctionInfo::set_outer_scope_info(
+     Tagged<UnionOf<ScopeInfo, TheHole>> value, WriteBarrierMode mode) {
+   DCHECK(!is_compiled());
+diff --git a/src/objects/shared-function-info.h b/src/objects/shared-function-info.h
+index 1ea073e..a30a685 100644
+--- a/src/objects/shared-function-info.h
++++ b/src/objects/shared-function-info.h
+@@ -408,6 +408,8 @@
+   // Get the outer scope info whether this function is compiled or not.
+   inline bool HasOuterScopeInfo() const;
+   inline Tagged<ScopeInfo> GetOuterScopeInfo() const;
++  inline Tagged<ScopeInfo> TryGetScopeInfoForMerge() const;
++  inline Tagged<ScopeInfo> TryGetOuterScopeInfo() const;
+ 
+   // [feedback metadata] Metadata template for feedback vectors of instances of
+   // this function.
+diff --git a/src/objects/string.tq b/src/objects/string.tq
+index a506d11..2ac2c80 100644
+--- a/src/objects/string.tq
++++ b/src/objects/string.tq
+@@ -330,6 +330,11 @@
+ // Dispatch on the slice type of two different strings.
+ macro TwoStringsToSlices<Result: type, Functor: type>(
+     s1: String, s2: String, f: Functor): Result {
++  // Flatten both strings before taking either slice. A slice into an external
++  // string is a raw pointer that doesn't keep the string alive, so flattening
++  // s2 while holding s1's slice could collect s1 and free its resource.
++  const s1 = Flatten(s1);
++  const s2 = Flatten(s2);
+   try {
+     StringToSlice(s1) otherwise FirstOneByte, FirstTwoByte;
+   } label FirstOneByte(s1Slice: ConstSlice<char8>) {
+diff --git a/src/parsing/expression-scope.h b/src/parsing/expression-scope.h
+index eee29e7..a448a4e 100644
+--- a/src/parsing/expression-scope.h
++++ b/src/parsing/expression-scope.h
+@@ -370,7 +370,8 @@
+                                      ? ExpressionScopeT::kLexicalDeclaration
+                                      : ExpressionScopeT::kVarDeclaration),
+         mode_(mode),
+-        names_(names) {}
++        names_(names),
++        scope_(parser->scope()) {}
+ 
+   VariableDeclarationParsingScope(const VariableDeclarationParsingScope&) =
+       delete;
+@@ -381,10 +382,9 @@
+     VariableKind kind = NORMAL_VARIABLE;
+     bool was_added;
+     Variable* var = this->parser()->DeclareVariable(
+-        name, kind, mode_, Variable::DefaultInitializationFlag(mode_),
+-        this->parser()->scope(), &was_added, pos);
+-    if (was_added &&
+-        this->parser()->scope()->num_var() > kMaxNumFunctionLocals) {
++        name, kind, mode_, Variable::DefaultInitializationFlag(mode_), scope_,
++        &was_added, pos);
++    if (was_added && scope_->num_var() > kMaxNumFunctionLocals) {
+       this->parser()->ReportMessage(MessageTemplate::kTooManyVariables);
+     }
+     if (names_) names_->Add(name, this->parser()->zone());
+@@ -428,6 +428,7 @@
+ 
+   VariableMode mode_;
+   ZonePtrList<const AstRawString>* names_;
++  Scope* scope_;
+ };
+ 
+ template <typename Types>
+diff --git a/src/runtime/runtime-scopes.cc b/src/runtime/runtime-scopes.cc
+index 7df136e..fe8a3ed 100644
+--- a/src/runtime/runtime-scopes.cc
++++ b/src/runtime/runtime-scopes.cc
+@@ -552,7 +552,7 @@
+                                           T parameters,
+                                           uint32_t argument_count) {
+   CHECK(!IsDerivedConstructor(callee->shared()->kind()));
+-  DCHECK(callee->shared()->has_simple_parameters());
++  CHECK(callee->shared()->has_simple_parameters());
+   DirectHandle<JSObject> result =
+       isolate->factory()->NewArgumentsObject(callee, argument_count);
+ 
+diff --git a/src/wasm/module-compiler.cc b/src/wasm/module-compiler.cc
+index 5776493..65e42c8 100644
+--- a/src/wasm/module-compiler.cc
++++ b/src/wasm/module-compiler.cc
+@@ -1213,10 +1213,11 @@
+ 
+     // Feedback data is untrusted. An invalid handle could lead to an OOB read
+     // from the `WasmCodePointerTable`, which either crashes or returns some
+-    // garbage. Thus `WasmCodeManager::LookupCode` would either return `nullptr`
+-    // (safe) or an unrelated code object which will be checked for a compatible
+-    // signature before being inlined.
+-    // So the CHECK here is mostly just there to silence a false positive report
++    // garbage. Only look up the target address in the current NativeModule: a
++    // target from a foreign module is not an inline candidate, and looking it
++    // up across all modules via `WasmCodeManager::LookupCode` could race with
++    // concurrent teardown of that foreign module.
++    // The CHECK here is mostly just there to silence a false positive report
+     // by the sandbox crash filter about an OOB read.
+     uint32_t untrusted_code_pointer =
+         static_cast<uint32_t>(target_truncated_smi.value());
+@@ -1224,10 +1225,9 @@
+     WasmCodePointer handle = WasmCodePointer{untrusted_code_pointer};
+     Address entry = GetProcessWideWasmCodePointerTable()
+                         ->GetEntrypointWithoutSignatureCheck(handle);
+-    wasm::WasmCode* code =
+-        wasm::GetWasmCodeManager()->LookupCode(nullptr, entry);
+-    if (!code || code->native_module() != instance_data_->native_module() ||
+-        code->IsAnonymous()) {
++    WasmCodeRefScope code_ref_scope;
++    wasm::WasmCode* code = instance_data_->native_module()->Lookup(entry);
++    if (!code || code->IsAnonymous()) {
+       // Was not in the main table (e.g., because it's an imported function).
+       has_non_inlineable_targets_ = true;
+       return;
+@@ -2786,7 +2786,10 @@
+ 
+   auto new_task = std::make_unique<CompileTask>(this, true);
+   pending_foreground_task_ = new_task.get();
+-  isolate_specific_info_.foreground_task_runner_->PostTask(std::move(new_task));
++  // Foreground compilation can invoke JavaScript callbacks and must not run
++  // nested inside an API interrupt.
++  isolate_specific_info_.foreground_task_runner_->PostNonNestableTask(
++      std::move(new_task));
+ }
+ 
+ void AsyncCompileJob::CancelPendingForegroundTask() {
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 16f8ee8..b29f253 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -3061,17 +3061,11 @@
+ }
+ 
+ WasmCode* WasmCodeManager::LookupCode(Isolate* isolate, Address pc) const {
++  DCHECK_NOT_NULL(isolate);
+   // Since kNullAddress is used as a sentinel value, we should not try
+-  // to look it up in the cache
++  // to look it up in the cache.
+   if (pc == kNullAddress) return nullptr;
+-  // If 'isolate' is nullptr, do not use a cache. This can happen when
+-  // called from function V8NameConverter::NameOfAddress
+-  if (isolate) {
+-    return isolate->wasm_code_look_up_cache()->GetCacheEntry(pc)->code;
+-  } else {
+-    wasm::WasmCodeRefScope code_ref_scope;
+-    return LookupCode(pc);
+-  }
++  return isolate->wasm_code_look_up_cache()->GetCacheEntry(pc)->code;
+ }
+ 
+ std::pair<WasmCode*, SafepointEntry&> WasmCodeManager::LookupCodeAndSafepoint(
+diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
+index 482c66c..d3a367b 100644
+--- a/src/wasm/wasm-code-manager.h
++++ b/src/wasm/wasm-code-manager.h
+@@ -1178,14 +1178,19 @@
+   static bool CanRegisterUnwindInfoForNonABICompliantCodeRange();
+ #endif  // V8_OS_WIN64
+ 
++  // Returns the NativeModule that contains the given address. Note that the
++  // returned pointer is borrowed and not reference-counted. Callers MUST ensure
++  // that the target NativeModule is kept alive (e.g. by an active call stack,
++  // owning pointer, or WasmCodeRefScope).
+   NativeModule* LookupNativeModule(Address pc) const;
+-  // Returns the Wasm code that contains the given address. The result
+-  // is cached. There is one cache per isolate for performance reasons
+-  // (to avoid locking and reference counting). Note that the returned
+-  // value is not reference counted. This should not be an issue since
+-  // we expect that the code is currently being executed. If 'isolate'
+-  // is nullptr, no caching occurs.
++  // Returns the Wasm code that contains the given address. The result is cached
++  // in the given isolate's lookup cache. Note that the returned pointer is
++  // borrowed and not reference-counted. The {isolate} must not be nullptr.
+   WasmCode* LookupCode(Isolate* isolate, Address pc) const;
++  // Non-cached version of LookupCode for contexts where no Isolate is available
++  // (e.g., in the disassembler). The caller must have an active
++  // WasmCodeRefScope. Returns a borrowed pointer.
++  WasmCode* LookupCode(Address pc) const;
+   // The referenced {SafepointEntry} is owned by the cache. The next call
+   // to this function must be assumed to invalidate the reference.
+   std::pair<WasmCode*, SafepointEntry&> LookupCodeAndSafepoint(Isolate* isolate,
+@@ -1243,8 +1248,6 @@
+ 
+   void AssignRange(base::AddressRegion, NativeModule*);
+ 
+-  WasmCode* LookupCode(Address pc) const;
+-
+   const size_t max_committed_code_space_;
+ 
+   std::atomic<size_t> total_committed_code_space_{0};
+diff --git a/src/wasm/wasm-serialization.cc b/src/wasm/wasm-serialization.cc
+index 11c66b1..83cd5af 100644
+--- a/src/wasm/wasm-serialization.cc
++++ b/src/wasm/wasm-serialization.cc
+@@ -1016,12 +1016,14 @@
+   if (current_code_space_.size() < static_cast<size_t>(code_size)) {
+     // Allocate the next code space. Don't allocate more than 90% of
+     // {kMaxCodeSpaceSize}, to leave some space for jump tables.
++    // Perform the division first to avoid overflow.
+     size_t max_reservation = RoundUp<kCodeAlignment>(
+-        v8_flags.wasm_max_code_space_size_mb * MB * 9 / 10);
++        v8_flags.wasm_max_code_space_size_mb * MB / 10 * 9);
+     size_t code_space_size = std::min(max_reservation, remaining_code_size_);
+     std::tie(current_code_space_, current_jump_tables_) =
+         native_module_->AllocateForDeserializedCode(code_space_size);
+     DCHECK_EQ(current_code_space_.size(), code_space_size);
++    CHECK_LE(code_size, current_code_space_.size());
+     CHECK(current_jump_tables_.is_valid());
+   }
+ 
+diff --git a/test/mjsunit/compiler/regress-541251902.js b/test/mjsunit/compiler/regress-541251902.js
+new file mode 100644
+index 0000000..6d53ebc
+--- /dev/null
++++ b/test/mjsunit/compiler/regress-541251902.js
+@@ -0,0 +1,42 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Flags: --allow-natives-syntax
++
++class Base {
++  constructor(x) { return x; }
++}
++
++class P extends Base {
++  #t = 42;
++  static get_t(o) {
++    return o.#t;
++  }
++}
++
++const warm = new Proxy({}, {});
++new P(warm);
++
++%PrepareFunctionForOptimization(P.get_t);
++assertEquals(42, P.get_t(warm));
++assertEquals(42, P.get_t(warm));
++
++%OptimizeFunctionOnNextCall(P.get_t);
++assertEquals(42, P.get_t(warm));
++
++// Non-callable proxies share the context-wide proxy_map. When an identity hash
++// is assigned (e.g. via Map/Set), properties_or_hash_ contains a Smi hash instead
++// of a NameDictionary. Accessing private fields on such a proxy must safely throw
++// a TypeError instead of assuming all objects with proxy_map have a dictionary.
++const map = new Map();
++const victims = [];
++for (let i = 0; i < 25; i++) {
++  const victim = new Proxy({}, {});
++  map.set(victim, 1);
++  victims.push(victim);
++}
++
++for (const victim of victims) {
++  assertThrows(() => P.get_t(victim), TypeError);
++}
+diff --git a/test/mjsunit/maglev/regress-541085654.js b/test/mjsunit/maglev/regress-541085654.js
+new file mode 100644
+index 0000000..06aa400
+--- /dev/null
++++ b/test/mjsunit/maglev/regress-541085654.js
+@@ -0,0 +1,48 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --maglev-non-eager-inlining
++
++class A extends Array {
++  constructor() {
++    super();
++    this.slot = 0;
++  }
++}
++
++class Holder {
++  constructor(v) {
++    this.s = v;
++  }
++}
++
++function inlinee(x) {
++  x += 1; x ^= 3; x += 5; x ^= 7; x += 9;
++  x ^= 11; x += 13; x ^= 15; x += 17; x ^= 19;
++  return x;
++}
++
++let sink = 0;
++
++function f(flag, a, holder) {
++  sink = inlinee(1);
++  const seed = a.slot;
++  const r = flag ? a : holder.s;
++  const marker = r.missing_property;
++  const is_array = Array.isArray(r);
++  return marker === undefined ? is_array : seed;
++}
++
++const a = new A();
++const holder = new Holder(1);
++
++%PrepareFunctionForOptimization(f);
++for (let i = 0; i < 1000; ++i) {
++  holder.s = (i & 7) + 1;
++  f((i & 1) === 0, a, holder);
++}
++
++%OptimizeMaglevOnNextCall(f);
++assertTrue(f(true, a, holder));
++assertFalse(f(false, a, holder));
+diff --git a/test/mjsunit/maglev/regress-541926503.js b/test/mjsunit/maglev/regress-541926503.js
+new file mode 100644
+index 0000000..11ec072
+--- /dev/null
++++ b/test/mjsunit/maglev/regress-541926503.js
+@@ -0,0 +1,42 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --expose-gc --maglev
++
++const getInt32 = DataView.prototype.getInt32;
++
++function read(holder) {
++  return getInt32.call(holder.x, 0, true);
++}
++
++function Holder(x) {
++  this.x = x;
++}
++
++const a = new DataView(new ArrayBuffer(16));
++const b = new DataView(new ArrayBuffer(16));
++a.p = 1;
++b.p = 2;
++
++// `Holder.x` learns the DataView map of `a` and `b` as its class field type.
++const holder = new Holder(a);
++holder.x = b;
++
++// Generalizing `p` to double makes that map unstable.
++a.p = 1.5;
++
++%PrepareFunctionForOptimization(read);
++read(holder);
++read(holder);
++%OptimizeMaglevOnNextCall(read);
++read(holder);
++
++// The last instance migrates away, so the class map dies and the GC widens the
++// field type to Any without invalidating the optimized code.
++b.p = 2.5;
++gc();
++gc();
++
++holder.x = {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9};
++assertThrows(() => read(holder), TypeError);
+diff --git a/test/mjsunit/maglev/regress-547819997.js b/test/mjsunit/maglev/regress-547819997.js
+new file mode 100644
+index 0000000..43a8e39
+--- /dev/null
++++ b/test/mjsunit/maglev/regress-547819997.js
+@@ -0,0 +1,38 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --maglev
++
++const boxes = [];
++
++// Never called during warm-up, so this call site has no feedback and Maglev
++// emits an unconditional deopt for it. The literal below is therefore only
++// used by deopt frames and gets elided by escape analysis.
++function sink(o) {
++  boxes.push(o);
++}
++
++function foo(depth, take) {
++  const o = {x: 1.5};
++  if (depth > 0) foo(depth - 1, take);
++  if (take) sink(o);
++}
++
++%PrepareFunctionForOptimization(foo);
++foo(3, false);
++foo(3, false);
++%OptimizeMaglevOnNextCall(foo);
++foo(3, false);
++
++// Deopts the innermost activation eagerly and the outer ones lazily, so every
++// activation materializes its own object.
++foo(3, true);
++
++assertEquals(4, boxes.length);
++for (let i = 0; i < boxes.length; i++) {
++  boxes[i].x = i;
++}
++for (let i = 0; i < boxes.length; i++) {
++  assertEquals(i, boxes[i].x);
++}
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index d256a71..4c94507 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -277,6 +277,9 @@
+   # Disabled since v8_flags.always_use_string_forwarding_table is now READONLY.
+   'string-forwarding-table': [SKIP],
+ 
++  # Requires a large --wasm-max-code-space-size-mb.
++  'regress/wasm/regress-538378084': [PASS, ['arch not in (x64, ia32) or no_simd_hardware', SKIP]],
++
+   # Slow tests in the lower_limits_mode.
+   # The lower limits makes EphemeronHashTables more inefficient by making hashes
+   # collide more. This tests adds many objects to a WeakMap and that is very
+@@ -639,6 +642,7 @@
+ 
+   'sandbox/regress/regress-334120897': [SKIP],
+   'sandbox/regress/regress-349502157': [SKIP],
++  'sandbox/regress-537948358': [SKIP],
+   'sandbox/wasm-inlining-sigcheck': [SKIP],
+   'sandbox/wasm-signature-verification': [SKIP],
+   'sandbox/wasm-table-import': [SKIP],
+@@ -2748,6 +2752,7 @@
+   'regress/wasm/regress-483269968': [SKIP],
+   'compiler/regress-347724915': [SKIP],
+   'regress/regress-crbug-418520151': [SKIP],
++  'regress/regress-535000102': [SKIP],
+ 
+   # TODO(v8:14581): Re-enable this test once TransitionElementsKindOrCheckMap is
+   # supported by the Maglev->Turboshaft graph builder.
+diff --git a/test/mjsunit/regress/regress-526380803-1.js b/test/mjsunit/regress/regress-526380803-1.js
+new file mode 100644
+index 0000000..c4662fc
+--- /dev/null
++++ b/test/mjsunit/regress/regress-526380803-1.js
+@@ -0,0 +1,5 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++assertThrows(() => eval("let[class x{...x}]"), SyntaxError);
+diff --git a/test/mjsunit/regress/regress-526380803-2.js b/test/mjsunit/regress/regress-526380803-2.js
+new file mode 100644
+index 0000000..bcede54
+--- /dev/null
++++ b/test/mjsunit/regress/regress-526380803-2.js
+@@ -0,0 +1,9 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++function testScopeResolutionInPatternDefault() {
++  let [c = class A { field = x; }, x] = [undefined, 42];
++  assertEquals(42, new c().field);
++}
++testScopeResolutionInPatternDefault();
+diff --git a/test/mjsunit/regress/regress-535000102.js b/test/mjsunit/regress/regress-535000102.js
+new file mode 100644
+index 0000000..b7584bc
+--- /dev/null
++++ b/test/mjsunit/regress/regress-535000102.js
+@@ -0,0 +1,43 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --expose-gc --expose-externalize-string
++// Flags: --gc-global
++
++// String.prototype.indexOf takes a slice of the receiver before flattening the
++// search string. A slice into an external string is a raw pointer that doesn't
++// keep the string alive, so the allocation done while flattening the search
++// string could collect the receiver and free its resource.
++//
++// External strings are only disposed by major GCs, so the flattening allocation
++// has to hit one. --gc-global just makes that deterministic; the bug also
++// reproduces under ordinary old space pressure.
++
++let subject = null;
++
++function makeExternal(s) {
++  const str = createExternalizableString(s);
++  externalizeString(str, true);
++  return str;
++}
++
++function indexOfAndDropSubject(search) {
++  const s = subject;
++  subject = null;
++  // Make the allocation that flattens {search} trigger a GC.
++  %SimulateNewspaceFull();
++  return s.indexOf(search);
++}
++
++%PrepareFunctionForOptimization(indexOfAndDropSubject);
++for (let i = 0; i < 3; i++) {
++  subject = makeExternal('a'.repeat(64));
++  indexOfAndDropSubject('b' + 'c');
++}
++%OptimizeFunctionOnNextCall(indexOfAndDropSubject);
++
++subject = makeExternal('A'.repeat(20 * 1024));
++// A cons string, so that indexOf has to flatten it.
++const search = 'B'.repeat(1024) + 'C'.repeat(1024);
++assertEquals(-1, indexOfAndDropSubject(search));
+diff --git a/test/mjsunit/regress/regress-541275802.js b/test/mjsunit/regress/regress-541275802.js
+new file mode 100644
+index 0000000..e3b2e17
+--- /dev/null
++++ b/test/mjsunit/regress/regress-541275802.js
+@@ -0,0 +1,37 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++(function () {
++  "use strict";
++
++  const N = 1536;
++
++  function tryExposeUninitializedHole() {
++    globalThis.dynamic = 1;
++    const children = [];
++    for (let i = 0; i < N; ++i) {
++      children.push(`{a:.1,p${i}:0,c:0}`);
++    }
++    eval(`
++      (() => {
++        const baseline = {a:0,b:0,c:0};
++        globalThis.corrupted = {
++          a:globalThis.dynamic,
++          b:0,
++          c:[${children.join(",")}]
++        };
++        globalThis.baseline = baseline;
++      })();
++    `);
++    return globalThis.corrupted.c;
++  }
++
++  const failedToExposeValue = tryExposeUninitializedHole();
++
++  assertEquals(Object.keys(globalThis.corrupted), ["a","b","c"]);
++  assertTrue(Array.isArray(failedToExposeValue));
++  for (let i = 0; i < N; ++i) {
++    assertEquals(failedToExposeValue[i], {"a":0.1,[`p${i}`]:0,"c":0});
++  }
++})();
+diff --git a/test/mjsunit/regress/regress-546670199-inobject.js b/test/mjsunit/regress/regress-546670199-inobject.js
+new file mode 100644
+index 0000000..324acfb
+--- /dev/null
++++ b/test/mjsunit/regress/regress-546670199-inobject.js
+@@ -0,0 +1,64 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --homomorphic-ic
++// Flags: --max-valid-polymorphic-map-count=4
++
++'use strict';
++
++// 9 constructors ensure we exceed the polymorphic IC limit (4) and fill the
++// homomorphic IC cache (8).
++const constructors = Array.from({length: 9}, () => new Function(''));
++const targetIndex = constructors.length - 1;
++
++// Only in-object properties 'x' and 'y' (no out-of-object properties).
++function decorate(o, x, y) {
++  o.x = x;
++  o.y = y;
++  return o;
++}
++
++function victim(o, storeY, value) {
++  const y_box = o.y;
++  if (storeY) {
++    o.y = value;
++  }
++  return y_box;
++}
++
++const staleSmi = 0x3fffffff;
++
++// Allocate objects before deprecation so their 'y' field has Smi
++// representation.
++const shapes = constructors.map((C, i) => decorate(new C(), 100 + i, staleSmi));
++const toMigrate = decorate(new constructors[targetIndex](), 112, staleSmi);
++const unmigrated = decorate(new constructors[targetIndex](), 112, staleSmi);
++
++%PrepareFunctionForOptimization(victim);
++
++// 1. Train o.y as homomorphic in-object load across all maps.
++for (const s of shapes) {
++  victim(s, false, 0);
++}
++
++// 2. Train o.y store on target map while 'y' still has Smi representation.
++victim(shapes[targetIndex], true, staleSmi);
++
++// 3. Deprecate target map by storing a Double to 'y'.
++shapes[targetIndex].y = 1.25;
++
++// 4. Trigger IC migration on toMigrate to mark target map with
++//    is_migration_target=true.
++void toMigrate.y;
++
++// 5. Optimize victim with TurboFan.
++%OptimizeFunctionOnNextCall(victim);
++victim(shapes[targetIndex], false, 0);
++
++// 6. Trigger: Passing 'unmigrated' causes CheckMaps(kTryMigrateInstance) to
++//    migrate the in-object field 'y' from Smi to Double, allocating a
++//    HeapNumber box at the in-object offset.
++victim(unmigrated, true, 13);
++assertEquals(13, unmigrated.y);
++assertEquals(112, unmigrated.x);
+diff --git a/test/mjsunit/regress/regress-546670199.js b/test/mjsunit/regress/regress-546670199.js
+new file mode 100644
+index 0000000..9528db8
+--- /dev/null
++++ b/test/mjsunit/regress/regress-546670199.js
+@@ -0,0 +1,75 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --homomorphic-ic
++// Flags: --max-valid-polymorphic-map-count=4
++
++'use strict';
++
++// 9 constructors ensure we exceed the polymorphic IC limit (4) and fill the
++// homomorphic IC cache (8).
++const constructors = Array.from({length: 9}, () => new Function(''));
++const targetIndex = constructors.length - 1;
++
++// Fill in-object properties so 'x' and 'y' are placed in out-of-object
++// PropertyArray.
++function decorate(object, x, y) {
++  object.p0 = 0;
++  object.p1 = 1;
++  object.p2 = 2;
++  object.p3 = 3;
++  object.p4 = 4;
++  object.p5 = 5;
++  object.p6 = 6;
++  object.p7 = 7;
++  object.p8 = 8;
++  object.p9 = 9;
++  object.x = x;
++  object.y = y;
++  return object;
++}
++
++function victim(o, storeY, value) {
++  const x = o.x;
++  if (storeY) {
++    o.y = value;
++  }
++  return x;
++}
++
++const staleSmi = 0x3fffffff;
++
++// Allocate objects before deprecation so their 'y' field has Smi
++// representation.
++const shapes = constructors.map((C, i) => decorate(new C(), 100 + i, staleSmi));
++const toMigrate = decorate(new constructors[targetIndex](), 112, staleSmi);
++const unmigrated = decorate(new constructors[targetIndex](), 112, staleSmi);
++
++%PrepareFunctionForOptimization(victim);
++
++// 1. Train o.x as homomorphic across all maps.
++for (const s of shapes) {
++  victim(s, false, 0);
++}
++
++// 2. Train o.y on target map while 'y' still has Smi representation.
++victim(shapes[targetIndex], true, staleSmi);
++
++// 3. Deprecate target map by storing a Double to 'y'.
++shapes[targetIndex].y = 1.25;
++
++// 4. Trigger IC migration on toMigrate to mark target map with
++//    is_migration_target=true.
++void toMigrate.y;
++
++// 5. Optimize victim with TurboFan.
++%OptimizeFunctionOnNextCall(victim);
++victim(shapes[targetIndex], false, 0);
++
++// 6. Trigger: Passing 'unmigrated' causes CheckMaps(kTryMigrateInstance) to
++//    migrate the instance to the double-field map and allocate a new
++//    PropertyArray.
++victim(unmigrated, true, 13);
++assertEquals(13, unmigrated.y);
++assertEquals(112, unmigrated.x);
+diff --git a/test/mjsunit/regress/regress-crbug-542403045.js b/test/mjsunit/regress/regress-crbug-542403045.js
+new file mode 100644
+index 0000000..e60a974
+--- /dev/null
++++ b/test/mjsunit/regress/regress-crbug-542403045.js
+@@ -0,0 +1,89 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --maglev
++
++// The inlined sort snapshots the receiver's elements, runs comparefn, then
++// copies the snapshot back specialized on the receiver's elements kind. With
++// polymorphic {PACKED_SMI,PACKED} feedback that kind is the union
++// PACKED_ELEMENTS, which no longer describes a receiver that comparefn has
++// narrowed back to PACKED_SMI_ELEMENTS.
++
++function sort(a) {
++  function compare() {
++    a.fill(0);
++    return 0;
++  }
++  return a.sort(compare);
++}
++
++%PrepareFunctionForOptimization(sort);
++for (let i = 0; i < 100; ++i) {
++  sort([1, 2]);
++  sort([{}, {}]);
++}
++%OptimizeMaglevOnNextCall(sort);
++sort([1, 2]);
++
++const object = {};
++const bad = [object, {}];
++sort(bad);
++
++// A Smi-elements array must never hold a HeapObject.
++assertFalse(%HasSmiElements(bad) && bad[0] === object);
++
++// Mixed-kind feedback is not inlined, but still sorts correctly.
++function sortMixed(a) {
++  return a.sort((x, y) => x - y);
++}
++%PrepareFunctionForOptimization(sortMixed);
++for (let i = 0; i < 100; ++i) {
++  sortMixed([2, 1]);
++  sortMixed([{}, {}]);
++}
++%OptimizeMaglevOnNextCall(sortMixed);
++assertEquals([1, 2, 3], sortMixed([3, 1, 2]));
++
++// Same via a Smi/double mix, whose union kind PACKED_DOUBLE_ELEMENTS is
++// rejected by the double bailout rather than the kind-agreement one.
++function sortDouble(a) {
++  function compare(x, y) {
++    a.fill(0);
++    return x - y;
++  }
++  return a.sort(compare);
++}
++%PrepareFunctionForOptimization(sortDouble);
++for (let i = 0; i < 100; ++i) {
++  sortDouble([2, 1]);
++  sortDouble([2.5, 1.5]);
++}
++%OptimizeMaglevOnNextCall(sortDouble);
++sortDouble([2, 1]);
++// The sort writes its snapshot back, so comparefn's fill is not observable.
++assertEquals([1.5, 2.5], sortDouble([2.5, 1.5]));
++
++// Sites whose receiver kinds agree keep the inlined path, including when the
++// maps themselves differ.
++function withProperty() {
++  const a = [{}, {}];
++  a.foo = 1;
++  return a;
++}
++function sortSameKind(a) {
++  return a.sort((x, y) => 0);
++}
++%PrepareFunctionForOptimization(sortSameKind);
++for (let i = 0; i < 100; ++i) {
++  sortSameKind([{}, {}]);
++  sortSameKind(withProperty());
++}
++%OptimizeMaglevOnNextCall(sortSameKind);
++sortSameKind([{}, {}]);
++assertOptimized(sortSameKind);
++for (let i = 0; i < 100; ++i) {
++  sortSameKind([{}, {}]);
++  sortSameKind(withProperty());
++}
++assertOptimized(sortSameKind);
+diff --git a/test/mjsunit/regress/wasm/regress-530663440.js b/test/mjsunit/regress/wasm/regress-530663440.js
+new file mode 100644
+index 0000000..6e67423
+--- /dev/null
++++ b/test/mjsunit/regress/wasm/regress-530663440.js
+@@ -0,0 +1,36 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --expose-gc
++
++d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
++
++const builder = new WasmModuleBuilder();
++const arrT = builder.addArray(kWasmAnyRef);
++
++let fill_sig = makeSig(
++    [kWasmI32, kWasmI32, kWasmI32, kWasmI32, wasmRefType(arrT), kWasmAnyRef],
++    []);
++builder.addFunction('fill', fill_sig).exportFunc().addBody([
++    kExprLocalGet, 4,
++    kExprLocalGet, 0,
++    kExprI32Eqz,
++    kExprLocalGet, 5,
++    kExprI32Const, 1,
++    kGCPrefix, kExprArrayFill, arrT,
++  ]);
++
++builder.addFunction('mkarr', makeSig([kWasmI32], [kWasmAnyRef])).exportFunc()
++  .addBody([
++    kExprLocalGet, 0,
++    kGCPrefix, kExprArrayNewDefault, arrT,
++  ]);
++
++const instance = builder.instantiate();
++
++const arr = instance.exports.mkarr(4);
++gc();  // Promote {arr} to old space.
++gc();
++
++instance.exports.fill(1, 0, 0, 0, arr, {});
+diff --git a/test/mjsunit/regress/wasm/regress-538378084.js b/test/mjsunit/regress/wasm/regress-538378084.js
+new file mode 100644
+index 0000000..3025365
+--- /dev/null
++++ b/test/mjsunit/regress/wasm/regress-538378084.js
+@@ -0,0 +1,52 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --wasm-max-code-space-size-mb=456 --expose-gc
++
++d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
++
++const kMaxReservation = 838912;
++
++const instr = SimdInstr(kExprI32x4TruncSatF64x2UZero);
++const chain = n => {
++  const b = [kExprLocalGet, 0, ...SimdInstr(kExprI32x4Splat)];
++  for (let i = 0; i < n; i++) b.push(...instr);
++  b.push(...SimdInstr(kExprI32x4ExtractLane), 0);
++  return b;
++};
++
++const builder = new WasmModuleBuilder();
++let chain_6k = chain(6000);
++builder.addFunction('big', kSig_i_i).addBody(chain(18300)).exportFunc();
++builder.addFunction('small', kSig_i_i).addBody(chain_6k).exportFunc();
++// Never called, so never compiled. These only inflate the initial reservation,
++// via EstimateNativeModuleCodeSize = 3*body+24 per declared function, which is
++// where the free slack for {small} comes from.
++for (let i = 0; i < 24; i++) {
++  builder.addFunction('pad' + i, kSig_i_i).addBody(chain_6k).exportFunc();
++}
++const wire = builder.toBuffer();
++
++// Only 'big' is tiered up, so only it serializes as real code; everything else
++// stays a 1-byte marker and is compiled after deserialization.
++let module = new WebAssembly.Module(wire);
++let inst0 = new WebAssembly.Instance(module);
++inst0.exports.big(3);
++%WasmTierUpFunction(inst0.exports.big);
++const blob = d8.wasm.serializeModule(module);
++// We want to achieve blob.byteLength > kMaxReservation here, but can't
++// assert it because in the no-AVX configuration the generated code is smaller.
++// That's fine, the default config provides enough coverage.
++
++// This is load bearing for some reason.
++print("" + blob.byteLength);
++
++// Clear the NativeModuleCache to force real deserialization.
++module = null; inst0 = null;
++gc();
++
++const inst = new WebAssembly.Instance(d8.wasm.deserializeModule(blob, wire));
++assertEquals(0, inst.exports.big(3));
++assertEquals(0, inst.exports.small(5));
++assertEquals(0, inst.exports.big(3));
+diff --git a/test/mjsunit/sandbox/regress-537948358.js b/test/mjsunit/sandbox/regress-537948358.js
+new file mode 100644
+index 0000000..22e5fd7
+--- /dev/null
++++ b/test/mjsunit/sandbox/regress-537948358.js
+@@ -0,0 +1,76 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --sandbox-testing --lazy
++
++d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
++d8.file.execute('test/mjsunit/sandbox/wasm-jspi.js');
++
++// A suspended JSPI computation supplies genuine WasmResumeData.
++const pendingPromises = [];
++function suspend() {
++  const promise = new Promise(() => {});
++  pendingPromises.push(promise);
++  return promise;
++}
++
++const builder = new WasmModuleBuilder();
++const suspendImport = builder.addImport('m', 'suspend', kSig_v_v);
++builder.addFunction('run', kSig_v_v)
++    .addBody([
++      kExprCallFunction,
++      suspendImport,
++      kExprCallFunction,
++      suspendImport,
++    ])
++    .exportFunc();
++const instance =
++    builder.instantiate({m: {suspend: new WebAssembly.Suspending(suspend)}});
++const outerPromise = WebAssembly.promising(instance.exports.run)();
++const resumeData = get_resume_data(pendingPromises[0]);
++
++// Prewarm the carrier so CompileLazy can install code without compiling its
++// source. The zero-arity donor remains lazy and supplies a genuine JDT entry
++// whose trusted parameter count is one (the receiver).
++function carrier() {
++  return 0x43;
++}
++function zeroArityLazyDonor() {
++  return 0x44;
++}
++carrier();
++
++const jsFunctionType = Sandbox.getInstanceTypeIdFor('JS_FUNCTION');
++const sharedFunctionInfoType =
++    Sandbox.getInstanceTypeIdFor('SHARED_FUNCTION_INFO');
++const dispatchHandleOffset =
++    Sandbox.getFieldOffset(jsFunctionType, 'dispatch_handle');
++const sharedFunctionInfoOffset =
++    Sandbox.getFieldOffset(jsFunctionType, 'shared_function_info');
++const trustedFunctionDataOffset =
++    Sandbox.getFieldOffset(sharedFunctionInfoType, 'trusted_function_data');
++const functionDataOffset =
++    Sandbox.getFieldOffset(sharedFunctionInfoType, 'function_data');
++
++const carrierPtr = getPtr(carrier);
++const donorPtr = getPtr(zeroArityLazyDonor);
++const carrierSfi = getField(carrierPtr, sharedFunctionInfoOffset);
++const donorDispatchHandle = getField(donorPtr, dispatchHandleOffset);
++
++// Keep the destination JDT count from the lazy donor, but select WasmResume
++// from the carrier SFI's genuine resume data.
++setField(carrierPtr, dispatchHandleOffset, donorDispatchHandle);
++setField(carrierSfi, trustedFunctionDataOffset, 0);
++setField(carrierSfi, functionDataOffset, resumeData);
++
++globalThis.keepAlive =
++    [pendingPromises, outerPromise, instance, carrier, resumeData];
++
++// The mismatched JDT update must fail compatibility verification. On a
++// vulnerable build, CompileLazy installs WasmResume into the count-1 entry.
++// One explicit argument balances WasmResume's fixed cleanup, so execution
++// returns here and makes the regression deterministic.
++carrier(undefined);
++
++assertUnreachable('A mismatched JDT entry accepted WasmResume');
+diff --git a/test/mjsunit/turboshaft/regress-547936520.js b/test/mjsunit/turboshaft/regress-547936520.js
+new file mode 100644
+index 0000000..bc017a2
+--- /dev/null
++++ b/test/mjsunit/turboshaft/regress-547936520.js
+@@ -0,0 +1,41 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax --verify-heap
++
++// `pad` ensures `holder.y` is at in-object offset 16 to avoid alias
++// collision with `object.target` at offset 12 in StoreStoreElimination.
++const holder = { pad: null, y: null, prev: null };
++
++function candidate() {
++  let object;
++  let sink = 0;
++  let i = 0;
++  while (true) {
++    holder.prev = holder.y;
++    object = { target: null };
++    holder.y = object;
++    if (i < 6) {
++      object.target = 0x42;
++      sink = sink ^ i ^ (sink << 1) ^ (sink << 2) ^ (sink << 3) ^ (sink << 4) ^
++             (sink << 5) ^ (sink << 6) ^ (sink << 7) ^ (sink << 8) ^ (sink << 9) ^
++             (sink << 10) ^ (sink << 11) ^ (sink << 12) ^ (sink << 13) ^
++             (sink << 14) ^ (sink << 15);
++      i = (i + 1) | 0;
++    } else {
++      break;
++    }
++  }
++  object.target = 0x43;
++  return [object, sink];
++}
++
++%PrepareFunctionForOptimization(candidate);
++candidate();
++candidate();
++
++%OptimizeFunctionOnNextCall(candidate);
++candidate();
++
++assertEquals(0x42, holder.prev.target);
+diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
+index a0c9333..a4b8a7c 100644
+--- a/test/unittests/BUILD.gn
++++ b/test/unittests/BUILD.gn
+@@ -509,6 +509,7 @@
+     "profiler/heap-snapshot-utils.h",
+     "profiler/strings-storage-unittest.cc",
+     "regexp/regexp-unittest.cc",
++    "regress/regress-536271629-unittest.cc",
+     "regress/regress-crbug-1041240-unittest.cc",
+     "regress/regress-crbug-1056054-unittest.cc",
+     "regress/regress-crbug-938251-unittest.cc",
+diff --git a/test/unittests/api/deserialize-unittest.cc b/test/unittests/api/deserialize-unittest.cc
+index e290107..ecd607e 100644
+--- a/test/unittests/api/deserialize-unittest.cc
++++ b/test/unittests/api/deserialize-unittest.cc
+@@ -10,6 +10,7 @@
+ #include "include/v8-primitive.h"
+ #include "include/v8-script.h"
+ #include "src/codegen/compilation-cache.h"
++#include "src/common/synchronization-point-support.h"
+ #include "test/unittests/heap/heap-utils.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+@@ -953,6 +954,120 @@
+   CHECK(expected->StrictEquals(actual));
+ }
+ 
++TEST_F(MergeDeserializedCodeTest,
++       MergeThatCompilesLazyFunctionWithOuterScopeInfo) {
++  i::v8_flags.merge_background_deserialized_script_with_compilation_cache =
++      true;
++  i::v8_flags.verify_code_merge = true;
++  std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
++  IsolateAndContextScope scope(this);
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
++  PersistentScriptOrigin default_origin(isolate(), NewString(""));
++
++  constexpr char kSourceCode[] =
++      "var outer = function () {\n"
++      "  var x = 1;\n"
++      "  var g = function () { return x; };\n"
++      "  var f = function () { return 42; };\n"
++      "  return f;\n"
++      "};\n"
++      "var f = outer();";
++
++  // Compile the script for the first time to produce code cache data.
++  {
++    v8::HandleScope handle_scope(isolate());
++    ScriptOrigin origin = default_origin.AsScriptOrigin();
++    Local<Script> script =
++        Script::Compile(context(), NewString(kSourceCode), &origin)
++            .ToLocalChecked();
++    CHECK(!script->Run(context()).IsEmpty());
++
++    // Cause the inner function to become compiled before creating the code
++    // cache.
++    Local<Value> actual = RunGlobalFunc("f");
++    CHECK_EQ(42, actual->Int32Value(context()).FromJust());
++
++    cached_data.reset(
++        ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
++  }
++
++  i_isolate->compilation_cache()->Clear();
++
++  // Compile the script for the second time, but don't run the function 'f'.
++  {
++    v8::HandleScope handle_scope(isolate());
++    ScriptOrigin origin = default_origin.AsScriptOrigin();
++    Local<Script> script =
++        Script::Compile(context(), NewString(kSourceCode), &origin)
++            .ToLocalChecked();
++    CHECK(!script->Run(context()).IsEmpty());
++
++    // Age the top-level bytecode so that the Isolate compilation cache will
++    // contain only the Script.
++    i::SharedFunctionInfo::EnsureOldForTesting(GetSharedFunctionInfo(script));
++  }
++
++  {
++    // We need to invoke GC without stack, otherwise some objects may survive.
++    i::DisableConservativeStackScanningScopeForTesting no_css_scope(
++        i_isolate->heap());
++    InvokeMajorGC(i_isolate);
++    InvokeMajorGC(i_isolate);
++  }
++
++  DeserializeThread deserialize_thread(ScriptCompiler::StartConsumingCodeCache(
++      isolate(), std::make_unique<ScriptCompiler::CachedData>(
++                     cached_data->data, cached_data->length,
++                     ScriptCompiler::CachedData::BufferNotOwned)));
++  CHECK(deserialize_thread.Start());
++  deserialize_thread.Join();
++
++  std::unique_ptr<ScriptCompiler::ConsumeCodeCacheTask> task =
++      deserialize_thread.TakeTask();
++
++  task->SourceTextAvailable(isolate(), NewString(kSourceCode),
++                            default_origin.AsScriptOrigin());
++
++  CHECK(task->ShouldMergeWithExistingScript());
++
++  // Request block at sync point before background thread reads outer scope
++  // info.
++  i::SynchronizationPointSupport::Get()->RequestBlockAt(
++      "BeforeGetOuterScopeInfo", base::TimeDelta::FromSeconds(10));
++
++  MergeThread merge_thread(task.get());
++  CHECK(merge_thread.Start());
++
++  // Wait until background merge is paused at the sync point.
++  CHECK(i::SynchronizationPointSupport::Get()->WaitUntilBlocked(
++      "BeforeGetOuterScopeInfo", base::TimeDelta::FromSeconds(10)));
++
++  // While background merge is paused before reading outer scope info, trigger
++  // real lazy compilation of 'f' on the main thread.
++  {
++    Local<Value> actual = RunGlobalFunc("f");
++    CHECK_EQ(42, actual->Int32Value(context()).FromJust());
++  }
++
++  // Resume the background merge thread.
++  CHECK(
++      i::SynchronizationPointSupport::Get()->Resume("BeforeGetOuterScopeInfo"));
++  merge_thread.Join();
++
++  // Complete compilation on the main thread.
++  ScriptCompiler::Source source(NewString(kSourceCode),
++                                default_origin.AsScriptOrigin(),
++                                cached_data.release(), task.release());
++  Local<Script> script =
++      ScriptCompiler::Compile(context(), &source,
++                              ScriptCompiler::kConsumeCodeCache)
++          .ToLocalChecked();
++  CHECK(!script->Run(context()).IsEmpty());
++
++  Local<Value> actual = RunGlobalFunc("f");
++  CHECK_EQ(42, actual->Int32Value(context()).FromJust());
++}
++
+ // POC: Relaxed-store publication of fresh SharedFunctionInfo into
+ // Script::infos() read concurrently by BackgroundMergeTask without acquire.
+ //
+diff --git a/test/unittests/assembler/macro-assembler-arm64-unittest.cc b/test/unittests/assembler/macro-assembler-arm64-unittest.cc
+index 26a1e3b..2ef1b31 100644
+--- a/test/unittests/assembler/macro-assembler-arm64-unittest.cc
++++ b/test/unittests/assembler/macro-assembler-arm64-unittest.cc
+@@ -141,25 +141,33 @@
+   Register dst_slot;
+   Register object;
+   Register offset_register = no_reg;
++  Extend offset_extend = NO_EXTEND;
+ };
+ 
+ const MoveObjectAndSlotTestCase kMoveObjectAndSlotTestCases[] = {
+     {"no overlap", x0, x1, x2},
+     {"no overlap", x0, x1, x2, x3},
++    {"no overlap", x0, x1, x2, w3, UXTW},
+ 
+     {"object == dst_object", x2, x1, x2},
+     {"object == dst_object", x2, x1, x2, x3},
++    {"object == dst_object", x2, x1, x2, w3, UXTW},
+ 
+     {"object == dst_slot", x1, x2, x2},
+     {"object == dst_slot", x1, x2, x2, x3},
++    {"object == dst_slot", x1, x2, x2, w3, UXTW},
+ 
+     {"offset == dst_object", x0, x1, x2, x0},
++    {"offset == dst_object", x0, x1, x2, w0, UXTW},
+ 
+     {"offset == dst_object && object == dst_slot", x0, x1, x1, x0},
++    {"offset == dst_object && object == dst_slot", x0, x1, x1, w0, UXTW},
+ 
+     {"offset == dst_slot", x0, x1, x2, x1},
++    {"offset == dst_slot", x0, x1, x2, w1, UXTW},
+ 
+-    {"offset == dst_slot && object == dst_object", x0, x1, x0, x1}};
++    {"offset == dst_slot && object == dst_object", x0, x1, x0, x1},
++    {"offset == dst_slot && object == dst_object", x0, x1, x0, w1, UXTW}};
+ 
+ // Make sure we include offsets that cannot be encoded in an add instruction.
+ const int kOffsets[] = {0, 42, kMaxRegularHeapObjectSize, 0x101001};
+@@ -194,7 +202,12 @@
+         offset_operand = Operand(offset);
+       } else {
+         __ Mov(test_case.offset_register, Operand(offset));
+-        offset_operand = Operand(test_case.offset_register);
++        if (test_case.offset_extend == NO_EXTEND) {
++          offset_operand = Operand(test_case.offset_register);
++        } else {
++          offset_operand =
++              Operand(test_case.offset_register, test_case.offset_extend);
++        }
+       }
+ 
+       std::stringstream comment;
+diff --git a/test/unittests/regress/regress-536271629-unittest.cc b/test/unittests/regress/regress-536271629-unittest.cc
+new file mode 100644
+index 0000000..57c944d
+--- /dev/null
++++ b/test/unittests/regress/regress-536271629-unittest.cc
+@@ -0,0 +1,60 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/execution/isolate.h"
++#include "src/objects/js-function-inl.h"
++#include "src/objects/scope-info.h"
++#include "src/objects/shared-function-info-inl.h"
++#include "test/unittests/test-utils.h"
++
++namespace v8 {
++namespace internal {
++
++using SloppyArgumentsScopeInfoTest = TestWithContext;
++
++namespace {
++
++DirectHandle<JSFunction> GetFunction(v8::Local<v8::Context> context,
++                                     v8::Local<v8::Object> global,
++                                     v8::Local<v8::String> name) {
++  return Cast<JSFunction>(v8::Utils::OpenDirectHandle(
++      *global->Get(context, name).ToLocalChecked()));
++}
++
++}  // namespace
++
++// A SharedFunctionInfo whose ScopeInfo says that the parameters are not simple
++// must never end up on the mapped arguments path: the arguments object would be
++// allocated with the strict arguments map and then be given the larger fast
++// aliased arguments map.
++TEST_F(SloppyArgumentsScopeInfoTest, MappedArgumentsWithNonSimpleScopeInfo) {
++  v8::HandleScope scope(isolate());
++
++  RunJS(
++      "function nonSimple(a, b = 0) { var g = () => a; return arguments[0]; }"
++      "function duplicate(a, a) { var g = () => a; return arguments[0]; }"
++      "nonSimple(1, 2);"
++      "duplicate(1, 2);");
++
++  v8::Local<v8::Object> global = context()->Global();
++  DirectHandle<JSFunction> non_simple =
++      GetFunction(context(), global, NewString("nonSimple"));
++  DirectHandle<JSFunction> duplicate =
++      GetFunction(context(), global, NewString("duplicate"));
++
++  DirectHandle<ScopeInfo> non_simple_scope_info(
++      non_simple->shared()->scope_info(), i_isolate());
++  CHECK(!non_simple_scope_info->HasSimpleParameters());
++  CHECK(duplicate->shared()->scope_info()->HasSimpleParameters());
++  CHECK(duplicate->shared()->has_duplicate_parameters());
++
++  // Emulate the incompatible ScopeInfo that a mismatched code cache can install
++  // on an otherwise simple-parameter function.
++  duplicate->shared()->SetScopeInfo(*non_simple_scope_info);
++
++  EXPECT_DEATH_IF_SUPPORTED(RunJS("duplicate(1, 2)"), "");
++}
++
++}  // namespace internal
++}  // namespace v8

@@ -1,0 +1,41 @@
+--- a/codex-rs/linux-sandbox/src/linux_run_main.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main.rs
+@@ -1379,7 +1379,8 @@
+ 
+ fn is_proc_mount_failure(stderr: &str) -> bool {
+     stderr.contains("Can't mount proc")
+-        && stderr.contains("/newroot/proc")
++        && (stderr.contains("Can't mount proc on /newroot/proc:")
++            || stderr.contains("Can't mount proc on /proc:"))
+         && (stderr.contains("Invalid argument")
+             || stderr.contains("Operation not permitted")
+             || stderr.contains("Permission denied"))
+--- a/codex-rs/linux-sandbox/src/linux_run_main_tests.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main_tests.rs
+@@ -45,6 +45,26 @@
+ fn ignores_non_proc_mount_errors() {
+     let stderr = "bwrap: Can't bind mount /dev/null: Operation not permitted";
+     assert!(!is_proc_mount_failure(stderr));
++}
++
++#[test]
++fn detects_current_bubblewrap_proc_mount_failures() {
++    for error in ["Invalid argument", "Operation not permitted", "Permission denied"] {
++        assert!(is_proc_mount_failure(&format!("bwrap: Can't mount proc on /proc: {error}")));
++    }
++}
++
++#[test]
++fn refuses_unrelated_proc_paths_and_errors() {
++    for stderr in [
++        "bwrap: Can't mount proc on /proc-other: Operation not permitted",
++        "bwrap: Can't mount proc on /newroot/proc-other: Invalid argument",
++        "bwrap: Can't bind mount /proc: Operation not permitted",
++        "bwrap: Can't mount proc on /proc: No such file or directory",
++        "bwrap: Can't mount proc on /tmp/proc: Permission denied",
++    ] {
++        assert!(!is_proc_mount_failure(stderr));
++    }
+ }
+ 
+ #[test]

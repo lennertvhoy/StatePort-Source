@@ -891,6 +891,39 @@ def quadlet_bundle_digest(files: Mapping[str, bytes]) -> str:
     return "sha256:" + hasher.hexdigest()
 
 
+def signed_workspace_image(target: Mapping[str, Any], images: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """Select only the explicit image role from the verified signed image set.
+
+    Callers rendering unverified input still only obtain an inert plan; root apply
+    independently verifies the enclosing release before using this selection.
+    """
+    contract = target.get("executionContract") or {}
+    if "workspaceImageId" not in contract:
+        return None
+    if contract["workspaceImageId"] != "stateport-dev-workspace":
+        raise ReleaseContractError("unsupported signed workspace image selector")
+    matches = [image for image in images if image.get("imageId") == "stateport-dev-workspace"]
+    if len(matches) != 1:
+        raise ReleaseContractError("signed workspace image is missing or duplicated")
+    image = matches[0]
+    if (image.get("role") != "optional-profile" or not isinstance(image.get("reference"), str)
+            or image["reference"].rsplit("@", 1)[-1] != image.get("digest")
+            or (image.get("signature") or {}).get("subjectDigest") != image.get("digest")):
+        raise ReleaseContractError("workspace image does not carry exact signed image metadata")
+    return image
+
+
+def workspace_image_environment(target: Mapping[str, Any], images: Sequence[Mapping[str, Any]]) -> list[str]:
+    image = signed_workspace_image(target, images)
+    if image is None:
+        return []
+    from execution_host.daemon_contract import workspace_template_for_image
+    reference = str(image["reference"])
+    digest = canonical_digest(workspace_template_for_image(reference))
+    return ["Environment=STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE=" + reference,
+            "Environment=STATEPORT_EXECUTION_HOST_WORKSPACE_SPEC_DIGEST=" + digest]
+
+
 def render_quadlet_bundle(
     target: Mapping[str, Any], images: Sequence[Mapping[str, Any]]
 ) -> dict[str, bytes]:
@@ -996,6 +1029,8 @@ def render_quadlet_bundle(
                 f"Environment=STATEPORT_RELEASE_PROFILE={profile}",
                 f"Environment=STATEPORT_RELEASE_REVISION={revision_token}",
             ]
+            if service_id == "stateport-web":
+                lines.extend(workspace_image_environment(target, images))
             for port in sorted(
                 service["ports"], key=lambda item: (item["name"], item["containerPort"])
             ):
@@ -1074,6 +1109,11 @@ def render_quadlet_bundle(
                         f"Environment={mount['environmentVariable']}={mount['mountPath']}",
                     ]
                 )
+                if mount["name"] == "workspace-authority":
+                    lines.append("Environment=STATEPORT_APPLICATION_WORKSPACE_BINDINGS=" + mount["mountPath"] + "/bindings.json")
+                    lines.append("Environment=STATEPORT_APPLICATION_WORKSPACE_BINDINGS_FORMAT=stateport.application-workspace-bindings/v2")
+                    if mount.get("profileId") in {"stateport.empty-workspace-terminal/v1", "stateport.reviewed-source-workspace-terminal/v1"}:
+                        lines.append("Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=" + mount["profileId"])
             provider_home = service.get("providerHome")
             if provider_home is not None:
                 lines.append(f"Environment=CODEX_HOME={provider_home['mountPath']}")
@@ -1082,9 +1122,12 @@ def render_quadlet_bundle(
                     # generations. Do not use :U or inspect its file contents.
                     lines.append(f"Volume={provider_home['hostPath']}:{provider_home['mountPath']}:rw")
                 else:
+                    # Podman accepts U for tmpfs and derives its mount UID/GID
+                    # from User=. Literal uid=/gid= options are rejected.
+                    # This is an empty tmpfs, never the accepted host auth path.
                     lines.append(
                         f"Tmpfs={provider_home['mountPath']}:rw,noexec,nosuid,nodev,"
-                        f"size=67108864,mode=0700,uid={service['runAsUser']},gid={service['runAsUser']}"
+                        "notmpcopyup,mode=0700,size=67108864,U"
                     )
             if service["capabilities"]["controlContract"] == "narrow-unix-client":
                 if not isinstance(execution_contract, Mapping):
@@ -1326,6 +1369,8 @@ def render_stable_host_quadlet_bundle(
                     f"{service['writableVolumes'][0]['mountPath']}/grants",
                 ]
             )
+        if service["serviceId"] == (target.get("executionContract") or {}).get("serviceId"):
+            lines.extend(workspace_image_environment(target, images))
         for volume in sorted(service["writableVolumes"], key=lambda item: item["name"]):
             lines.append(f"Volume={volume['hostPath']}:{volume['mountPath']}:rw")
         for port in sorted(service["ports"], key=lambda item: item["name"]):
@@ -4870,6 +4915,7 @@ def _validate_cross_fields(
                 f"targets[{target_position}] topology digest is stale or tampered"
             )
         execution_contract = target["executionContract"]
+        signed_workspace_image(target, images)
         execution_mode = target["executionHostMode"]
         stable_execution = execution_mode in {
             "stable-host-daemon-client",
@@ -5007,9 +5053,19 @@ def _validate_cross_fields(
                     "mode": "ro",
                     "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
                 }
+                expected_workspace_mount = {
+                    "name": "workspace-authority", "hostPath": "/etc/stateport/workspace-authority",
+                    "mountPath": "/run/stateport-workspace-authority", "purpose": "workspace-authority",
+                    "sourceOwner": "root", "sourceGroup": "root", "mode": "ro",
+                    "environmentVariable": "STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY",
+                }
                 if (
                     service_id != "stateport-web"
-                    or list(read_only_mounts) != [expected_template_mount]
+                    or list(read_only_mounts) not in (
+                        [expected_template_mount], [expected_template_mount, expected_workspace_mount],
+                        [expected_template_mount, {**expected_workspace_mount, "profileId": "stateport.empty-workspace-terminal/v1"}],
+                        [expected_template_mount, {**expected_workspace_mount, "profileId": "stateport.reviewed-source-workspace-terminal/v1"}],
+                    )
                     or service["capabilities"]["controlContract"] != "narrow-unix-client"
                 ):
                     raise ReleaseContractError(

@@ -112,7 +112,7 @@ export interface ApplicationsClient {
   readonly canRename: boolean
   list(): Promise<ApplicationInstance[]>
   get(instanceId: string): Promise<ApplicationInstance>
-  rename(instanceId: string, name: string): Promise<ApplicationInstance>
+  rename(instanceId: string, name: string, expectedName?: string): Promise<ApplicationInstance>
   setPinned(instanceId: string, pinned: boolean): Promise<ApplicationInstance>
   /** Records "last opened" for the resume dashboard. */
   touchOpened(instanceId: string): Promise<void>
@@ -331,7 +331,7 @@ export type FileWorkbenchAdapter = FilesClient
 export interface TerminalClient {
   /** Mock line-command interpreter or authenticated production raw PTY. */
   readonly inputMode: 'line_commands' | 'raw_pty'
-  listTargets(instanceId: string): Promise<TerminalTarget[]>
+  listTargets(instanceId: string, scope?: 'workspace'): Promise<TerminalTarget[]>
   listSessions(instanceId: string): Promise<TerminalSession[]>
   createSession(instanceId: string, targetId: string, name?: string): Promise<TerminalSession>
   renameSession(sessionId: string, name: string): Promise<TerminalSession>
@@ -480,19 +480,109 @@ export interface ContextClient {
  * operations additionally require the CSRF mutation gate on the backend.
  * Every result is a bounded daemon receipt — never fabricated state.
  */
+export interface WorkspaceAuthorityProjection {
+  instanceId: string
+  applicationId: string
+  displayName: string
+  catalogIdentityDigest: string
+  status: 'available' | 'issued' | 'unavailable'
+  refusal?: { reason: string; detail: string }
+  issuer?: WorkspaceAuthorityIssuer
+  issued?: Record<string, unknown>
+}
+
+export interface WorkspaceAuthoritySource {
+  baseRevision: string
+  commitObject: string
+  sourceInventory: Array<{ path: string; mode: '100644' | '100755'; contentDigest: string }>
+  sourceArchive: {
+    formatVersion: 'stateport.deployment-context-archive/v1'
+    archiveDigest: string
+    archiveBytes: number
+    contextDigest: string
+    fileCount: number
+  }
+  descriptorDigest: string
+}
+
+export interface WorkspaceAuthorityIssuerBase {
+    issuerContextDigest: string
+    profileId: string
+    profileDigest: string
+    sourceMode: 'empty' | 'reviewed-commit'
+    operations?: string[]
+    grantExpiresAtLimit: string
+    profile: {
+      image: { reference: string }
+      parameters: { cpuQuotaPercent: number; diskMaxBytes: number; networkMode: string; shell?: string[] }
+      resources: { memoryMaxBytes: number; pidsMax: number }
+      timeoutSeconds: number
+      outputByteBound: number
+    }
+  }
+
+export interface WorkspaceAuthorityEmptyIssuer extends WorkspaceAuthorityIssuerBase {
+  profileId: 'stateport.empty-workspace/v1' | 'stateport.empty-workspace-terminal/v1'
+  sourceMode: 'empty'
+}
+
+export interface WorkspaceAuthorityReviewedIssuer extends WorkspaceAuthorityIssuerBase {
+  profileId: 'stateport.reviewed-source-workspace-terminal/v1'
+  sourceMode: 'reviewed-commit'
+}
+
+export type WorkspaceAuthorityIssuer = WorkspaceAuthorityEmptyIssuer | WorkspaceAuthorityReviewedIssuer
+
+export interface WorkspaceAuthorityRequestBase {
+  instanceId: string
+  applicationId: string
+  catalogIdentityDigest: string
+  issuerContextDigest: string
+  profileDigest: string
+  createdAt: string
+  expiresAt: string
+  grantExpiresAt: string
+  requestDigest: string
+}
+
+export interface WorkspaceAuthorityRequestV1 extends WorkspaceAuthorityRequestBase {
+  formatVersion: 'stateport.workspace-authority-request/v1'
+  sourceMode: 'empty'
+}
+
+export interface WorkspaceAuthorityRequestV2 extends WorkspaceAuthorityRequestBase {
+  formatVersion: 'stateport.workspace-authority-request/v2'
+  sourceMode: 'reviewed-commit'
+  source: WorkspaceAuthoritySource
+  sourceDigest: string
+}
+
+export type WorkspaceAuthorityRequest = WorkspaceAuthorityRequestV1 | WorkspaceAuthorityRequestV2
+
+export interface WorkspaceAuthorityPreparation {
+  request: WorkspaceAuthorityRequest
+  review: WorkspaceAuthorityProjection
+}
+
 export interface ExecutionHostClient {
+  workspaceAuthority(instanceId: string): Promise<WorkspaceAuthorityProjection>
+  prepareWorkspaceAuthority(instanceId: string, request: WorkspaceAuthorityRequestInput): Promise<WorkspaceAuthorityPreparation>
   status(): Promise<ExecutionHostStatus>
   listWorkloads(): Promise<ExecutionHostResult>
   listReceipts(): Promise<ExecutionHostReceiptIndex>
   workloadStatus(workloadId: string): Promise<ExecutionHostResult>
   workloadLogs(workloadId: string): Promise<ExecutionHostResult>
-  createDefaultWorkload(): Promise<ExecutionHostResult>
+  createDefaultWorkload(instanceId?: string, sourceReviewDigest?: string): Promise<ExecutionHostResult>
   startWorkload(workloadId: string): Promise<ExecutionHostResult>
   stopWorkload(workloadId: string): Promise<ExecutionHostResult>
   cancelWorkload(workloadId: string): Promise<ExecutionHostResult>
   removeWorkload(workloadId: string): Promise<ExecutionHostResult>
   execWorkload(workloadId: string, argv: string[]): Promise<ExecutionHostResult>
 }
+
+export type WorkspaceAuthorityRequestInput =
+  | { profileDigest: string; sourceMode: 'empty'; grantExpiresAt: string }
+  | { profileDigest: string; sourceMode: 'reviewed-commit'; grantExpiresAt: string }
 
 export interface ExecutionHostStatus {
   status: 'available' | 'unavailable'
@@ -561,6 +651,7 @@ export interface ExecutionHostResult {
 export interface RepositoryImportClient {
   listLocalCandidates(): Promise<RepositoryCandidate[]>
   inspect(candidateId: string): Promise<RepositoryInspection>
+  inspectPublic(url: string, revision: string): Promise<RepositoryInspection>
   register(input: { candidateId: string; name: string; inspectionDigest: string; approved: boolean }): Promise<RepositoryRegistration>
   installTemplate(input: {
     candidateId: string
@@ -647,7 +738,7 @@ export interface UpdaterClient {
 export interface PreviewRoutesClient {
   list(): Promise<PreviewRouteIndex>
   register(input: PreviewRouteRegisterInput): Promise<PreviewRouteMutation>
-  revoke(routeId: string, input: { reason: string }): Promise<PreviewRouteMutation>
+  revoke(routeId: string, input: { reason: string; expectedRouteDigest: string }): Promise<PreviewRouteMutation>
   rewrite(routeId: string, input: PreviewRouteRewriteInput): Promise<PreviewRouteMutation>
 }
 

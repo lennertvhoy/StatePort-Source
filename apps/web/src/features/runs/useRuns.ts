@@ -15,6 +15,7 @@ import type {
   RunRecord,
 } from '@/client'
 import { getClient } from '@/client'
+import { useSessionStore } from '@/state'
 
 interface RunsSnapshot {
   key: string
@@ -115,6 +116,7 @@ export function useRuns(instanceId: string): RunsState & RunsActions {
     }): Promise<RunRecord | null> => {
       setBusy(true)
       setTransitionError(null)
+      const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
       try {
         const run = await getClient().runs.prepare(instanceId, input)
         updateRun(run)
@@ -123,6 +125,7 @@ export function useRuns(instanceId: string): RunsState & RunsActions {
         setTransitionError(error)
         return null
       } finally {
+        releaseOperationsMutation()
         setBusy(false)
       }
     },
@@ -133,6 +136,7 @@ export function useRuns(instanceId: string): RunsState & RunsActions {
     async (run: RunRecord, operation: RunOperation): Promise<RunRecord | null> => {
       setBusy(true)
       setTransitionError(null)
+      const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
       try {
         const next = await getClient().runs.transition(run.id, operation, {
           expectedInstanceId: run.instanceId,
@@ -144,6 +148,7 @@ export function useRuns(instanceId: string): RunsState & RunsActions {
         setTransitionError(error)
         return null
       } finally {
+        releaseOperationsMutation()
         setBusy(false)
       }
     },

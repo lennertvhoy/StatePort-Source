@@ -494,7 +494,7 @@ const conversationSchema = z.object({
   instanceId: z.string(),
   title: z.string(),
   channel: z.enum(['web', 'telegram']),
-  deliveryState: z.enum(['delivered', 'pending', 'failed', 'not_configured']),
+  deliveryState: z.enum(['delivered', 'pending', 'failed', 'not_configured', 'unknown']),
   retentionNote: z.string(),
   messages: z.array(conversationMessageSchema),
   createdAt: iso,

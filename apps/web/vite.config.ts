@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -82,6 +83,13 @@ function buildIdentityPlugin(
     name: 'stateport-web-build-identity',
     apply: 'build',
     generateBundle() {
+      // The fallback joiner is vendored MIT code; minification removes its
+      // source comment, so retain the exact redistribution notice as an asset.
+      this.emitFile({
+        type: 'asset',
+        fileName: 'xterm-ligatures.LICENSE.txt',
+        source: readFileSync(path.join(webRoot, 'src/features/terminal/xterm-ligatures.LICENSE'), 'utf8'),
+      })
       this.emitFile({
         type: 'asset',
         fileName: WEB_BUILD_IDENTITY_FILENAME,

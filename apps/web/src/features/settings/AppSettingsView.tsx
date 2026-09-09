@@ -10,13 +10,14 @@ import { useSearchParams } from 'react-router-dom'
 
 import type { ApplicationPackage, AppSettings, TerminalTarget } from '@/client'
 import { getClient } from '@/client'
-import { CapabilityDot, ConfirmDialog, Disclosure, ErrorState, InlineNotice, SkeletonRows, StatusBadge } from '@/components'
+import { CapabilityDot, ConfirmDialog, Disclosure, ErrorState, InlineNotice, SkeletonRows, StatusBadge, TimeAgo } from '@/components'
 import { Button } from '@/components/ui/button'
 import { capabilityPresentation } from '@/semantic'
 import { useSessionStore } from '@/state'
 import { useCurrentInstance } from '@/shell/currentInstance'
 import { useMediaQuery } from '@/shell/platform'
 import { cn } from '@/lib/utils'
+import { RenameDialog } from '@/features/applications/components/RenameDialog'
 
 import {
   CheckboxChips,
@@ -81,6 +82,7 @@ export function AppSettingsView({ instanceId }: { instanceId: string }) {
   const [saved, setSaved] = useState<AppSettings | null>(null)
   const [draft, setDraft] = useState<AppSettings | null>(null)
   const [name, setName] = useState('')
+  const [renameOpen, setRenameOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<unknown>(null)
   const [saving, setSaving] = useState(false)
@@ -317,10 +319,20 @@ export function AppSettingsView({ instanceId }: { instanceId: string }) {
                 {isMock ? (
                   <TextControl value={name} onChange={setName} className="w-64" />
                 ) : (
-                  <ReadOnlyValue
-                    mono={false}
-                    value={`${instance.name} — fixed at registration; the connected service does not expose rename.`}
-                  />
+                  <div className="flex items-center gap-2">
+                    <ReadOnlyValue mono={false} value={instance.name} />
+                    {client.applications.canRename ? (
+                      <>
+                        <Button variant="outline" size="sm" onClick={() => setRenameOpen(true)}>Rename…</Button>
+                        <RenameDialog open={renameOpen} currentName={instance.name} onOpenChange={setRenameOpen}
+                          onSubmit={async (nextName) => {
+                            await client.applications.rename(instanceId, nextName, instance.name)
+                            refresh()
+                            pushToast({ kind: 'success', title: `Renamed to ${nextName}` })
+                          }} />
+                      </>
+                    ) : null}
+                  </div>
                 )}
               </SettingRow>
               <SettingRow anchor="app-package" label="Package" description="The package this instance runs.">
@@ -337,6 +349,11 @@ export function AppSettingsView({ instanceId }: { instanceId: string }) {
                     void getClient()
                       .applications.setPinned(instanceId, v)
                       .then(() => refresh())
+                      .catch((error: unknown) => pushToast({
+                        kind: 'error',
+                        title: 'Pin preference could not be saved',
+                        body: error instanceof Error ? error.message : 'Browser storage is unavailable. Try again.',
+                      }))
                   }}
                 />
               </SettingRow>
@@ -477,12 +494,12 @@ export function AppSettingsView({ instanceId }: { instanceId: string }) {
               <SettingRow anchor="backup-last" label="Last backup">
                 <ReadOnlyValue
                   mono={false}
-                  value={instance.recovery.lastBackupAt ? new Date(instance.recovery.lastBackupAt).toLocaleString() : 'Never'}
+                  value={instance.recovery.lastBackupAt ? <TimeAgo date={instance.recovery.lastBackupAt} /> : 'Never'}
                 />
               </SettingRow>
               {instance.recovery.nextDueAt ? (
                 <SettingRow anchor="backup-next" label="Next due">
-                  <ReadOnlyValue mono={false} value={new Date(instance.recovery.nextDueAt).toLocaleString()} />
+                  <ReadOnlyValue mono={false} value={<TimeAgo date={instance.recovery.nextDueAt} />} />
                 </SettingRow>
               ) : null}
               {instance.recovery.detail ? (
@@ -505,7 +522,7 @@ export function AppSettingsView({ instanceId }: { instanceId: string }) {
                 <ReadOnlyValue value={`${instance.packageName}${pkg ? `@${pkg.version}` : ''}`} copyValue={instance.packageName} />
               </SettingRow>
               <SettingRow anchor="app-created" label="Installed" description="When this instance was created.">
-                <ReadOnlyValue mono={false} value={new Date(instance.createdAt).toLocaleString()} />
+                <ReadOnlyValue mono={false} value={<TimeAgo date={instance.createdAt} />} />
               </SettingRow>
             </SettingSubsection>
             <SettingSubsection title="Terminal">
@@ -660,7 +677,7 @@ export function AppSettingsView({ instanceId }: { instanceId: string }) {
                 </header>
                 {!isMock ? (
                   <InlineNotice tone="informational" title="Authority boundary">
-                    Editable presentation preferences stay in this browser. Backend-owned capability, recovery, and context facts remain read-only; canonical application state is not changed here.
+                    Display-name changes update the local catalog. Editable presentation preferences stay in this browser. Backend-owned capability, recovery, and context facts remain read-only; canonical application state is not changed here.
                   </InlineNotice>
                 ) : null}
                 {content()}
@@ -691,7 +708,7 @@ export function AppSettingsView({ instanceId }: { instanceId: string }) {
           </header>
           {!isMock && activeGroup ? (
             <InlineNotice tone="informational" title="Authority boundary">
-              Editable presentation preferences stay in this browser. Backend-owned capability, recovery, and context facts remain read-only; canonical application state is not changed here.
+              Display-name changes update the local catalog. Editable presentation preferences stay in this browser. Backend-owned capability, recovery, and context facts remain read-only; canonical application state is not changed here.
             </InlineNotice>
           ) : null}
           {activeGroup ? content() : null}

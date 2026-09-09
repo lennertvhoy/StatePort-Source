@@ -10,6 +10,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ReactNode } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { getClient } from '@/client'
 import { Kbd } from '@/components'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
@@ -36,7 +37,7 @@ function groupRows(commands: ShellCommand[], titleFor: (c: ShellCommand) => Reac
     }
   }
   for (const group of COMMAND_GROUP_ORDER) {
-    const inGroup = commands.filter((c) => c.group === group)
+    const inGroup = commands.filter((c) => c.group === group && !(emptyQuery && recentIds.includes(c.id)))
     if (inGroup.length === 0) continue
     rows.push({ type: 'header', id: `h:${group}`, label: group })
     for (const command of inGroup) rows.push({ type: 'command', id: command.id, command, title: titleFor(command) })
@@ -53,6 +54,8 @@ export function CommandPalette() {
   const pushToast = useSessionStore((s) => s.pushToast)
 
   const [query, setQuery] = useState('')
+  const [showRecents, setShowRecents] = useState(false)
+  const [preferenceError, setPreferenceError] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -64,12 +67,25 @@ export function CommandPalette() {
     }
   }, [open])
 
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setShowRecents(false)
+    setPreferenceError(false)
+    void getClient().globalSettings.get().then((settings) => {
+      if (!cancelled) setShowRecents(settings.navigation.recentCommands)
+    }).catch(() => {
+      if (!cancelled) setPreferenceError(true)
+    })
+    return () => { cancelled = true }
+  }, [open])
+
   const available = useMemo(() => (open ? availableCommands(commands) : []), [commands, open])
 
   const rows = useMemo<Row[]>(() => {
     const trimmed = query.trim()
     if (!trimmed) {
-      return groupRows(available, (c) => c.title, recents, true)
+      return groupRows(available, (c) => c.title, showRecents ? recents : [], true)
     }
     const results = fuzzysort.go(trimmed, available, {
       keys: ['title', (c: ShellCommand) => (c.keywords ?? []).join(' ')],
@@ -90,7 +106,7 @@ export function CommandPalette() {
       [],
       false,
     )
-  }, [available, query, recents])
+  }, [available, query, recents, showRecents])
 
   const selectable = useMemo(() => rows.filter((r): r is Extract<Row, { type: 'command' }> => r.type === 'command'), [rows])
 
@@ -116,8 +132,12 @@ export function CommandPalette() {
   }, [activeIndex, selectable, rows, virtualizer])
 
   const runCommand = async (command: ShellCommand) => {
-    setOpen(false)
-    recordRun(command.id)
+    try {
+      setOpen(false)
+      recordRun(command.id)
+    } catch {
+      pushToast({ kind: 'error', title: 'Recent commands could not be saved', body: 'The selected command will still run. Its history may not survive reload.' })
+    }
     try {
       await command.run()
     } catch (error) {
@@ -175,6 +195,7 @@ export function CommandPalette() {
           />
         </div>
 
+        {preferenceError && <p role="status" className="px-3 py-2 text-sm text-foreground-secondary">Recent command preferences could not be loaded. All commands remain available; reopen the palette to retry.</p>}
         <div ref={scrollRef} className="max-h-[50vh] overflow-y-auto" id="command-palette-list" role="listbox" aria-label="Commands">
           {selectable.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-foreground-secondary">No matching commands.</p>

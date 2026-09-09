@@ -6,10 +6,11 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
-import { resetClientForTests } from '@/client'
+import { getClient, resetClientForTests } from '@/client'
+import type { OperationExecutionRecord, OperationRecord } from '@/client'
 import { useWorkspaceStore } from '@/state'
 
 async function renderAt(route: string) {
@@ -24,12 +25,48 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   window.location.hash = ''
 })
 
 const CTO_OVERVIEW = '#/app/ins_cto_pilot/workbench'
 
 describe('workbench overview', () => {
+  it('shows active prepared, approved, cancelling, and interrupted work only for this instance', async () => {
+    const operation = (state: OperationExecutionRecord['state'], instanceId = 'ins_cto_pilot') => ({
+      id: `op_${state}`,
+      instanceId,
+      kind: 'orchestration_run' as const,
+      title: `${state} operation`,
+      state,
+      stageLabel: state,
+      startedAt: '2026-09-08T00:00:00Z',
+      updatedAt: '2026-09-08T00:00:00Z',
+      canPause: false,
+      canCancel: state === 'cancelling',
+      log: [],
+    } satisfies OperationRecord)
+    vi.spyOn(getClient().operations, 'list').mockResolvedValue([
+      operation('prepared'),
+      operation('approved'),
+      operation('cancelling'),
+      operation('interrupted'),
+      operation('completed'),
+      operation('running', 'ins_other'),
+    ])
+
+    await renderAt(CTO_OVERVIEW)
+    const root = await screen.findByTestId('workbench-overview-stub', undefined, { timeout: 10_000 })
+    const active = await within(root).findByRole('region', { name: 'Active work' })
+    const rows = within(active).getAllByTestId('overview-operation')
+    expect(rows).toHaveLength(4)
+    for (const state of ['Prepared', 'Approved', 'Cancelling', 'Interrupted']) {
+      expect(active.textContent).toContain(state)
+    }
+    expect(active.textContent).not.toContain('completed operation')
+    expect(active.textContent).not.toContain('running operation')
+  }, 20_000)
+
   it("hides unavailable tools' actions — CTO Pilot has no Deployments row", async () => {
     await renderAt(CTO_OVERVIEW)
     const root = await screen.findByTestId('workbench-overview-stub', undefined, { timeout: 10_000 })

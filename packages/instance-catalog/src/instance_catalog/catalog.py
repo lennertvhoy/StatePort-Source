@@ -1,7 +1,7 @@
 """Authoritative, local-only discovery catalog for StatePort instances.
 
 The implementation intentionally treats an instance directory as opaque. It
-uses ``lstat``/``scandir`` only to establish directory identity and does not
+uses directory metadata only to establish directory identity and does not
 read learner, workflow, or StateDD files.
 """
 
@@ -55,6 +55,7 @@ class CatalogConflictError(CatalogError):
 class FilesystemIdentity:
     device: int
     inode: int
+    filesystem_id: str | None = field(default=None, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {"device": self.device, "inode": self.inode, "kind": "directory"}
@@ -188,6 +189,22 @@ def _same_identity(left: FilesystemIdentity, right: FilesystemIdentity) -> bool:
     return left.device == right.device and left.inode == right.inode
 
 
+def _persistent_identity_matches(record: InstanceRecord, observed: FilesystemIdentity) -> bool:
+    stable = record.metadata.get("filesystemId")
+    if stable is not None:
+        return isinstance(stable, str) and stable == observed.filesystem_id and record.filesystem.inode == observed.inode
+    # Old records can acquire a stable ID only while their exact old identity
+    # still matches. A post-reboot mismatch cannot be migrated by guessing.
+    return _same_identity(record.filesystem, observed)
+
+
+def _filesystem_id(descriptor: int) -> str:
+    value = os.fstatvfs(descriptor).f_fsid
+    if type(value) is not int or not 0 < value < 2**64:
+        raise PathSafetyError("filesystem has no usable persistent identity")
+    return f"statvfs:{value:016x}"
+
+
 class InstanceCatalog:
     """A locked, atomically persisted catalog confined to one local root."""
 
@@ -264,6 +281,46 @@ class InstanceCatalog:
 
         _validate_name(name)
         return self._update_record(instance_id, lambda record: replace(record, name=name))
+
+    def rename_reviewed(self, instance_id: str, name: str, *, expected_name: str,
+                        actor_id: str, actor_role: str) -> tuple[InstanceRecord, dict[str, Any] | None, bool]:
+        """Compare, rename, and record its receipt in one catalog transaction."""
+        with self._locked(exclusive=True):
+            document = self._load()
+            index = self._find_index(document, instance_id)
+            current = InstanceRecord.from_dict(document["entries"][index])
+            metadata, receipt, replayed = reviewed_name_change(
+                instance_id, current.name, current.metadata, name=name,
+                expected_name=expected_name, actor_id=actor_id, actor_role=actor_role,
+            )
+            if replayed:
+                return current, receipt, True
+            updated = replace(current, name=name, metadata=metadata, updated_at=_now())
+            document["entries"][index] = updated.to_dict()
+            self._write(document)
+            return updated, receipt, False
+
+    def merge_metadata(self, instance_id: str, fields: Mapping[str, Any]) -> InstanceRecord:
+        """Merge metadata under the same lock as display-name receipts."""
+        return self._update_record(instance_id, lambda record: replace(record, metadata={**record.metadata, **fields}))
+
+    def merge_metadata_if_matches(self, expected: InstanceRecord, fields: Mapping[str, Any]) -> InstanceRecord | None:
+        """Persist an observed metadata upgrade only for the unchanged live record."""
+        with self._locked(exclusive=True):
+            document = self._load()
+            index = self._find_index(document, expected.instance_id)
+            current = InstanceRecord.from_dict(document["entries"][index])
+            if (current.path, current.filesystem, current.created_at, current.metadata) != (
+                expected.path, expected.filesystem, expected.created_at, expected.metadata
+            ):
+                return None
+            _, current = self._revalidate(current)
+            if current.path_state != "present" or current.path != expected.path:
+                return None
+            updated = replace(current, metadata={**current.metadata, **fields}, updated_at=_now())
+            document["entries"][index] = updated.to_dict()
+            self._write(document)
+            return updated
 
     def archive(self, instance_id: str) -> InstanceRecord:
         """Archive an entry without changing its instance directory."""
@@ -364,6 +421,7 @@ class InstanceCatalog:
             updated = replace(
                 record,
                 filesystem=observed,
+                metadata={**record.metadata, "filesystemId": observed.filesystem_id},
                 path_state="present",
                 updated_at=now,
                 last_validated_at=now,
@@ -393,14 +451,14 @@ class InstanceCatalog:
                 raise DuplicateInstanceError(f"instance ID is already cataloged: {chosen_id}")
             if any(record.path == relative for record in records):
                 raise DuplicateInstanceError(f"path is already cataloged: {relative}")
-            if any(_same_identity(record.filesystem, identity) for record in records):
+            if any(_persistent_identity_matches(record, identity) for record in records):
                 raise DuplicateInstanceError("directory identity is already cataloged")
             now = _now()
             record = InstanceRecord(
                 instance_id=chosen_id, name=chosen_name, path=relative, status="active",
                 adoption_mode=mode, read_only=True, filesystem=identity, path_state="present",
                 created_at=now, updated_at=now, last_validated_at=now,
-                metadata=dict(metadata or {}),
+                metadata={**dict(metadata or {}), "filesystemId": identity.filesystem_id},
             )
             document["entries"].append(record.to_dict())
             document["entries"].sort(key=lambda item: item["instanceId"])
@@ -429,11 +487,13 @@ class InstanceCatalog:
         except (FileNotFoundError, NotADirectoryError, OSError):
             relative = record.path
             identity = None
-        if identity is not None and _same_identity(identity, record.filesystem):
+        if identity is not None and _persistent_identity_matches(record, identity):
             state: PathState = "present" if relative == record.path else "moved"
-            updated = replace(record, path=relative, path_state=state, last_validated_at=now, updated_at=now)
+            updated = replace(record, path=relative, path_state=state,
+                              metadata={**record.metadata, "filesystemId": identity.filesystem_id},
+                              last_validated_at=now, updated_at=now)
             return updated != record, updated
-        moved = self._find_identity(record.filesystem)
+        moved = self._find_identity(record)
         if moved is not None:
             previous = record.previous_paths + ((record.path,) if moved != record.path else ())
             updated = replace(record, path=moved, path_state="moved", previous_paths=previous, last_validated_at=now, updated_at=now)
@@ -462,9 +522,27 @@ class InstanceCatalog:
         info = os.lstat(target)
         if not stat.S_ISDIR(info.st_mode):
             raise NotADirectoryError(str(target))
-        return relative_text, FilesystemIdentity(info.st_dev, info.st_ino)
+        descriptors = []
+        try:
+            descriptor = os.open(self.instances_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            descriptors.append(descriptor)
+            for component in PurePosixPath(relative_text).parts:
+                descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=descriptor)
+                descriptors.append(descriptor)
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                raise PathSafetyError("instance directory changed during identity observation")
+            stable = _filesystem_id(descriptor)
+            self._assert_no_symlink_components(target)
+            after = os.lstat(target)
+            if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+                raise PathSafetyError("instance directory changed during identity observation")
+            return relative_text, FilesystemIdentity(opened.st_dev, opened.st_ino, stable)
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
 
-    def _find_identity(self, wanted: FilesystemIdentity) -> str | None:
+    def _find_identity(self, record: InstanceRecord) -> str | None:
         self._assert_root()
         stack = [self.instances_root]
         while stack:
@@ -482,8 +560,13 @@ class InstanceCatalog:
                         if not stat.S_ISDIR(info.st_mode):
                             continue
                         relative = Path(entry.path).relative_to(self.instances_root).as_posix()
-                        if _same_identity(wanted, FilesystemIdentity(info.st_dev, info.st_ino)):
-                            return _validate_relative_path(relative)
+                        if info.st_ino == record.filesystem.inode:
+                            try:
+                                observed = self._inspect_path(relative)[1]
+                            except (CatalogError, OSError):
+                                continue
+                            if _persistent_identity_matches(record, observed):
+                                return _validate_relative_path(relative)
                         stack.append(Path(entry.path))
             except OSError:
                 continue
@@ -588,21 +671,8 @@ class InstanceCatalog:
 
     @contextmanager
     def _locked(self, *, exclusive: bool) -> Iterator[None]:
-        self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        _validate_parent_chain(self.catalog_path.parent)
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(self.lock_path, flags, 0o600)
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise PathSafetyError("catalog lock must not be a symlink") from exc
-            raise
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        with catalog_lock(self.lock_path, exclusive=exclusive):
             yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
 
 
 def _absolute_path(value: str | os.PathLike[str], label: str) -> Path:
@@ -644,3 +714,57 @@ __all__ = [
 # Short alias for applications that do not need the longer product-qualified
 # class name; both names refer to the same API.
 Catalog = InstanceCatalog
+
+
+@contextmanager
+def catalog_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
+    """Serialize catalog documents with the existing symlink-refusing file lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_parent_chain(path.parent)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PathSafetyError("catalog lock must not be a symlink") from exc
+        raise
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def reviewed_name_change(instance_id: str, current_name: str, metadata: Mapping[str, Any], *,
+                         name: str, expected_name: str, actor_id: str, actor_role: str
+                         ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
+    """Build a receipt to persist atomically with a catalog-only rename."""
+    for value in (name, expected_name):
+        _validate_name(value)
+        if len(value) > 120 or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise CatalogError("application name must be at most 120 characters without control characters")
+    if not isinstance(actor_id, str) or not actor_id or len(actor_id) > 128:
+        raise CatalogError("rename actor identity is invalid")
+    if actor_role not in {"local_user", "platform_operator"}:
+        raise CatalogError("rename actor role is invalid")
+    history = metadata.get("displayNameChanges", [])
+    if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+        raise CatalogError("catalog name-change history is invalid")
+    if current_name == name:
+        if expected_name == current_name:
+            return dict(metadata), None, True
+        if history and all(history[-1].get(key) == value for key, value in {
+            "instanceId": instance_id, "oldName": expected_name, "newName": name,
+            "actorId": actor_id, "actorRole": actor_role,
+        }.items()):
+            return dict(metadata), dict(history[-1]), True
+    if current_name != expected_name:
+        raise CatalogConflictError("application name changed; reload before renaming")
+    receipt = {
+        "formatVersion": "stateport.application-rename-receipt/v1",
+        "receiptId": "rename_" + uuid.uuid4().hex,
+        "instanceId": instance_id, "oldName": current_name, "newName": name,
+        "actorId": actor_id, "actorRole": actor_role, "createdAt": _now(),
+    }
+    return {**metadata, "displayNameChanges": [*history, receipt]}, receipt, False

@@ -5234,6 +5234,24 @@ def _derive_removal_plan(
     )
 
 
+def _require_unit_enablement_observed(observed: Completed, unit: str) -> None:
+    """A failed manager/account query is not an absent or disabled unit."""
+    if observed.returncode == 0:
+        return
+    known_inactive = (
+        observed.returncode == 1
+        and observed.stdout.strip() in {"disabled", "masked", "masked-runtime"}
+    ) or (
+        observed.returncode == 4 and observed.stdout.strip() == "not-found"
+    )
+    if not known_inactive or observed.stderr.strip():
+        raise InstallerRefusal(
+            "unit_observation_failed",
+            f"cannot observe enablement of the recorded unit {unit}; "
+            "the installation has not been proven inactive",
+        )
+
+
 def _stop_and_disable_units(
     runner: Runner, units: Sequence[str], *, control_units: Sequence[str] = ()
 ) -> tuple[list[str], list[str]]:
@@ -5263,6 +5281,16 @@ def _stop_and_disable_units(
             timeout=60,
             code="unit_stop_failed",
         )
+        if active.returncode != 0 and not (
+            active.returncode in {3, 4}
+            and active.stdout.strip() in {"inactive", "failed", "unknown"}
+            and not active.stderr.strip()
+        ):
+            raise InstallerRefusal(
+                "unit_observation_failed",
+                f"cannot observe the recorded unit {unit}; no absence is inferred from "
+                "a failed account handoff or systemd query",
+            )
         if active.returncode == 0:
             completed = _run_effect(
                 runner,
@@ -5282,6 +5310,7 @@ def _stop_and_disable_units(
             timeout=60,
             code="unit_disable_failed",
         )
+        _require_unit_enablement_observed(enabled, unit)
         if enabled.returncode == 0:
             completed = _run_effect(
                 runner,
@@ -5309,6 +5338,12 @@ def _remove_containers(runner: Runner, names: Sequence[str]) -> list[str]:
             timeout=60,
             code="container_remove_failed",
         )
+        if exists.returncode not in {0, 1}:
+            raise InstallerRefusal(
+                "container_remove_failed",
+                f"cannot establish whether recorded resource {name} exists; "
+                "engine failure is not absence",
+            )
         if exists.returncode != 0:
             continue
         completed = _run_effect(
@@ -5382,6 +5417,7 @@ def _disable_activation_target(runner: Runner) -> bool:
         timeout=60,
         code="activation_target_disable_failed",
     )
+    _require_unit_enablement_observed(enabled, ACCEPTED_ACTIVATION_TARGET)
     if enabled.returncode != 0:
         return False
     completed = _run_effect(
@@ -5416,6 +5452,12 @@ def _remove_volumes(runner: Runner, names: Sequence[str]) -> list[str]:
         exists = _run_effect(
             runner, ["podman", "volume", "exists", name], timeout=60, code="volume_remove_failed"
         )
+        if exists.returncode not in {0, 1}:
+            raise InstallerRefusal(
+                "volume_remove_failed",
+                f"cannot establish whether recorded resource {name} exists; "
+                "engine failure is not absence",
+            )
         if exists.returncode != 0:
             continue
         completed = _run_effect(

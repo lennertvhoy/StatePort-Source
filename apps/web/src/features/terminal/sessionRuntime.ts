@@ -29,6 +29,7 @@ import type { TerminalSettings, TerminalSessionState } from '@/client'
 import { IS_MAC } from '@/shell/platform'
 
 import { LineEditor } from './lineEditor'
+import { FallbackLigatures } from './fallbackLigatures'
 import {
   drainBufferedOutput,
   sendTerminalInput,
@@ -78,6 +79,7 @@ export class SessionRuntime {
   private callbacks: SessionRuntimeCallbacks
   private term: Terminal | null = null
   private fitAddon: FitAddon | null = null
+  private ligatures: FallbackLigatures | null = null
   private searchAddon: SearchAddon | null = null
   private host: HTMLDivElement | null = null
   private editor: LineEditor
@@ -144,6 +146,8 @@ export class SessionRuntime {
   private createTerminal(): void {
     const settings = this.callbacks.getSettings()
     const term = new Terminal({
+      // Required only for the reviewed character-joiner rendering API.
+      allowProposedApi: true,
       fontFamily: fontStack(settings.fontFamily),
       fontSize: settings.fontSize,
       lineHeight: settings.lineHeight,
@@ -172,6 +176,8 @@ export class SessionRuntime {
     host.style.width = '100%'
     host.addEventListener('paste', this.onPasteCapture, true)
     term.open(host)
+    this.ligatures = new FallbackLigatures(term)
+    this.ligatures.setEnabled(settings.ligatures)
 
     term.onData((data) => this.handleData(data))
     term.onResize(({ cols, rows }) => this.callbacks.onResize(cols, rows))
@@ -461,6 +467,7 @@ export class SessionRuntime {
       screenReaderMode: settings.screenReaderMode,
       rightClickSelectsWord: settings.rightClickBehavior === 'select_word',
     }
+    this.ligatures?.setEnabled(settings.ligatures)
     this.fitSoon()
   }
 
@@ -510,6 +517,8 @@ export class SessionRuntime {
     setStateHook(this.key, null)
     this.host?.removeEventListener('paste', this.onPasteCapture, true)
     this.host?.remove()
+    this.ligatures?.dispose()
+    this.ligatures = null
     this.term?.dispose()
     this.term = null
     this.host = null

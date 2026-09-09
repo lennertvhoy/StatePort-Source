@@ -754,7 +754,7 @@ export interface Conversation {
   instanceId: string
   title: string
   channel: ConversationChannel
-  deliveryState: 'delivered' | 'pending' | 'failed' | 'not_configured'
+  deliveryState: 'delivered' | 'pending' | 'failed' | 'not_configured' | 'unknown'
   retentionNote: string
   messages: ConversationMessage[]
   createdAt: string
@@ -859,7 +859,7 @@ export interface TerminalTarget {
   id: string
   instanceId: string
   label: string
-  kind: 'local_pty' | 'ssh'
+  kind: 'local_pty' | 'ssh' | 'capsule' | 'herdr_attach' | 'unresolved'
   available: boolean
   unavailableReason?: string
 }
@@ -873,6 +873,7 @@ export type TerminalSessionState =
   | 'ended'
 
 export interface TerminalSession {
+  preparedTarget?: { targetId: string; targetClass: 'local_pty' | 'ssh' | 'capsule' | 'herdr_attach'; displayName: string; sessionId: string }
   id: string
   targetId: string
   instanceId: string
@@ -1124,7 +1125,7 @@ export interface Receipt {
 // Operation center (long-running operations)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface OperationRecord {
+export interface OperationExecutionRecord {
   id: string
   instanceId: string
   kind: 'infrastructure_plan' | 'orchestration_run' | 'backup' | 'export'
@@ -1142,6 +1143,17 @@ export interface OperationRecord {
   relatedReceiptId?: string
   error?: string
 }
+
+/** Observation failure has no claimed execution state, progress, or start time. */
+export type OperationObservationRecord = {
+  id: string
+  instanceId: string
+  kind: 'infrastructure_observation'
+  title: string
+  observationError: string
+} & Partial<Record<Exclude<keyof OperationExecutionRecord, 'id' | 'instanceId' | 'kind' | 'title'>, never>>
+
+export type OperationRecord = OperationExecutionRecord | OperationObservationRecord
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Orchestration (bounded CTO slice)
@@ -1720,6 +1732,7 @@ export interface AttentionItem {
 export interface NotificationItem {
   id: string
   instanceId?: string
+  instanceName?: string
   title: string
   body?: string
   importance: 'low' | 'normal' | 'important'
@@ -2130,6 +2143,8 @@ export interface UpdaterRollbackPlanResult {
 
 /** One preview route row inside `GET /v1/preview-routes`. */
 export interface PreviewRoute {
+  /** Gateway-projected relative path; absent for inactive or older services. */
+  previewPath?: string | null;
   schema: 'stateport.preview-route/v1'
   routeId: string
   capsuleId: string
@@ -2186,6 +2201,7 @@ export interface PreviewRouteRegisterInput {
 }
 
 export interface PreviewRouteRewriteInput {
+  expectedRouteDigest: string
   revisionDigest: string
   upstreamPort: number
 }

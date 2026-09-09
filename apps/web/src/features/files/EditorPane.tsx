@@ -47,6 +47,8 @@ export interface EditorPaneProps {
   onCompare: (path: string) => void
   onMoveToOtherPane?: (path: string) => void
   onReviewSave: () => void
+  onEdit?: (pane: 'primary' | 'secondary', path: string) => void
+  onComposition?: (composing: boolean) => void
   onSendSelection: (path: string, selection: EditorSelectionInfo) => void
   onOpenReceipt: (receiptId: string) => void
   onCursor: (pane: 'primary' | 'secondary', path: string, cursor: EditorCursor) => void
@@ -73,6 +75,8 @@ export function EditorPane({
   onCompare,
   onMoveToOtherPane,
   onReviewSave,
+  onEdit,
+  onComposition,
   onSendSelection,
   onOpenReceipt,
   onCursor,
@@ -97,6 +101,8 @@ export function EditorPane({
       className="flex h-full min-w-0 flex-col bg-sunken"
       data-testid={`editor-pane-${pane}`}
       onPointerDown={onFocusPane}
+      onCompositionStartCapture={() => onComposition?.(true)}
+      onCompositionEndCapture={() => onComposition?.(false)}
     >
       {showTabs ? (
         <EditorTabs
@@ -215,7 +221,11 @@ export function EditorPane({
                         settings={settings}
                         wordWrap={wordWrap}
                         initialCursor={initialCursorFor(path)}
-                        onChangeValue={(value) => useFilesStore.getState().setDraft(instanceId, path, value)}
+                        onChangeValue={(value) => {
+                          if (doc.readOnly || !isActive || value === doc.draft) return
+                          useFilesStore.getState().setDraft(instanceId, path, value)
+                          onEdit?.(pane, path)
+                        }}
                         onCursor={(c) => onCursor(pane, path, c)}
                         onSelectionChange={(sel) => {
                           if (isActive) onSelection(pane, sel)

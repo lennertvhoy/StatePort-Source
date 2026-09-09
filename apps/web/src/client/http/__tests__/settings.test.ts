@@ -2,11 +2,13 @@
  * Settings contract tests: updates carry the current revision for optimistic
  * concurrency; rollback sends expectedRevision + receiptId.
  */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { HttpTransport } from '../transport'
 import { HttpAppSettingsClient, HttpGlobalSettingsClient } from '../domainsCore'
 import { jsonResponse, makeFakeFetch } from './helpers'
+
+afterEach(() => vi.restoreAllMocks())
 
 const SETTINGS_PROJECTION = {
   formatVersion: 'stateport.settings-projection/v1',
@@ -55,6 +57,43 @@ function settingsReceipt(
 
 describe('HttpGlobalSettingsClient', () => {
   beforeEach(() => localStorage.clear())
+
+  it('refuses browser-only preference save when durable storage is denied', async () => {
+    const fake = makeFakeFetch([
+      ['GET', '/v1/settings', jsonResponse(SETTINGS_PROJECTION)],
+    ])
+    const client = new HttpGlobalSettingsClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    const before = await client.get()
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new DOMException('denied', 'SecurityError') })
+    await expect(client.update({ appearance: { density: before.appearance.density === 'compact' ? 'comfortable' : 'compact' } }))
+      .rejects.toMatchObject({ kind: 'unavailable', message: expect.stringContaining('Browser settings could not be saved') })
+    expect(fake.calls.some(call => call.method === 'POST' && call.url.includes('/v1/settings'))).toBe(false)
+    expect(await client.get()).toEqual(before)
+  })
+
+
+  it('reports a partial service save and refreshes before retrying denied browser persistence', async () => {
+    const receipt = { ...settingsReceipt(8, 'settings.patch'), changes: { 'general.appearance': 'light' }, previousValues: { 'general.appearance': 'dark' } }
+    const updated = { ...SETTINGS_PROJECTION, revision: 8, recentReceipts: [receipt], sections: [{
+      ...SETTINGS_PROJECTION.sections[0], fields: [{ ...SETTINGS_PROJECTION.sections[0].fields[0], value: 'light', effectiveValue: 'light' }],
+    }] }
+    let serviceSaved = false
+    const fake = makeFakeFetch([
+      ['GET', '/v1/settings', () => jsonResponse(serviceSaved ? updated : SETTINGS_PROJECTION)],
+      ['POST', '/v1/settings', () => { serviceSaved = true; return jsonResponse({ projection: updated, receipt }) }],
+    ])
+    const client = new HttpGlobalSettingsClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    await client.get()
+    const store = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })
+    await expect(client.update({ appearance: { theme: 'light', density: 'comfortable' } }))
+      .rejects.toMatchObject({ kind: 'unavailable', message: expect.stringContaining('Service settings were saved') })
+    store.mockRestore()
+    expect((await client.update({ appearance: { theme: 'light', density: 'comfortable' } })).appearance)
+      .toMatchObject({ theme: 'light', density: 'comfortable' })
+    expect(fake.calls.filter(call => call.method === 'POST' && call.url.includes('/v1/settings'))).toHaveLength(1)
+    expect(fake.calls.filter(call => call.method === 'GET' && call.url.includes('/v1/settings'))).toHaveLength(2)
+    expect((await client.get()).appearance.density).toBe('comfortable')
+  })
 
   it('update sends the expectedRevision from the last projection', async () => {
     const fake = makeFakeFetch([

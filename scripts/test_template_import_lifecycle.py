@@ -248,3 +248,42 @@ def test_managed_incarnation_refuses_a_recreated_marker(
             adapter_id="statespec-template",
             application_id="stateport.template.generic",
         )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_managed_template_reopens_after_recorded_device_renumbering(tmp_path, monkeypatch, legacy):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    source = _statespec_repository(sources / "native")
+    monkeypatch.setenv("STATEPORT_REPOSITORY_ROOTS", str(sources))
+    layout = LocalLayout(tmp_path / "config", tmp_path / "data", tmp_path / "state")
+    layout.initialize()
+    app = PersistentApp(layout)
+    inspector = RepositoryInspector(RepositorySourcePolicy(layout))
+    _install(app, _inspection(inspector, source, sources), source, "generic-template")
+    document = json.loads(layout.catalog_file.read_text())
+    row = document["entries"][0]
+    if legacy:
+        del row["metadata"]["filesystemId"]
+        del row["metadata"]["managedIncarnation"]["markerFilesystem"]["filesystemId"]
+        layout.catalog_file.write_text(json.dumps(document))
+        assert PersistentApp(layout).catalog.get("generic-template")["pathState"] == "present"
+        document = json.loads(layout.catalog_file.read_text())
+        row = document["entries"][0]
+        assert "filesystemId" in row["metadata"]["managedIncarnation"]["markerFilesystem"]
+    # Model persisted pre-reboot numbers. Actual descriptor observations stay
+    # internally consistent, as they do after a real remount.
+    row["filesystem"]["device"] += 1000
+    row["metadata"]["managedIncarnation"]["markerFilesystem"]["device"] += 1000
+    layout.catalog_file.write_text(json.dumps(document))
+    reopened = PersistentApp(layout)
+    assert reopened.catalog.get("generic-template")["pathState"] == "present"
+    assert reopened.managed_template_binding(
+        "generic-template", adapter_id="statespec-template", application_id="stateport.template.generic",
+    )[1]["declaredTemplateId"] == "checklist-course"
+    # Retain the original inode so copying identical bytes cannot reuse it.
+    marker = layout.instances_root / "generic-template/.stateport/managed-incarnation.json"
+    original = marker.read_bytes()
+    marker.rename(marker.with_name("retained-original.json"))
+    marker.write_bytes(original)
+    assert reopened.catalog.get("generic-template")["pathState"] == "stale"

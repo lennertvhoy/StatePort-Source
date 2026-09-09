@@ -2,7 +2,8 @@
  * Real AppServer acceptance for the current-backed Runs, Context lifecycle,
  * and governed Files surfaces. No route is mocked or intercepted.
  */
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
+import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import {
@@ -50,6 +51,9 @@ function sourceRoots(parent: string): string[] {
 // Resolve the interpreter before replacing XDG roots; toolchain shims can
 // otherwise consult unrelated, untrusted configuration in the disposable home.
 const PYTHON = execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8', timeout: 5_000 }).trim()
+// Keep the same installed development libraries when HOME is isolated. These
+// are interpreter dependency locations, not provider configuration or secrets.
+const PYTHON_LIBRARIES = JSON.parse(execFileSync(PYTHON, ['-c', 'import json,site; print(json.dumps(site.getsitepackages()+[site.getusersitepackages()]))'], { encoding: 'utf8', timeout: 5_000 })) as string[]
 
 const PYTHONPATH = [
   ...sourceRoots(path.join(ROOT, 'packages')),
@@ -74,9 +78,21 @@ interface BrowserSignals {
   console: string[]
   pageErrors: string[]
   requestFailures: string[]
+  inFlight: Set<import('@playwright/test').Request>
+  navigationAbortCandidates: WeakSet<import('@playwright/test').Request>
+  navigationReadAborts: string[]
+  navigationAbortsWaived: string[]
   errorResponses: Array<{ status: number; method: string; path: string }>
   responses: Array<{ status: number; method: string; path: string }>
   requests: Array<{ method: string; path: string; body?: unknown }>
+}
+
+/** Reviewed R24 classification: a deliberate same-document/hash/link/goto
+ * navigation may abort in-flight read-only fixture bootstrap GETs. Waive such
+ * an abort only with proven recovery (same method+path later 2xx); never waive
+ * mutations, non-abort errors, or unrecovered reads. Applies per-caller. */
+interface NavigationAbortWaiver {
+  pathPattern: RegExp
 }
 
 interface TerminalSocketFrame {
@@ -156,9 +172,24 @@ async function waitForService(url: string, child: ChildProcess): Promise<void> {
   throw new Error(`service startup timed out: ${lastError}`)
 }
 
-async function startService(): Promise<RunningService> {
+async function startService(resume = false, actorRole: 'local_user' | 'platform_operator' = 'local_user', authorityProof = false, providerIsolation = false): Promise<RunningService> {
   const port = await freePort()
   const xdg = path.join(disposableRoot, 'xdg')
+  const privateHome = path.join(disposableRoot, 'provider-private-home')
+  const privateCodexHome = path.join(privateHome, 'codex')
+  const privateRuntime = path.join(privateHome, 'runtime')
+  const privateTemp = path.join(privateHome, 'tmp')
+  if (providerIsolation) for (const directory of [privateHome, privateCodexHome, privateRuntime, privateTemp]) mkdirSync(directory, { recursive: true, mode: 0o700 })
+  if (providerIsolation) {
+    // Explicit disposable OS-owned operator setup, independent of preceding
+    // serial cases. This never stands in for installed operator authentication.
+    const boundary = path.join(xdg, 'config', 'stateport', 'platform-operator-authority')
+    if (!existsSync(boundary)) writeFileSync(boundary, 'Private provider source-browser operator fixture.\n', { mode: 0o600, flag: 'wx' })
+  }
+  const serviceEnvironment = providerIsolation
+    ? { PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8', HOME: privateHome, CODEX_HOME: privateCodexHome, XDG_RUNTIME_DIR: privateRuntime, TMPDIR: privateTemp }
+    : process.env
+
   const podmanRoot = path.join(disposableRoot, 'podman')
   const podmanStorageConfig = path.join(podmanRoot, 'storage.conf')
   mkdirSync(podmanRoot, { recursive: true, mode: 0o700 })
@@ -174,11 +205,14 @@ async function startService(): Promise<RunningService> {
     { encoding: 'utf8', mode: 0o600 },
   )
   mkdirSync(ARTIFACT_ROOT, { recursive: true, mode: 0o700 })
-  const log = openSync(path.join(ARTIFACT_ROOT, 'service.log'), 'w', 0o600)
+  const log = openSync(path.join(ARTIFACT_ROOT, resume ? 'service-restarted.log' : 'service.log'), resume ? 'a' : 'w', 0o600)
   const child = spawn(
     PYTHON,
     [
       path.join(HERE, 'live-core-fixture.py'),
+      ...(resume ? ['--resume'] : []),
+      '--actor-role', actorRole,
+      ...(authorityProof ? ['--authority-proof'] : []),
       '--port',
       String(port),
       '--repo-root',
@@ -187,9 +221,12 @@ async function startService(): Promise<RunningService> {
     {
       cwd: ROOT,
       env: {
-        ...process.env,
+        ...serviceEnvironment,
         CONTAINERS_STORAGE_CONF: podmanStorageConfig,
-        PYTHONPATH,
+        PYTHONPATH: providerIsolation ? [PYTHONPATH, ...PYTHON_LIBRARIES].join(path.delimiter) : PYTHONPATH,
+        STATEPORT_UI_ENGINE_ENV: JSON.stringify(Object.fromEntries([
+          'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'CONTAINERS_STORAGE_CONF', 'CONTAINERS_CONF', 'CONTAINERS_CONF_OVERRIDE',
+        ].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))),
         XDG_CONFIG_HOME: path.join(xdg, 'config'),
         XDG_DATA_HOME: path.join(xdg, 'data'),
         XDG_STATE_HOME: path.join(xdg, 'state'),
@@ -199,7 +236,12 @@ async function startService(): Promise<RunningService> {
   )
   closeSync(log)
   const url = `http://127.0.0.1:${port}`
-  await waitForService(url, child)
+  try {
+    await waitForService(url, child)
+  } catch (error) {
+    await stopChild(child)
+    throw error
+  }
   projectRoot = path.join(xdg, 'data', 'stateport', 'instances', PROJECT_ID)
   studyRoot = path.join(xdg, 'data', 'stateport', 'instances', STUDY_ID)
   importCandidateRoot = path.join(
@@ -290,7 +332,7 @@ async function stopChild(child: ChildProcess | undefined): Promise<void> {
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
   const timedOut = await Promise.race([
     exited.then(() => false),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 5_000)),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(true), process.env.STATEPORT_UI_REAL_WORKSPACES === '1' ? 95_000 : 5_000)),
   ])
   if (timedOut && child.exitCode === null) {
     child.kill('SIGKILL')
@@ -303,6 +345,10 @@ function browserSignals(page: import('@playwright/test').Page): BrowserSignals {
     console: [],
     pageErrors: [],
     requestFailures: [],
+    inFlight: new Set(),
+    navigationAbortCandidates: new WeakSet(),
+    navigationReadAborts: [],
+    navigationAbortsWaived: [],
     errorResponses: [],
     responses: [],
     requests: [],
@@ -312,6 +358,7 @@ function browserSignals(page: import('@playwright/test').Page): BrowserSignals {
   })
   page.on('pageerror', (error) => value.pageErrors.push(error.message))
   page.on('request', (request) => {
+    value.inFlight.add(request)
     const url = new URL(request.url())
     if (
       url.origin === service.url &&
@@ -328,10 +375,13 @@ function browserSignals(page: import('@playwright/test').Page): BrowserSignals {
       value.requests.push({ method: request.method(), path: url.pathname, body })
     }
   })
+  page.on('requestfinished', (request) => value.inFlight.delete(request))
   page.on('requestfailed', (request) => {
-    value.requestFailures.push(
-      `${request.method()} ${request.url()} ${request.failure()?.errorText ?? 'failed'}`,
-    )
+    value.inFlight.delete(request)
+    const failure = `${request.method()} ${request.url()} ${request.failure()?.errorText ?? 'failed'}`
+    if (value.navigationAbortCandidates.has(request) && request.failure()?.errorText === 'net::ERR_ABORTED') {
+      value.navigationReadAborts.push(failure)
+    } else value.requestFailures.push(failure)
   })
   page.on('response', (response) => {
     const request = response.request()
@@ -351,6 +401,18 @@ function browserSignals(page: import('@playwright/test').Page): BrowserSignals {
     if (response.status() >= 400) value.errorResponses.push(observation)
   })
   return value
+}
+
+/** A deliberate full document reload may cancel its existing read-only fetches.
+ * Track exact Request objects, never waive other failures or mutation requests. */
+async function reloadWithReadObservation(page: import('@playwright/test').Page, signals: BrowserSignals): Promise<void> {
+  for (const request of signals.inFlight) {
+    const url = new URL(request.url())
+    if (request.method() === 'GET' && url.origin === service.url && (url.pathname === '/session' || url.pathname.startsWith('/v1/') || url.pathname.startsWith('/assets/'))) {
+      signals.navigationAbortCandidates.add(request)
+    }
+  }
+  await page.reload()
 }
 
 function terminalSocketSignals(
@@ -445,7 +507,42 @@ function expectClean(
   signals: BrowserSignals,
   allowedErrors: Array<{ status: number; method: string; path: string }> = [],
   allowedRequestFailures: string[] = [],
+  navigationAbortWaiver?: NavigationAbortWaiver,
 ): void {
+  matrix.navigationReadAborts = [...((matrix.navigationReadAborts as string[] | undefined) ?? []), ...signals.navigationReadAborts]
+  const waived: string[] = []
+  const unwaived = signals.requestFailures.filter((failure) => {
+    if (allowedRequestFailures.includes(failure)) return false
+    if (!navigationAbortWaiver) return true
+    // Failure shape: `METHOD <absolute-url> <errorText>`.
+    const firstSpace = failure.indexOf(' ')
+    const lastSpace = failure.lastIndexOf(' ')
+    if (firstSpace < 0 || lastSpace <= firstSpace) return true
+    const method = failure.slice(0, firstSpace)
+    const rawUrl = failure.slice(firstSpace + 1, lastSpace)
+    const errorText = failure.slice(lastSpace + 1)
+    if (method !== 'GET' || errorText !== 'net::ERR_ABORTED') return true
+    let url: URL
+    try {
+      url = new URL(rawUrl)
+    } catch {
+      return true
+    }
+    if (url.origin !== service.url) return true
+    if (!navigationAbortWaiver.pathPattern.test(url.pathname)) return true
+    const recovered = signals.responses.some(
+      (response) =>
+        response.method === 'GET' &&
+        response.path === url.pathname &&
+        response.status >= 200 &&
+        response.status < 300,
+    )
+    if (!recovered) return true
+    waived.push(failure)
+    return false
+  })
+  signals.navigationAbortsWaived.push(...waived)
+  matrix.navigationAbortsWaived = [...((matrix.navigationAbortsWaived as string[] | undefined) ?? []), ...waived]
   const statusReason: Record<number, string> = {
     400: 'Bad Request',
     401: 'Unauthorized',
@@ -469,9 +566,7 @@ function expectClean(
   ).toEqual([])
   expect(signals.pageErrors, 'uncaught page errors').toEqual([])
   expect(
-    signals.requestFailures.filter(
-      (failure) => !allowedRequestFailures.includes(failure),
-    ),
+    unwaived,
     'unexpected failed browser requests',
   ).toEqual([])
   expect(signals.errorResponses, 'unexpected HTTP error responses').toEqual(allowedErrors)
@@ -573,6 +668,56 @@ test.afterAll(async () => {
       })
     }
     rmSync(disposableRoot, { recursive: true, force: true })
+  }
+})
+
+test('Shell menu keeps readable hover and keyboard focus across persisted themes', async ({ page }) => {
+  for (const theme of ['light', 'dark', 'hc-light', 'hc-dark']) {
+    await page.emulateMedia({ colorScheme: theme.endsWith('dark') ? 'dark' : 'light' })
+    await openApplicationRoute(page, '/applications')
+    const trigger = page.getByRole('button', { name: 'More actions', exact: true })
+    await trigger.click()
+    await page.getByRole('menuitem', {
+      name: theme.startsWith('hc') ? 'High contrast' : theme === 'dark' ? 'Dark' : 'Light',
+      exact: true,
+    }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+    await page.reload()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+    await trigger.focus()
+    await page.keyboard.press('Enter')
+    const help = page.getByRole('menuitem', { name: 'Help & shortcuts', exact: true })
+    await expect(help).toBeFocused()
+
+    const contrast = async () => help.evaluate((element) => {
+      const style = getComputedStyle(element)
+      const canvas = document.createElement('canvas')
+      canvas.width = canvas.height = 1
+      const context = canvas.getContext('2d')!
+      const luminance = (color: string) => {
+        context.clearRect(0, 0, 1, 1)
+        context.fillStyle = color
+        context.fillRect(0, 0, 1, 1)
+        const rgb = Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3)
+          .map((channel) => channel / 255)
+          .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+        return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722
+      }
+      const foreground = luminance(style.color)
+      const background = luminance(style.backgroundColor)
+      return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05)
+    })
+    expect(await contrast()).toBeGreaterThanOrEqual(theme.startsWith('hc') ? 7 : 4.5)
+    await expect(help).toHaveCSS('outline-style', 'solid')
+    await page.screenshot({ path: path.join(ARTIFACT_ROOT, `shell-menu-${theme}.png`) })
+    await page.keyboard.press('ArrowDown')
+    await expect(page.getByRole('menuitem', { name: 'Follow system', exact: true })).toBeFocused()
+    await help.hover()
+    await expect(help).toHaveAttribute('data-highlighted', '')
+    expect(await contrast()).toBeGreaterThanOrEqual(theme.startsWith('hc') ? 7 : 4.5)
+    await page.keyboard.press('Escape')
+    await expect(trigger).toBeFocused()
+    await expect(page.getByRole('menu')).toHaveCount(0)
   }
 })
 
@@ -801,7 +946,7 @@ test('Catalog installs a reviewed fixture and imports an allowlisted repository 
   await expect(page.getByTestId('package-list')).toBeVisible()
   await page.getByRole('button', { name: 'More catalog actions' }).click()
   await page
-    .getByRole('menuitem', { name: 'Import a local repository' })
+    .getByRole('menuitem', { name: 'Import a repository' })
     .click()
   const candidateButton = page.getByTestId(
     `import-candidate-${IMPORT_CANDIDATE_NAME}`,
@@ -848,65 +993,34 @@ test('Catalog installs a reviewed fixture and imports an allowlisted repository 
   expect(inspectionPayload.result.mutated).toBe(false)
   await expect(page.getByTestId('import-review')).toContainText('Clean')
   await expect(page.getByTestId('import-register')).toBeDisabled()
-  await page
-    .getByRole('checkbox', {
-      name: 'Approve registration of the exact inspected repository',
-    })
-    .click()
-
-  const registrationResponsePromise = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'POST' &&
-      new URL(response.url()).pathname === '/v1/repository-import/register',
+  await page.getByRole('checkbox', {
+    name: 'Approve creation of an isolated copy of the exact inspected template',
+  }).click()
+  const installTemplateResponsePromise = page.waitForResponse(response =>
+    response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/v1/template-import/install',
   )
   await page.getByTestId('import-register').click()
-  const registrationResponse = await registrationResponsePromise
+  const registrationResponse = await installTemplateResponsePromise
   expect(registrationResponse.status()).toBe(200)
-  const registrationRequest =
-    registrationResponse.request().postDataJSON() as {
-      candidateId: string
-      inspectionDigest: string
-      instanceId: string
-      name: string
-      approval: {
-        decision: string
-        actorId: string
-        proposalDigest: string
-      }
-    }
-  expect(registrationRequest.candidateId).toBe(inspectionRequest.candidateId)
-  expect(registrationRequest.inspectionDigest).toBe(
-    inspectionPayload.result.inspectionDigest,
-  )
-  expect(registrationRequest.instanceId).toMatch(/^ins-[0-9a-f]{16}$/)
-  expect(registrationRequest.name).toBe(IMPORT_CANDIDATE_NAME)
+  const registrationRequest = registrationResponse.request().postDataJSON() as {
+    plan: { candidateId: string; inspectionDigest: string; instanceId: string; name: string; planDigest: string }
+    approval: { decision: string; actorId: string; planDigest: string }
+  }
+  expect(registrationRequest.plan.candidateId).toBe(inspectionRequest.candidateId)
+  expect(registrationRequest.plan.inspectionDigest).toBe(inspectionPayload.result.inspectionDigest)
+  expect(registrationRequest.plan.instanceId).toMatch(/^template-[0-9a-f]{16}$/)
+  expect(registrationRequest.plan.name).toBe(IMPORT_CANDIDATE_NAME)
   expect(registrationRequest.approval).toEqual({
-    decision: 'approve',
-    actorId: 'local-user',
-    proposalDigest: inspectionPayload.result.inspectionDigest,
+    decision: 'approve', actorId: 'local-user', planDigest: registrationRequest.plan.planDigest,
   })
   const registrationPayload = (await registrationResponse.json()) as {
-    result: {
-      entry: { instanceId: string }
-      inspection: { candidateId: string; inspectionDigest: string }
-      receipt: { receiptId: string; approval: { proposalDigest: string } }
-    }
+    result: { instanceId: string; receiptId: string; managedCopyCreated: boolean; sourceRepositoryMutated: boolean }
   }
-  expect(registrationPayload.result.entry.instanceId).toBe(
-    registrationRequest.instanceId,
-  )
-  expect(registrationPayload.result.inspection.candidateId).toBe(
-    inspectionRequest.candidateId,
-  )
-  expect(registrationPayload.result.inspection.inspectionDigest).toBe(
-    inspectionPayload.result.inspectionDigest,
-  )
-  expect(registrationPayload.result.receipt.approval.proposalDigest).toBe(
-    inspectionPayload.result.inspectionDigest,
-  )
-  await expect(page.getByTestId('import-done')).toContainText(
-    `${IMPORT_CANDIDATE_NAME} is registered`,
-  )
+  expect(registrationPayload.result.instanceId).toBe(registrationRequest.plan.instanceId)
+  expect(registrationPayload.result.managedCopyCreated).toBe(true)
+  expect(registrationPayload.result.sourceRepositoryMutated).toBe(false)
+  await expect(page.getByTestId('import-done')).toContainText(`${IMPORT_CANDIDATE_NAME}`)
 
   expect(
     execFileSync('git', ['-C', importCandidateRoot, 'rev-parse', 'HEAD'], {
@@ -926,13 +1040,13 @@ test('Catalog installs a reviewed fixture and imports an allowlisted repository 
     .getByRole('button', { name: 'IDs, revisions, and digests' })
     .click()
   await expect(page.getByTestId('receipt-exact-record')).toContainText(
-    'repository.import',
+    'template.import',
   )
   await expect(page.getByTestId('receipt-exact-record')).toContainText(
-    registrationPayload.result.receipt.receiptId,
+    registrationPayload.result.receiptId,
   )
 
-  await page.goto(`${service.url}/#/app/${registrationRequest.instanceId}`)
+  await page.goto(`${service.url}/#/app/${registrationRequest.plan.instanceId}`)
   await expect(page.getByTestId('app-overview-stub')).toBeVisible()
   await expect(page.locator('body')).not.toContainText(importCandidateRoot)
 
@@ -941,7 +1055,8 @@ test('Catalog installs a reviewed fixture and imports an allowlisted repository 
   expectRequest(signals, 'GET', '/v1/repository-import/local-candidates')
   expectRequest(signals, 'POST', '/v1/repository-import/inspect')
   expectRequest(signals, 'GET', '/v1/status')
-  expectRequest(signals, 'POST', '/v1/repository-import/register')
+  expectRequest(signals, 'POST', '/v1/template-import/plan')
+  expectRequest(signals, 'POST', '/v1/template-import/install')
 
   await page.screenshot({
     path: path.join(ARTIFACT_ROOT, 'catalog-repository-import-receipt.png'),
@@ -961,13 +1076,126 @@ test('Catalog installs a reviewed fixture and imports an allowlisted repository 
       localRepositoryImport: {
         allowlistedDiscovery: 'live-tested',
         inspection: 'read-only and exact-identity bound',
-        approval: 'local actor and inspection digest bound',
-        registration: 'live-tested',
+        approval: 'local actor and exact plan digest bound',
+        isolatedCopy: 'live-tested',
         repositoryGitState: 'unchanged',
         receipt: 'opened',
       },
     },
   }
+})
+
+test('Decorative animation preference changes real styles and survives reload', async ({ page }) => {
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, '/settings/accessibility')
+  const toggle = page.locator('#setting-a11y-no-animation').getByRole('switch')
+  await expect(toggle).toHaveAttribute('aria-checked', 'false')
+  await toggle.click()
+  await expect(page.locator('html')).toHaveAttribute('data-decorative-motion', 'none')
+  await page.getByTestId('settings-save').click()
+  await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+  await page.reload()
+  await expect(toggle).toHaveAttribute('aria-checked', 'true')
+  await expect(page.locator('html')).toHaveAttribute('data-decorative-motion', 'none')
+  await page.getByTestId('topbar').getByRole('button', { name: /^Notifications/ }).click()
+  const popover = page.getByTestId('notifications-popover')
+  await expect(popover).toBeVisible()
+  const animation = await popover.evaluate(element => getComputedStyle(element).animationName)
+  expect(animation).toBe('none')
+  await page.keyboard.press('Escape')
+  await toggle.click()
+  await expect(page.locator('html')).toHaveAttribute('data-decorative-motion', 'full')
+  await page.getByTestId('settings-discard').click()
+  await expect(page.locator('html')).toHaveAttribute('data-decorative-motion', 'none')
+  writeFileSync(path.join(ARTIFACT_ROOT, 'decorative-animation-preference.json'), JSON.stringify({ classification: 'source browser local preference and actual computed CSS; no installed proof', savedAndReloaded: true, animation, discardRestored: true }, null, 2))
+  expectClean(signals)
+})
+
+test('Timestamp preferences persist and preserve application dates at narrow width', async ({ page }) => {
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/settings?group=advanced`)
+  const installed = page.locator('#setting-app-created time')
+  await expect(installed).toBeVisible()
+  const canonical = await installed.getAttribute('datetime')
+  expect(canonical).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  const observations: Record<string, unknown>[] = []
+  for (const mode of ['absolute', 'both']) {
+    await page.goto(`${service.url}/#/settings/general`)
+    await page.locator('#setting-date-time-format select').selectOption(mode)
+    await page.getByTestId('settings-save').click()
+    await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('stateport.http.global-ui-settings.v1') ?? '{}').general?.dateTimeFormat)).toBe(mode)
+    await reloadWithReadObservation(page, signals)
+    await expect(page.locator('#setting-date-time-format select')).toHaveValue(mode)
+    await page.goto(`${service.url}/#/app/${PROJECT_ID}/settings?group=advanced`)
+    await expect(installed).toHaveAttribute('datetime', canonical!)
+    if (mode === 'both') await expect(installed).toContainText(' · ')
+    else await expect(installed).not.toContainText(' · ')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(installed).toBeVisible()
+    const geometry = await installed.evaluate(element => {
+      const box = element.getBoundingClientRect()
+      return { left: box.left, right: box.right, viewport: innerWidth, whiteSpace: getComputedStyle(element).whiteSpace, text: element.textContent }
+    })
+    expect(geometry.left).toBeGreaterThanOrEqual(0)
+    expect(geometry.right).toBeLessThanOrEqual(geometry.viewport)
+    expect(geometry.whiteSpace).toBe('normal')
+    observations.push({ mode, canonical, ...geometry })
+    await page.screenshot({ path: path.join(ARTIFACT_ROOT, `timestamp-${mode}-narrow.png`) })
+    await page.setViewportSize({ width: 1440, height: 900 })
+  }
+  writeFileSync(path.join(ARTIFACT_ROOT, 'timestamp-preferences.json'), JSON.stringify({ classification: 'source browser; real local settings save and reload, unchanged canonical application date; installed unrun', observations }, null, 2))
+  expectClean(signals)
+})
+
+test('Bare startup honors saved reopening and landing choice while preserving deep links', async ({ page }) => {
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, '/settings/general')
+  const toggle = page.locator('#setting-reopen-app').getByRole('switch')
+  await expect(toggle).toBeVisible()
+  const save = async () => {
+    await page.getByTestId('settings-save').click()
+    await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+  }
+  // Enable explicitly even if earlier tests used another service preference.
+  if (await toggle.getAttribute('aria-checked') !== 'true') {
+    await toggle.click()
+    await save()
+  }
+  await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/files`)
+  await expect(page.getByTestId('files-stub')).toBeVisible()
+  // Replace only the address, then perform one actual bare-root reload.
+  await page.evaluate(url => window.history.replaceState(null, '', url), service.url)
+  await reloadWithReadObservation(page, signals)
+  await expect(page).toHaveURL(new RegExp(`/app/${PROJECT_ID}$`))
+  await expect(page.getByTestId('app-overview-stub')).toBeVisible()
+  await page.goto(`${service.url}/#/catalog`)
+  await expect(page.getByTestId('package-list')).toBeVisible()
+  await expect(page).toHaveURL(/#\/catalog$/)
+
+  await page.goto(`${service.url}/#/settings/general`)
+  await toggle.click()
+  await page.locator('#setting-landing-page select').selectOption('last_workspace')
+  await save()
+  await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/files`)
+  await expect(page.getByTestId('files-stub')).toBeVisible()
+  // Replace only the address, then perform one actual bare-root reload.
+  await page.evaluate(url => window.history.replaceState(null, '', url), service.url)
+  await reloadWithReadObservation(page, signals)
+  await expect(page).toHaveURL(new RegExp(`/app/${PROJECT_ID}/workbench/files$`))
+  await expect(page.getByTestId('files-stub')).toBeVisible()
+
+  await page.goto(`${service.url}/#/settings/general`)
+  await page.locator('#setting-landing-page select').selectOption('applications')
+  await save()
+  await page.goto(`${service.url}/#/app/${PROJECT_ID}`)
+  await expect(page.getByTestId('app-overview-stub')).toBeVisible()
+  // Replace only the address, then perform one actual bare-root reload.
+  await page.evaluate(url => window.history.replaceState(null, '', url), service.url)
+  await reloadWithReadObservation(page, signals)
+  await expect(page).toHaveURL(/#\/applications$/)
+  writeFileSync(path.join(ARTIFACT_ROOT, 'startup-preferences.json'), JSON.stringify({ classification: 'source browser local preferences and full navigation reload; installed unrun', reopenOverview: true, explicitDeepLinkPreserved: true, lastWorkspaceFiles: true, applicationsFallback: true }, null, 2))
+  expectClean(signals)
 })
 
 test('Settings retries one expired session, rolls back exact backend state, and keeps app preferences local', async ({ page }) => {
@@ -1266,6 +1494,7 @@ test('Notifications mark real attention read without claiming the condition was 
   const popover = page.getByTestId('notifications-popover')
   await expect(popover).toBeVisible()
   const notification = popover
+    .locator(`[data-instance-id="${PROJECT_ID}"]`)
     .getByRole('button')
     .filter({ hasText: 'No verified backup recorded' })
     .first()
@@ -1393,6 +1622,16 @@ test('Notifications mark real attention read without claiming the condition was 
       .filter({ hasText: 'No verified backup recorded' })
       .first(),
   ).toBeVisible()
+  const scopedAgain = page.getByTestId('notifications-popover')
+    .locator(`[data-instance-id="${owningInstanceId}"]`).getByRole('button').filter({ hasText: 'No verified backup recorded' })
+  const repeatedResponse = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === readPath)
+  await scopedAgain.click()
+  const repeated = await repeatedResponse
+  expect(repeated.status()).toBe(200)
+  expect(repeated.request().postDataJSON()).toEqual({ expectedVersion: readPayload.result.attention.version })
+  const repeatedPayload = await repeated.json()
+  expect(repeatedPayload.result.attention.version).toBe(readPayload.result.attention.version + 1)
+  writeFileSync(path.join(ARTIFACT_ROOT, 'activity-scoped-repeat.json'), JSON.stringify({ classification: 'source browser/real HTTP attention effect; no provider execution', owningInstanceId, first: readPayload, repeated: repeatedPayload }, null, 2))
   await page.screenshot({
     path: path.join(ARTIFACT_ROOT, 'activity-read-condition-unresolved.png'),
     fullPage: true,
@@ -1405,7 +1644,7 @@ test('Notifications mark real attention read without claiming the condition was 
     ...(matrix.surfaces as Record<string, unknown>),
     activity: {
       status: 'live-tested',
-      notificationRead: 'version-bound and receipted',
+      notificationRead: 'application-scoped repeated version-bound transitions and receipts',
       staleVersion: '409 fail-closed',
       underlyingCondition: 'still no_backup after read',
       acknowledged: false,
@@ -3097,6 +3336,12 @@ test('ProjectState Terminal uses the exact live PTY protocol and preserves canon
   const signals = browserSignals(page)
   const socketSignals = terminalSocketSignals(page)
   await installTerminalConstructorProbe(page)
+  await openApplicationRoute(page, '/settings/terminal')
+  const ligaturesToggle = page.locator('#setting-terminal-ligatures').getByRole('switch')
+  await expect(ligaturesToggle).toHaveAttribute('aria-checked', 'false')
+  await ligaturesToggle.click()
+  await page.getByTestId('settings-save').click()
+  await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
 
   // StudyState has no Workbench or terminal capability. A direct hash route
   // must fail closed at the application overview without preparing a ticket.
@@ -3273,7 +3518,7 @@ test('ProjectState Terminal uses the exact live PTY protocol and preserves canon
     page
       .getByTestId('terminal-find-bar')
       .locator('span[aria-live="polite"]'),
-  ).toHaveText(/Match|\d+\/[1-9]\d*|[1-9]\d* matches?/)
+  ).toHaveText(/Match|\d+\/[1-9]\d*|[1-9]\d* match(?:es)?/)
   await page.getByRole('button', { name: 'Close find' }).click()
 
   const resizeCountBeforeFocus = parsedTerminalControls(
@@ -3326,6 +3571,58 @@ test('ProjectState Terminal uses the exact live PTY protocol and preserves canon
     path: path.join(ARTIFACT_ROOT, 'terminal-live-pty.png'),
     fullPage: true,
   })
+
+  await terminalInput.focus()
+  await page.keyboard.type("printf 'STATEPORT_LIGATURES -> => == != ===\\n'")
+  await page.keyboard.press('Enter')
+  await expect.poll(() => socketSignals.frames.filter(frame => frame.direction === 'received' && frame.binary).map(frame => frame.text).join('')).toContain('STATEPORT_LIGATURES -> => == != ===')
+  await page.evaluate(() => document.fonts.ready)
+  const terminalElement = page.getByTestId('terminal-canvas').locator('.xterm')
+  await expect(terminalElement).toHaveCSS('font-feature-settings', /"calt"(?: 1)?, "liga"(?: 1)?/)
+  const readLigatureRows = () => terminalElement.evaluate(element => ({
+    fontFamily: getComputedStyle(element.querySelector('.xterm-rows')!).fontFamily,
+    loadedFonts: [...document.fonts].filter(face => face.status === 'loaded').map(face => face.family),
+    rows: [...element.querySelectorAll('.xterm-rows > div')]
+      .filter(row => row.textContent?.replace(/\u00a0/g, ' ').trim() === 'STATEPORT_LIGATURES -> => == != ===')
+      .map(row => ({ text: row.textContent?.replace(/\u00a0/g, ' ').trim(), cursor: row.querySelector('.xterm-cursor') !== null, spans: [...row.querySelectorAll(':scope > span')].map(span => span.textContent) })),
+  }))
+  await expect.poll(async () => (await readLigatureRows()).rows.some(row => ['->', '=>', '==', '!=', '==='].every(sequence => row.spans.includes(sequence)))).toBe(true)
+  const ligaturesOn = await readLigatureRows()
+  expect(ligaturesOn.rows.every(row => !row.cursor)).toBe(true)
+  expect(ligaturesOn.loadedFonts.some(font => font.includes('JetBrains Mono'))).toBe(true)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'terminal-ligatures-on.png'), fullPage: true })
+  await page.goto(`${service.url}/#/settings/terminal`)
+  await expect(ligaturesToggle).toHaveAttribute('aria-checked', 'true')
+  await ligaturesToggle.click()
+  await page.getByTestId('settings-save').click()
+  await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+  await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/terminal`)
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  await expect(terminalElement).toHaveCSS('font-feature-settings', '"calt" 0, "liga" 0')
+  const ligaturesOff = await readLigatureRows()
+  expect(ligaturesOff.rows.map(row => row.text)).toEqual(ligaturesOn.rows.map(row => row.text))
+  const readTerminalGeometry = () => page.getByTestId('terminal-canvas').evaluate(element => ({
+    viewport: innerWidth, document: document.documentElement.scrollWidth,
+    canvas: element.getBoundingClientRect().toJSON(),
+    screen: element.querySelector('.xterm-screen')?.getBoundingClientRect().toJSON(),
+  }))
+  const geometryBeforeFit = await readTerminalGeometry()
+  writeFileSync(path.join(ARTIFACT_ROOT, 'terminal-geometry-before.json'), JSON.stringify(geometryBeforeFit, null, 2))
+  await expect.poll(async () => {
+    const box = await readTerminalGeometry()
+    return box.document <= box.viewport && box.canvas.right <= box.viewport && (!box.screen || box.screen.right <= box.canvas.right)
+  }).toBe(true)
+  const geometryAfterFit = await readTerminalGeometry()
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'terminal-ligatures-off.png'), fullPage: true })
+  await page.getByTestId('terminal-overflow').click()
+  const exported = page.waitForEvent('download')
+  await page.getByRole('menuitem', { name: 'Export session', exact: true }).click()
+  const transcript = await exported
+  const transcriptPath = path.join(ARTIFACT_ROOT, 'terminal-ligatures-transcript.txt')
+  await transcript.saveAs(transcriptPath)
+  expect(readFileSync(transcriptPath, 'utf8')).toContain('STATEPORT_LIGATURES -> => == != ===')
+  writeFileSync(path.join(ARTIFACT_ROOT, 'terminal-ligatures.json'), JSON.stringify({ classification: 'source browser actual xterm joined spans/font/local PTY and exact text export; installed capsule unrun', on: ligaturesOn, off: ligaturesOff, geometryBeforeFit, geometryAfterFit, rawExportPreserved: true, sockets: socketSignals.urls.length }, null, 2))
+  expect(socketSignals.urls).toHaveLength(1)
 
   await page.getByTestId('terminal-end').click()
   await expect(page.getByTestId('terminal-ended-bar')).toContainText(
@@ -3578,16 +3875,41 @@ test('Files lists, reads, writes, and refuses escape and stale commit in the dis
       }),
     })
     const body = await response.json()
-    await fetch(`${prefix}/discardWrite`, {
+    const discardResponse = await fetch(`${prefix}/discardWrite`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ preparedWriteId }),
     })
-    return { status: response.status, body }
+    const discarded = await discardResponse.json()
+    return { status: response.status, body, discardStatus: discardResponse.status, discarded }
   }, { instanceId: PROJECT_ID, ...prepared })
   expect(conflict.status).toBe(409)
   expect(conflict.body.error.code).toBe('file_workspace_refused')
+  expect(conflict.discardStatus).toBe(200)
+  expect(conflict.discarded.result).toMatchObject({
+    operation: 'discardWrite', preparedWriteId: prepared.preparedWriteId, discarded: true,
+  })
   expect(readFileSync(path.join(projectRoot, 'src', 'main.py'), 'utf8')).toBe('answer = 99\n')
+
+  // Recover through the real editor after its cached revision lost a race to
+  // an external writer. Reload must replace the reviewed draft without writing
+  // it back over the newer file, and the clean disk value survives navigation.
+  await page.getByTestId('tree-row-src/main.py').click()
+  await editor.click()
+  await page.keyboard.press('Control+a')
+  await page.keyboard.type('answer = 100')
+  await page.keyboard.press('Control+s')
+  await page.getByTestId('confirm-save').click()
+  await expect(page.getByTestId('conflict-src/main.py')).toBeVisible()
+  await page.getByRole('button', { name: 'Reload disk version', exact: true }).click()
+  await expect(editor).toContainText('answer = 99')
+  await expect(page.getByTestId('editor-status-strip')).not.toContainText('Unsaved changes')
+  expect(readFileSync(path.join(projectRoot, 'src', 'main.py'), 'utf8')).toBe('answer = 99\n')
+  await page.keyboard.press('Escape')
+  await page.reload()
+  await page.getByTestId('tree-row-src').click()
+  await page.getByTestId('tree-row-src/main.py').click()
+  await expect(editor).toContainText('answer = 99')
 
   expectRequest(signals, 'GET', `/v1/instances/${PROJECT_ID}/file-workspace/listDirectory`)
   expectRequest(signals, 'GET', `/v1/instances/${PROJECT_ID}/file-workspace/readFile`)
@@ -3614,6 +3936,11 @@ test('Files lists, reads, writes, and refuses escape and stale commit in the dis
       method: 'POST',
       path: `/v1/instances/${PROJECT_ID}/file-workspace/commitWrite`,
     },
+    {
+      status: 409,
+      method: 'POST',
+      path: `/v1/instances/${PROJECT_ID}/file-workspace/prepareWrite`,
+    },
   ])
 
   matrix.surfaces = {
@@ -3631,8 +3958,1469 @@ test('Files lists, reads, writes, and refuses escape and stale commit in the dis
         'exact indexed save and delete receipts opened with raw broker evidence',
       pathEscape: 'refused',
       staleCommit: 'refused without overwriting externally changed content',
+      conflictReload: 'reviewed draft replaced by real disk read; file unchanged and retained after reload',
       receiptVerification: 'mock-only control absent from production',
       scope: 'disposable fixture only',
     },
   }
+})
+
+test('Idle shell records bounded polling and browser resource observations', async ({ page }) => {
+  await openApplicationRoute(page, '/applications')
+  await expect(page.getByTestId('applications-page')).toBeVisible()
+  // Separate initial hydration from steady idle traffic. No requests are mocked.
+  await page.waitForTimeout(2_000)
+  const counts: Record<string, number> = {}
+  page.on('request', request => {
+    if (request.method() !== 'GET') return
+    const pathname = new URL(request.url()).pathname
+    if (pathname.startsWith('/v1/')) counts[pathname] = (counts[pathname] ?? 0) + 1
+  })
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Performance.enable')
+  const before = await cdp.send('Performance.getMetrics')
+  const startedAt = new Date().toISOString()
+  await page.waitForTimeout(65_000)
+  const after = await cdp.send('Performance.getMetrics')
+  writeFileSync(path.join(ARTIFACT_ROOT, 'idle-shell-observation.json'), JSON.stringify({
+    environment: 'Linux source AppServer, disposable fixture, isolated Chromium; not installed WSL or whole-stack qualification',
+    startedAt, durationMs: 65_000, getRequests: counts,
+    browserMetricsBefore: before.metrics, browserMetricsAfter: after.metrics,
+  }, null, 2) + '\n')
+  await cdp.detach()
+  expect(counts['/v1/status']).toBeGreaterThan(0)
+})
+
+test('Manual application ordering persists across reload without changing application data', async ({ page }) => {
+  const signals = browserSignals(page)
+  const beforeSource = [projectRoot, studyRoot].map(root => execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: root, encoding: 'utf8' }))
+  await openApplicationRoute(page, '/applications')
+  await page.getByRole('button', { name: /Sort:/ }).click()
+  await page.getByRole('menuitemradio', { name: 'Manual', exact: true }).click()
+  const storedOrder = () => page.evaluate(() => JSON.parse(localStorage.getItem('stateport.applications.v1')!).state.unpinnedOrder as string[])
+  await expect.poll(async () => (await storedOrder()).length).toBeGreaterThanOrEqual(2)
+  const before = await storedOrder()
+  const movedId = before[1]!
+  const expected = [movedId, before[0]!, ...before.slice(2)]
+  const row = page.getByTestId(`instance-row-${movedId}`)
+  await row.focus()
+  await page.keyboard.press('Alt+ArrowUp')
+  await expect.poll(storedOrder).toEqual(expected)
+  const renderedOrder = () => page.getByTestId('all-applications-section').locator('[data-testid^="instance-row-"]').evaluateAll(elements => elements.map(element => element.getAttribute('data-testid')!.slice('instance-row-'.length)))
+  await expect.poll(renderedOrder).toEqual(expected)
+  await reloadWithReadObservation(page, signals)
+  await expect.poll(renderedOrder).toEqual(expected)
+  await expect(page.getByRole('button', { name: /Sort: Manual/ })).toBeVisible()
+  const index = (await (await page.request.get(`${service.url}/v1/instances`)).json()).result.instances
+  const movedName = index.find((instance: { instanceId: string }) => instance.instanceId === movedId).name as string
+  await page.getByTestId('filter-input').fill(movedName)
+  await expect(page.getByText('Clear the filter to reorder applications. Hidden applications keep their positions.')).toBeVisible()
+  await row.focus()
+  await page.keyboard.press('Alt+ArrowDown')
+  expect(await storedOrder()).toEqual(expected)
+  await page.getByRole('button', { name: 'Clear filter', exact: true }).click()
+  await expect.poll(renderedOrder).toEqual(expected)
+  expect([projectRoot, studyRoot].map(root => execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: root, encoding: 'utf8' }))).toEqual(beforeSource)
+  writeFileSync(path.join(ARTIFACT_ROOT, 'application-manual-order.json'), JSON.stringify({ classification: 'source browser local preference; no catalog/application mutation', before, after: expected, reloaded: await storedOrder(), filterRefused: true, sourceUnchanged: true }, null, 2))
+  expectClean(signals)
+})
+
+test('Application rename persists through reload and exposes the exact durable receipt', async ({ page }) => {
+  await openApplicationRoute(page, '/applications')
+  const index = await (await page.request.get(`${service.url}/v1/instances`)).json()
+  const originalName = index.result.instances.find((instance: { instanceId: string }) => instance.instanceId === PROJECT_ID).name as string
+  const nextName = 'Renamed source project'
+  const row = page.getByTestId(`instance-row-${PROJECT_ID}`)
+  await row.getByRole('button', { name: `Actions for ${originalName}`, exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Rename…', exact: true }).click()
+  await page.getByTestId('rename-input').fill(nextName)
+  const changed = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith(`/v1/instances/${PROJECT_ID}/rename`))
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  const response = await changed
+  expect(response.status()).toBe(200)
+  const result = (await response.json()).result
+  expect(result.receipt).toMatchObject({ instanceId: PROJECT_ID, oldName: originalName, newName: nextName, actorId: 'local-user' })
+  await expect(page.getByTestId('rename-dialog')).toHaveCount(0)
+  await page.reload()
+  await expect(row).toContainText(nextName)
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/receipts/${result.receipt.receiptId}`)
+  await expect(page.getByTestId('receipt-detail')).toBeVisible()
+  await expect(page.getByTestId('receipt-detail')).toContainText('Application renamed')
+  await page.getByRole('button', { name: 'Raw JSON', exact: true }).click()
+  await expect(page.getByTestId('receipt-raw-json')).toContainText(result.receipt.receiptId)
+  await expect(page.getByTestId('receipt-raw-json')).toContainText(originalName)
+  await expect(page.getByTestId('receipt-raw-json')).toContainText(nextName)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'application-rename-receipt.png') })
+  await openApplicationRoute(page, '/applications')
+  await row.getByRole('button', { name: `Actions for ${nextName}`, exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Rename…', exact: true }).click()
+  await page.getByTestId('rename-input').fill(originalName)
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  await expect(page.getByTestId('rename-dialog')).toHaveCount(0)
+  await expect(row).toContainText(originalName)
+})
+
+
+async function applicationWorkspaceJourney(page: Page, actual: boolean) {
+  test.skip(process.env.STATEPORT_UI_REAL_WORKSPACES !== '1', 'Requires explicitly booked real Podman fixture mode')
+  // Actual mode adds a third template, source verification and removed-volume recovery.
+  test.setTimeout(actual ? 300_000 : 180_000)
+  const fixturePath = path.join(disposableRoot, 'xdg', 'data', 'stateport', 'ui-workspace-fixture.json')
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+    manifest: string; daemonRoot: string; governedScope: string; workloads: Record<string, string>
+    actualTemplates?: { instanceId: string; name: string; adapterId: string; sourceRoot: string; managedRoot: string; sourceCommit: string; installReceiptId: string; sourceReview: { reviewDigest: string; sourceInventory: { path: string; mode: string; contentDigest: string }[] } }[]
+  }
+  const templates = fixture.actualTemplates
+  expect(Boolean(templates)).toBe(actual)
+  const projectId = actual ? templates![0]!.instanceId : PROJECT_ID
+  const studyId = actual ? templates![1]!.instanceId : STUDY_ID
+  const genericId = actual ? templates![2]!.instanceId : ''
+  const projectPath = actual ? templates![0]!.managedRoot : projectRoot
+  const studyPath = actual ? templates![1]!.managedRoot : studyRoot
+  const roots = actual ? templates!.flatMap(row => [row.sourceRoot, row.managedRoot]) : [projectPath, studyPath]
+  const sourceState = (root: string) => ({
+    status: execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: root, encoding: 'utf8' }),
+    diff: execFileSync('git', ['diff', 'HEAD', '--'], { cwd: root, encoding: 'utf8' }),
+    commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }),
+    bytes: execFileSync(PYTHON, ['-c', 'import hashlib,pathlib,sys,json; r=pathlib.Path(sys.argv[1]); print(json.dumps([(str(p.relative_to(r)),p.stat().st_mode & 4095,hashlib.sha256(p.read_bytes()).hexdigest()) for p in sorted(r.rglob("*")) if p.is_file() and ".git" not in p.relative_to(r).parts]))', root], { encoding: 'utf8' }),
+  })
+  const sourceBefore = roots.map(sourceState)
+  const a = fixture.workloads[projectId]!
+  const b = fixture.workloads[studyId]!
+  const c = actual ? fixture.workloads[genericId]! : ''
+  const workspaceIds = actual ? templates!.map(row => row.instanceId) : [projectId, studyId]
+  const workspaceWorkloads = actual ? [a, b, c] : [a, b]
+  const markerNames = actual ? ['ui-marker', 'ui-study-marker', 'ui-generic-marker'] : ['ui-marker', 'ui-study-marker']
+  const ledger = (id: string) => JSON.parse(readFileSync(path.join(fixture.daemonRoot, 'state', 'workloads', `${id}.json`), 'utf8'))
+  const containment: unknown[] = []
+  const verifyContainment = (id: string) => {
+    const proof = execFileSync(PYTHON, ['-c', 'import json,sys;sys.path.insert(0,sys.argv[1]);from test_execution_host_daemon import _governed_container_membership;print(json.dumps(_governed_container_membership(sys.argv[2],sys.argv[3])))', path.join(ROOT, 'scripts'), ledger(id).containerId, fixture.governedScope], { env: { ...process.env, PYTHONPATH }, encoding: 'utf8', timeout: 20_000 })
+    containment.push(JSON.parse(proof))
+    writeFileSync(path.join(ARTIFACT_ROOT, 'workspace-cgroups.json'), JSON.stringify(containment, null, 2))
+  }
+  const openRuntime = () => openApplicationRoute(page, '/execution-host')
+  const openWorkspaceTerminal = async (instanceId: string) => {
+    await openRuntime()
+    const name = actual ? templates!.find(row => row.instanceId === instanceId)!.name : instanceId === projectId ? 'Live Core Project' : 'Live Core Study'
+    const profile = page.getByRole('region', { name: 'Application workspaces' }).locator('div').filter({ has: page.getByText(name, { exact: true }) }).first()
+    const [targetResponse] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${instanceId}/terminal/target` && r.request().method() === 'GET'),
+      profile.getByRole('link', { name: 'Open workspace terminal', exact: true }).click(),
+    ])
+    expect(targetResponse.status()).toBe(200)
+    expect((await targetResponse.json()).result.target.targetClass).toBe('capsule')
+  }
+  const connectVisibleTerminal = async () => {
+    // The header and neutral start pane both expose terminal-connect. Scope to
+    // the state pane so the click remains deterministic in the real UI.
+    const start = page.getByTestId('terminal-start').getByTestId('terminal-connect')
+    if (await start.isVisible()) {
+      await start.click()
+      return
+    }
+    const lost = page.getByTestId('terminal-lost').getByTestId('terminal-connect')
+    if (await lost.isVisible()) {
+      await lost.click()
+      return
+    }
+    const ended = page.getByTestId('terminal-ended-bar').getByTestId('terminal-reconnect')
+    if (await ended.isVisible()) {
+      await ended.click()
+      return
+    }
+    await expect(page.locator('header').getByTestId('terminal-connect')).toBeVisible()
+    await page.locator('header').getByTestId('terminal-connect').click()
+  }
+
+  await openRuntime()
+  if (actual && process.env.STATEPORT_UI_NO_DEFAULT_GRANT === '1') {
+    await expect(page.getByText(/Development workspace authority unavailable: default_grant_not_configured\./)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Create development workspace', exact: true })).toBeDisabled()
+  }
+  for (const name of (actual ? templates!.map(row => row.name) : ['Live Core Project', 'Live Core Study'])) {
+    const profile = page.getByRole('region', { name: 'Application workspaces' }).locator('div').filter({ has: page.getByText(name, { exact: true }) }).first()
+    await profile.getByRole('button', { name: 'Create application workspace', exact: true }).click()
+    if (actual) {
+      const reviewed = templates!.find(row => row.name === name)!
+      const dialog = page.getByRole('alertdialog')
+      await expect(dialog).toContainText(reviewed.sourceReview.reviewDigest)
+      await dialog.getByRole('button', { name: 'Confirm approved source', exact: true }).click()
+    }
+  }
+  for (const id of workspaceWorkloads) {
+    await page.getByRole('article', { name: `Workload ${id}`, exact: true }).getByRole('button', { name: 'Start', exact: true }).click()
+    await expect.poll(() => ledger(id).state).toBe('running')
+    verifyContainment(id)
+  }
+  const socketSignals = terminalSocketSignals(page)
+  let genericTargetId: string | undefined
+  let genericSessionId: string | undefined
+  let recoveredTargetId: string | undefined
+  const workspaceLogMarker = 'STATEPORT_WORKSPACE_C_LOG_MARKER_9d6c'
+  let workspaceLogsVerified = false
+  let workspaceCancelVerified = false
+  const proveSource = async (index: number) => {
+    if (!actual) return
+    const inventory = templates![index]!.sourceReview.sourceInventory
+    const expectedDigest = execFileSync(PYTHON, ['-c', 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(sys.stdin),sort_keys=True,separators=(",",":")).encode()).hexdigest())'], { input: JSON.stringify(inventory), encoding: 'utf8' }).trim()
+    const script = `import hashlib,pathlib,json; root=pathlib.Path('/workspace'); excluded=${JSON.stringify(markerNames)}; rows=[dict(path=str(p.relative_to(root)),mode=('100755' if p.stat().st_mode & 511 == 493 else '100644' if p.stat().st_mode & 511 == 420 else 'invalid'),contentDigest='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()) for p in sorted(root.rglob('*'),key=lambda p:str(p.relative_to(root))) if p.is_file() and str(p.relative_to(root)) not in excluded]; print('APPROVED_'+'SOURCE_'+hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest())`
+    const quoted = "'" + script.replaceAll("'", "'\\''") + "'"
+    socketSignals.frames.length = 0
+    await page.getByTestId('terminal-canvas').locator('.xterm-helper-textarea').focus()
+    await page.keyboard.type(`python3 -c ${quoted}`)
+    await page.keyboard.press('Enter')
+    await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain(`APPROVED_SOURCE_${expectedDigest}`)
+  }
+  await openWorkspaceTerminal(projectId)
+  const [prepare] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${projectId}/terminal/prepare` && r.request().method() === 'POST'),
+    connectVisibleTerminal(),
+  ])
+  const initialPreparation = (await prepare.json()).result
+  expect(initialPreparation.target.targetClass).toBe('capsule')
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  await proveSource(0)
+  const input = page.getByTestId('terminal-canvas').locator('.xterm-helper-textarea')
+  await input.focus()
+  await page.keyboard.type("printf capsule-durable > /workspace/ui-marker; printf 'CAPSULE_%s\\n' READY")
+  await page.keyboard.press('Enter')
+  await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('CAPSULE_READY')
+  await openWorkspaceTerminal(studyId)
+  const [studyPrepare] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${studyId}/terminal/prepare` && r.request().method() === 'POST'),
+    connectVisibleTerminal(),
+  ])
+  expect(studyPrepare.status()).toBe(200)
+  const studyPreparation = (await studyPrepare.json()).result
+  expect(studyPreparation.target.targetClass).toBe('capsule')
+  expect(studyPreparation.target.targetId).not.toBe(initialPreparation.target.targetId)
+  expect(studyPreparation.sessionId).not.toBe(initialPreparation.sessionId)
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  await proveSource(1)
+  await input.focus()
+  socketSignals.frames.length = 0
+  await page.keyboard.type("test ! -e /workspace/ui-marker && printf study-durable > /workspace/ui-study-marker && printf 'STUDY_%s\\n' READY")
+  await page.keyboard.press('Enter')
+  await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('STUDY_READY')
+  if (actual) {
+    await openWorkspaceTerminal(genericId)
+    const [genericPrepare] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${genericId}/terminal/prepare` && r.request().method() === 'POST'),
+      connectVisibleTerminal(),
+    ])
+    expect(genericPrepare.status()).toBe(200)
+    const genericPreparation = (await genericPrepare.json()).result
+    genericTargetId = genericPreparation.target.targetId
+    genericSessionId = genericPreparation.sessionId
+    expect(genericPreparation.target.targetClass).toBe('capsule')
+    expect(genericPreparation.target.targetId).not.toBe(initialPreparation.target.targetId)
+    expect(genericPreparation.target.targetId).not.toBe(studyPreparation.target.targetId)
+    expect(genericPreparation.sessionId).not.toBe(initialPreparation.sessionId)
+    expect(genericPreparation.sessionId).not.toBe(studyPreparation.sessionId)
+    await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+    await proveSource(2)
+    await input.focus()
+    socketSignals.frames.length = 0
+    await page.keyboard.type("printf generic-durable > /workspace/ui-generic-marker; printf 'GENERIC_%s\\n' READY")
+    await page.keyboard.press('Enter')
+    await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('GENERIC_READY')
+    // The pinned workspace supervisor is PID 1 and the terminal shell has
+    // the same sealed UID. Write one bounded marker to the real container
+    // stdout so Logs proves engine output rather than an empty response.
+    await page.keyboard.type(`printf '${workspaceLogMarker}\\n' > /proc/1/fd/1 && printf 'LOG_MARKER_%s\\n' WRITTEN`)
+    await page.keyboard.press('Enter')
+    await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('LOG_MARKER_WRITTEN')
+    await openRuntime()
+    const genericArticle = page.getByRole('article', { name: `Workload ${c}`, exact: true })
+    const [workspaceLogs] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === `/v1/execution-host/workloads/${c}/logs` && response.request().method() === 'GET'),
+      genericArticle.getByRole('button', { name: 'Logs', exact: true }).click(),
+    ])
+    expect(workspaceLogs.status()).toBe(200)
+    const workspaceLogsEnvelope = (await workspaceLogs.json()).result as {
+      accepted: boolean
+      result: { workloadId: string; state: string; output: string; byteCount: number; outputByteBound: number; truncated: boolean }
+    }
+    expect(workspaceLogsEnvelope.accepted).toBe(true)
+    const workspaceLogsPayload = workspaceLogsEnvelope.result
+    expect(workspaceLogsPayload).toEqual(expect.objectContaining({ workloadId: c, state: 'running' }))
+    expect(workspaceLogsPayload.outputByteBound).toBeGreaterThan(0)
+    expect(workspaceLogsPayload.outputByteBound).toBeLessThanOrEqual(256 * 1024)
+    expect(workspaceLogsPayload.output).toContain(workspaceLogMarker)
+    expect(typeof workspaceLogsPayload.output).toBe('string')
+    expect(Number.isSafeInteger(workspaceLogsPayload.byteCount)).toBe(true)
+    expect(workspaceLogsPayload.byteCount).toBeLessThanOrEqual(workspaceLogsPayload.outputByteBound)
+    expect(typeof workspaceLogsPayload.truncated).toBe('boolean')
+    const workspaceLogsRegion = page.getByRole('region', { name: `Logs for ${c}` })
+    await expect(workspaceLogsRegion).toBeVisible()
+    await expect(workspaceLogsRegion).toContainText(workspaceLogMarker)
+    workspaceLogsVerified = true
+  }
+  await openRuntime()
+  await page.getByRole('article', { name: `Workload ${a}`, exact: true }).getByRole('button', { name: 'Stop', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+  await expect.poll(() => ledger(a).state).toBe('stopped')
+  expect(ledger(b).state).toBe('running')
+  await page.getByRole('article', { name: `Workload ${a}`, exact: true }).getByRole('button', { name: 'Start', exact: true }).click()
+  await expect.poll(() => ledger(a).state).toBe('running')
+  await openWorkspaceTerminal(projectId)
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Session ended')
+  const reconnect = page.getByTestId('terminal-ended-bar').getByTestId('terminal-reconnect')
+  await expect(reconnect).toHaveText('Reconnect')
+  const [reprepared] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${projectId}/terminal/prepare` && r.request().method() === 'POST'),
+    reconnect.click(),
+  ])
+  expect(reprepared.status()).toBe(200)
+  const freshPreparation = (await reprepared.json()).result
+  expect(freshPreparation.target.targetClass).toBe('capsule')
+  expect(freshPreparation.target.targetId).toBe(initialPreparation.target.targetId)
+  expect(freshPreparation.sessionId).not.toBe(initialPreparation.sessionId)
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  await proveSource(0)
+  await input.focus()
+  socketSignals.frames.length = 0
+  await page.keyboard.type("test ! -e /workspace/ui-study-marker && cat /workspace/ui-marker; printf '\\n'")
+  await page.keyboard.press('Enter')
+  await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('capsule-durable')
+  // Operator fixture revokes only A while a capsule session exists; browser cannot write this manifest.
+  const manifest = JSON.parse(readFileSync(fixture.manifest, 'utf8'))
+  const originalBindings = [...manifest.bindings]
+  manifest.bindings = manifest.bindings.filter((row: { workload: { workloadId: string } }) => row.workload.workloadId !== a)
+  writeFileSync(fixture.manifest, JSON.stringify(manifest))
+  const socketCountBeforeRevocation = socketSignals.urls.length
+  const [refusal] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${projectId}/terminal/target` && r.request().method() === 'GET'),
+    page.reload(),
+  ])
+  expect(refusal.status()).toBe(403)
+  expect(socketSignals.urls).toHaveLength(socketCountBeforeRevocation)
+  await expect(page.getByTestId('terminal-canvas')).toHaveCount(0)
+  if (!actual) expect(readFileSync(path.join(projectPath, 'state', 'PROJECT.yaml'), 'utf8')).toBe(projectCanonicalBefore)
+  expect(existsSync(path.join(projectPath, 'ui-marker'))).toBe(false)
+  // Restore exact authority to remove A through its normal UI; B remains independently running.
+  manifest.bindings = originalBindings
+  writeFileSync(fixture.manifest, JSON.stringify(manifest))
+  await openRuntime()
+  await page.getByRole('article', { name: `Workload ${a}`, exact: true }).getByRole('button', { name: 'Remove container', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+  await expect.poll(() => ledger(a).state).toBe('removed')
+  expect(ledger(b).state).toBe('running')
+  await openWorkspaceTerminal(studyId)
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Session ended')
+  const [studyReprepare] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${studyId}/terminal/prepare` && r.request().method() === 'POST'),
+    connectVisibleTerminal(),
+  ])
+  expect(studyReprepare.status()).toBe(200)
+  const freshStudyPreparation = (await studyReprepare.json()).result
+  expect(freshStudyPreparation.target.targetClass).toBe('capsule')
+  expect(freshStudyPreparation.target.targetId).toBe(studyPreparation.target.targetId)
+  expect(freshStudyPreparation.sessionId).not.toBe(studyPreparation.sessionId)
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  await proveSource(1)
+  await input.focus()
+  socketSignals.frames.length = 0
+  await page.keyboard.type("test ! -e /workspace/ui-marker && cat /workspace/ui-study-marker; printf '\\n'")
+  await page.keyboard.press('Enter')
+  await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('study-durable')
+  if (actual) {
+    expect(ledger(c).state).toBe('running')
+    await openWorkspaceTerminal(genericId)
+    await expect(page.getByTestId('terminal-state-label')).toHaveText('Session ended')
+    // A full-page revocation reload restores this tab without its old buffer.
+    // The lost-session pane offers Connect; the helper also covers ended tabs.
+    const [genericReprepare] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${genericId}/terminal/prepare` && r.request().method() === 'POST'),
+      connectVisibleTerminal(),
+    ])
+    expect(genericReprepare.status()).toBe(200)
+    const freshGenericPreparation = (await genericReprepare.json()).result
+    expect(freshGenericPreparation.target.targetClass).toBe('capsule')
+    expect(freshGenericPreparation.target.targetId).toBe(genericTargetId)
+    expect(freshGenericPreparation.sessionId).not.toBe(genericSessionId)
+    await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+    await proveSource(2)
+    await input.focus()
+    socketSignals.frames.length = 0
+    await page.keyboard.type("test ! -e /workspace/ui-marker && test ! -e /workspace/ui-study-marker && cat /workspace/ui-generic-marker; printf '\\n'")
+    await page.keyboard.press('Enter')
+    await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('generic-durable')
+  }
+  if (actual) {
+    // Recover the removed owner through the same UI control and prove the
+    // retained volume, while the other two independent workspaces stay live.
+    await openRuntime()
+    const projectProfile = page.getByRole('region', { name: 'Application workspaces' }).locator('div').filter({ has: page.getByText(templates![0]!.name, { exact: true }) }).first()
+    await projectProfile.getByRole('button', { name: 'Recover application workspace', exact: true }).click()
+    const recoveryDialog = page.getByRole('alertdialog')
+    await expect(recoveryDialog).toContainText(templates![0]!.sourceReview.reviewDigest)
+    await recoveryDialog.getByRole('button', { name: 'Confirm approved source', exact: true }).click()
+    await expect.poll(() => ['created', 'stopped'].includes(ledger(a).state)).toBe(true)
+    await page.getByRole('article', { name: `Workload ${a}`, exact: true }).getByRole('button', { name: 'Start', exact: true }).click()
+    await expect.poll(() => ledger(a).state).toBe('running')
+    expect(ledger(b).state).toBe('running')
+    expect(ledger(c).state).toBe('running')
+    await openWorkspaceTerminal(projectId)
+    // Container recovery rotates the target identity. Keep the old tab bound
+    // to its original target, and explicitly create a new, unconnected session.
+    const replacementPane = page.getByTestId('terminal-target-unavailable')
+    await expect(replacementPane).toBeVisible()
+    const socketsBeforeReplacement = socketSignals.urls.length
+    await replacementPane.getByRole('button', { name: 'New session', exact: true }).click()
+    await expect(page.getByTestId('terminal-start')).toBeVisible()
+    expect(socketSignals.urls).toHaveLength(socketsBeforeReplacement)
+    const [recoveryPrepare] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === `/v1/execution-host/workspaces/${projectId}/terminal/prepare` && r.request().method() === 'POST'),
+      connectVisibleTerminal(),
+    ])
+    expect(recoveryPrepare.status()).toBe(200)
+    recoveredTargetId = (await recoveryPrepare.json()).result.target.targetId
+    await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+    await proveSource(0)
+    await input.focus()
+    socketSignals.frames.length = 0
+    await page.keyboard.type("test ! -e /workspace/ui-study-marker && test ! -e /workspace/ui-generic-marker && cat /workspace/ui-marker; printf '\\n'")
+    await page.keyboard.press('Enter')
+    await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('capsule-durable')
+  }
+  if (actual) {
+    // Workspace cancellation is a real daemon cleanup operation: the
+    // container must disappear before the durable state becomes cancelled.
+    await openRuntime()
+    const cancelArticle = page.getByRole('article', { name: `Workload ${c}`, exact: true })
+    await cancelArticle.getByRole('button', { name: 'Cancel work', exact: true }).click()
+    const cancelling = page.waitForResponse(response => new URL(response.url()).pathname === '/v1/execution-host/workloads/cancel' && response.request().method() === 'POST')
+    await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+    const cancelledResponse = await cancelling
+    expect(cancelledResponse.status()).toBe(200)
+    const cancelledEnvelope = (await cancelledResponse.json()).result as {
+      accepted: boolean
+      result: { workloadId: string; state: string }
+      receipt: { action: string; status: string; workloadId?: string; operationId: string }
+    }
+    expect(cancelledEnvelope.accepted).toBe(true)
+    expect(cancelledEnvelope.result).toEqual(expect.objectContaining({ workloadId: c, state: 'cancelled' }))
+    expect(cancelledEnvelope.receipt).toEqual(expect.objectContaining({ action: 'execution_host.cancel', status: 'accepted', workloadId: c }))
+    await expect.poll(() => ledger(c).state).toBe('cancelled')
+    const cancelledLedger = ledger(c) as { state: string; receipts?: Array<{ kind?: string; cleanup?: string; detail?: string }> }
+    expect(cancelledLedger.state).toBe('cancelled')
+    const lastCancelReceipt = cancelledLedger.receipts?.[cancelledLedger.receipts.length - 1]
+    expect(lastCancelReceipt).toEqual(expect.objectContaining({ kind: 'cancel', cleanup: 'engine workload absence verified' }))
+    const cancelledInventory = await page.request.get(`${service.url}/v1/execution-host/workloads`)
+    expect(cancelledInventory.status()).toBe(200)
+    const cancelledInventoryEnvelope = (await cancelledInventory.json()).result as {
+      accepted: boolean
+      result: { workloads: Array<{ workloadId: string; state: string; engineStatus: string }> }
+    }
+    expect(cancelledInventoryEnvelope.accepted).toBe(true)
+    expect(cancelledInventoryEnvelope.result.workloads.find(row => row.workloadId === c)).toEqual(expect.objectContaining({ workloadId: c, state: 'cancelled', engineStatus: 'absent' }))
+    workspaceCancelVerified = true
+
+    // Cancelled work is terminal, but the UI's explicit Remove → Recover
+    // path must still reattach the preserved application workspace volume.
+    const cancelledArticle = page.getByRole('article', { name: `Workload ${c}`, exact: true })
+    await cancelledArticle.getByRole('button', { name: 'Remove container', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+    await expect.poll(() => ledger(c).state).toBe('removed')
+    const genericProfile = page.getByRole('region', { name: 'Application workspaces' }).locator('div').filter({ has: page.getByText(templates![2]!.name, { exact: true }) }).first()
+    await genericProfile.getByRole('button', { name: 'Recover application workspace', exact: true }).click()
+    const genericRecoveryDialog = page.getByRole('alertdialog')
+    await expect(genericRecoveryDialog).toContainText(templates![2]!.sourceReview.reviewDigest)
+    await genericRecoveryDialog.getByRole('button', { name: 'Confirm approved source', exact: true }).click()
+    await expect.poll(() => ['created', 'stopped'].includes(ledger(c).state)).toBe(true)
+    await page.getByRole('article', { name: `Workload ${c}`, exact: true }).getByRole('button', { name: 'Start', exact: true }).click()
+    await expect.poll(() => ledger(c).state).toBe('running')
+    await openWorkspaceTerminal(genericId)
+    const cancelledRecoveryPane = page.getByTestId('terminal-target-unavailable')
+    await expect(cancelledRecoveryPane).toBeVisible()
+    const socketsBeforeCancelledRecovery = socketSignals.urls.length
+    await cancelledRecoveryPane.getByRole('button', { name: 'New session', exact: true }).click()
+    await expect(page.getByTestId('terminal-start')).toBeVisible()
+    expect(socketSignals.urls).toHaveLength(socketsBeforeCancelledRecovery)
+    const [cancelledRecoveryPrepare] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === `/v1/execution-host/workspaces/${genericId}/terminal/prepare` && response.request().method() === 'POST'),
+      connectVisibleTerminal(),
+    ])
+    expect(cancelledRecoveryPrepare.status()).toBe(200)
+    const cancelledRecoveryPreparation = (await cancelledRecoveryPrepare.json()).result
+    expect(cancelledRecoveryPreparation.target.targetClass).toBe('capsule')
+    expect(cancelledRecoveryPreparation.target.targetId).not.toBe(genericTargetId)
+    await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+    await proveSource(2)
+    await input.focus()
+    socketSignals.frames.length = 0
+    await page.keyboard.type("test ! -e /workspace/ui-marker && test ! -e /workspace/ui-study-marker && cat /workspace/ui-generic-marker; printf '\\n'")
+    await page.keyboard.press('Enter')
+    await expect.poll(() => socketSignals.frames.filter(f => f.direction === 'received' && f.binary).map(f => f.text).join('')).toContain('generic-durable')
+  }
+  await openRuntime()
+  const history = page.getByRole('region', { name: 'Execution operation history' })
+  await history.getByRole('button', { name: 'Refresh operation history', exact: true }).click()
+  await expect(history.locator('details').first()).toBeVisible()
+  for (const action of ['execution_host.createWorkload', 'execution_host.start', 'execution_host.stop', 'execution_host.removeWorkload', ...(actual ? ['execution_host.cancel'] : [])]) {
+    await expect(history).toContainText(action)
+  }
+  expect(roots.map(sourceState)).toEqual(sourceBefore)
+  for (const root of roots) {
+    for (const marker of markerNames) expect(existsSync(path.join(root, marker))).toBe(false)
+  }
+  await openRuntime()
+  await page.getByRole('article', { name: `Workload ${b}`, exact: true }).getByRole('button', { name: 'Stop', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+  await expect.poll(() => ledger(b).state).toBe('stopped')
+  writeFileSync(path.join(ARTIFACT_ROOT, 'application-workspace-journey.json'), JSON.stringify({
+    environment: 'source AppServer and real rootless containers; fixture operator grants; not installed qualification',
+    actualTemplates: templates?.map(row => ({ instanceId: row.instanceId, adapterId: row.adapterId, sourceCommit: row.sourceCommit, installReceiptId: row.installReceiptId, sourceReviewDigest: row.sourceReview.reviewDigest, approvedFiles: row.sourceReview.sourceInventory.length })),
+    instanceIds: workspaceIds, workloadIds: workspaceWorkloads,
+    finalLedgers: workspaceWorkloads.map(id => ledger(id)),
+    capsuleTargetIds: [initialPreparation.target.targetId, studyPreparation.target.targetId, genericTargetId, recoveredTargetId].filter(Boolean),
+    sourcePreserved: true, independentMarkersVerified: true, containerRestartReconnected: true,
+    revokedTargetStatus: refusal.status(), revokedScopeOpenedNoSocket: true,
+    removalPreservedOtherWorkload: true, recoveredRemovedWorkspace: actual, operationHistoryInspected: true,
+    workspaceLogsVerified, workspaceCancelVerified,
+    noDefaultGrant: actual && process.env.STATEPORT_UI_NO_DEFAULT_GRANT === '1',
+    serviceRestart: 'not_run', operatorIssuance: 'fixture_preprovisioned',
+  }, null, 2))
+}
+
+test('Application-owned real workspaces use independent capsule authority', async ({ page }) => {
+  test.skip(process.env.STATEPORT_UI_ACTUAL_TEMPLATES === '1', 'Separate actual-template mode has its own case')
+  await applicationWorkspaceJourney(page, false)
+})
+
+test('Actual pinned ProjectState, StudyState, and generic StateSpec imports seed independent workspaces', async ({ page }) => {
+  test.skip(process.env.STATEPORT_UI_ACTUAL_TEMPLATES !== '1', 'Requires explicit actual-template governed fixture mode')
+  await applicationWorkspaceJourney(page, true)
+})
+
+
+test('Connected capsule overflow Reconnect opens a fresh session on the same target', async ({ page }) => {
+  test.skip(process.env.STATEPORT_UI_REAL_WORKSPACES !== '1', 'Requires explicitly booked real Podman fixture mode')
+  test.setTimeout(120_000)
+  const signals = browserSignals(page)
+  const socketSignals = terminalSocketSignals(page)
+  const fixturePath = path.join(disposableRoot, 'xdg', 'data', 'stateport', 'ui-workspace-fixture.json')
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+    daemonRoot: string
+    governedScope: string
+    workloads: Record<string, string>
+    actualTemplates?: Array<{ instanceId: string; name: string; sourceReview?: { reviewDigest: string } }>
+  }
+  const instanceId = fixture.actualTemplates?.[0]?.instanceId ?? PROJECT_ID
+  const workspaceName = fixture.actualTemplates?.[0]?.name ?? 'Live Core Project'
+  const workloadId = fixture.workloads[instanceId]!
+  const ledgerPath = path.join(fixture.daemonRoot, 'state', 'workloads', `${workloadId}.json`)
+  const ledger = () => existsSync(ledgerPath) ? JSON.parse(readFileSync(ledgerPath, 'utf8')) as { state: string; containerId: string } : undefined
+
+  await openApplicationRoute(page, '/execution-host')
+  const profile = page.getByRole('region', { name: 'Application workspaces' }).locator('div').filter({ has: page.getByText(workspaceName, { exact: true }) }).first()
+  const currentState = ledger()?.state
+  if (currentState === 'running') {
+    const existing = page.getByRole('article', { name: `Workload ${workloadId}`, exact: true })
+    await existing.getByRole('button', { name: 'Stop', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+    await expect.poll(() => ledger()?.state).toBe('stopped')
+  }
+  if (['created', 'stopped'].includes(ledger()?.state ?? '')) {
+    const existing = page.getByRole('article', { name: `Workload ${workloadId}`, exact: true })
+    await existing.getByRole('button', { name: 'Remove container', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+    await expect.poll(() => ledger()?.state).toBe('removed')
+  }
+  await profile.getByRole('button', { name: /^(Create|Recover) application workspace$/, exact: true }).click()
+  const review = fixture.actualTemplates?.[0]?.sourceReview
+  if (review) {
+    const dialog = page.getByRole('alertdialog')
+    await expect(dialog).toContainText(review.reviewDigest)
+    await dialog.getByRole('button', { name: 'Confirm approved source', exact: true }).click()
+  }
+  await expect.poll(() => ['created', 'stopped'].includes(ledger()?.state ?? '')).toBe(true)
+  await page.getByRole('article', { name: `Workload ${workloadId}`, exact: true }).getByRole('button', { name: 'Start', exact: true }).click()
+  await expect.poll(() => ledger()?.state).toBe('running')
+
+  const containment = execFileSync(PYTHON, ['-c', 'import json,sys;sys.path.insert(0,sys.argv[1]);from test_execution_host_daemon import _governed_container_membership;print(json.dumps(_governed_container_membership(sys.argv[2],sys.argv[3])))', path.join(ROOT, 'scripts'), ledger()!.containerId, fixture.governedScope], { env: { ...process.env, PYTHONPATH }, encoding: 'utf8', timeout: 20_000 })
+  writeFileSync(path.join(ARTIFACT_ROOT, 'capsule-reconnect-cgroups.json'), containment)
+
+  await openApplicationRoute(page, `/execution-host/workspaces/${instanceId}/terminal`)
+  await expect(page.getByTestId('terminal-start').getByTestId('terminal-connect')).toBeVisible()
+  const [firstPrepare] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === `/v1/execution-host/workspaces/${instanceId}/terminal/prepare` && response.request().method() === 'POST'),
+    page.getByTestId('terminal-start').getByTestId('terminal-connect').click(),
+  ])
+  expect(firstPrepare.status()).toBe(200)
+  const first = (await firstPrepare.json()).result as { sessionId: string; target: { targetId: string; targetClass: string } }
+  expect(first.target.targetClass).toBe('capsule')
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  const input = page.getByTestId('terminal-canvas').locator('.xterm-helper-textarea')
+  const marker = `CAPSULE_OVERFLOW_RECONNECT_${Date.now()}`
+  await input.focus()
+  await page.keyboard.type(`printf 'CAPSULE_OVERFLOW_%s' '${marker.slice('CAPSULE_OVERFLOW_'.length)}' > /workspace/ui-overflow-reconnect-marker; cat /workspace/ui-overflow-reconnect-marker; printf '\\n'`)
+  await page.keyboard.press('Enter')
+  await expect.poll(() => socketSignals.frames.filter(frame => frame.direction === 'received' && frame.binary).map(frame => frame.text).join('')).toContain(marker)
+
+  const socketsBeforeReconnect = socketSignals.urls.length
+  socketSignals.frames.length = 0
+  await page.getByTestId('terminal-overflow').click()
+  const [secondPrepare] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === `/v1/execution-host/workspaces/${instanceId}/terminal/prepare` && response.request().method() === 'POST'),
+    page.getByRole('menuitem', { name: 'Reconnect', exact: true }).click(),
+  ])
+  expect(secondPrepare.status()).toBe(200)
+  const second = (await secondPrepare.json()).result as { sessionId: string; purpose: string; target: { targetId: string; targetClass: string } }
+  expect(second.purpose).toBe('create')
+  expect(second.sessionId).not.toBe(first.sessionId)
+  expect(second.target).toMatchObject({ targetClass: 'capsule', targetId: first.target.targetId })
+  await expect.poll(() => socketSignals.urls.length).toBe(socketsBeforeReconnect + 1)
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  const sent = parsedTerminalControls(socketSignals, 'sent')
+  const received = parsedTerminalControls(socketSignals, 'received')
+  expect(sent[0]).toMatchObject({ type: 'authenticate', sessionId: second.sessionId, purpose: 'create' })
+  expect(received).toContainEqual(expect.objectContaining({ type: 'ready', sessionId: second.sessionId, purpose: 'create', targetClass: 'capsule', reconnect: false }))
+  await input.focus()
+  socketSignals.frames.length = 0
+  await page.keyboard.type('cat /workspace/ui-overflow-reconnect-marker')
+  await page.keyboard.press('Enter')
+  await expect.poll(() => socketSignals.frames.filter(frame => frame.direction === 'received' && frame.binary).map(frame => frame.text).join('')).toContain(marker)
+  expect(socketSignals.errors).toEqual([])
+  expectClean(signals)
+
+  await page.getByTestId('terminal-end').click()
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Session ended')
+  await expect.poll(() => socketSignals.closes).toBeGreaterThanOrEqual(2)
+
+  // Leave the disposable workload removed after this isolated proof.
+  await openApplicationRoute(page, '/execution-host')
+  const workload = page.getByRole('article', { name: `Workload ${workloadId}`, exact: true })
+  await workload.getByRole('button', { name: 'Stop', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+  await expect.poll(() => ledger()?.state).toBe('stopped')
+  await workload.getByRole('button', { name: 'Remove container', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+  await expect.poll(() => ledger()?.state).toBe('removed')
+})
+
+
+test('Catalog imports a public HTTPS template at an exact commit and preserves it across process restart', async ({ page }) => {
+  test.setTimeout(180_000)
+  const url = 'https://github.com/lennertvhoy/ProjectState_Template'
+  const revision = '7e4cb7c3397324d09f768eeb1d722316714c46e1'
+  const tree = '80cde79f0b235b7a1f7fd911d3074700f799d9d5'
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, '/catalog')
+  await page.getByRole('button', { name: 'More catalog actions' }).click()
+  await page.getByRole('menuitem', { name: 'Import a repository' }).click()
+  await page.getByLabel('Public HTTPS repository').fill(url)
+  await page.getByLabel('Exact Git commit').fill(revision)
+  const inspectionResponsePromise = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/v1/repository-import/inspect', { timeout: 90_000 })
+  await page.getByRole('button', { name: 'Fetch and inspect' }).click()
+  const inspectionResponse = await inspectionResponsePromise
+  expect(inspectionResponse.status()).toBe(200)
+  expect(inspectionResponse.request().postDataJSON()).toEqual({ url, revision })
+  const inspected = (await inspectionResponse.json()).result as {
+    candidateId: string; inspectionDigest: string; mutated: boolean;
+    sourceIdentity: { kind: string; headCommit: string; dirty: boolean };
+  }
+  expect(inspected.sourceIdentity).toMatchObject({ headCommit: revision, dirty: false })
+  expect(inspected.mutated).toBe(false)
+  const cache = path.join(disposableRoot, 'xdg', 'data', 'stateport', 'public-repositories', inspected.candidateId, 'repository')
+  const git = (...args: string[]) => execFileSync('git', ['-C', cache, ...args], { encoding: 'utf8', timeout: 5_000 }).trim()
+  expect(git('rev-parse', 'HEAD')).toBe(revision)
+  expect(git('rev-parse', 'HEAD^{tree}')).toBe(tree)
+  expect(git('status', '--porcelain')).toBe('')
+  await expect(page.getByTestId('import-review')).toContainText('Clean')
+  await expect(page.getByTestId('template-adapter-match')).toContainText('projectstate-v6')
+  await page.getByTestId('import-name').fill('Public ProjectState Browser')
+  await expect(page.getByTestId('import-register')).toBeDisabled()
+  await page.getByRole('checkbox', { name: 'Approve creation of an isolated copy of the exact inspected template' }).click()
+  const installedResponsePromise = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/v1/template-import/install')
+  await page.getByTestId('import-register').click()
+  const installedResponse = await installedResponsePromise
+  expect(installedResponse.status()).toBe(200)
+  const body = installedResponse.request().postDataJSON() as {
+    plan: { candidateId: string; inspectionDigest: string; planDigest: string };
+    approval: { decision: string; actorId: string; planDigest: string };
+  }
+  expect(body.plan.candidateId).toBe(inspected.candidateId)
+  expect(body.plan.inspectionDigest).toBe(inspected.inspectionDigest)
+  expect(body.approval).toEqual({ decision: 'approve', actorId: 'local-user', planDigest: body.plan.planDigest })
+  const installed = (await installedResponse.json()).result as {
+    instanceId: string; receiptId: string; managedCopyCreated: boolean; sourceRepositoryMutated: boolean;
+  }
+  expect(installed.managedCopyCreated).toBe(true)
+  expect(installed.sourceRepositoryMutated).toBe(false)
+  await expect(page.getByTestId('import-done')).toContainText('Public ProjectState Browser')
+  await page.getByTestId('import-view-receipt').click()
+  await page.getByRole('button', { name: 'IDs, revisions, and digests' }).click()
+  const receipt = page.getByTestId('receipt-exact-record')
+  await expect(receipt).toContainText(installed.receiptId)
+  await page.getByRole('button', { name: 'Raw JSON', exact: true }).click()
+  const rawReceipt = page.getByTestId('receipt-raw-json')
+  await expect(rawReceipt).toContainText(revision)
+  await expect(rawReceipt).toContainText(url)
+  const receiptBefore = await receipt.textContent()
+  const rawReceiptBefore = await rawReceipt.textContent()
+  const receiptRoute = new URL(page.url()).hash
+  expectClean(signals)
+
+  // Stop the browser's polls before terminating the service, then start a new
+  // process over the exact same XDG roots, catalog, receipts and source cache.
+  await page.goto('about:blank')
+  const oldPid = service.child.pid
+  await stopChild(service.child)
+  service = await startService(true)
+  expect(service.child.pid).not.toBe(oldPid)
+  const restartedSignals = browserSignals(page)
+  await page.goto(`${service.url}/${receiptRoute}`)
+  await page.getByRole('button', { name: 'IDs, revisions, and digests' }).click()
+  await expect(page.getByTestId('receipt-exact-record')).toHaveText(receiptBefore ?? '')
+  await page.getByRole('button', { name: 'Raw JSON', exact: true }).click()
+  await expect(page.getByTestId('receipt-raw-json')).toHaveText(rawReceiptBefore ?? '')
+  await page.goto(`${service.url}/#/app/${installed.instanceId}`)
+  await expect(page.getByTestId('app-overview-stub')).toBeVisible()
+  expect(git('rev-parse', 'HEAD')).toBe(revision)
+  expect(git('rev-parse', 'HEAD^{tree}')).toBe(tree)
+  expect(git('status', '--porcelain')).toBe('')
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'public-template-import-restarted.png'), fullPage: true })
+  expectClean(restartedSignals)
+  matrix.surfaces = { ...(matrix.surfaces as Record<string, unknown>), publicTemplateImport: {
+    environment: 'Linux source AppServer and isolated browser; not installed Windows qualification',
+    sourceUrl: url, sourceCommit: revision, sourceTree: tree, inspectionDigest: inspected.inspectionDigest,
+    instanceId: installed.instanceId, receiptId: installed.receiptId, processRestart: 'same durable roots, new process',
+    sourceSnapshot: 'unchanged', explicitReviewAndApproval: true, receiptAfterRestart: 'exact same content',
+  } }
+})
+
+
+test('Recovery restores a new instance after stale-backup refusal and retains exact receipts across restart', async ({ page }) => {
+  test.setTimeout(180_000)
+  // The production StudyState installer declares and now emits valid StateSpec.
+  // The raw development directory's unsupported handmade lock is not a restore fixture.
+  const destinationId = 'live-core-browser-restored'
+  const backupRoute = `/app/${STUDY_ID}/settings?group=backup`
+  await openApplicationRoute(page, backupRoute)
+  await expect(page.getByText('Operator session required', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('restore-plan-action')).toBeDisabled()
+  await page.goto('about:blank')
+  await stopChild(service.child)
+  const boundary = path.join(disposableRoot, 'xdg', 'config', 'stateport', 'platform-operator-authority')
+  writeFileSync(boundary, 'Disposable source browser operator fixture; not installed authority proof.\n', { mode: 0o600, flag: 'wx' })
+  service = await startService(true, 'platform_operator')
+  const signals = browserSignals(page)
+  const snapshot = (root: string): Record<string, string> => {
+    const files: Record<string, string> = {}
+    const visit = (relative: string) => {
+      for (const entry of readdirSync(path.join(root, relative), { withFileTypes: true })) {
+        if (entry.name === '.git') continue
+        const child = path.join(relative, entry.name)
+        if (entry.isDirectory()) visit(child)
+        else if (entry.isFile()) files[child] = createHash('sha256').update(readFileSync(path.join(root, child))).digest('hex')
+        else throw new Error(`Unexpected nonregular recovery fixture path: ${child}`)
+      }
+    }
+    visit('')
+    return files
+  }
+  const original = snapshot(studyRoot)
+  const head = execFileSync('git', ['-C', studyRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5_000 }).trim()
+  await openApplicationRoute(page, backupRoute)
+  const backupResponsePromise = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === `/v1/instances/${STUDY_ID}/backup`)
+  await page.getByTestId('recovery-backup-action').click()
+  const backupResponse = await backupResponsePromise
+  expect(backupResponse.status()).toBe(200)
+  const backupId = (await backupResponse.json()).result.backupReceipt.receiptId as string
+  const backupIndex = JSON.parse(readFileSync(path.join(disposableRoot, 'xdg', 'data', 'stateport', 'backups', 'index.json'), 'utf8')) as {
+    entries: Array<{ archive: string; backupReceipt: { receiptId: string } }>;
+  }
+  const archive = backupIndex.entries.find(entry => entry.backupReceipt.receiptId === backupId)?.archive
+  expect(archive).toBeTruthy()
+  if (!archive) throw new Error('Exact browser backup archive is absent')
+  expect(path.dirname(archive)).toBe(path.join(disposableRoot, 'xdg', 'data', 'stateport', 'backups', STUDY_ID))
+  const archiveBefore = readFileSync(archive)
+  const destination = path.join(disposableRoot, 'xdg', 'data', 'stateport', 'instances', destinationId)
+  await page.goto(`${service.url}/#${backupRoute}`)
+  await expect(page.getByTestId('governed-restore-panel')).toContainText(backupId)
+  await page.getByTestId('restore-destination-id').fill(destinationId)
+  const planResponsePromise = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname.endsWith('/recovery/restore/plan'))
+  await page.getByTestId('restore-plan-action').click()
+  const planResponse = await planResponsePromise
+  expect(planResponse.status()).toBe(200)
+  const plan = (await planResponse.json()).result as { planDigest: string; sourceInstanceId: string; destinationInstanceId: string }
+  expect(plan).toMatchObject({ sourceInstanceId: STUDY_ID, destinationInstanceId: destinationId })
+  await expect(page.getByTestId('governed-restore-panel')).toContainText(plan.planDigest)
+  const approvalResponsePromise = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname.endsWith('/recovery/restore/approve'))
+  await page.getByTestId('restore-approve-action').click()
+  const approvalResponse = await approvalResponsePromise
+  expect(approvalResponse.status()).toBe(200)
+  const approval = (await approvalResponse.json()).result as { approvalDigest: string; planDigest: string }
+  expect(approval.planDigest).toBe(plan.planDigest)
+  const apply = async () => {
+    await page.getByTestId('restore-apply-action').click()
+    const responsePromise = page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname.endsWith('/recovery/restore/apply'))
+    await page.getByTestId('confirm-action').click()
+    return responsePromise
+  }
+  let refusedStatus = 0
+  try {
+    writeFileSync(archive, Buffer.concat([archiveBefore, Buffer.from('owned stale-backup probe')]))
+    const refused = await apply()
+    refusedStatus = refused.status()
+    expect(refusedStatus).toBe(400)
+    expect(refused.request().postDataJSON()).toEqual({ planDigest: plan.planDigest, approvalDigest: approval.approvalDigest })
+    await expect(page.getByText('Recovery request refused', { exact: true })).toBeVisible()
+    expect(existsSync(destination)).toBe(false)
+    expect(snapshot(studyRoot)).toEqual(original)
+  } finally {
+    writeFileSync(archive, archiveBefore)
+  }
+  const applied = await apply()
+  expect(applied.status()).toBe(200)
+  expect(applied.request().postDataJSON()).toEqual({ planDigest: plan.planDigest, approvalDigest: approval.approvalDigest })
+  const receipt = (await applied.json()).result as {
+    receiptId: string; receiptDigest: string; sourceInstanceId: string; destinationInstanceId: string;
+    status: string; result: { validation: { valid: boolean } };
+  }
+  expect(receipt).toMatchObject({ sourceInstanceId: STUDY_ID, destinationInstanceId: destinationId,
+    status: 'validated', result: { validation: { valid: true } } })
+  await expect(page.getByTestId('governed-restore-panel')).toContainText(receipt.receiptId)
+  await expect(page.getByTestId('governed-restore-panel')).toContainText(receipt.receiptDigest)
+  expect(readFileSync(path.join(destination, 'instance.yaml'), 'utf8')).toContain(`id: "${destinationId}"`)
+  expect(snapshot(studyRoot)).toEqual(original)
+  expect(createHash('sha256').update(readFileSync(path.join(destination, 'README.md'))).digest('hex')).toBe(original['README.md'])
+  const receiptFile = path.join(disposableRoot, 'xdg', 'state', 'stateport', 'operations', 'restores', 'receipts', `${plan.planDigest.slice(7)}.json`)
+  const receiptBytes = readFileSync(receiptFile)
+  expect(JSON.parse(receiptBytes.toString())).toEqual(receipt)
+  await page.goto('about:blank')
+  const oldPid = service.child.pid
+  await stopChild(service.child)
+  service = await startService(true, 'platform_operator')
+  expect(service.child.pid).not.toBe(oldPid)
+  await page.goto(`${service.url}/#${backupRoute}`)
+  await expect(page.getByTestId('governed-restore-panel')).toContainText(receipt.receiptId)
+  await expect(page.getByTestId('governed-restore-panel')).toContainText('Validated')
+  expect(readFileSync(receiptFile)).toEqual(receiptBytes)
+  const instancesResponse = await page.request.get(`${service.url}/v1/instances`)
+  expect(instancesResponse.status()).toBe(200)
+  const instances = (await instancesResponse.json()).result.instances as Array<{ instanceId: string; applicationId: string }>
+  expect(instances.find(instance => instance.instanceId === destinationId)?.applicationId).toBe(STUDY_APPLICATION_ID)
+  expect(snapshot(studyRoot)).toEqual(original)
+  expect(readFileSync(archive)).toEqual(archiveBefore)
+  expect(execFileSync('git', ['-C', studyRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5_000 }).trim()).toBe(head)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'recovery-restored-restarted.png'), fullPage: true })
+  expectClean(signals, [{ status: 400, method: 'POST', path: `/v1/instances/${STUDY_ID}/recovery/restore/apply` }])
+  matrix.surfaces = { ...(matrix.surfaces as Record<string, unknown>), recoveryRestore: {
+    environment: 'Linux source AppServer, disposable OS-owned operator fixture and isolated browser; not installed authority proof',
+    sourceInstanceId: STUDY_ID, destinationInstanceId: destinationId, backupReceiptId: backupId,
+    planDigest: plan.planDigest, approvalDigest: approval.approvalDigest, receipt,
+    staleBackupRefusalStatus: refusedStatus, refusalBeforeDestinationWrite: true, exactApprovedRetry: true,
+    sourceFilesAndGit: 'unchanged', backupArchiveRestored: 'exact original bytes', processRestart: 'same durable roots, new PID',
+    durableReceipt: 'byte-identical after restart', browserSignals: signals,
+  } }
+})
+
+
+test('Authority UI pause and revoke enforce two scoped file consumers with exact receipts after restart', async ({ page, context }) => {
+  test.setTimeout(180_000)
+  await page.goto('about:blank')
+  await stopChild(service.child)
+  const boundary = path.join(disposableRoot, 'xdg', 'config', 'stateport', 'platform-operator-authority')
+  if (!existsSync(boundary)) writeFileSync(boundary, 'Disposable authority operator fixture.\n', { mode: 0o600, flag: 'wx' })
+  service = await startService(true, 'platform_operator', true)
+  const authorityRoot = path.join(disposableRoot, 'xdg', 'data', 'stateport', 'live-core-authority-repository')
+  const receipts: Array<{ receiptId: string; receiptDigest: string; result: { status: string } }> = []
+  let receiptDirectory = ''
+  const consume = (suffix: 'a' | 'b', value: string) => {
+    const result = JSON.parse(execFileSync(PYTHON, [path.join(HERE, 'live-core-fixture.py'), '--port', '0',
+      '--repo-root', ROOT, '--authority-consume', suffix, '--authority-text', value], {
+      env: { ...process.env, PYTHONPATH, XDG_CONFIG_HOME: path.join(disposableRoot, 'xdg/config'),
+        XDG_DATA_HOME: path.join(disposableRoot, 'xdg/data'), XDG_STATE_HOME: path.join(disposableRoot, 'xdg/state') },
+      encoding: 'utf8', timeout: 15_000,
+    })) as { decision: string; reason?: string; receiptDirectory: string;
+      receipt: { receiptId: string; receiptDigest: string; result: { status: string } } }
+    expect(result.receiptDirectory.startsWith(path.join(disposableRoot, 'xdg/state/stateport/authority') + path.sep)).toBe(true)
+    receiptDirectory = result.receiptDirectory
+    expect(JSON.parse(readFileSync(path.join(receiptDirectory, `${result.receipt.receiptId}.json`), 'utf8'))).toEqual(result.receipt)
+    receipts.push(result.receipt)
+    return result
+  }
+  for (const suffix of ['a', 'b'] as const) {
+    expect(consume(suffix, 'before').decision).toBe('executed')
+    expect(readFileSync(path.join(authorityRoot, `proof-${suffix}.txt`), 'utf8')).toBe('before')
+  }
+  const signals = browserSignals(page)
+  const indexResponsePromise = page.waitForResponse(response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname === '/v1/authority/index')
+  await openApplicationRoute(page, '/authority')
+  const indexResponse = await indexResponsePromise
+  expect(indexResponse.status()).toBe(200)
+  const initialIndex = (await indexResponse.json()).result as {
+    control: { controlDigest: string }; activeGrants: Array<{ grantId: string; grantDigest: string }>;
+  }
+  const grantA = initialIndex.activeGrants.find(grant => grant.grantId === 'grant_browser_a')!
+  expect(grantA).toBeTruthy()
+  const fillPause = async (target: import('@playwright/test').Page, paused: boolean) => {
+    await target.getByTestId(paused ? 'authority-pause-start' : 'authority-unpause-start').click()
+    await target.getByTestId('authority-directive-input').fill('OD-BROWSER-AUTHORITY-PROOF')
+    await target.getByTestId('authority-reason-input').fill('Bounded source authority browser proof')
+  }
+  const submitPause = async (target: import('@playwright/test').Page) => {
+    const responsePromise = target.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/v1/authority/pause')
+    await target.getByTestId('authority-pause-confirm').click()
+    return responsePromise
+  }
+  await fillPause(page, true)
+  const other = await context.newPage()
+  const otherSignals = browserSignals(other)
+  try {
+    await other.goto(`${service.url}/#/authority`)
+    await fillPause(other, true)
+    const paused = await submitPause(other)
+    expect(paused.status()).toBe(200)
+    expect(paused.request().postDataJSON().controlDigest).toBe(initialIndex.control.controlDigest)
+    const pausedResult = (await paused.json()).result
+    expect(pausedResult.receipt.receiptDigest).toBe(pausedResult.receiptDigest)
+    receipts.push(pausedResult.receipt)
+    await expect(other.getByTestId('authority-page')).toContainText(pausedResult.receiptId)
+    const stale = await submitPause(page)
+    expect(stale.status()).toBe(409)
+    expect((await stale.json()).error.code).toBe('authority_digest_mismatch')
+    await expect(page.getByText('Authority action could not be confirmed', { exact: true })).toBeVisible()
+    await expect(page.getByText('No success was confirmed. Refresh authority state before retrying.', { exact: true })).toBeVisible()
+    for (const suffix of ['a', 'b'] as const) {
+      expect(consume(suffix, 'must not execute')).toMatchObject({ decision: 'refused', reason: 'autonomous_execution_paused',
+        receipt: { result: { status: 'not_executed' } } })
+      expect(readFileSync(path.join(authorityRoot, `proof-${suffix}.txt`), 'utf8')).toBe('before')
+    }
+    expectClean(otherSignals)
+  } finally { await other.close() }
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await fillPause(page, false)
+  const unpaused = await submitPause(page)
+  expect(unpaused.status()).toBe(200)
+  receipts.push((await unpaused.json()).result.receipt)
+  for (const suffix of ['a', 'b'] as const) expect(consume(suffix, 'unpaused').decision).toBe('executed')
+  await page.getByTestId('authority-revoke-start-grant_browser_a').click()
+  const revokeForm = page.getByTestId('authority-revoke-form-grant_browser_a')
+  await revokeForm.getByLabel('Owner directive id').fill('OD-BROWSER-AUTHORITY-PROOF')
+  await revokeForm.getByLabel('Revocation reason').fill('Revoke only scoped grant A')
+  const revokeResponsePromise = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/v1/authority/grants/grant_browser_a/revoke')
+  await page.getByTestId('authority-revoke-confirm-grant_browser_a').click()
+  const revoked = await revokeResponsePromise
+  expect(revoked.status()).toBe(200)
+  expect(revoked.request().postDataJSON().grantDigest).toBe(grantA.grantDigest)
+  const revokedResult = (await revoked.json()).result
+  expect(revokedResult.revokedGrantDigest).toBe(grantA.grantDigest)
+  receipts.push(revokedResult.receipt)
+  await expect(page.getByTestId('authority-page')).toContainText(revokedResult.receiptId)
+  await expect(page.getByTestId('authority-revoke-start-grant_browser_a')).toBeDisabled()
+  await expect(page.getByTestId('authority-revoke-start-grant_browser_b')).toBeEnabled()
+  expect(consume('a', 'must not execute')).toMatchObject({ decision: 'refused', reason: 'grant_revoked' })
+  expect(consume('b', 'independent').decision).toBe('executed')
+  expect(readFileSync(path.join(authorityRoot, 'proof-a.txt'), 'utf8')).toBe('unpaused')
+  expect(readFileSync(path.join(authorityRoot, 'proof-b.txt'), 'utf8')).toBe('independent')
+  const retainedReceipts = receipts.map(receipt => {
+    const file = path.join(receiptDirectory, `${receipt.receiptId}.json`)
+    const bytes = readFileSync(file)
+    expect(JSON.parse(bytes.toString())).toEqual(receipt)
+    return { file, bytes }
+  })
+  await page.goto('about:blank')
+  const oldPid = service.child.pid
+  await stopChild(service.child)
+  service = await startService(true, 'platform_operator', true)
+  expect(service.child.pid).not.toBe(oldPid)
+  await page.goto(`${service.url}/#/authority`)
+  await expect(page.getByTestId('authority-revoke-start-grant_browser_a')).toBeDisabled()
+  await expect(page.getByTestId('authority-revoke-start-grant_browser_b')).toBeEnabled()
+  for (const { file, bytes } of retainedReceipts) expect(readFileSync(file)).toEqual(bytes)
+  expect(consume('a', 'must not execute after restart')).toMatchObject({ decision: 'refused', reason: 'grant_revoked' })
+  expect(consume('b', 'after restart').decision).toBe('executed')
+  expect(readFileSync(path.join(authorityRoot, 'proof-a.txt'), 'utf8')).toBe('unpaused')
+  expect(readFileSync(path.join(authorityRoot, 'proof-b.txt'), 'utf8')).toBe('after restart')
+  expectClean(signals, [{ status: 409, method: 'POST', path: '/v1/authority/pause' }])
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'authority-scoped-consumers-restarted.png'), fullPage: true })
+  matrix.surfaces = { ...(matrix.surfaces as Record<string, unknown>), authorityConsumers: {
+    environment: 'Linux source AppServer and real AuthorityManager.execute over private fixture repository; OS-owned operator fixture',
+    scope: 'authority primitive/API/browser only; deployment, provider and container enforcement remain separate',
+    grants: ['grant_browser_a', 'grant_browser_b'], pausedBothRefused: true, staleUIConfirmation: '409, visible refresh guidance',
+    unpausedBothExecuted: true, revokedARefused: true, independentBExecuted: true, sameStateNewProcess: true,
+    unchangedReceiptBytesAfterRestart: true, receipts,
+  } }
+})
+
+// Real pre-execution cancellation only: no provider or child process is launched.
+test('Operation center cancels an awaiting approval run durably without executing it', async ({ page }) => {
+  const sourceSnapshot = () => {
+    const files = execFileSync('git', ['ls-files', '-z'], { cwd: studyRoot, encoding: 'utf8', timeout: 5_000 }).split('\0').filter(Boolean)
+    return Object.fromEntries(files.map(file => [file, createHash('sha256').update(readFileSync(path.join(studyRoot, file))).digest('hex')]))
+  }
+  const before = sourceSnapshot()
+  const beforeHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: studyRoot, encoding: 'utf8', timeout: 5_000 })
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, `/app/${STUDY_ID}/runs`)
+  await page.getByTestId('runs-action-studystate.sample.record-evidence/v1').click()
+  await page.getByLabel('What did you learn?').fill('This prepared action must never execute or change learning state.')
+  const preparing = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/v1/instances/${STUDY_ID}/execution/prepare`)
+  await page.getByTestId('run-prepare').click()
+  const preparedResponse = await preparing
+  expect(preparedResponse.status()).toBe(200)
+  const prepared = (await preparedResponse.json()).result.run as { runId: string; revision: number; runSpecDigest: string }
+  await expect(page.getByTestId('run-exact-status')).toHaveText('Awaiting Approval')
+  const listing = await page.request.get(`${service.url}/v1/operations`)
+  expect(listing.status()).toBe(200)
+  const records = (await listing.json()).result.runs as { runId: string }[]
+  expect(records.some(record => record.runId === prepared.runId)).toBe(true)
+  await page.getByTestId('operation-center-trigger').click()
+  const row = page.locator(`[data-testid="operation-row"][data-operation-id="op_${prepared.runId}"]`)
+  await expect(row.locator('[data-state="awaiting_approval"]')).toBeVisible()
+  const cancelling = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/v1/runs/${prepared.runId}/cancel`)
+  await row.getByRole('button', { name: 'Cancel', exact: true }).click()
+  const cancelledResponse = await cancelling
+  expect(cancelledResponse.status()).toBe(200)
+  expect(cancelledResponse.request().postDataJSON()).toEqual({ expectedInstanceId: STUDY_ID, expectedRevision: prepared.revision })
+  await expect(row).toContainText('Cancelled')
+  await expect(row.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0)
+
+  const operationsRoot = path.join(disposableRoot, 'xdg', 'state', 'stateport', 'operations')
+  const storedRun = () => (JSON.parse(readFileSync(path.join(operationsRoot, 'portable-runs.json'), 'utf8')).runs as {
+    runId: string; status: string; revision: number; runSpecDigest: string; events: { type: string; from: string; to: string }[];
+    runBundle: { path: string; contentDigest: string }; process?: unknown; result?: unknown; receiptId?: string; proposal?: unknown;
+  }[]).find(record => record.runId === prepared.runId)!
+  const cancelled = storedRun()
+  expect(cancelled.status).toBe('cancelled')
+  expect(cancelled.revision).toBeGreaterThan(prepared.revision)
+  expect(cancelled.runSpecDigest).toBe(prepared.runSpecDigest)
+  expect(cancelled.events).toContainEqual(expect.objectContaining({ type: 'state_transition', from: 'awaiting_approval', to: 'cancelled' }))
+  expect(cancelled.process).toBeFalsy()
+  expect(cancelled.result).toBeFalsy()
+  expect(cancelled.proposal).toBeFalsy()
+  expect(cancelled.receiptId).toBeFalsy() // No application-change receipt is invented for a pre-execution cancellation.
+  const bundlePath = path.join(operationsRoot, 'run-bundles', prepared.runId)
+  expect(cancelled.runBundle.path).toBe(bundlePath)
+  const bundleSnapshot = () => Object.fromEntries(['bundle-manifest.json', 'SHA256SUMS', 'execution/events.jsonl', 'execution/result.json', 'execution/process.json'].map(file => [file, readFileSync(path.join(bundlePath, file), 'utf8')]))
+  const bundleBefore = bundleSnapshot()
+  expect(JSON.parse(bundleBefore['execution/result.json'])).toEqual({ status: 'cancelled' })
+  expect(JSON.parse(bundleBefore['execution/process.json'])).toEqual({})
+  const verified = await page.request.get(`${service.url}/v1/runs/${prepared.runId}/bundle`)
+  expect(verified.status()).toBe(200)
+  expect((await verified.json()).result.verification.verified).toBe(true)
+  expect(sourceSnapshot()).toEqual(before)
+  expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: studyRoot, encoding: 'utf8', timeout: 5_000 })).toBe(beforeHead)
+  expect(signals.requests.some(request => /\/runs\/[^/]+\/(execute|apply)$/.test(request.path))).toBe(false)
+  expectClean(signals)
+
+  // A direct stale request exercises the real refusal without inventing another UI control.
+  const sessionResponse = await page.request.get(`${service.url}/session`)
+  expect(sessionResponse.status()).toBe(200)
+  const session = await sessionResponse.json() as { result: { csrfToken: string } }
+  const stale = await page.request.post(`${service.url}/v1/runs/${prepared.runId}/cancel`, {
+    headers: { Origin: service.url, 'X-StatePort-CSRF': session.result.csrfToken }, data: { expectedInstanceId: STUDY_ID, expectedRevision: prepared.revision },
+  })
+  // Existing handler maps RunStore's ValueError to 400; refusal remains durable.
+  expect(stale.status()).toBe(400)
+  expect(storedRun()).toEqual(cancelled)
+  expect(bundleSnapshot()).toEqual(bundleBefore)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'operation-cancelled-before-execution.png'), fullPage: true })
+  await page.goto('about:blank')
+  const oldPid = service.child.pid
+  await stopChild(service.child)
+  service = await startService(true)
+  expect(service.child.pid).not.toBe(oldPid)
+  expect(storedRun()).toEqual(cancelled)
+  expect(bundleSnapshot()).toEqual(bundleBefore)
+  expect(sourceSnapshot()).toEqual(before)
+  await openApplicationRoute(page, `/app/${STUDY_ID}/runs`)
+  const restartedBundle = await page.request.get(`${service.url}/v1/runs/${prepared.runId}/bundle`)
+  expect(restartedBundle.status()).toBe(200)
+  expect((await restartedBundle.json()).result.verification.verified).toBe(true)
+  await page.getByTestId('operation-center-trigger').click()
+  await expect(row).toContainText('Cancelled')
+  matrix.surfaces = { ...(matrix.surfaces as Record<string, unknown>), operationCancellation: {
+    environment: 'Linux source AppServer; pre-execution cancellation only, no active process/provider or installed proof',
+    runId: prepared.runId, runSpecDigest: prepared.runSpecDigest, cancelledRevision: cancelled.revision,
+    bundleDigest: cancelled.runBundle.contentDigest, staleRevisionStatus: stale.status(),
+    sourceBytes: 'unchanged', restart: 'same RunStore and bundle bytes, new service PID',
+    closureReceipt: 'not applicable: no application change executed',
+  } }
+})
+
+test('Provider selection persists OpenCode refusal across an isolated service restart', async ({ page }) => {
+  test.setTimeout(120_000)
+  const home = path.join(disposableRoot, 'provider-private-home')
+  const codexHome = path.join(home, 'codex')
+  expect(existsSync(home)).toBe(false)
+  await page.goto('about:blank')
+  await stopChild(service.child)
+  service = await startService(true, 'platform_operator', false, true)
+  const firstPid = service.child.pid
+  expect(firstPid).toBeTruthy()
+  const verifyPrivateEnvironment = () => {
+    const environment = readFileSync(`/proc/${service.child.pid}/environ`, 'utf8').split('\0')
+    expect(environment).toContain(`HOME=${home}`)
+    expect(environment).toContain(`CODEX_HOME=${codexHome}`)
+    expect(environment.some(row => /^(OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|OPENCODE_API_KEY|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS)=/.test(row))).toBe(false)
+    expect(readdirSync(codexHome)).toEqual([])
+  }
+  verifyPrivateEnvironment()
+  await page.goto(`${service.url}/#/settings/provider`)
+  const form = page.getByRole('form', { name: 'Provider configuration' })
+  await form.getByLabel('Coding provider', { exact: true }).selectOption('opencode')
+  const model = 'openai/gpt-5.4'
+  await form.getByLabel('OpenCode model identifier', { exact: true }).fill(model)
+  const [savedResponse] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === '/v1/provider/configure' && response.request().method() === 'POST'),
+    form.getByRole('button', { name: 'Save provider selection', exact: true }).click(),
+  ])
+  expect(savedResponse.status()).toBe(200)
+  expect(savedResponse.request().postDataJSON()).toEqual({ model, providerId: 'opencode' })
+  const saved = (await savedResponse.json()).result
+  expect(saved).toMatchObject({ providerId: 'opencode', configured: true, connected: false, model, executionRefusal: 'sandboxed_validation_not_implemented', authenticationStatus: 'unavailable', requestStatus: 'unverified' })
+  const profilePath = path.join(disposableRoot, 'xdg', 'config', 'stateport', 'provider-router.json')
+  const disabledPath = path.join(disposableRoot, 'xdg', 'config', 'stateport', 'provider-router.disabled')
+  const profileBefore = readFileSync(profilePath, 'utf8')
+  const profile = JSON.parse(profileBefore)
+  expect(profile.provider.backendId).toBe('opencode')
+  expect(profile.model).toEqual({ id: model })
+  expect(profile.profileDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+  expect(statSync(profilePath).mode & 0o777).toBe(0o600)
+  const disabledBefore = readFileSync(disabledPath, 'utf8')
+  expect(disabledBefore).toBe('StatePort provider work disabled\n')
+  expect(statSync(disabledPath).mode & 0o777).toBe(0o600)
+  const observations = page.getByRole('region', { name: 'Provider observations' })
+  await expect(observations).toContainText('OpenCode')
+  await expect(observations).toContainText('No Codex fallback is enabled.')
+  const [checkedResponse] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === '/v1/provider/verify' && response.request().method() === 'POST'),
+    page.getByRole('button', { name: 'Check selected adapter', exact: true }).click(),
+  ])
+  expect(checkedResponse.status()).toBe(200)
+  const checked = (await checkedResponse.json()).result
+  expect(checked).toMatchObject({ providerId: 'opencode', connected: false, model, executionRefusal: 'sandboxed_validation_not_implemented', authenticationStatus: 'unavailable', requestStatus: 'failed' })
+  expect(readFileSync(profilePath, 'utf8')).toBe(profileBefore)
+  expect(readFileSync(disabledPath, 'utf8')).toBe(disabledBefore)
+  verifyPrivateEnvironment()
+  await page.goto('about:blank')
+  await stopChild(service.child)
+  service = await startService(true, 'platform_operator', false, true)
+  expect(service.child.pid).not.toBe(firstPid)
+  verifyPrivateEnvironment()
+  // Let the browser establish its fresh service session before observing status.
+  const [newSession, reopenedStatus] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === '/session' && response.request().method() === 'GET' && response.status() === 200),
+    page.waitForResponse(response => new URL(response.url()).pathname === '/v1/provider/status' && response.request().method() === 'GET' && response.status() === 200),
+    page.goto(`${service.url}/#/settings/provider`),
+  ])
+  expect(newSession.status()).toBe(200)
+  const restored = (await reopenedStatus.json()).result
+  expect(restored).toMatchObject({ providerId: 'opencode', configured: true, connected: false, model, executionRefusal: 'sandboxed_validation_not_implemented', authenticationStatus: 'unavailable', executableStatus: 'unverified', requestStatus: 'unverified' })
+  await expect(page.getByRole('combobox', { name: 'Coding provider', exact: true })).toHaveValue('opencode')
+  await expect(page.getByLabel('OpenCode model identifier', { exact: true })).toHaveValue(model)
+  await expect(page.getByRole('region', { name: 'Provider observations' })).toContainText('Not checked in this service session')
+  expect(readFileSync(profilePath, 'utf8')).toBe(profileBefore)
+  expect(readFileSync(disabledPath, 'utf8')).toBe(disabledBefore)
+  writeFileSync(path.join(ARTIFACT_ROOT, 'provider-selection-restart.json'), JSON.stringify({ classification: 'source HTTP/browser; private credential-free home; selection and refusal only', firstPid, restartedPid: service.child.pid, providerId: 'opencode', model, profileDigest: profile.profileDigest, configure: saved, adapterCheck: checked, afterRestart: restored, authenticationAttempted: false, providerExecutionAttempted: false }, null, 2))
+})
+
+
+test('Panel contrast changes real separators and survives saved reload', async ({ page }) => {
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, '/settings/appearance')
+  const setting = page.locator('#setting-panel-contrast')
+  const topbar = page.getByTestId('topbar')
+  const read = () => topbar.evaluate(element => {
+    const style = getComputedStyle(element)
+    return { color: style.borderBottomColor, width: style.borderBottomWidth, background: style.backgroundColor }
+  })
+  await expect(setting.getByRole('radio', { name: 'Normal', exact: true })).toHaveAttribute('aria-checked', 'true')
+  const before = await read()
+  await setting.getByRole('radio', { name: 'Increased', exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-panel-contrast', 'increased')
+  const preview = await read()
+  expect(preview.color).not.toBe(before.color)
+  expect(preview.width).toBe(before.width)
+  expect(preview.background).toBe(before.background)
+  await page.getByTestId('settings-discard').click()
+  await expect(page.locator('html')).toHaveAttribute('data-panel-contrast', 'default')
+  expect(await read()).toEqual(before)
+  await setting.getByRole('radio', { name: 'Increased', exact: true }).click()
+  await page.getByTestId('settings-save').click()
+  await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+  await reloadWithReadObservation(page, signals)
+  await expect(page.locator('html')).toHaveAttribute('data-panel-contrast', 'increased')
+  expect(await read()).toEqual(preview)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'panel-contrast-saved.png') })
+  writeFileSync(path.join(ARTIFACT_ROOT, 'panel-contrast.json'), JSON.stringify({ classification: 'source browser saved local preference; actual computed separator colors, installed unrun', before, preview, reload: await read(), discardRestored: true }, null, 2))
+  expectClean(signals)
+})
+
+test('Saved Workbench tool order changes real tabs and numbered navigation after reload', async ({ page }) => {
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, '/settings/navigation')
+  await page.getByRole('button', { name: 'Move Files up', exact: true }).click()
+  await page.getByTestId('settings-save').click()
+  await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('stateport.http.global-ui-settings.v1') ?? '{}').navigation?.workbenchToolOrder)
+  expect(saved[0]).toBe('files')
+  await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/terminal`)
+  const first = page.getByTestId('tool-header').getByRole('link').first()
+  await expect(first).toHaveText('Files')
+  await page.keyboard.press('Control+1')
+  await expect(page).toHaveURL(new RegExp(`/app/${PROJECT_ID}/workbench/files$`))
+  await expect(page.getByTestId('files-stub')).toBeVisible()
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
+  await reloadWithReadObservation(page, signals)
+  await expect(first).toHaveText('Files')
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'workbench-tool-order.png') })
+  writeFileSync(path.join(ARTIFACT_ROOT, 'workbench-tool-order.json'), JSON.stringify({ classification: 'source browser local preference and actual tabs/keyboard navigation/reload; installed unrun', saved, firstTool: await first.textContent(), numberedNavigation: true }, null, 2))
+  expectClean(signals)
+})
+
+test('Saved startup focus reaches the real Workbench once and respects explicit focus', async ({ page }) => {
+  const signals = browserSignals(page)
+  await openApplicationRoute(page, '/settings/general')
+  const toggle = page.locator('#setting-focus-mode').getByRole('switch')
+  await expect(toggle).toHaveAttribute('aria-checked', 'false')
+  await toggle.click()
+  await page.getByTestId('settings-save').click()
+  await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('stateport.http.global-ui-settings.v1') ?? '{}').general?.startInFocusMode)).toBe(true)
+  await page.goto(`${service.url}/#/applications`)
+  await reloadWithReadObservation(page, signals)
+  await expect(page.getByTestId('all-applications-section')).toBeVisible()
+  // A hash navigation preserves the same document and AppShell session.
+  await page.evaluate(route => { window.location.hash = route }, `/app/${PROJECT_ID}/workbench/files?view=wide`)
+  await expect(page.getByTestId('workbench-focus')).toBeVisible()
+  await expect(page.getByTestId('files-stub')).toBeVisible()
+  await expect(page).toHaveURL(/view=wide&focus=1$/)
+  await expect(page.getByTestId('topbar')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Restore · Esc', exact: true }).click()
+  await expect(page.getByTestId('workbench-shell')).toBeVisible()
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
+  await page.getByTestId('workbench-shell').getByRole('link', { name: 'Terminal', exact: true }).click()
+  await expect(page.getByTestId('workbench-shell')).toBeVisible()
+  await expect(page.getByTestId('workbench-focus')).toHaveCount(0)
+  await expect(page).not.toHaveURL(/focus=1/)
+  await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/files?focus=0&view=wide`)
+  await reloadWithReadObservation(page, signals)
+  await expect(page.getByTestId('workbench-shell')).toBeVisible()
+  await expect(page.getByTestId('files-stub')).toBeVisible()
+  await expect(page).toHaveURL(/focus=0&view=wide$/)
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'startup-focus-explicit-off.png') })
+  writeFileSync(path.join(ARTIFACT_ROOT, 'startup-focus.json'), JSON.stringify({ classification: 'source browser actual guarded Workbench and saved local preference; installed unrun', firstEligibleFromApplications: true, realFocusLayout: true, restoreAndLaterToolPreserved: true, explicitOffPreserved: true }, null, 2))
+  // Reviewed R24 classification: this test performs 6 deliberate navigations
+  // (settings goto, applications goto+reload, same-document hash nav, two tool
+  // clicks, explicit-off goto+reload). In-flight read-only fixture bootstrap
+  // GETs aborted by those navigations are excused only with a later 2xx for
+  // the same path; all other failures stay strict.
+  expectClean(signals, [], [], { pathPattern: /^\/v1\/instances(\/live-core-[\w-]+(\/experience)?)?$/ })
+})
+
+
+test('Reviewed source authority prepares and downloads exact committed facts without issuing a grant', async ({ page }) => {
+  test.skip(process.env.STATEPORT_UI_SOURCE_AUTHORITY !== '1', 'Requires explicit source-authority publication fixture')
+  const signals = browserSignals(page)
+  const authorityRoot = path.join(disposableRoot, 'xdg', 'config', 'stateport', 'workspace-authority-fixture')
+  const authorityFiles: string[] = []
+  const authorityDirectories = [authorityRoot]
+  if (process.env.STATEPORT_UI_REVIEWED_ISSUANCE === '1') {
+    const fixture = JSON.parse(readFileSync(path.join(disposableRoot, 'xdg', 'data', 'stateport', 'ui-workspace-fixture.json'), 'utf8')) as { manifest: string; reviewedIssuance: { grantsDir: string } }
+    authorityFiles.push(fixture.manifest)
+    authorityDirectories.push(fixture.reviewedIssuance.grantsDir)
+  }
+  const authorityState = () => Object.fromEntries([...authorityFiles, ...authorityDirectories.flatMap(directory => readdirSync(directory).map(name => path.join(directory, name)))].filter(file => statSync(file).isFile()).map(file => [file, readFileSync(file, 'utf8')]))
+  const before = authorityState()
+  await openApplicationRoute(page, '/execution-host')
+  const panel = page.getByRole('region', { name: `Workspace authority ${PROJECT_ID}`, exact: true })
+  await panel.getByRole('button', { name: 'Review workspace authority', exact: true }).click()
+  await expect(panel).toContainText('stateport.reviewed-source-workspace-terminal/v1')
+  const endpoint = `/v1/execution-host/workspaces/${PROJECT_ID}/authority/prepare`
+  const selectedExpiry = new Date(Date.now() + 30 * 60 * 1000).toISOString().slice(0, 19)
+  await panel.getByLabel('Authority expires at (UTC)').fill(selectedExpiry)
+  await expect(panel.getByRole('button', { name: 'Prepare authority request', exact: true })).toBeEnabled()
+  const [response] = await Promise.all([
+    page.waitForResponse(row => new URL(row.url()).pathname === endpoint && row.request().method() === 'POST'),
+    panel.getByRole('button', { name: 'Prepare authority request', exact: true }).click(),
+  ])
+  expect(response.status()).toBe(200)
+  expect(Object.keys(response.request().postDataJSON()).sort()).toEqual(['grantExpiresAt', 'profileDigest', 'sourceMode'])
+  const result = (await response.json()).result as import('../src/client/client').WorkspaceAuthorityPreparation
+  if (result.request.formatVersion !== 'stateport.workspace-authority-request/v2') throw new Error('source request format differs')
+  const request = result.request
+  expect(request.sourceMode).toBe('reviewed-commit')
+  expect(request.instanceId).toBe(PROJECT_ID)
+  expect(request.source.baseRevision).toBe(projectHeadBefore)
+  expect(request.source.sourceInventory.some(row => row.path === 'application.yaml')).toBe(true)
+  expect(request.source.sourceArchive.fileCount).toBe(request.source.sourceInventory.length)
+  await expect(panel.getByRole('region', { name: 'Prepared workspace authority request', exact: true })).toContainText('Pending operator approval')
+  await expect(panel).toContainText(request.source.baseRevision)
+  await expect(panel).toContainText(request.sourceDigest)
+  await panel.locator('summary').filter({ hasText: 'Reviewed source inventory (' }).click()
+  const preparedSource = panel.getByRole('region', { name: 'Prepared reviewed source', exact: true })
+  const firstSourceFile = request.source.sourceInventory[0]!
+  await expect(preparedSource.locator('pre')).toBeVisible()
+  await expect(preparedSource.locator('pre')).toContainText(`${firstSourceFile.path} · mode ${firstSourceFile.mode} · ${firstSourceFile.contentDigest}`)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'source-authority-prepared-inventory.png'), fullPage: true })
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    panel.getByRole('link', { name: 'Download authority request', exact: true }).click(),
+  ])
+  const downloaded = path.join(ARTIFACT_ROOT, 'reviewed-source-request.json')
+  await download.saveAs(downloaded)
+  expect(JSON.parse(readFileSync(downloaded, 'utf8'))).toEqual(request)
+  // Exercise the production pure verifier against actual source bytes. The
+  // current UID is a source-fixture owner, never installed root authentication.
+  const verified = execFileSync(PYTHON, ['-c', [
+    'import json,os,sys',
+    'from execution_host.application_workspaces import validate_workspace_authority_request',
+    'from execution_host.workspace_source import verify_source_commit',
+    'request=validate_workspace_authority_request(json.load(open(sys.argv[1])))',
+    'fd=os.open(sys.argv[2],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)',
+    'try: verify_source_commit(fd,request["source"],owner_uid=os.geteuid())',
+    'finally: os.close(fd)',
+    'print("verified")',
+  ].join('\n'), downloaded, projectRoot], { env: { ...process.env, PYTHONPATH }, encoding: 'utf8', timeout: 30_000 })
+  expect(verified.trim()).toBe('verified')
+  await panel.getByRole('button', { name: 'Check operator approval', exact: true }).click()
+  await expect(panel).toContainText('Pending operator approval')
+  expect(authorityState()).toEqual(before)
+  const sourcePath = path.join(projectRoot, 'application.yaml')
+  const sourceBefore = readFileSync(sourcePath)
+  try {
+    writeFileSync(sourcePath, Buffer.concat([sourceBefore, Buffer.from('\n# unreviewed fixture change\n')]))
+    await panel.getByRole('button', { name: 'Review workspace authority', exact: true }).click()
+    await panel.getByLabel('Authority expires at (UTC)').fill(selectedExpiry)
+    await expect(panel.getByRole('button', { name: 'Prepare authority request', exact: true })).toBeEnabled()
+    const [refused] = await Promise.all([
+      page.waitForResponse(row => new URL(row.url()).pathname === endpoint && row.request().method() === 'POST'),
+      panel.getByRole('button', { name: 'Prepare authority request', exact: true }).click(),
+    ])
+    expect(refused.status()).toBe(409)
+    expect(JSON.stringify(await refused.json())).toContain('workspace_source_review_failed')
+    await expect(panel.getByRole('alert')).toBeVisible()
+    await expect(panel.getByRole('link', { name: 'Download authority request', exact: true })).toHaveCount(0)
+    expect(authorityState()).toEqual(before)
+  } finally {
+    writeFileSync(sourcePath, sourceBefore)
+  }
+  expectClean(signals, [{ status: 409, method: 'POST', path: endpoint }])
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'source-authority-dirty-refusal.png'), fullPage: true })
+  writeFileSync(path.join(ARTIFACT_ROOT, 'source-authority-browser.json'), JSON.stringify({
+    instanceId: PROJECT_ID, requestDigest: request.requestDigest, sourceDigest: request.sourceDigest,
+    baseRevision: request.source.baseRevision, fileCount: request.source.sourceInventory.length,
+    archiveBytes: request.source.sourceArchive.archiveBytes, downloadedExactRequest: true,
+    actualSourceVerifierPassed: true, dirtySourceRefused: true, authorityUnchanged: true,
+    environment: process.env.STATEPORT_UI_REVIEWED_ISSUANCE === '1'
+      ? 'real source AppServer/browser/rootless daemon; explicit publication/default-grant fixture; preparation leaves grant store unchanged; no installed root authentication'
+      : 'real source AppServer/browser; explicit publication fixture; no root authentication or daemon grant issuance',
+  }, null, 2))
+})
+
+
+test('Reviewed source authority download reaches a real capsule after explicit fixture operator issuance', async ({ page }) => {
+  test.skip(process.env.STATEPORT_UI_REVIEWED_ISSUANCE !== '1', 'Requires booked real daemon and explicit test-UID operator transaction')
+  test.setTimeout(180_000)
+  const signals = browserSignals(page)
+  const sockets = terminalSocketSignals(page)
+  const sourceBefore = readFileSync(path.join(projectRoot, 'application.yaml'))
+  await openApplicationRoute(page, '/execution-host')
+  const panel = page.getByRole('region', { name: `Workspace authority ${PROJECT_ID}`, exact: true })
+  await panel.getByRole('button', { name: 'Review workspace authority', exact: true }).click()
+  await panel.getByLabel('Authority expires at (UTC)').fill(new Date(Date.now() + 30 * 60 * 1000).toISOString().slice(0, 19))
+  const [preparation] = await Promise.all([
+    page.waitForResponse(row => new URL(row.url()).pathname === `/v1/execution-host/workspaces/${PROJECT_ID}/authority/prepare` && row.request().method() === 'POST'),
+    panel.getByRole('button', { name: 'Prepare authority request', exact: true }).click(),
+  ])
+  expect(preparation.status()).toBe(200)
+  const result = (await preparation.json()).result as import('../src/client/client').WorkspaceAuthorityPreparation
+  if (result.request.formatVersion !== 'stateport.workspace-authority-request/v2') throw new Error('source request format differs')
+  const request = result.request
+  expect(request.source.baseRevision).toBe(projectHeadBefore)
+  const hostSourceSnapshot = () => request.source.sourceInventory.map(row => ({
+    path: row.path, mode: statSync(path.join(projectRoot, row.path)).mode & 0o777,
+    contentDigest: 'sha256:' + createHash('sha256').update(readFileSync(path.join(projectRoot, row.path))).digest('hex'),
+  }))
+  const hostSourceBefore = hostSourceSnapshot()
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    panel.getByRole('link', { name: 'Download authority request', exact: true }).click(),
+  ])
+  const downloaded = path.join(ARTIFACT_ROOT, 'issued-source-request.json')
+  await download.saveAs(downloaded)
+  expect(JSON.parse(readFileSync(downloaded, 'utf8'))).toEqual(request)
+  // Explicit source-fixture OS transaction: production issuance and FD source
+  // verification run with test UID substitutions, never installed sudo auth.
+  const issued = JSON.parse(execFileSync(PYTHON, [
+    path.join(HERE, 'live-core-fixture.py'), '--port', '0', '--repo-root', ROOT,
+    '--issue-source-request', downloaded, '--reviewed-request-digest', request.requestDigest,
+  ], {
+    cwd: ROOT,
+    env: { ...process.env, PYTHONPATH,
+      XDG_CONFIG_HOME: path.join(disposableRoot, 'xdg', 'config'),
+      XDG_DATA_HOME: path.join(disposableRoot, 'xdg', 'data'),
+      XDG_STATE_HOME: path.join(disposableRoot, 'xdg', 'state') },
+    encoding: 'utf8', timeout: 30_000,
+  })) as { workloadId: string; receiptDigest: string; status: string }
+  expect(issued.status).toBe('issued')
+  expect(issued.receiptDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
+  const fixture = JSON.parse(readFileSync(path.join(disposableRoot, 'xdg', 'data', 'stateport', 'ui-workspace-fixture.json'), 'utf8')) as { daemonRoot: string; governedScope: string }
+  const ledger = () => JSON.parse(readFileSync(path.join(fixture.daemonRoot, 'state', 'workloads', `${issued.workloadId}.json`), 'utf8')) as { state: string; containerId: string }
+  await panel.getByRole('button', { name: 'Check operator approval', exact: true }).click()
+  await expect(panel.locator('summary').filter({ hasText: 'Daemon-verified workspace binding' })).toBeVisible()
+  await expect(panel.getByRole('region', { name: 'Prepared workspace authority request', exact: true })).toHaveCount(0)
+  const profile = page.getByRole('region', { name: 'Application workspaces' }).locator('div').filter({ has: page.getByText('Live Core Project', { exact: true }) }).first()
+  await profile.getByRole('button', { name: 'Create application workspace', exact: true }).click()
+  const review = page.getByRole('alertdialog')
+  await expect(review).toContainText(request.source.baseRevision)
+  await review.getByRole('button', { name: 'Confirm approved source', exact: true }).click()
+  const workload = page.getByRole('article', { name: `Workload ${issued.workloadId}`, exact: true })
+  await workload.getByRole('button', { name: 'Start', exact: true }).click()
+  await expect.poll(() => ledger().state).toBe('running')
+  const containment = execFileSync(PYTHON, ['-c', 'import json,sys;sys.path.insert(0,sys.argv[1]);from test_execution_host_daemon import _governed_container_membership;print(json.dumps(_governed_container_membership(sys.argv[2],sys.argv[3])))', path.join(ROOT, 'scripts'), ledger().containerId, fixture.governedScope], { env: { ...process.env, PYTHONPATH }, encoding: 'utf8', timeout: 20_000 })
+  writeFileSync(path.join(ARTIFACT_ROOT, 'issued-source-cgroups.json'), containment)
+  const [target] = await Promise.all([
+    page.waitForResponse(row => new URL(row.url()).pathname === `/v1/execution-host/workspaces/${PROJECT_ID}/terminal/target` && row.request().method() === 'GET'),
+    profile.getByRole('link', { name: 'Open workspace terminal', exact: true }).click(),
+  ])
+  expect(target.status()).toBe(200)
+  expect((await target.json()).result.target.targetClass).toBe('capsule')
+  await page.getByTestId('terminal-start').getByTestId('terminal-connect').click()
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Connected')
+  const expected = createHash('sha256').update(JSON.stringify(request.source.sourceInventory.map(row => [row.path, row.mode, row.contentDigest]))).digest('hex')
+  const script = "import hashlib,pathlib,json; r=pathlib.Path('/workspace'); rows=[[str(p.relative_to(r)),('100755' if p.stat().st_mode & 511 == 493 else '100644' if p.stat().st_mode & 511 == 420 else 'invalid'),'sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()] for p in sorted(r.rglob('*'),key=lambda p:str(p.relative_to(r))) if p.is_file()]; print('ISSUED_'+'SOURCE_'+hashlib.sha256(json.dumps(rows,separators=(',',':')).encode()).hexdigest())"
+  await page.getByTestId('terminal-canvas').locator('.xterm-helper-textarea').focus()
+  await page.keyboard.type("python3 -c '" + script.replaceAll("'", "'\\''") + "'")
+  await page.keyboard.press('Enter')
+  await expect.poll(() => sockets.frames.filter(row => row.direction === 'received' && row.binary).map(row => row.text).join('')).toContain(`ISSUED_SOURCE_${expected}`)
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'issued-source-capsule.png'), fullPage: true })
+  await page.getByTestId('terminal-end').click()
+  await expect(page.getByTestId('terminal-state-label')).toHaveText('Session ended')
+  await openApplicationRoute(page, '/execution-host')
+  await workload.getByRole('button', { name: 'Stop', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+  await expect.poll(() => ledger().state).toBe('stopped')
+  await workload.getByRole('button', { name: 'Remove container', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm operation', exact: true }).click()
+  await expect.poll(() => ledger().state).toBe('removed')
+  expect(readFileSync(path.join(projectRoot, 'application.yaml'))).toEqual(sourceBefore)
+  expect(hostSourceSnapshot()).toEqual(hostSourceBefore)
+  expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectRoot, encoding: 'utf8' }).trim()).toBe(projectHeadBefore)
+  expect(sockets.errors).toEqual([])
+  expectClean(signals)
+  writeFileSync(path.join(ARTIFACT_ROOT, 'issued-source-browser.json'), JSON.stringify({
+    requestDigest: request.requestDigest, sourceDigest: request.sourceDigest,
+    baseRevision: request.source.baseRevision, workloadId: issued.workloadId,
+    receiptDigest: issued.receiptDigest, downloadedExactRequest: true,
+    daemonVerifiedGrant: true, capsuleInventoryAndModesVerified: true, sourceUnchanged: true,
+    environment: 'production browser/AppServer/rootless daemon; production transaction primitive with explicit test UID substitutions; installed root-helper identity/context/authentication checks unrun',
+  }, null, 2))
 })

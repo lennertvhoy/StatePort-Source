@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -18,6 +19,19 @@ from scripts.test_release_contracts import release_index
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _source_fixture(tmp_path: Path) -> tuple[Path, dict]:
+    """Build the real Git-backed source witness without importing checkout code in the proof."""
+
+    helper_path = ROOT / "packages/execution-host/tests/test_workspace_source.py"
+    spec = importlib.util.spec_from_file_location("stateport_source_fixture", helper_path)
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    fixture_parent = tmp_path / "source-fixture"
+    fixture_parent.mkdir(mode=0o700)
+    return helper._fixture(fixture_parent)
 
 
 def _build_wheel(
@@ -146,6 +160,7 @@ def test_updater_wheel_installs_without_checkout_or_pythonpath(tmp_path: Path) -
     assert "stateport_release/contract.py" in names
     assert "execution_host/client.py" in names
     assert "execution_host/daemon_contract.py" in names
+    assert "execution_host/workspace_source.py" in names
     assert any(name.endswith("update-status.v1.schema.json") for name in names)
     allowed_prefixes = (
         "execution_host/",
@@ -241,7 +256,68 @@ def test_updater_wheel_installs_without_checkout_or_pythonpath(tmp_path: Path) -
     assert Path(origin_result["executionHostClient"]).resolve().is_relative_to(
         site_packages.resolve()
     )
+    workspace_source_origin = subprocess.run(
+        [
+            str(python),
+            "-I",
+            "-c",
+            "import execution_host.workspace_source; print(execution_host.workspace_source.__file__)",
+        ],
+        cwd=Path("/"),
+        env=runtime_environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    workspace_source_path = Path(workspace_source_origin.stdout.strip()).resolve()
+    assert workspace_source_path.is_relative_to(site_packages.resolve())
     assert origin_result["governedRunner"] is None
+
+    source_root, source = _source_fixture(tmp_path)
+    shutil.rmtree(source_root / ".git")
+    assert not (source_root / ".git").exists()
+    source_document = tmp_path / "reviewed-source.json"
+    source_document.write_text(json.dumps(source), encoding="utf-8")
+    verify_script = """
+import json
+import os
+from pathlib import Path
+import sys
+
+from execution_host.workspace_source import verify_source_commit
+
+root = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+try:
+    verify_source_commit(root, json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")), owner_uid=os.geteuid())
+finally:
+    os.close(root)
+print("verified")
+"""
+    verified_source = subprocess.run(
+        [str(python), "-I", "-c", verify_script, str(source_root), str(source_document)],
+        cwd=Path("/"),
+        env=runtime_environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert verified_source.stdout.strip() == "verified"
+    assert next(row for row in source["sourceInventory"] if row["path"] == "bin/run.sh")["mode"] == "100755"
+    (source_root / "README.md").write_bytes(b"changed source\n")
+    refused_source = subprocess.run(
+        [str(python), "-I", "-c", verify_script, str(source_root), str(source_document)],
+        cwd=Path("/"),
+        env=runtime_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert refused_source.returncode != 0
+    assert "WorkspaceSourceRefusal" in refused_source.stderr
+
     health = subprocess.run(
         [str(updater), "--state-root", str(state_root), "health"],
         cwd=Path("/"),

@@ -13,6 +13,7 @@ import { MAX_SETTINGS_IMPORT_BYTES } from '@/client/settingsImportPolicy'
 import { ConfirmDialog, Disclosure, InlineNotice, copyText } from '@/components'
 import { Button } from '@/components/ui/button'
 import { localServicePresentation } from '@/semantic'
+import { useCommandStore } from '@/shell/commands'
 import { useSessionStore, useWorkspaceStore } from '@/state'
 
 import { ReadOnlyValue, SettingRow, SettingSubsection } from './controls'
@@ -41,6 +42,9 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
   const [importText, setImportText] = useState('')
   const [importIssues, setImportIssues] = useState<string[] | null>(null)
   const [importBusy, setImportBusy] = useState(false)
+  const [fileReading, setFileReading] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const importReadVersion = useRef(0)
   const [policyJson, setPolicyJson] = useState<string | null>(null)
   const [descriptorJson, setDescriptorJson] = useState<string | null>(null)
   const [confirmResetLayout, setConfirmResetLayout] = useState(false)
@@ -59,6 +63,7 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
       .catch(() => undefined)
     return () => {
       cancelled = true
+      importReadVersion.current += 1
     }
   }, [])
 
@@ -78,9 +83,14 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
   }
 
   const exportSettings = async () => {
-    const json = await client.globalSettings.exportJson()
-    downloadTextFile('stateport-settings.json', json)
-    pushToast({ kind: 'success', title: 'Settings exported' })
+    setActionError(null)
+    try {
+      const json = await client.globalSettings.exportJson()
+      downloadTextFile('stateport-settings.json', json)
+      pushToast({ kind: 'success', title: 'Settings exported' })
+    } catch (err) {
+      setActionError(`Settings export failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
   }
 
   const runImport = async (json: string) => {
@@ -119,6 +129,7 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
 
   const loadPolicy = () => {
     if (policyJson !== null) return
+    setActionError(null)
     void client.catalog.list().then((packages) => {
       setPolicyJson(
         JSON.stringify(
@@ -143,11 +154,12 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
           2,
         ),
       )
-    })
+    }).catch((err: unknown) => setActionError(`Policy summary could not be loaded: ${err instanceof Error ? err.message : 'Unknown error'}`))
   }
 
   const loadDescriptor = () => {
     if (descriptorJson !== null) return
+    setActionError(null)
     void client.applications.list().then((instances) => {
       setDescriptorJson(
         JSON.stringify(
@@ -166,11 +178,12 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
           2,
         ),
       )
-    })
+    }).catch((err: unknown) => setActionError(`Capability descriptor could not be loaded: ${err instanceof Error ? err.message : 'Unknown error'}`))
   }
 
   return (
     <div className="flex flex-col gap-5" data-testid="settings-group-advanced">
+      {actionError ? <InlineNotice tone="danger" title="Settings action failed">{actionError}</InlineNotice> : null}
       <SettingSubsection title="Service" description="How this build talks to the StatePort service.">
         <SettingRow anchor="adapter-mode" label="Adapter mode" description="The effective adapter in use right now.">
           <ReadOnlyValue
@@ -263,6 +276,9 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
               onChange={(e) => {
                 const file = e.target.files?.[0]
                 if (!file) return
+                const version = ++importReadVersion.current
+                setFileReading(false)
+                setImportIssues(null)
                 if (file.size > MAX_SETTINGS_IMPORT_BYTES) {
                   setImportText('')
                   setImportIssues([
@@ -271,7 +287,16 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
                   e.target.value = ''
                   return
                 }
-                void file.text().then((text) => setImportText(text))
+                setFileReading(true)
+                void file.text().then((text) => {
+                  if (version === importReadVersion.current) setImportText(text)
+                }).catch((err: unknown) => {
+                  if (version === importReadVersion.current) {
+                    setImportIssues([`Settings file could not be read: ${err instanceof Error ? err.message : 'Unknown error'}`])
+                  }
+                }).finally(() => {
+                  if (version === importReadVersion.current) setFileReading(false)
+                })
                 e.target.value = ''
               }}
             />
@@ -286,6 +311,8 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
             <textarea
               value={importText}
               onChange={(e) => {
+                importReadVersion.current += 1
+                setFileReading(false)
                 setImportText(e.target.value)
                 setImportIssues(null)
               }}
@@ -297,8 +324,8 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
             />
           </label>
           <div className="mt-2 flex items-center gap-2">
-            <Button size="sm" onClick={() => void runImport(importText)} disabled={importBusy || !importText.trim()} data-testid="import-settings-apply">
-              {importBusy ? 'Validating…' : 'Validate & import'}
+            <Button size="sm" onClick={() => void runImport(importText)} disabled={importBusy || fileReading || !importText.trim()} data-testid="import-settings-apply">
+              {fileReading ? 'Reading file…' : importBusy ? 'Validating…' : 'Validate & import'}
             </Button>
           </div>
           {importIssues ? (
@@ -329,8 +356,16 @@ export function AdvancedGroup({ settings, replaceAll }: AdvancedProps) {
             variant="outline"
             size="sm"
             onClick={() => {
-              window.localStorage.removeItem('stateport.commands.v1')
-              pushToast({ kind: 'success', title: 'Caches cleared', body: 'Recent palette commands were cleared.' })
+              setActionError(null)
+              try {
+                window.localStorage.removeItem('stateport.commands.v1')
+                useCommandStore.setState({ recents: [] })
+                window.localStorage.removeItem('stateport.commands.v1')
+                if (window.localStorage.getItem('stateport.commands.v1') !== null) throw new Error('Recent commands remain in browser storage')
+                pushToast({ kind: 'success', title: 'Caches cleared', body: 'Recent palette commands were cleared.' })
+              } catch (err) {
+                setActionError(`Caches could not be cleared: ${err instanceof Error ? err.message : 'Unknown error'}`)
+              }
             }}
           >
             Clear caches

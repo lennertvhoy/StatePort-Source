@@ -140,6 +140,7 @@
         "grantDigest": {"$ref": "#/$defs/digest"}
       }
     },
+    "workspaceIssuerContextDigest": {"$ref": "#/$defs/digest"},
     "steps": {
       "type": "array",
       "minItems": 0,
@@ -156,7 +157,17 @@
             "maxItems": 32,
             "items": {"type": "array", "maxItems": 48, "items": {"type": "string", "maxLength": 300}}
           },
-          "detail": {"type": "string", "maxLength": 300}
+          "detail": {"type": "string", "maxLength": 300},
+          "workspaceImage": {
+            "type": "object", "additionalProperties": false,
+            "required": ["imageId", "reference", "digest", "observedDigest"],
+            "properties": {
+              "imageId": {"const": "stateport-dev-workspace"},
+              "reference": {"type": "string", "minLength": 1, "maxLength": 300},
+              "digest": {"$ref": "#/$defs/digest"},
+              "observedDigest": {"$ref": "#/$defs/digest"}
+            }
+          }
         }
       }
     },
@@ -202,6 +213,40 @@
     },
     "startedAt": {"$ref": "#/$defs/timestamp"},
     "finishedAt": {"$ref": "#/$defs/timestamp"},
+    "managedResources": {
+      "type": "object", "additionalProperties": false,
+      "required": ["units", "dataVolumesPreserved", "providerAuthenticationPreserved", "preservationScope"],
+      "properties": {
+        "units": {
+          "type": "array", "maxItems": 32,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["kind", "path", "owner", "uid", "contentDigest"],
+            "properties": {
+              "kind": {"enum": ["container", "network"]},
+              "path": {"type": "string", "pattern": "^/var/lib/(?:stateport-control|stateport-exec)/\\.config/containers/systemd/[a-z0-9][a-z0-9_.@-]*\\.(?:container|network)$", "maxLength": 500},
+              "owner": {"enum": ["stateport-control:stateport-control", "stateport-exec:stateport-exec"]},
+              "uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+              "contentDigest": {"$ref": "#/$defs/digest"},
+              "containerName": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"}
+            },
+            "allOf": [
+              {"if": {"properties": {"kind": {"const": "container"}}},
+               "then": {"required": ["containerName"], "properties": {"path": {"pattern": "\\.container$"}}}},
+              {"if": {"properties": {"kind": {"const": "network"}}},
+               "then": {"not": {"required": ["containerName"]}, "properties": {"path": {"pattern": "\\.network$"}}}},
+              {"if": {"properties": {"owner": {"const": "stateport-control:stateport-control"}}},
+               "then": {"properties": {"path": {"pattern": "^/var/lib/stateport-control/"}}}},
+              {"if": {"properties": {"owner": {"const": "stateport-exec:stateport-exec"}}},
+               "then": {"properties": {"path": {"pattern": "^/var/lib/stateport-exec/"}}}}
+            ]
+          }
+        },
+        "dataVolumesPreserved": {"const": true},
+        "providerAuthenticationPreserved": {"const": true},
+        "preservationScope": {"const": "provisioning-only"}
+      }
+    },
     "result": {"enum": ["succeeded", "failed"]},
     "receiptDigest": {"$ref": "#/$defs/digest"}
   },

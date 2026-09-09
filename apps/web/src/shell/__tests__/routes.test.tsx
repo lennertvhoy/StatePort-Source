@@ -11,6 +11,7 @@ import App from '@/App'
 import { getClient, resetClientForTests } from '@/client'
 import { buildSeed } from '@/client/mock/seed'
 import { invalidateInstanceCache } from '@/shell/data'
+import { useWorkspaceStore } from '@/state'
 
 afterEach(() => {
   cleanup()
@@ -79,7 +80,8 @@ describe('route smoke', () => {
     )
   }
 
-  it('root redirects to Applications', async () => {
+  it('root without a previously opened application redirects to Applications', async () => {
+    useWorkspaceStore.setState({ lastInstanceId: null, lastView: null, lastWorkbenchTool: null })
     await renderAt('#/')
     expect(await screen.findByTestId('applications-stub', undefined, { timeout: 10_000 })).toBeTruthy()
   })

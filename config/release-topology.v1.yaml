@@ -19,6 +19,7 @@ targets:
       serviceId: stateport-execution-host
       imageId: stateport-execution-host
       imageDigest: null
+      workspaceImageId: stateport-dev-workspace
       contractVersion: 2
       clientCompatibility: {minimum: 1, maximum: 2}
       hostDirectory: /run/stateport/execution-control

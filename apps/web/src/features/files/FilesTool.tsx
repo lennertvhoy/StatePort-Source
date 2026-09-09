@@ -576,6 +576,44 @@ export default function FilesTool() {
   // ── Mobile file picker ────────────────────────────────────────────────────
   const [pickerOpen, setPickerOpen] = useState(false)
 
+  // Autosave requests review only. Consume each edit before opening, so cancel,
+  // discard or a failed save cannot produce a modal loop without another edit.
+  const [idleEdit, setIdleEdit] = useState<{
+    instance: string; pane: PaneId; path: string; primary: string | null;
+    secondary: string | null; targetPane: PaneId
+  } | null>(null)
+  const consumedIdleEdit = useRef<typeof idleEdit>(null)
+  const [composing, setComposing] = useState(false)
+  const onEditorEdit = useCallback((pane: PaneId, path: string) => {
+    setIdleEdit({ instance: instanceId, pane, path, primary: activeFile,
+      secondary: secondaryActive, targetPane: openInPane })
+  }, [instanceId, activeFile, secondaryActive, openInPane])
+  useEffect(() => {
+    setComposing(false)
+  }, [instanceId, activeFile, secondaryActive, openInPane])
+  useEffect(() => {
+    if (!idleEdit || consumedIdleEdit.current === idleEdit) return
+    const doc = docs?.[idleEdit.path]
+    const contextChanged = idleEdit.instance !== instanceId || idleEdit.primary !== activeFile
+      || idleEdit.secondary !== secondaryActive || idleEdit.targetPane !== openInPane
+    if (!editorSettings.autosave || contextChanged || savePreviewOpen || pendingClose
+      || pendingNav || quickOpenOpen || pickerOpen || !doc || doc.status !== 'ready'
+      || doc.readOnly || doc.draft === doc.savedContent) {
+      consumedIdleEdit.current = idleEdit
+      return
+    }
+    if (composing) return
+    const timer = window.setTimeout(() => {
+      consumedIdleEdit.current = idleEdit
+      // Another feature may own a modal; never stack unsolicited review over it.
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return
+      openSavePreview({ paths: [idleEdit.path], origin: 'Autosave review — confirmation required' })
+    }, 1200)
+    return () => window.clearTimeout(timer)
+  }, [idleEdit, docs, instanceId, activeFile, secondaryActive, openInPane,
+    editorSettings.autosave, savePreviewOpen, pendingClose, pendingNav,
+    quickOpenOpen, pickerOpen, composing, openSavePreview])
+
   // ── Derived view state ────────────────────────────────────────────────────
   const treeEmpty = Boolean(tree && !tree.loading && !tree.error && (tree.nodes ?? []).length === 0)
   const recentFiles = useMemo(() => {
@@ -662,6 +700,8 @@ export default function FilesTool() {
     onReveal: revealInTree,
     onCompare: (path: string) => openSavePreview({ paths: [path] }),
     onReviewSave: () => openSavePreview(),
+    onEdit: onEditorEdit,
+    onComposition: setComposing,
     onSendSelection: sendSelection,
     onOpenReceipt: openReceipt,
     onCursor,

@@ -38,6 +38,7 @@ import { Button } from '@/components/ui/button'
 import { useApplicationReceiptBaseRoute } from '@/features/application-experience/useApplicationReceiptRoute'
 import { sendToBridge } from '@/features/bridge/bridgeStore'
 import { cn } from '@/lib/utils'
+import { useSessionStore } from '@/state'
 
 import {
   approvalStatusPresentation,
@@ -197,6 +198,7 @@ export function ApprovalDetailPane({ approvalId, instanceName, onDecided, onBack
     if (!approval) return
     setBusy('approve')
     setActionError(null)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
     try {
       const result = await getClient().approvals.approve(approval.id, {
         expectedDigest: approval.planDigest.value,
@@ -209,6 +211,7 @@ export function ApprovalDetailPane({ approvalId, instanceName, onDecided, onBack
       setActionError(err)
       reload()
     } finally {
+      releaseOperationsMutation()
       setBusy(null)
     }
   }, [approval, onDecided, reload])
@@ -217,6 +220,7 @@ export function ApprovalDetailPane({ approvalId, instanceName, onDecided, onBack
     if (!approval) return
     setBusy('reject')
     setActionError(null)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
     try {
       const result = await getClient().approvals.reject(approval.id, {
         reason: undefined,
@@ -228,6 +232,7 @@ export function ApprovalDetailPane({ approvalId, instanceName, onDecided, onBack
       setActionError(err)
       reload()
     } finally {
+      releaseOperationsMutation()
       setBusy(null)
     }
   }, [approval, onDecided, reload])

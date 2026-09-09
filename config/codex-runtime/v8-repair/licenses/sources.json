@@ -1,0 +1,32 @@
+[
+  {
+    "file": "V8-BSD-3-Clause.txt",
+    "url": "https://raw.githubusercontent.com/v8/v8/4323497a6a73839e6d5260f6acd7ec0212cb3321/LICENSE",
+    "sha256": "6ab33af8774a0f396ee3aeeb761e3229057682d6f9fa7f572e390c2cb3a6e509",
+    "bytes": 3093
+  },
+  {
+    "file": "Rusty-V8-MIT.txt",
+    "url": "https://raw.githubusercontent.com/denoland/rusty_v8/2768994f664e8a6e3aba27503606c58339136e2a/LICENSE",
+    "sha256": "1c6356fb751d45f0c53093ebf8a7f5e580e802f51999178e19d60f3ec39e147d",
+    "bytes": 1078
+  },
+  {
+    "file": "XZ-0BSD.txt",
+    "url": "https://raw.githubusercontent.com/tukaani-project/xz/a3ea8832bec11128597c454f5d14d05ef6010e3f/COPYING.0BSD",
+    "sha256": "0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1",
+    "bytes": 607
+  },
+  {
+    "file": "Codex-Apache-2.0.txt",
+    "url": "https://raw.githubusercontent.com/openai/codex/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/LICENSE",
+    "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+    "bytes": 10926
+  },
+  {
+    "file": "Codex-NOTICE.txt",
+    "url": "https://raw.githubusercontent.com/openai/codex/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/NOTICE",
+    "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+    "bytes": 242
+  }
+]

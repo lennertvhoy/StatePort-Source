@@ -132,3 +132,23 @@ def test_codex_execution_exposes_durable_process_supervision_identity(tmp_path: 
     assert len(started) == len(finished) == 1
     assert started[0] == finished[0]
     assert started[0].process_generation == generation
+
+
+def test_explicit_empty_environment_never_inherits_operator_home(tmp_path: Path, monkeypatch) -> None:
+    """Exercise the adapter/process boundary without invoking or reading Codex auth."""
+    fake_codex = tmp_path / "fake-codex"
+    fake_codex.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os\n"
+        "print(json.dumps({key: os.environ.get(key) for key in "
+        "('HOME', 'CODEX_HOME', 'OPENAI_API_KEY')}))\n"
+    )
+    fake_codex.chmod(0o700)
+    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "operator-codex"))
+    monkeypatch.setenv("OPENAI_API_KEY", "UNREAD_TEST_CANARY")
+    adapter = CodexAdapter(CodexProbe(str(fake_codex), "fixture", True, True, True, "fixture"))
+    result = adapter.execute(make_spec(), tmp_path, environment={})
+    assert result.ok
+    import json
+    assert json.loads(result.stdout) == {"HOME": None, "CODEX_HOME": None, "OPENAI_API_KEY": None}

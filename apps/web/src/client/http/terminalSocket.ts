@@ -54,6 +54,7 @@ interface ReadyFrame {
 }
 
 const WS_OPEN = 1
+const CLOSE_ACK_TIMEOUT_MS = 5_000
 const READY_FRAME_KEYS = [
   'formatVersion',
   'purpose',
@@ -342,6 +343,51 @@ export class TerminalSocket {
       this.ws = null
       this.readyFlag = false
     }
+  }
+
+  /**
+   * Detach and wait for the server's cleanup-ordered close acknowledgement.
+   * This is used only by explicit reconnect; ordinary disposal remains
+   * fire-and-forget so unmounts and cancellation cannot hang the UI.
+   */
+  closeAndWait(): Promise<void> {
+    const ws = this.ws
+    if (!ws) return Promise.resolve()
+    return new Promise<void>((resolve, reject) => {
+      let settled = false
+      const originalOnClose = ws.onclose
+      const finish = (error?: ClientError) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (ws.onclose === wrappedOnClose) ws.onclose = originalOnClose
+        if (error) reject(error)
+        else resolve()
+      }
+      const wrappedOnClose = (event: { code: number; reason: string }) => {
+        try {
+          originalOnClose?.(event)
+        } finally {
+          if (event.code === 1000 && event.reason === 'transport_detached') finish()
+          else finish(new ClientError('network', 'Terminal socket close was not acknowledged by cleanup', {
+            detail: `close code ${event.code}${event.reason ? `: ${event.reason}` : ''}`,
+          }))
+        }
+      }
+      ws.onclose = wrappedOnClose
+      const timer = setTimeout(() => {
+        this.teardown()
+        finish(new ClientError('network', 'Terminal socket cleanup acknowledgement timed out'))
+      }, CLOSE_ACK_TIMEOUT_MS)
+      try {
+        ws.close()
+      } catch (cause) {
+        this.teardown()
+        finish(new ClientError('network', 'Terminal socket could not be closed', {
+          detail: cause instanceof Error ? cause.message : String(cause),
+        }))
+      }
+    })
   }
 
   onData(listener: (text: string) => void): () => void {

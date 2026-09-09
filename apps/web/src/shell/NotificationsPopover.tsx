@@ -80,7 +80,7 @@ export function NotificationsPopover({ children }: { children: ReactNode }) {
           ) : (
             <ul className="flex flex-col">
               {items.map((item) => (
-                <li key={item.id}>
+                <li key={JSON.stringify([item.instanceId, item.id])} data-instance-id={item.instanceId}>
                   <button
                     type="button"
                     className={cn(
@@ -90,15 +90,6 @@ export function NotificationsPopover({ children }: { children: ReactNode }) {
                     onClick={() => {
                       void getClient()
                         .activity.markNotificationRead(item.id, { instanceId: item.instanceId })
-                        .then(() => {
-                          setItems((current) =>
-                            current?.map((candidate) =>
-                              candidate.id === item.id
-                                ? { ...candidate, read: true }
-                                : candidate,
-                            ) ?? null,
-                          )
-                        })
                         .catch(() => {
                           pushToast({
                             kind: 'error',
@@ -115,6 +106,7 @@ export function NotificationsPopover({ children }: { children: ReactNode }) {
                       <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{item.title}</span>
                       <TimeAgo date={item.createdAt} />
                     </span>
+                    {item.instanceId && <span className="truncate text-xs text-foreground-secondary" title={item.instanceName ?? item.instanceId}>{item.instanceName ?? item.instanceId}</span>}
                     {item.body ? <span className="line-clamp-2 text-xs text-foreground-secondary">{item.body}</span> : null}
                   </button>
                 </li>

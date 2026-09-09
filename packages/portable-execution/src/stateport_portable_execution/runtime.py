@@ -1751,6 +1751,10 @@ class PortableExecutionService:
             if not secrets.compare_digest("sha256:" + digest_value.hexdigest(), expected):
                 raise PortableExecutionError("lifecycle fixture template file changed outside governance")
 
+        validation = self.app._validate_managed_instance(instance_root)
+        if not validation.ok:
+            raise PortableExecutionError("lifecycle fixture failed declared StateSpec validation")
+
     @staticmethod
     def _safe_fixture_file(root: Path, relative: str) -> Path:
         path = Path(relative)
@@ -1833,7 +1837,19 @@ class PortableExecutionService:
         spec = descriptor.get("spec") if isinstance(descriptor, Mapping) else None
         application_id = spec.get("applicationId") if isinstance(spec, Mapping) else None
         if not isinstance(application_id, str):
-            return "unknown"
+            template_ref = spec.get("templateRef") if isinstance(spec, Mapping) else None
+            template_id = template_ref.get("id") if isinstance(template_ref, Mapping) else None
+            matches = [
+                item.get("applicationId") for item in self.applications()
+                if isinstance(item.get("lifecycleTemplate"), Mapping)
+                and isinstance(template_id, str)
+                and item["lifecycleTemplate"].get("templateId") == template_id
+            ]
+            if len(matches) > 1:
+                raise PortableExecutionError("portable lifecycle application identity is ambiguous")
+            if len(matches) != 1 or not isinstance(matches[0], str):
+                return "unknown"
+            application_id = matches[0]
         try:
             application, _identity, profile, source_root, package_digest = (
                 self._browser_fixture_contract(application_id)
@@ -1963,6 +1979,8 @@ class PortableExecutionService:
         materialized_identity: tuple[int, int] | None = None
         try:
             if revision_root is not None:
+                destination.mkdir(mode=0o700)
+                materialized_identity = self._portable_directory_identity(destination)
                 lock = self._materialize_revision_instance(
                     revision_root,
                     destination,
@@ -1970,6 +1988,7 @@ class PortableExecutionService:
                     name or str(descriptor.get("displayName", instance_id)),
                     application_id,
                     template_id,
+                    actor_id=actor_id,
                 )
                 materialized_identity = self._portable_directory_identity(destination)
                 if not secrets.compare_digest(self._fixture_tree_digest(revision_root), package_digest):
@@ -2166,19 +2185,32 @@ class PortableExecutionService:
         display_name: str,
         application_id: str,
         template_id: str,
+        *,
+        actor_id: str = "local-operator",
     ) -> dict[str, Any]:
         """Materialize one declared fixture revision into a locked instance."""
 
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        source_relative = ".statedd/template-source"
+        embedded_source = destination / source_relative
+        embedded_source.parent.mkdir(exist_ok=True, mode=0o700)
+        self._copy_tree_without_symlinks(revision_root, embedded_source)
+        if self._fixture_tree_digest(embedded_source) != self._fixture_tree_digest(revision_root):
+            raise PortableExecutionError("embedded fixture source differs from registered revision")
+        compatibility = embedded_source / "template.yaml"
+        template_document = yaml.safe_load(compatibility.read_text(encoding="utf-8")) if compatibility.is_file() else {}
+        lifecycle = template_document.get("spec", {}).get("lifecycle", [])
+        initial_status = lifecycle[0] if isinstance(lifecycle, list) and lifecycle else "active"
         (destination / "instance.yaml").write_text(
             yaml.safe_dump(
                 {
-                    "formatVersion": "stateport.application-instance/v1",
+                    "apiVersion": "statedd.stateport.io/v1alpha1",
+                    "kind": "Instance",
                     "metadata": {"id": instance_id, "name": display_name},
                     "spec": {
-                        "applicationId": application_id,
-                        "mode": "fixture",
-                        "templateRef": {"id": template_id},
+                        "templateRef": {"id": template_id, "path": source_relative},
+                        "status": initial_status,
+                        "owner": {"name": actor_id, "handle": actor_id},
                     },
                 },
                 sort_keys=False,
@@ -2208,7 +2240,33 @@ class PortableExecutionService:
                         target,
                         ignore=lambda _relative, name: name == "__pycache__" or name.endswith(".pyc"),
                     )
-            return materialize_instance(revision_root, destination, allow_fixture=True)
+            lock = materialize_instance(embedded_source, destination, allow_fixture=True)
+            lock["template"]["sourcePath"] = source_relative
+            lock["template"]["source"]["checkoutLocation"] = source_relative
+            lock_path = destination / ".statedd/lock.yaml"
+            lock_text = lock_path.read_text(encoding="utf-8")
+            # Preserve the materializer's restricted-YAML serialization.
+            lock_text = re.sub(
+                r"(?m)^(\s*(?:sourcePath|checkoutLocation):) .*$",
+                lambda match: match[1] + " " + json.dumps(source_relative),
+                lock_text,
+            )
+            lock_path.write_text(lock_text, encoding="utf-8")
+            readme = destination / "README.md"
+            if not readme.exists() and not readme.is_symlink():
+                readme.write_text(
+                    f"# {display_name}\n\nInstalled public fixture: {application_id}.\n"
+                    "Canonical instance state lives in state/. Use StatePort backup and "
+                    "restore controls to recover into a new instance.\n",
+                    encoding="utf-8",
+                )
+            validation = self.app._validate_managed_instance(destination)
+            if not validation.ok:
+                raise PortableExecutionError(
+                    "fixture materialization failed declared StateSpec validation: "
+                    + "; ".join(f"{issue.path}: {issue.message}" for issue in validation.issues)
+                )
+            return lock
         except LifecycleError as exc:
             raise PortableExecutionError(f"fixture revision materialization failed: {exc}") from exc
 

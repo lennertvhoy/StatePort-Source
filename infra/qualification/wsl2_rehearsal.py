@@ -34,8 +34,8 @@ the bind-mount immediately restored rootless `podman run`.  The sitecustomize
 shim leaves /proc completely untouched.
 
 Usage: wsl2_rehearsal.py --site-root <staged Site tree> --version <exact candidate> \
-           --archive-root <retained OCI archives> --work-dir <dir> --receipt-out <receipt.json> \
-           [--public-transport]
+           [--archive-root <retained OCI archives>] --work-dir <dir> \
+           --receipt-out <receipt.json> [--public-transport]
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ import json
 import os
 import re
 import secrets
-import select
+import queue
 import shlex
 import shutil
 import signal
@@ -53,6 +53,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -537,7 +538,12 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def phase0_binding(site_root: Path, version: str, archive_root: Path) -> dict[str, object]:
+def phase0_binding(
+    site_root: Path,
+    version: str,
+    archive_root: Path | None,
+    bootstrap_url: str | None = None,
+) -> dict[str, object]:
     """Derive the exact candidate transport inputs before any guest work."""
     index_path = site_root / "download" / version / "release-index.json"
     bootstrap_path = site_root / "download" / "install.sh"
@@ -553,21 +559,30 @@ def phase0_binding(site_root: Path, version: str, archive_root: Path) -> dict[st
         if not isinstance(image, dict) or not isinstance(image.get("imageId"), str):
             raise ValueError("phase-0 candidate image inventory is malformed")
         image_id = str(image["imageId"])
-        archive = archive_root / f"{image_id}.oci.tar"
-        if archive.is_symlink() or not archive.is_file():
-            raise ValueError(f"phase-0 retained archive is unavailable: {image_id}")
-        archives[image_id] = {
-            "archiveDigest": "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest(),
-            "manifestDigest": str(image.get("digest", "")),
-        }
+        if archive_root is not None:
+            archive = archive_root / f"{image_id}.oci.tar"
+            if archive.is_symlink() or not archive.is_file():
+                raise ValueError(f"phase-0 retained archive is unavailable: {image_id}")
+            archives[image_id] = {
+                "archiveDigest": "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest(),
+                "manifestDigest": str(image.get("digest", "")),
+            }
     binding = {
         "releaseIndexDigest": "sha256:" + hashlib.sha256(index_path.read_bytes()).hexdigest(),
         "signedPayloadDigest": "sha256:" + hashlib.sha256(_canonical_json(signed)).hexdigest(),
         "bootstrapDigest": "sha256:" + hashlib.sha256(bootstrap_path.read_bytes()).hexdigest(),
-        "archives": archives,
         "images": {item["imageId"]: item["digest"] for item in images},
         "providerRuntimeRequired": any(service.get("providerHome") for target in signed.get("targets", []) for service in target.get("services", [])),
     }
+    # Public transport is verified directly from anonymous Site/GHCR.  OCI
+    # archives belong only to the staged QEMU mirror and must not be a
+    # prerequisite or part of the public candidate binding.
+    if archive_root is not None:
+        binding["archives"] = archives
+    if bootstrap_url is not None:
+        if not re.fullmatch(r"https://[^\s]+", bootstrap_url):
+            raise ValueError("candidate bootstrap URL must use HTTPS")
+        binding["bootstrapUrl"] = bootstrap_url
     artifacts = signed.get("artifacts") if isinstance(signed, dict) else None
     package_bundle = artifacts.get("podmanPackageBundle") if isinstance(artifacts, dict) else None
     if isinstance(package_bundle, dict):
@@ -593,13 +608,14 @@ class VM:
         self,
         work: Path,
         site_root: Path,
-        archive_root: Path,
+        archive_root: Path | None,
         *,
         phase_gates: bool = False,
         diagnostic_reuse: bool = False,
         public_transport: bool = False,
         memory_mib: int = QUALIFICATION_VM_MEMORY_MIB,
         base_image: Path | None = None,
+        bootstrap_url: str | None = None,
     ):
         self.work = work
         self.site_root = site_root
@@ -609,6 +625,7 @@ class VM:
         self.public_transport = public_transport
         self.memory_mib = memory_mib
         self.base_image = base_image
+        self.bootstrap_url = bootstrap_url or f"https://{HOSTNAME}/StatePort-Site/download/install.sh"
         self.current_receipt: dict = {}
         self.proc: subprocess.Popen | None = None
         self.key = work / "id_ed25519"
@@ -816,93 +833,99 @@ class VM:
         return subprocess.run(argv, check=check, capture_output=True, text=True,
                               input=stdin_text, timeout=timeout)
 
-    def ssh_install(
-        self,
-        cmd: str,
-        *,
-        confirmations: list[str],
-        timeout: int,
-    ) -> subprocess.CompletedProcess[str]:
-        """Run the bootstrap install, answering each /dev/tty confirmation.
-
-        The bootstrap prints an exact confirmation prompt (without a trailing
-        newline) and reads the answer from /dev/tty.  Piping every confirmation
-        up front does not work: the earlier ``sudo``/``apt`` subprocesses drain
-        the PTY input buffer before the prompt's read.  This driver keeps the
-        ssh stdin open and writes each confirmation only after its prompt text
-        appears in the output stream.  Output is read with select() in chunks
-        because the prompt has no newline, so a line-buffered readline() would
-        block forever waiting for one.
-        """
-        argv = ["ssh", "-i", str(self.key), "-p", str(SSH_PORT),
+    def _install_argv(self, cmd: str) -> list[str]:
+        return ["ssh", "-i", str(self.key), "-p", str(SSH_PORT),
                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR",
                 "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=6",
                 "-tt", SSH_TARGET, f"script -qefc {shlex.quote(cmd)} /dev/null"]
-        prompts = [
-            "Type install-packages to authorize this exact authenticated package plan:",
-            "Type install-exact to authorize this exact plan:",
-            "Type install:",
-        ]
-        if len(confirmations) > len(prompts):
-            raise ValueError("more install confirmations than known prompts")
-        process = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=0,
-        )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        pending = list(confirmations)
-        output = ""
-        deadline = time.time() + timeout
-        fd = process.stdout.fileno()
-        next_prompt = 0
-        try:
-            while time.time() < deadline and process.poll() is None:
-                readable, _, _ = select.select([fd], [], [], 1.0)
-                if fd in readable:
-                    chunk = os.read(fd, 4096).decode("utf-8", "replace")
-                    if not chunk:
-                        break
-                    output += chunk
-                    # Answer each confirmation prompt in order as its text
-                    # appears in the stream.
-                    while (
-                        pending
-                        and next_prompt < len(prompts)
-                        and prompts[next_prompt] in output
-                    ):
-                        answer = pending.pop(0)
-                        process.stdin.write(answer + "\n")
-                        process.stdin.flush()
-                        next_prompt += 1
-                        log(f"install confirmation sent: {answer}")
-            if time.time() >= deadline:
-                raise subprocess.TimeoutExpired(cmd, timeout, output=output)
-        except BaseException:
-            process.terminate()
+
+    def ssh_install(
+        self, cmd: str, *, confirmations: list[str], timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        """Answer exact installer prompts over the selected guest transport.
+
+        A reader thread supports Windows anonymous pipes as well as SSH pipes;
+        select() only supports sockets on Windows. No answer is sent before
+        its own prompt, and output/exit waits share a monotonic deadline.
+        """
+        prompts = {
+            "install-packages": "Type install-packages to authorize this exact authenticated package plan:",
+            "install-exact": "Type install-exact to authorize this exact plan:",
+            "install": "Type install:",
+        }
+        if not confirmations or any(answer not in prompts for answer in confirmations):
+            raise ValueError("unknown or empty install confirmations")
+        if len(set(confirmations)) != len(confirmations):
+            raise ValueError("duplicate install confirmation")
+        argv = self._install_argv(cmd)
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, bufsize=0)
+        assert process.stdin is not None and process.stdout is not None
+        chunks: queue.Queue = queue.Queue()
+
+        def read_output() -> None:
             try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
+                while chunk := os.read(process.stdout.fileno(), 4096):
+                    chunks.put(chunk)
+            except OSError as error:
+                chunks.put(error)
+            finally:
+                chunks.put(None)
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        pending = list(confirmations)
+        output = bytearray()
+        deadline = time.monotonic() + timeout
+        consumed = 0
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(cmd, timeout, output=output.decode("utf-8", "replace"))
+                try:
+                    chunk = chunks.get(timeout=remaining)
+                except queue.Empty:
+                    raise subprocess.TimeoutExpired(cmd, timeout, output=output.decode("utf-8", "replace")) from None
+                if chunk is None:
+                    break
+                if isinstance(chunk, OSError):
+                    raise chunk
+                output.extend(chunk)
+                if len(output) > 16 * 1024 * 1024:
+                    raise RuntimeError("installer transcript exceeded its 16 MiB bound")
+                while pending:
+                    marker = prompts[pending[0]].encode()
+                    position = output.find(marker, consumed)
+                    if position < 0:
+                        break
+                    consumed = position + len(marker)
+                    answer = pending.pop(0)
+                    process.stdin.write((answer + "\n").encode())
+                    process.stdin.flush()
+                    log(f"install confirmation sent: {answer}")
+            returncode = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            if pending and returncode == 0:
+                raise RuntimeError(f"install finished without all confirmations consumed: {pending}")
+            return subprocess.CompletedProcess(argv, returncode, output.decode("utf-8", "replace"), "")
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
             raise
         finally:
             try:
                 process.stdin.close()
             except BrokenPipeError:
                 pass
-        stdout = output
-        returncode = process.wait()
-        if process.stdout:
-            tail = process.stdout.read()
-            if tail:
-                stdout += tail
-        if pending and returncode == 0:
-            raise RuntimeError(
-                f"install finished without all confirmations consumed: {pending}"
-            )
-        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+            reader.join(timeout=1)
+            if not reader.is_alive():
+                process.stdout.close()
 
     def scp_in(self, src: str, dst: str) -> None:
         run(["scp", "-i", str(self.key), "-P", str(SSH_PORT),
@@ -1359,11 +1382,11 @@ class VM:
                 "changedPrecondition": "revision-qualified-container-watcher",
             }
         cmd = (f"curl -fsSL --proto '=https' --tlsv1.2 "
-               f"https://{HOSTNAME}/StatePort-Site/download/install.sh -o /tmp/install.sh "
+               f"{shlex.quote(self.bootstrap_url)} -o /tmp/install.sh "
                f"&& sha256sum /tmp/install.sh")
         log("phase: fetch bootstrap exactly as the download page instructs")
         r = self.ssh(cmd, timeout=300)
-        receipt["phases"]["bootstrap-fetch"] = {"ok": True, "sha256": r.stdout.split()[0]}
+        receipt["phases"]["bootstrap-fetch"] = {"ok": True, "sha256": r.stdout.split()[0], "url": self.bootstrap_url}
         if "sha256:" + receipt["phases"]["bootstrap-fetch"]["sha256"] != binding["bootstrapDigest"]:
             raise SystemExit("phase-0 bootstrap bytes differ from the bound candidate")
 
@@ -1821,24 +1844,31 @@ fi
 class NativeWSL(VM):
     """Disposable native WSL2 runner for post-publication owner-path evidence."""
 
-    def __init__(self, work: Path, site_root: Path, archive_root: Path, *,
+    def __init__(self, work: Path, site_root: Path, archive_root: Path | None, *,
                  distro_name: str, phase_gates: bool = False,
-                 public_transport: bool = True) -> None:
+                 public_transport: bool = True, attach_existing: bool = False,
+                 bootstrap_url: str | None = None) -> None:
         if not public_transport:
             raise ValueError("native WSL2 qualification requires anonymous public transport")
         if re.fullmatch(r"StatePort-Rehearsal-[A-Za-z0-9._-]{3,64}", distro_name) is None:
             raise ValueError("native WSL2 rehearsal distribution name is invalid")
         super().__init__(work, site_root, archive_root, phase_gates=phase_gates,
-                         public_transport=True, memory_mib=0)
+                         public_transport=True, memory_mib=0,
+                         bootstrap_url=bootstrap_url)
         self.distro_name = distro_name
         self.install_root = work / "distribution"
         self.rootfs = work / "ubuntu-24.04.4-wsl-amd64.wsl"
         self.exec_user = "root"
         self.imported = False
+        self.attach_existing = attach_existing
+        self.expected_native_identity: dict[str, str] | None = None
+        self.expected_native_baseline: dict[str, object] | None = None
         self.native_wsl = True
         self.substrate = "native-wsl2"
         self.rootfs_identity = dict(WSL_ROOTFS_IDENTITY)
-        self.identity_shims = self.usr_local_changes = self.runtime_configuration_changes = []
+        self.identity_shims = []
+        self.usr_local_changes = []
+        self.runtime_configuration_changes = []
 
     @staticmethod
     def _wsl(arguments: list[str], *, check: bool = True,
@@ -1847,7 +1877,7 @@ class NativeWSL(VM):
                               text=True, timeout=timeout, shell=False)
 
     def prepare(self, *, reuse: bool = False) -> None:
-        if reuse:
+        if reuse and not self.attach_existing:
             raise SystemExit("native WSL2 qualification never reuses a retained distribution")
         if os.name != "nt":
             raise SystemExit("--native-wsl2 must run from Windows Python on the owner host")
@@ -1856,8 +1886,13 @@ class NativeWSL(VM):
         if listed.returncode != 0:
             raise SystemExit("wsl.exe is unavailable or WSL is not enabled")
         names = {line.strip().replace("\x00", "").casefold() for line in listed.stdout.splitlines()}
-        if self.distro_name.casefold() in names:
+        if self.distro_name.casefold() in names and not self.attach_existing:
             raise SystemExit("native WSL2 rehearsal distribution name is already registered")
+        if self.attach_existing:
+            if self.distro_name.casefold() not in names:
+                raise SystemExit("requested native WSL2 qualification distro is not registered")
+            self.exec_user = VM_USER
+            return
         if self.install_root.exists() or self.install_root.is_symlink():
             raise SystemExit("native WSL2 rehearsal install directory must be absent")
         expected = WSL_ROOTFS_IDENTITY["digest"].removeprefix("sha256:")
@@ -1888,14 +1923,70 @@ class NativeWSL(VM):
         self.imported = True
 
     def boot(self) -> None:
+        if self.attach_existing:
+            expected = self.expected_native_identity
+            baseline = self.expected_native_baseline
+            if (
+                not isinstance(expected, dict)
+                or set(expected) != {"machineId", "windowsIdentity"}
+                or not isinstance(expected.get("machineId"), str)
+                or re.fullmatch(r"[0-9a-fA-F]{32}", expected["machineId"]) is None
+                or not isinstance(expected.get("windowsIdentity"), str)
+                or not expected["windowsIdentity"].strip()
+                or not isinstance(baseline, dict)
+                or baseline.get("distroName") != self.distro_name
+                or any(baseline.get(key) != value for key, value in expected.items())
+            ):
+                raise SystemExit("native follow-on identity binding is incomplete or inconsistent")
         versions = self._wsl(["--list", "--verbose"], check=False, timeout=60)
         normalized = versions.stdout.replace("\x00", "")
         if versions.returncode != 0 or not any(
-            self.distro_name.casefold() in line.casefold() and line.rstrip().endswith("2")
-            for line in normalized.splitlines()
+            (parts := line.lstrip().removeprefix("*").split()) and parts[0] == self.distro_name
+            and parts[-1] == "2" for line in normalized.splitlines()
         ):
             raise SystemExit("imported rehearsal distribution is not registered as WSL2")
-        self.rehearsal_baseline = self._capture_rehearsal_baseline()
+        if not self.attach_existing:
+            self.rehearsal_baseline = self._capture_rehearsal_baseline()
+            self.rehearsal_baseline["distroName"] = self.distro_name
+        elif self.expected_native_baseline is None:
+            raise SystemExit("native follow-on is missing the retained J1 baseline")
+        else:
+            self.rehearsal_baseline = dict(self.expected_native_baseline)
+        machine = self.ssh("cat /etc/machine-id", check=False, timeout=60)
+        ps_identity = "$o=Get-CimInstance Win32_OperatingSystem; $o.Caption+'|'+$o.Version+'|'+$o.BuildNumber"
+        identity = self.ssh("powershell.exe -NoProfile -NonInteractive -Command " + shlex.quote(ps_identity), check=False, timeout=60)
+        if machine.returncode != 0 or not re.fullmatch(r"[0-9a-fA-F]{32}\n?", machine.stdout):
+            raise SystemExit("native distro machine identity probe failed")
+        if identity.returncode != 0 or not identity.stdout.strip():
+            raise SystemExit("native Windows identity probe failed")
+        if not self.rehearsal_baseline.get("machineId"):
+            self.rehearsal_baseline["machineId"] = machine.stdout.strip()
+        if not self.rehearsal_baseline.get("windowsIdentity"):
+            self.rehearsal_baseline["windowsIdentity"] = identity.stdout.strip()
+        if self.expected_native_identity is not None and any(
+            {"machineId": machine.stdout.strip(),
+             "windowsIdentity": identity.stdout.strip(),
+             "distroName": self.distro_name}.get(key) != value
+            for key, value in self.expected_native_identity.items()
+        ):
+            raise SystemExit("attached native WSL2 identity differs from retained J1")
+        # Import has no first-run user wizard. Create the ordinary test user,
+        # but preserve stock WSL/systemd configuration and leave lingering to
+        # the public installer. Passwordless sudo is an automation seam; this
+        # lane does not establish interactive sudo-password prompt behavior.
+        if self.attach_existing:
+            self.exec_user = VM_USER
+            ready = self.ssh(
+                "set -eu; id -u rehearsal | grep -qx 1000; "
+                "case $(uname -r | tr '[:upper:]' '[:lower:]') in *microsoft*) ;; *) exit 1;; esac; "
+                "test -n \"${WSL_INTEROP:-}\"; command -v script >/dev/null; "
+                "systemctl --user show-environment >/dev/null",
+                check=False, timeout=300,
+            )
+            if ready.returncode != 0:
+                raise SystemExit("attached native WSL2 distro/user identity check failed")
+            log("attached native WSL2 distribution for follow-on journey")
+            return
         configure = self.ssh(
             "set -eu;"
             "command -v sudo >/dev/null;"
@@ -1903,10 +1994,7 @@ class NativeWSL(VM):
             f"useradd --create-home --uid 1000 --shell /bin/bash {VM_USER};"
             f"usermod --append --groups sudo {VM_USER};"
             f"printf '%s ALL=(ALL) NOPASSWD:ALL\\n' {VM_USER} > /etc/sudoers.d/stateport-rehearsal;"
-            "chmod 0440 /etc/sudoers.d/stateport-rehearsal;"
-            "install -d -m 0755 /var/lib/systemd/linger;"
-            f"install -m 0644 /dev/null /var/lib/systemd/linger/{VM_USER};"
-            "printf '[boot]\\nsystemd=true\\n[user]\\ndefault=rehearsal\\n' > /etc/wsl.conf",
+            "chmod 0440 /etc/sudoers.d/stateport-rehearsal",
             check=False, timeout=120,
         )
         if configure.returncode != 0:
@@ -1938,8 +2026,38 @@ class NativeWSL(VM):
                               timeout=timeout or int(os.environ.get("STATEPORT_REHEARSAL_WSL_TIMEOUT", "1800")),
                               shell=False)
 
+    def _install_argv(self, cmd: str) -> list[str]:
+        return ["wsl.exe", "--distribution", self.distro_name, "--user", self.exec_user,
+                "--", "script", "-qefc", f"sh -lc {shlex.quote(cmd)}", "/dev/null"]
+
     def scp_in(self, src: str, dst: str) -> None:
         raise SystemExit(f"native public qualification forbids local transfer: {src} -> {dst}")
+
+    def fetch_public_artifact(self, url: str, destination: str, expected_digest: str) -> None:
+        """Fetch one reviewed release byte through anonymous HTTPS in WSL.
+
+        The download is staged atomically and verified inside the distro. No
+        host path, local mirror, or identity shim participates in this path.
+        """
+        if not re.fullmatch(r"https://[^\s]+", url):
+            raise ValueError("native artifact URL must use HTTPS")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest):
+            raise ValueError("native artifact digest is invalid")
+        if not destination.startswith("/") or "\n" in destination or "\x00" in destination:
+            raise ValueError("native artifact destination must be an absolute path")
+        quoted_url = shlex.quote(url)
+        quoted_dst = shlex.quote(destination)
+        command = (
+            "set -eu; "
+            f"tmp={quoted_dst}.part.$$; trap 'rm -f \"$tmp\"' EXIT; "
+            f"curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "
+            f"--output \"$tmp\" {quoted_url}; "
+            f"test \"$(sha256sum \"$tmp\" | awk '{{print $1}}')\" = {expected_digest.removeprefix('sha256:')}; "
+            f"install -m 0755 \"$tmp\" {quoted_dst}; rm -f \"$tmp\"; trap - EXIT"
+        )
+        result = self.ssh(command, check=False, timeout=900)
+        if result.returncode != 0:
+            raise SystemExit("native public artifact fetch or digest verification failed")
 
     def teardown(self) -> None:
         if not self.imported:
@@ -2006,7 +2124,7 @@ def public_binding(work: Path) -> dict:
 
 def installed_service_smoke(vm: VM, binding: dict) -> dict:
     from qualification.journey_common import (
-        GuestJsonClient, discover_services, verify_installed_image_digests,
+        GuestJsonClient, control_user_env, discover_services, verify_installed_image_digests,
         wait_service_healthy,
     )
     services = discover_services(vm)
@@ -2021,18 +2139,44 @@ def installed_service_smoke(vm: VM, binding: dict) -> dict:
     if host.get("status") != "available" or host.get("grantBound") is not True:
         raise ValueError(f"installed execution host unavailable: {host}")
     provider = None
+    sandbox = None
     if binding.get("providerRuntimeRequired"):
-        observed = web.request("GET", "/v1/provider/status").get("result", {})
+        observed = web.request("GET", "/v1/provider/status")
         expected = {"executableInstalled": True, "configured": False, "connected": False,
                     "authenticationStatus": "unverified", "requestStatus": "unverified",
                     "telemetryStatus": "unavailable"}
         if any(observed.get(key) != value for key, value in expected.items()):
             raise ValueError("fresh installed provider observations do not match the signed runtime contract")
         provider = expected
+        # Exercise the real provider sandbox, not just CLI presence. Bind exec
+        # to the exact running ID already checked against the signed images.
+        container = digests.get("containers", {}).get("stateport-web", {}).get("containerId", "")
+        if re.fullmatch(r"[0-9a-f]{64}", container) is None:
+            raise ValueError("provider sandbox requires the verified running container ID")
+        source = (Path(__file__).resolve().parents[2] / "scripts/qualification/provider_sandbox_probe.py").read_text()
+        command = ["podman", "exec", "--user", "65532:65532", container,
+                   "/usr/local/bin/python3", "-c", source]
+        shell = control_user_env() + "; run_control " + shlex.join(command)
+        checked = vm.ssh("sudo runuser -u stateport-control -- bash -c " + shlex.quote(shell),
+                         check=False, timeout=110)
+        if checked.returncode != 0:
+            raise ValueError("installed provider sandbox failed: " + checked.stderr[-2500:])
+        sandbox = json.loads(checked.stdout)
+        version = sandbox.get("providerVersion") if isinstance(sandbox, dict) else None
+        if (not isinstance(version, str) or len(version) > 160
+                or re.fullmatch(r"codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?", version) is None):
+            raise ValueError("installed provider sandbox returned no valid provider version")
+        if sandbox != {"result": "passed", "insideWrite": "passed", "outsideWrite": "refused",
+                       "symlinkEscape": "refused", "networkSocket": "refused",
+                       "childProcess": "passed", "namespaces": "isolated",
+                       "authentication": "not attempted", "runtime": "web",
+                       "parentNetworkSocket": "permitted", "providerVersion": version}:
+            raise ValueError("installed provider sandbox returned incomplete boundary evidence")
     return {"ok": True, "services": services, "imageDigests": digests,
             "providerFreshObservations": provider,
+            "providerSandbox": sandbox,
             "webSession": "passed", "executionHost": host,
-            "limitations": "Health/protocol and unauthenticated provider-presence smoke only; no real provider request or three-template qualification"}
+            "limitations": "Health/protocol and unauthenticated provider sandbox checks only; no real provider request or three-template qualification"}
 
 
 def finish_local_vm(vm: VM, receipt: dict) -> None:
@@ -2161,13 +2305,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--site-root", type=Path, required=True)
     ap.add_argument("--version", required=True)
-    ap.add_argument("--archive-root", type=Path, required=True)
+    ap.add_argument("--archive-root", type=Path)
     ap.add_argument("--work-dir", type=Path, default=Path("/tmp/opencode/rehearse/vm"))
     ap.add_argument("--keep-vm", action="store_true")
     ap.add_argument("--phase0-only", action="store_true")
     ap.add_argument("--phase0-receipt", type=Path)
     ap.add_argument("--public-transport", action="store_true")
     ap.add_argument("--native-wsl2", action="store_true")
+    ap.add_argument("--bootstrap-url")
     ap.add_argument("--wsl-distro-name")
     ap.add_argument("--diagnostic", action="store_true")
     ap.add_argument("--retained-vm-dir", type=Path)
@@ -2178,7 +2323,11 @@ def main() -> int:
     require_guard("qualification", sys.argv)
     if not args.site_root.is_dir() or not (args.site_root / "download" / "install.sh").is_file():
         raise SystemExit("--site-root must be a staged Site tree containing download/install.sh")
-    if not args.archive_root.is_dir() or not list(args.archive_root.glob("*.oci.tar")):
+    if not args.public_transport and (
+        args.archive_root is None
+        or not args.archive_root.is_dir()
+        or not list(args.archive_root.glob("*.oci.tar"))
+    ):
         raise SystemExit("--archive-root must contain retained OCI archives")
     if args.public_transport and args.phase0_only:
         ap.error("public transport is a full post-publication rehearsal, not a phase-0 mode")
@@ -2188,7 +2337,12 @@ def main() -> int:
         ap.error("native WSL2 owner-path qualification requires --public-transport")
     if args.native_wsl2 and (args.phase0_only or args.diagnostic or args.retained_vm_dir):
         ap.error("native WSL2 owner-path qualification is a fresh full journey only")
-    binding = phase0_binding(args.site_root, args.version, args.archive_root)
+    binding = phase0_binding(
+        args.site_root,
+        args.version,
+        None if args.public_transport else args.archive_root,
+        args.bootstrap_url,
+    )
     # Full journeys execute both transport and materialization probes themselves.
     # A separately supplied receipt is additional exact-byte evidence, never a
     # prerequisite that forces native WSL through an unrelated QEMU run.
@@ -2216,6 +2370,7 @@ def main() -> int:
             distro_name=distro_name,
             phase_gates=True,
             public_transport=True,
+            bootstrap_url=args.bootstrap_url,
         )
     else:
         vm = VM(
@@ -2226,6 +2381,7 @@ def main() -> int:
             diagnostic_reuse=diagnostic_reuse,
             public_transport=args.public_transport,
             memory_mib=memory_mib,
+            bootstrap_url=args.bootstrap_url,
         )
     try:
         if not diagnostic_reuse:

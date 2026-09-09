@@ -17,11 +17,14 @@ from journey_common import (  # noqa: E402
     JourneyReceipt,
     Refusal,
     boot_retained_vm,
+    boot_native_follow_on,
     discover_services,
     log,
     validate_retained_candidate_inputs,
     verify_installed_image_digests,
     wait_service_healthy,
+    transport_artifact,
+    candidate_artifact_urls,
 )
 from run_journey_j2 import (  # noqa: E402
     RECORD_ACTION,
@@ -164,12 +167,18 @@ def main() -> int:
     parser.add_argument("--vm-dir", type=Path, required=True)
     parser.add_argument("--candidate-dir", type=Path, required=True)
     parser.add_argument("--site-root", type=Path, required=True)
-    parser.add_argument("--archive-root", type=Path, required=True)
+    parser.add_argument("--archive-root", type=Path)
+    parser.add_argument("--native-wsl2", action="store_true")
+    parser.add_argument("--wsl-distro-name")
+    parser.add_argument("--qualification-build-receipt", type=Path)
     args = parser.parse_args()
 
     try:
         facts, prerequisite_evidence = validate_retained_candidate_inputs(
-            args.candidate_dir, args.vm_dir, args.site_root, args.archive_root
+            args.candidate_dir, args.vm_dir, args.site_root,
+            None if args.native_wsl2 else args.archive_root,
+            native_distro_name=args.wsl_distro_name if args.native_wsl2 else None,
+            qualification_build_receipt=args.qualification_build_receipt,
         )
     except Exception as exc:  # noqa: BLE001 - preflight failure must be durable
         receipt = JourneyReceipt(
@@ -197,9 +206,16 @@ def main() -> int:
     vm = None
     try:
         receipt.record("input-preflight", True, **prerequisite_evidence)
-        vm = boot_retained_vm(
-            args.vm_dir, site_root=args.site_root, archive_root=args.archive_root
-        )
+        if args.native_wsl2:
+            if not args.wsl_distro_name:
+                raise ValueError("--native-wsl2 requires --wsl-distro-name")
+            vm = boot_native_follow_on(args.vm_dir, site_root=args.site_root,
+                                       distro_name=args.wsl_distro_name,
+                                       expected_identity=prerequisite_evidence["nativeIdentity"],
+                                       expected_baseline=prerequisite_evidence["rehearsalBaseline"])
+        else:
+            vm = boot_retained_vm(args.vm_dir, site_root=args.site_root,
+                                  archive_root=args.archive_root)
         services = discover_services(vm)
         wait_all_healthy(vm, services)
         digests = verify_installed_image_digests(vm, dict(facts["images"]))  # type: ignore[arg-type]
@@ -370,8 +386,21 @@ def main() -> int:
         expect(restore_ok,
                f"restore apply did not reproduce the backed-up canonical state: {sorted(applied)}")
 
-        vm.scp_in(str(prerequisite_evidence["bootstrapPath"]), "/tmp/stateport-bootstrap")
-        vm.scp_in(str(prerequisite_evidence["installerPath"]), "/tmp/stateport-installer")
+        # Native WSL fetches these exact bytes anonymously from the public
+        # candidate. QEMU retains the existing local staged transport.
+        bootstrap_url = str(prerequisite_evidence.get(
+            "bootstrapUrl", "https://lennertvhoy.github.io/StatePort-Site/download/install.sh"))
+        bootstrap_url, installer_url = candidate_artifact_urls(facts["version"], bootstrap_url)
+        transport_artifact(
+            vm, prerequisite_evidence["bootstrapPath"], "/tmp/stateport-bootstrap",
+            public_url=bootstrap_url,
+            expected_digest=str(prerequisite_evidence["bootstrapDigest"]),
+        )
+        transport_artifact(
+            vm, prerequisite_evidence["installerPath"], "/tmp/stateport-installer",
+            public_url=installer_url,
+            expected_digest=str(prerequisite_evidence["installerDigest"]),
+        )
         guest_bootstrap = vm.ssh(
             "sha256sum /tmp/stateport-bootstrap", check=False, timeout=60
         )

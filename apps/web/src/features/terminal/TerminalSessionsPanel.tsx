@@ -108,7 +108,7 @@ export function TerminalSessionsPanel({ instanceId }: WorkbenchSlotProps) {
               >
                 <SquareTerminal className="size-3.5 shrink-0 text-foreground-tertiary" aria-hidden="true" />
                 <span className="min-w-0 flex-1 truncate">{target.label}</span>
-                <span className="text-xs text-foreground-tertiary">{target.kind === 'ssh' ? 'SSH' : 'Local'}</span>
+                <span className="text-xs text-foreground-tertiary">{target.kind === 'unresolved' ? 'Verified on connect' : target.kind === 'capsule' ? 'Capsule' : target.kind === 'ssh' ? 'SSH' : target.kind === 'herdr_attach' ? 'Managed attach' : 'Local'}</span>
               </button>
             </li>
           ))}

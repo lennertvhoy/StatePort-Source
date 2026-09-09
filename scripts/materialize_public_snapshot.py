@@ -193,6 +193,59 @@ def _reviewed_npm_specifier(relative_path: PurePosixPath, value: str) -> bool:
     return relative_path.name == "package-lock.json" and bool(_NPM_SPECIFIER.fullmatch(value))
 
 
+_CIPD_VERSION = re.compile(r"^[0-9]+@[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$")
+_REVIEWED_CIPD_PATHS = frozenset(
+    {
+        PurePosixPath("config/codex-runtime/v8-repair/recipe.json"),
+        PurePosixPath("config/codex-runtime/v8-repair/upstream-deps.json"),
+    }
+)
+
+
+def _reviewed_cipd_version(relative_path: PurePosixPath, value: str) -> bool:
+    return relative_path in _REVIEWED_CIPD_PATHS and bool(_CIPD_VERSION.fullmatch(value))
+
+
+_CGROUP_USER_PATH = re.compile(r"^/user\.slice/user-[0-9]+\.slice/user@[0-9]+\.service$")
+
+
+def _reviewed_cgroup_fixture(relative_path: PurePosixPath, value: str) -> bool:
+    return relative_path == PurePosixPath("scripts/test_release_images.py") and bool(
+        _CGROUP_USER_PATH.fullmatch(value)
+    )
+
+
+# Exact upstream bytes were reviewed for public copyright/author attribution.
+# Changed files require a fresh provenance review; a matching address alone is insufficient.
+_UPSTREAM_ATTRIBUTION_BINDINGS = {
+    PurePosixPath("config/codex-runtime/v8-repair/icu-corrections/LICENSE-ICU"): (
+        "e55522d81edc687a341a4411e0776e54ca654e90147f354a90458aaced4116af",
+        frozenset({"c-tsai4@" + "uiuc.edu", "scott@" + "netsplit.com", "dbn.lists@" + "gmail.com"}),
+    ),
+    PurePosixPath("config/codex-runtime/v8-repair/icu-corrections/icu-nfrule-fix.patch"): (
+        "63a0e5c19deb155688904d04df8be73a655a22216dc93ad06016722fa3cc6ed5",
+        frozenset({"ftang@" + "chromium.org"}),
+    ),
+    PurePosixPath("config/codex-runtime/v8-repair/icu-corrections/icu-utfiterator-fix.patch"): (
+        "69532f556b3a0cb7b21b3b47631d637009e8590c7665d6b014e6e9c8422f04e5",
+        frozenset({"egg.robin.leroy@" + "gmail.com"}),
+    ),
+    PurePosixPath("config/codex-runtime/v8-repair/native-backports/lzma-sys.patch"): (
+        "56e36b7c038ecd050b84b25053a7158e39c3e5465de054009786cdb92f4f82d8",
+        frozenset({"lasse.collin@" + "tukaani.org"}),
+    ),
+    PurePosixPath("config/codex-runtime/v8-repair/native-backports/xz-upstream-regression.patch"): (
+        "62b7e68062df5e78baf1450c46c874236515c7bd13ed3aa7feeb935d96f3edca",
+        frozenset({"lasse.collin@" + "tukaani.org"}),
+    ),
+}
+
+
+def _reviewed_upstream_attribution(relative_path: PurePosixPath, data: bytes, value: str) -> bool:
+    binding = _UPSTREAM_ATTRIBUTION_BINDINGS.get(relative_path)
+    return binding is not None and sha256(data).hexdigest() == binding[0] and value in binding[1]
+
+
 def _gateway_receipt(candidate: Path) -> dict[str, object]:
     gateway = SensitiveDataGateway(
         DeterministicScanner(),
@@ -204,6 +257,9 @@ def _gateway_receipt(candidate: Path) -> dict[str, object]:
     high_risk_finding_count = 0
     reviewed_fixture_email_count = 0
     reviewed_npm_specifier_count = 0
+    reviewed_cipd_version_count = 0
+    reviewed_cgroup_fixture_count = 0
+    reviewed_upstream_attribution_count = 0
     try:
         for path in _candidate_files(candidate):
             relative = PurePosixPath(path.relative_to(candidate).as_posix())
@@ -224,6 +280,15 @@ def _gateway_receipt(candidate: Path) -> dict[str, object]:
                         continue
                     if _reviewed_npm_specifier(relative, matched):
                         reviewed_npm_specifier_count += 1
+                        continue
+                    if _reviewed_cipd_version(relative, matched):
+                        reviewed_cipd_version_count += 1
+                        continue
+                    if _reviewed_cgroup_fixture(relative, matched):
+                        reviewed_cgroup_fixture_count += 1
+                        continue
+                    if _reviewed_upstream_attribution(relative, data, matched):
+                        reviewed_upstream_attribution_count += 1
                         continue
                     high_risk.append(finding)
                     continue
@@ -250,6 +315,9 @@ def _gateway_receipt(candidate: Path) -> dict[str, object]:
         "receiptSetDigest": _digest(canonical_receipts),
         "reviewedFixtureEmailCount": reviewed_fixture_email_count,
         "reviewedNpmSpecifierCount": reviewed_npm_specifier_count,
+        "reviewedCipdVersionCount": reviewed_cipd_version_count,
+        "reviewedCgroupFixtureCount": reviewed_cgroup_fixture_count,
+        "reviewedUpstreamAttributionCount": reviewed_upstream_attribution_count,
         "scannerVersion": gateway.scanner.VERSION,
         "status": "passed" if high_risk_finding_count == 0 else "blocked",
     }

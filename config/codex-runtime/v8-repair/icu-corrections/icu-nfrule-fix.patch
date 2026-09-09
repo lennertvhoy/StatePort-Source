@@ -1,0 +1,124 @@
+From 910bb20d66f1d19140bd045aed88d6402208326a Mon Sep 17 00:00:00 2001
+From: Frank Tang <ftang@chromium.org>
+Date: Fri, 7 Nov 2025 21:46:25 +0000
+Subject: [PATCH] ICU-23256 Fix floating exception while divided by 0
+
+See #3769
+---
+ icu4c/source/i18n/nfrule.cpp                         |  7 ++++++-
+ icu4c/source/test/intltest/itrbnf.cpp                |  9 +++++++++
+ icu4c/source/test/intltest/itrbnf.h                  |  1 +
+ .../core/src/main/java/com/ibm/icu/text/NFRule.java  | 12 +++++++-----
+ .../com/ibm/icu/dev/test/format/RBNFParseTest.java   | 11 +++++++++++
+ 5 files changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/icu4c/source/i18n/nfrule.cpp b/icu4c/source/i18n/nfrule.cpp
+index 26a6e818d5a9..3857f9f45f2e 100644
+--- a/icu4c/source/i18n/nfrule.cpp
++++ b/icu4c/source/i18n/nfrule.cpp
+@@ -158,12 +158,17 @@ NFRule::makeRules(UnicodeString& description,
+         UnicodeString sbuf;
+         int32_t orElseOp = description.indexOf(gVerticalLine);
+ 
++        uint64_t mod = util64_pow(rule1->radix, rule1->exponent);
+         // we'll actually only split the rule into two rules if its
+         // base value is an even multiple of its divisor (or it's one
+         // of the special rules)
++        if (rule1->baseValue > 0 && rule1->radix != 0 && mod == 0) {
++            status = U_NUMBER_ARG_OUTOFBOUNDS_ERROR;
++            return;
++        }
+         if ((rule1->baseValue > 0
+             && (rule1->radix != 0) // ICU-23109 Ensure next line won't "% 0"
+-            && (rule1->baseValue % util64_pow(rule1->radix, rule1->exponent)) == 0)
++            && (rule1->baseValue % mod == 0))
+             || rule1->getType() == kImproperFractionRule
+             || rule1->getType() == kDefaultRule) {
+ 
+diff --git a/icu4c/source/test/intltest/itrbnf.cpp b/icu4c/source/test/intltest/itrbnf.cpp
+index ebc257025e74..481b1546cc3e 100644
+--- a/icu4c/source/test/intltest/itrbnf.cpp
++++ b/icu4c/source/test/intltest/itrbnf.cpp
+@@ -86,6 +86,7 @@ void IntlTestRBNF::runIndexedTest(int32_t index, UBool exec, const char* &name,
+         TESTCASE(34, testOmissionReplacementWithPluralRules);
+         TESTCASE(35, TestNullDereferenceWRITE23149);
+         TESTCASE(36, TestNullDereferenceREAD23184);
++        TESTCASE(39, TestDividedByZero);
+ #else
+         TESTCASE(0, TestRBNFDisabled);
+ #endif
+@@ -2781,6 +2782,14 @@ IntlTestRBNF::TestNullDereferenceREAD23184() {
+     }
+ }
+ 
++void
++IntlTestRBNF::TestDividedByZero() {
++    UParseError perror;
++    UErrorCode status = U_ZERO_ERROR;
++    RuleBasedNumberFormat rbnf(u"7060920374060940374/4:[]", Locale::getUS(), perror, status);
++    assertEquals("base is too large", U_NUMBER_ARG_OUTOFBOUNDS_ERROR, status);
++}
++
+ /* U_HAVE_RBNF */
+ #else
+ 
+diff --git a/icu4c/source/test/intltest/itrbnf.h b/icu4c/source/test/intltest/itrbnf.h
+index 5a01ab045d74..68f80486e8fe 100644
+--- a/icu4c/source/test/intltest/itrbnf.h
++++ b/icu4c/source/test/intltest/itrbnf.h
+@@ -167,6 +167,7 @@ class IntlTestRBNF : public IntlTest {
+     void testOmissionReplacementWithPluralRules();
+     void TestNullDereferenceWRITE23149();
+     void TestNullDereferenceREAD23184();
++    void TestDividedByZero();
+ 
+ protected:
+     virtual void doTest(RuleBasedNumberFormat* formatter, const char* const testData[][2], UBool testParsing);
+diff --git a/icu4j/main/core/src/main/java/com/ibm/icu/text/NFRule.java b/icu4j/main/core/src/main/java/com/ibm/icu/text/NFRule.java
+index 89aae8f3b040..6687c78491a0 100644
+--- a/icu4j/main/core/src/main/java/com/ibm/icu/text/NFRule.java
++++ b/icu4j/main/core/src/main/java/com/ibm/icu/text/NFRule.java
+@@ -164,14 +164,16 @@ public static void makeRules(String                description,
+             StringBuilder sbuf = new StringBuilder();
+             int orElseOp = description.indexOf('|');
+ 
++            long mod = power(rule1.radix, rule1.exponent);
++            if (rule1.baseValue > 0 && mod == 0) {
++                throw new IllegalArgumentException("value out of range");
++            }
+             // we'll actually only split the rule into two rules if its
+             // base value is an even multiple of its divisor (or it's one
+             // of the special rules)
+-            if ((rule1.baseValue > 0
+-                 && rule1.baseValue % (power(rule1.radix, rule1.exponent)) == 0)
+-                || rule1.baseValue == IMPROPER_FRACTION_RULE
+-                || rule1.baseValue == DEFAULT_RULE)
+-            {
++            if ((rule1.baseValue > 0 && rule1.baseValue % mod == 0)
++                    || rule1.baseValue == IMPROPER_FRACTION_RULE
++                    || rule1.baseValue == DEFAULT_RULE) {
+ 
+                 // if it passes that test, new up the second rule.  If the
+                 // rule set both rules will belong to is a fraction rule
+diff --git a/icu4j/main/core/src/test/java/com/ibm/icu/dev/test/format/RBNFParseTest.java b/icu4j/main/core/src/test/java/com/ibm/icu/dev/test/format/RBNFParseTest.java
+index 60f72781b629..24262abdbd04 100644
+--- a/icu4j/main/core/src/test/java/com/ibm/icu/dev/test/format/RBNFParseTest.java
++++ b/icu4j/main/core/src/test/java/com/ibm/icu/dev/test/format/RBNFParseTest.java
+@@ -213,6 +213,17 @@ public void Test23184EmptyRuleSet() {
+     public void TestNullRuleSet() {
+         try {
+             RuleBasedNumberFormat rbnf = new RuleBasedNumberFormat("x00:a>>>b>#>", Locale.US);
++            errln("Failed: should throw IllegalArgumentException");
++        } catch (IllegalArgumentException e) {
++            // success!
++        }
++    }
++
++    @Test
++    public void TestDividedByZero() {
++        try {
++            RuleBasedNumberFormat rbnf = new RuleBasedNumberFormat("7060920374060940374/4:[]");
++            errln("Failed: should throw IllegalArgumentException");
+         } catch (IllegalArgumentException e) {
+             // success!
+         }

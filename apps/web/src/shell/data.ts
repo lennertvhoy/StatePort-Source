@@ -3,9 +3,11 @@
  * mirror into stores for chrome surfaces. Feature agents own their own data;
  * these hooks exist only for shell chrome (service chip, sidebar, badges).
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
-import type { ApplicationInstance } from '@/client'
+import { useLocation, useNavigate } from 'react-router-dom'
+
+import type { ApplicationInstance, GlobalSettings } from '@/client'
 import { getClient } from '@/client'
 import { useSessionStore, useWorkspaceStore } from '@/state'
 
@@ -13,20 +15,88 @@ import { useSessionStore, useWorkspaceStore } from '@/state'
 
 const SERVICE_POLL_MS = 30_000
 
+// Share only simultaneous shell/startup reads; never cache a saved preference.
+const bootstrapSettingsRequests = new WeakMap<ReturnType<typeof getClient>, Promise<GlobalSettings>>()
+export function fetchBootstrapSettings(): Promise<GlobalSettings> {
+  const client = getClient()
+  const pending = bootstrapSettingsRequests.get(client)
+  if (pending) return pending
+  const request = client.globalSettings.get().finally(() => {
+    if (bootstrapSettingsRequests.get(client) === request) bootstrapSettingsRequests.delete(client)
+  })
+  bootstrapSettingsRequests.set(client, request)
+  return request
+}
+
+interface StartupFocusSession {
+  settings: Promise<GlobalSettings> | null
+  entryKey: string | null
+  finished: boolean
+  attempt: object | null
+}
+export const StartupFocusContext = createContext<StartupFocusSession | null>(null)
+
+/** Called by the Workbench only after its existing instance/tool guards pass. */
+export function useStartupFocus(eligible: boolean): void {
+  const session = useContext(StartupFocusContext)
+  const location = useLocation()
+  const navigate = useNavigate()
+  useEffect(() => {
+    if (!session || !eligible || session.finished) return
+    if (session.entryKey === null) session.entryKey = location.key
+    if (session.entryKey !== location.key) return
+    if (new URLSearchParams(location.search).has('focus')) {
+      session.finished = true
+      return
+    }
+    let cancelled = false
+    const attempt = {}
+    session.attempt = attempt
+    session.settings ??= fetchBootstrapSettings()
+    void session.settings.then((settings) => {
+      if (cancelled || session.finished) return
+      session.finished = true
+      if (settings.general.startInFocusMode !== true) return
+      const search = new URLSearchParams(location.search)
+      search.set('focus', '1')
+      void navigate({ pathname: location.pathname, search: search.toString(), hash: location.hash }, {
+        replace: true, state: location.state,
+      })
+    }).catch(() => { if (!cancelled) session.finished = true })
+    return () => {
+      cancelled = true
+      // StrictMode immediately replaces this attempt; a real departure consumes
+      // it, including browser Back restoring the same history location key.
+      queueMicrotask(() => {
+        if (session.attempt === attempt) session.finished = true
+      })
+    }
+  }, [eligible, location, navigate, session])
+}
+
 /**
- * One-shot saved-navigation reconciliation at shell bootstrap. The saved
+ * One-shot saved navigation/date-display reconciliation at shell bootstrap. The saved
  * sidebar default applies only when the user never made an explicit sidebar
  * choice; the auto-collapse threshold always applies. When the service is
  * unreachable, the persisted local values stay in force.
  */
-export function useSavedNavigationSettings(): void {
+export function useSavedNavigationSettings(): StartupFocusSession {
+  const session = useMemo<StartupFocusSession>(() => ({ settings: null, entryKey: null, finished: false, attempt: null }), [])
   useEffect(() => {
     let cancelled = false
-    void getClient()
-      .globalSettings.get()
+    const toolOrderGeneration = useWorkspaceStore.getState().workbenchToolOrderGeneration
+    const dateTimeGeneration = useWorkspaceStore.getState().dateTimeFormatGeneration
+    void (session.settings ??= fetchBootstrapSettings())
       .then((settings) => {
         if (cancelled) return
         const workspace = useWorkspaceStore.getState()
+        if (workspace.dateTimeFormatGeneration === dateTimeGeneration
+          && workspace.dateTimeFormat !== settings.general.dateTimeFormat) {
+          workspace.setDateTimeFormat(settings.general.dateTimeFormat)
+        }
+        if (workspace.workbenchToolOrderGeneration === toolOrderGeneration) {
+          workspace.setWorkbenchToolOrder(settings.navigation.workbenchToolOrder)
+        }
         // No-op writes are skipped: an identical value must not notify
         // subscribers and re-render the shell for nothing.
         if (
@@ -45,7 +115,8 @@ export function useSavedNavigationSettings(): void {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [session])
+  return session
 }
 
 export function useServiceStatusPolling(): void {
@@ -234,47 +305,125 @@ export interface ShellCountResult {
   error: unknown
 }
 
-export function usePendingApprovalsCount(): ShellCountResult {
-  const [result, setResult] = useState<ShellCountResult>({ count: 0, error: null })
-  const activeScenario = useSessionStore((s) => s.activeScenario)
-  const mounted = useRef(true)
-
-  useEffect(() => {
-    mounted.current = true
-    const tick = async () => {
-      try {
-        const list = await getClient().approvals.list({ status: 'pending' })
-        if (mounted.current) setResult({ count: list.length, error: null })
-      } catch (err) {
-        // Honest failure: keep the last known count and flag it as stale
-        // rather than reporting a misleading zero.
-        if (mounted.current) setResult((prev) => ({ count: prev.count, error: err }))
+// Chrome surfaces share one observation and timer for each client/scenario.
+// Slow requests cannot overlap, and a stopped subscription cannot publish late data.
+function countPoller(load: () => Promise<number>, interval: number) {
+  let snapshot: ShellCountResult = { count: 0, error: null }
+  const listeners = new Set<() => void>()
+  let timer: ReturnType<typeof setInterval> | undefined
+  let generation = 0
+  let pending = false
+  const tick = async () => {
+    if (pending) return
+    pending = true
+    const current = generation
+    try {
+      const count = await load()
+      if (current === generation) snapshot = { count, error: null }
+    } catch (error) {
+      if (current === generation) snapshot = { ...snapshot, error }
+    } finally {
+      if (current === generation) {
+        pending = false
+        listeners.forEach(listener => listener())
       }
     }
-    void tick()
-    const timer = window.setInterval(tick, APPROVALS_POLL_MS)
-    return () => {
-      mounted.current = false
-      window.clearInterval(timer)
-    }
-  }, [activeScenario])
+  }
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      if (listeners.size === 1) {
+        void tick()
+        timer = setInterval(() => void tick(), interval)
+      }
+      return () => {
+        listeners.delete(listener)
+        if (!listeners.size) {
+          clearInterval(timer)
+          generation += 1
+          pending = false
+          snapshot = { count: 0, error: null }
+        }
+      }
+    },
+  }
+}
 
-  return result
+const countPollers = new WeakMap<ReturnType<typeof getClient>, Map<string, ReturnType<typeof countPoller>>>()
+function useSharedCount(kind: 'approvals' | 'notifications'): ShellCountResult {
+  const scenario = useSessionStore(s => s.activeScenario)
+  const client = getClient()
+  const poller = useMemo(() => {
+    let cache = countPollers.get(client)
+    if (!cache) { cache = new Map(); countPollers.set(client, cache) }
+    const key = JSON.stringify([kind, scenario])
+    let current = cache.get(key)
+    if (!current) {
+      current = kind === 'approvals'
+        ? countPoller(async () => (await client.approvals.list({ status: 'pending' })).length, APPROVALS_POLL_MS)
+        : countPoller(async () => (await client.activity.listNotifications()).filter(n => !n.read).length, 60_000)
+      cache.set(key, current)
+    }
+    return current
+  }, [client, kind, scenario])
+  return useSyncExternalStore(poller.subscribe, poller.getSnapshot)
+}
+
+export function usePendingApprovalsCount(): ShellCountResult {
+  return useSharedCount('approvals')
 }
 
 // ── Operation records (operation center + status bar + topbar spinner) ───────
 
-const OPERATIONS_POLL_MS = 3_000
+const OPERATIONS_ACTIVE_POLL_MS = 3_000
+const OPERATIONS_IDLE_POLL_MS = 30_000
+const LIVE_OPERATION_STATES = new Set([
+  'draft',
+  'proposed',
+  'preparing',
+  'prepared',
+  'awaiting_approval',
+  'approved',
+  'queued',
+  'running',
+  'cancelling',
+  'paused',
+  'interrupted',
+  'validating',
+])
 
 export function useOperationsPolling(): void {
   const activeScenario = useSessionStore((s) => s.activeScenario)
 
   useEffect(() => {
     let cancelled = false
+    let pending = false
+    let wakeRequested = false
+    let timer: number | undefined
+    let live = hasLiveOperation(useSessionStore.getState().operations)
+
+    const schedule = (delay: number) => {
+      if (cancelled) return
+      if (timer !== undefined) window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        timer = undefined
+        void tick()
+      }, delay)
+    }
+
     const tick = async () => {
+      if (cancelled) return
+      if (pending) {
+        wakeRequested = true
+        return
+      }
+      pending = true
+      wakeRequested = false
       try {
         const records = await getClient().operations.list()
         if (!cancelled) {
+          live = hasLiveOperation(records)
           useSessionStore.getState().setOperations(records)
           useSessionStore.getState().setOperationsError(null)
         }
@@ -283,50 +432,48 @@ export function useOperationsPolling(): void {
         // projection is unavailable, so consumers never read a failed poll as
         // "no operations".
         if (!cancelled) useSessionStore.getState().setOperationsError('Operations could not be loaded.')
+      } finally {
+        pending = false
+        if (!cancelled) {
+          const mutationInFlight = useSessionStore.getState().operationsMutationCount > 0
+          const delay = wakeRequested
+            ? 0
+            : mutationInFlight || live
+              ? OPERATIONS_ACTIVE_POLL_MS
+              : OPERATIONS_IDLE_POLL_MS
+          wakeRequested = false
+          schedule(delay)
+        }
       }
     }
+
+    const unsubscribe = useSessionStore.subscribe((state, previous) => {
+      if (
+        state.operationsRefreshGeneration === previous.operationsRefreshGeneration &&
+        state.operationsMutationCount === previous.operationsMutationCount
+      ) return
+      wakeRequested = true
+      if (!pending) schedule(0)
+    })
+
     void tick()
-    const timer = window.setInterval(tick, OPERATIONS_POLL_MS)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      unsubscribe()
+      if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [activeScenario])
 }
 
 /** True when any operation is in a live (non-terminal) state. */
-export function hasLiveOperation(records: { state: string }[]): boolean {
-  return records.some((r) =>
-    ['preparing', 'queued', 'running', 'validating', 'awaiting_approval', 'paused'].includes(r.state),
-  )
+export function hasLiveOperation(records: { state?: string }[]): boolean {
+  return records.some((r) => LIVE_OPERATION_STATES.has(r.state ?? ''))
 }
 
 // ── Unread notifications dot ─────────────────────────────────────────────────
 
 export function useUnreadNotificationsCount(): ShellCountResult {
-  const [result, setResult] = useState<ShellCountResult>({ count: 0, error: null })
-  const activeScenario = useSessionStore((s) => s.activeScenario)
-
-  useEffect(() => {
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const list = await getClient().activity.listNotifications()
-        if (!cancelled) setResult({ count: list.filter((n) => !n.read).length, error: null })
-      } catch (err) {
-        // Honest failure: keep the last known count and flag it as stale.
-        if (!cancelled) setResult((prev) => ({ count: prev.count, error: err }))
-      }
-    }
-    void tick()
-    const timer = window.setInterval(tick, 60_000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [activeScenario])
-
-  return result
+  return useSharedCount('notifications')
 }
 
 // ── Workbench layout helpers ─────────────────────────────────────────────────

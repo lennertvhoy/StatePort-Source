@@ -85,7 +85,7 @@ export function StatusBar() {
   const service = localServicePresentation(serviceStatus?.state ?? 'unknown')
   const repo = status.instance.repository
   const terminal = status.terminalState ? terminalStatePresentation(status.terminalState) : null
-  const liveOp = operations.find((o) => hasLiveOperation([o]))
+  const liveOp = operations.filter((o) => o.kind !== 'infrastructure_observation').find((o) => hasLiveOperation([o]))
 
   return (
     <footer

@@ -27,6 +27,7 @@ from journey_common import (  # noqa: E402
     Refusal,
     SSH_PORT,
     boot_retained_vm,
+    boot_native_follow_on,
     control_user_env,
     discover_services,
     log,
@@ -501,6 +502,11 @@ def _existing_study_instances(instance_index: object) -> list[dict[str, str]]:
 
 
 def _ensure_qualification_registry(vm) -> None:
+    if getattr(vm, "native_wsl", False):
+        # Native public qualification must pull the browser image from the
+        # anonymous registry; starting the retained QEMU mirror would falsify
+        # the transport boundary.
+        return
     probe = "curl -fsS -m 5 http://127.0.0.1:5443/v2/ >/dev/null"
     if vm.ssh(probe, check=False, timeout=30).returncode == 0:
         return
@@ -516,6 +522,39 @@ def _ensure_qualification_registry(vm) -> None:
             return
         time.sleep(1)
     raise AssertionError("retained qualification registry did not become reachable")
+
+
+def _qualification_browser_transport(vm, digest: str) -> tuple[str, bool]:
+    expect(re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None,
+           "qualification browser digest is malformed")
+    native = bool(getattr(vm, "native_wsl", False))
+    if not native:
+        return f"{QUALIFICATION_REGISTRY}/stateport-playwright@{digest}", False
+    references = getattr(vm, "public_image_references", {})
+    image = references.get("stateport-playwright") if isinstance(references, dict) else None
+    expect(isinstance(image, str) and image.endswith("@" + digest),
+           "candidate Playwright reference does not bind its digest")
+    expect(re.fullmatch(r"ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", image) is not None
+           and not any(part in {"", ".", ".."} for part in image.split("@", 1)[0].split("/")[1:]),
+           "native Playwright reference is not an exact GHCR reference")
+    return image, True
+
+
+def _verify_qualification_browser_image(vm, image: str, digest: str, native: bool) -> None:
+    if native:
+        # Podman is a shipped prerequisite. Do not depend on the QEMU fixture's
+        # Skopeo binary or inject a registry/tool into the native installation.
+        command = (_control_user_command("podman", "pull", "--tls-verify=true", image)
+                   + " && " + _control_user_command("podman", "image", "inspect",
+                                                     "--format", "{{.Digest}}", image))
+        observed = vm.ssh(command, check=False, timeout=300)
+        observed_digest = observed.stdout.strip().splitlines()[-1] if observed.returncode == 0 and observed.stdout.strip() else ""
+    else:
+        observed = vm.ssh("skopeo inspect --raw --tls-verify=false "
+                          + shlex.quote(f"docker://{image}") + " | sha256sum",
+                          check=False, timeout=180)
+        observed_digest = "sha256:" + observed.stdout.split()[0] if observed.returncode == 0 and observed.stdout.strip() else ""
+    expect(observed_digest == digest, "qualification browser image digest mismatch")
 
 
 def _gui_inspection_script(
@@ -1019,20 +1058,8 @@ def _capture_gui_inspection(
     approve_after_capture: bool = False,
 ) -> dict:
     _ensure_qualification_registry(vm)
-    image = f"{QUALIFICATION_REGISTRY}/stateport-playwright@{playwright_digest}"
-    observed = vm.ssh(
-        "skopeo inspect --raw --tls-verify=false "
-        + shlex.quote(f"docker://{image}")
-        + " | sha256sum",
-        check=False,
-        timeout=180,
-    )
-    observed_digest = (
-        "sha256:" + observed.stdout.split()[0]
-        if observed.returncode == 0 and observed.stdout.strip()
-        else ""
-    )
-    expect(observed_digest == playwright_digest, "qualification browser image digest mismatch")
+    image, native = _qualification_browser_transport(vm, playwright_digest)
+    _verify_qualification_browser_image(vm, image, playwright_digest, native)
 
     guest_artifacts = (
         "/var/lib/stateport-control/.local/state/stateport/qualification/J2/" + instance_id
@@ -1057,7 +1084,7 @@ def _capture_gui_inspection(
             "run",
             "--rm",
             "--pull=always",
-            "--tls-verify=false",
+            "--tls-verify=true" if native else "--tls-verify=false",
             "--network=host",
             "--userns=keep-id:uid=10001,gid=10001",
             "--read-only",
@@ -1135,20 +1162,8 @@ def _capture_guided_study_journey(
     reflection: str,
 ) -> dict:
     _ensure_qualification_registry(vm)
-    image = f"{QUALIFICATION_REGISTRY}/stateport-playwright@{playwright_digest}"
-    observed = vm.ssh(
-        "skopeo inspect --raw --tls-verify=false "
-        + shlex.quote(f"docker://{image}")
-        + " | sha256sum",
-        check=False,
-        timeout=180,
-    )
-    observed_digest = (
-        "sha256:" + observed.stdout.split()[0]
-        if observed.returncode == 0 and observed.stdout.strip()
-        else ""
-    )
-    expect(observed_digest == playwright_digest, "qualification browser image digest mismatch")
+    image, native = _qualification_browser_transport(vm, playwright_digest)
+    _verify_qualification_browser_image(vm, image, playwright_digest, native)
     guest_artifacts = (
         "/var/lib/stateport-control/.local/state/stateport/qualification/J2/guided-"
         + secrets.token_hex(6)
@@ -1165,7 +1180,7 @@ def _capture_guided_study_journey(
             "run",
             "--rm",
             "--pull=always",
-            "--tls-verify=false",
+            "--tls-verify=true" if native else "--tls-verify=false",
             "--network=host",
             "--userns=keep-id:uid=10001,gid=10001",
             "--read-only",
@@ -1326,12 +1341,18 @@ def main() -> int:
     parser.add_argument("--vm-dir", type=Path, required=True)
     parser.add_argument("--candidate-dir", type=Path, required=True)
     parser.add_argument("--site-root", type=Path, required=True)
-    parser.add_argument("--archive-root", type=Path, required=True)
+    parser.add_argument("--archive-root", type=Path)
+    parser.add_argument("--native-wsl2", action="store_true")
+    parser.add_argument("--wsl-distro-name")
+    parser.add_argument("--qualification-build-receipt", type=Path)
     args = parser.parse_args()
 
     try:
         facts, prerequisite_evidence = validate_retained_candidate_inputs(
-            args.candidate_dir, args.vm_dir, args.site_root, args.archive_root
+            args.candidate_dir, args.vm_dir, args.site_root,
+            None if args.native_wsl2 else args.archive_root,
+            native_distro_name=args.wsl_distro_name if args.native_wsl2 else None,
+            qualification_build_receipt=args.qualification_build_receipt,
         )
     except Exception as exc:  # noqa: BLE001 - preflight failure must be durable
         receipt = JourneyReceipt(
@@ -1356,11 +1377,20 @@ def main() -> int:
 
     vm = None
     try:
-        _require_ssh_port_available()
+        if not args.native_wsl2:
+            _require_ssh_port_available()
         receipt.record("input-preflight", True, **prerequisite_evidence)
-        vm = boot_retained_vm(
-            args.vm_dir, site_root=args.site_root, archive_root=args.archive_root
-        )
+        if args.native_wsl2:
+            if not args.wsl_distro_name:
+                raise ValueError("--native-wsl2 requires --wsl-distro-name")
+            vm = boot_native_follow_on(args.vm_dir, site_root=args.site_root,
+                                       distro_name=args.wsl_distro_name,
+                                       expected_identity=prerequisite_evidence["nativeIdentity"],
+                                       expected_baseline=prerequisite_evidence["rehearsalBaseline"])
+        else:
+            vm = boot_retained_vm(args.vm_dir, site_root=args.site_root,
+                                  archive_root=args.archive_root)
+        vm.public_image_references = facts.get("imageReferences", {})
         services = discover_services(vm)
         for service_id in ("stateport-web", "stateport-api", "stateport-worker"):
             wait_service_healthy(vm, services, service_id, deadline_s=420)

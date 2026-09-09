@@ -15,7 +15,7 @@ import { indentUnit } from '@codemirror/language'
 import { highlightSelectionMatches, search } from '@codemirror/search'
 import { EditorState } from '@codemirror/state'
 import type { Extension } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
+import { EditorView, highlightWhitespace, keymap } from '@codemirror/view'
 import type { ViewUpdate } from '@codemirror/view'
 import CodeMirror from '@uiw/react-codemirror'
 import { useCallback, useEffect, useMemo } from 'react'
@@ -102,12 +102,13 @@ export function CodeEditor({
       highlightSelectionMatches(),
       search({ top: true }),
     ]
+    if (settings.showWhitespace) list.push(highlightWhitespace())
     if (wordWrap) list.push(EditorView.lineWrapping)
     if (readOnly) list.push(EditorState.readOnly.of(true), EditorView.editable.of(false))
     // Keep Tab as indentation inside the editor (design.md keyboard rules).
     list.push(keymap.of([]))
     return list
-  }, [path, theme, settings.indentWith, settings.tabSize, wordWrap, readOnly])
+  }, [path, theme, settings.indentWith, settings.tabSize, settings.showWhitespace, wordWrap, readOnly])
 
   const handleUpdate = useCallback(
     (update: ViewUpdate) => {

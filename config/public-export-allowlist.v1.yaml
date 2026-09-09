@@ -42,6 +42,7 @@ rules:
   - apps/web/assets/brand/stateport-mascot-dark-block-arch.svg
   - apps/web/assets/brand/stateport-mascot-light-block-arch.svg
   - apps/worker/README.md
+  - config/codex-runtime/README.md
   - docs/ACCEPTANCE_FREEZES.md
   - docs/AGENT_KITS.md
   - docs/API_CONTRACT.md
@@ -90,6 +91,7 @@ rules:
   - docs/operations/AGENT_MODEL_ROUTING.md
   - docs/operations/CODEX_PROVIDER_SETUP.md
   - docs/operations/CODEX_SUBAGENT_CONFIGURATION.md
+  - docs/operations/application-workspace-authority.md
   - docs/operations/authority.md
   - docs/operations/azure-alpha-teardown.md
   - docs/operations/backup-restore-durability.md
@@ -221,6 +223,10 @@ rules:
   - apps/web/src/client/http/__tests__/approvals.test.ts
   - apps/web/src/client/http/__tests__/assistantContinuity.test.ts
   - apps/web/src/client/http/__tests__/assistantConversation.test.ts
+  - apps/web/src/client/http/__tests__/applicationPins.test.ts
+  - apps/web/src/features/settings/__tests__/instanceSwitch.test.tsx
+  - apps/web/src/lib/__tests__/clipboard.test.ts
+  - apps/web/src/client/http/__tests__/applicationRename.test.ts
   - apps/web/src/client/http/__tests__/capabilities.test.ts
   - apps/web/src/client/http/__tests__/catalogInstall.test.ts
   - apps/web/src/client/http/__tests__/catalogList.test.ts
@@ -284,6 +290,7 @@ rules:
   - apps/web/src/components/StatusBadge.tsx
   - apps/web/src/components/StatusDot.tsx
   - apps/web/src/components/TimeAgo.tsx
+  - apps/web/src/components/__tests__/TimeAgo.test.tsx
   - apps/web/src/components/Tooltip.tsx
   - apps/web/src/components/__tests__/Brand.test.tsx
   - apps/web/src/components/index.ts
@@ -319,6 +326,7 @@ rules:
   - apps/web/src/features/application-experience/registry.ts
   - apps/web/src/features/application-experience/useApplicationReceiptRoute.ts
   - apps/web/src/features/applications/ApplicationsPage.tsx
+  - apps/web/src/features/applications/__tests__/RenameDialog.test.tsx
   - apps/web/src/features/applications/__tests__/applications.test.tsx
   - apps/web/src/features/applications/components/AttentionFeed.tsx
   - apps/web/src/features/applications/components/ContinueHero.tsx
@@ -354,6 +362,8 @@ rules:
   - apps/web/src/features/conversation/ConversationSurface.tsx
   - apps/web/src/features/conversation/ConversationWorkbenchIntegration.tsx
   - apps/web/src/features/conversation/DetailsPanel.tsx
+  - apps/web/src/features/conversation/deliveryPresentation.ts
+  - apps/web/src/features/conversation/__tests__/channelDetails.test.tsx
   - apps/web/src/features/conversation/Markdown.tsx
   - apps/web/src/features/conversation/MessageRow.tsx
   - apps/web/src/features/conversation/ThreadHeader.tsx
@@ -369,6 +379,8 @@ rules:
   - apps/web/src/features/conversation/useContextChips.ts
   - apps/web/src/features/conversation/useConversationController.ts
   - apps/web/src/features/execution-host/ExecutionHostPage.tsx
+  - apps/web/src/features/execution-host/WorkspaceAuthorityPanel.tsx
+  - apps/web/src/features/execution-host/__tests__/WorkspaceAuthorityPanel.test.tsx
   - apps/web/src/features/execution-host/__tests__/ExecutionHostPage.test.tsx
   - apps/web/src/features/files/Breadcrumbs.tsx
   - apps/web/src/features/files/CodeEditor.tsx
@@ -382,6 +394,8 @@ rules:
   - apps/web/src/features/files/QuickOpen.tsx
   - apps/web/src/features/files/SavePreviewDialog.tsx
   - apps/web/src/features/files/StatusStrip.tsx
+  - apps/web/src/features/files/__tests__/editorThemeFont.test.ts
+  - apps/web/src/features/files/__tests__/CodeEditor.test.tsx
   - apps/web/src/features/files/__tests__/FilesTool.test.tsx
   - apps/web/src/features/files/__tests__/MarkdownPreview.test.tsx
   - apps/web/src/features/files/__tests__/filesStore.test.ts
@@ -446,6 +460,8 @@ rules:
   - apps/web/src/features/settings/__tests__/RecoveryRestorePanel.test.tsx
   - apps/web/src/features/settings/__tests__/browserStorage.test.ts
   - apps/web/src/features/settings/__tests__/notificationOverrides.test.tsx
+  - apps/web/src/features/settings/__tests__/pendingSave.test.ts
+  - apps/web/src/features/settings/__tests__/codeFont.test.tsx
   - apps/web/src/features/settings/__tests__/settings.test.tsx
   - apps/web/src/features/settings/__tests__/settingsModel.test.ts
   - apps/web/src/features/settings/browserStorage.ts
@@ -464,6 +480,7 @@ rules:
   - apps/web/src/features/terminal/TerminalTool.tsx
   - apps/web/src/features/terminal/TerminalView.tsx
   - apps/web/src/features/terminal/TerminalWorkbenchIntegration.tsx
+  - apps/web/src/features/terminal/__tests__/fallbackLigatures.test.ts
   - apps/web/src/features/terminal/__tests__/fakeXterm.ts
   - apps/web/src/features/terminal/__tests__/lineEditor.test.ts
   - apps/web/src/features/terminal/__tests__/pasteGuard.test.ts
@@ -492,6 +509,11 @@ rules:
   - apps/web/src/semantic.ts
   - apps/web/src/shell/AppContextShell.tsx
   - apps/web/src/shell/AppShell.tsx
+  - apps/web/src/shell/StartupRoute.tsx
+  - apps/web/src/shell/__tests__/startup.test.tsx
+  - apps/web/src/shell/__tests__/startupFocus.test.tsx
+  - apps/web/src/shell/__tests__/workbenchToolOrder.test.tsx
+  - apps/web/src/shell/__tests__/workbenchContinuity.test.tsx
   - apps/web/src/shell/CommandPalette.tsx
   - apps/web/src/shell/KeyboardShortcuts.tsx
   - apps/web/src/shell/NotificationsPopover.tsx
@@ -508,9 +530,11 @@ rules:
   - apps/web/src/shell/WorkbenchShell.tsx
   - apps/web/src/shell/__tests__/commands.test.tsx
   - apps/web/src/shell/__tests__/dataPolling.test.tsx
+  - apps/web/src/shell/__tests__/operationControls.test.tsx
   - apps/web/src/shell/__tests__/routes.test.tsx
   - apps/web/src/shell/__tests__/shortcuts.test.ts
   - apps/web/src/shell/__tests__/sidebarRail.test.tsx
+  - apps/web/src/shell/__tests__/applicationContinuity.test.tsx
   - apps/web/src/shell/__tests__/themeEngine.test.tsx
   - apps/web/src/shell/appIcon.tsx
   - apps/web/src/shell/commands.ts
@@ -562,6 +586,11 @@ rules:
   - config/agent-routing-policy.yaml
   - config/application-experience-policy.yaml
   - config/authority-policy.v1.yaml
+  - config/codex-runtime/Containerfile
+  - config/codex-runtime/bubblewrap.Containerfile
+  - config/codex-runtime/bubblewrap-build.json
+  - config/codex-runtime/prepare-source.py
+  - config/codex-runtime/source-build.json
   - config/codex-runtime/package-lock.json
   - config/codex-runtime/package.json
   - config/container-base-images.yaml
@@ -784,6 +813,7 @@ rules:
   - packages/execution-host/src/execution_host/__init__.py
   - packages/execution-host/src/execution_host/adapter.py
   - packages/execution-host/src/execution_host/agent_run_lifecycle.py
+  - packages/execution-host/src/execution_host/application_workspaces.py
   - packages/execution-host/src/execution_host/client.py
   - packages/execution-host/src/execution_host/contracts.py
   - packages/execution-host/src/execution_host/daemon.py
@@ -804,7 +834,10 @@ rules:
   - packages/execution-host/src/execution_host/staging_identity.py
   - packages/execution-host/src/execution_host/validator_runtime.py
   - packages/execution-host/src/execution_host/workspace_revisions.py
+  - packages/execution-host/src/execution_host/workspace_source.py
   - packages/execution-host/src/execution_host/workspaces.py
+  - packages/execution-host/tests/test_application_workspace_authority.py
+  - packages/execution-host/tests/test_workspace_source.py
   - packages/execution-host/tests/test_execution_host_daemon_unit.py
   - packages/external-engine-runtime/src/external_engine_runtime/__init__.py
   - packages/external-engine-runtime/src/external_engine_runtime/runtime.py
@@ -1104,6 +1137,7 @@ rules:
   - scripts/render_wsl2_install_bootstrap.py
   - scripts/qualification/__init__.py
   - scripts/qualification/build_j1_candidate.py
+  - scripts/qualification/provider_sandbox_probe.py
   - scripts/qualification/journey_common.py
   - scripts/qualification/run_journey_j2.py
   - scripts/qualification/run_journey_j3.py
@@ -1133,6 +1167,8 @@ rules:
   - scripts/test_api_native_adapter.py
   - scripts/test_append_only_policy.py
   - scripts/test_application_experience.py
+  - scripts/test_agent_source_engine.py
+  - scripts/test_application_rename.py
   - scripts/test_application_onboarding.py
   - scripts/test_application_registry.py
   - scripts/test_approvals_projection.py
@@ -1154,6 +1190,12 @@ rules:
   - scripts/test_ci_continuation.py
   - scripts/test_ci_workflow.py
   - scripts/test_codex_adapter.py
+  - scripts/test_codex_runtime_cache.py
+  - scripts/test_codex_consumer_context.py
+  - scripts/test_xz_regression_prep.py
+  - scripts/test_codex_runtime_resume.py
+  - scripts/test_control_materialization_paths.py
+  - scripts/test_execution_host_receipt_inventory.py
   - scripts/test_complete_studydd_upgrade.py
   - scripts/test_compose_shape.py
   - scripts/test_container_base_images.py
@@ -1175,6 +1217,7 @@ rules:
   - scripts/test_durable_writes.py
   - scripts/test_execution_host.py
   - scripts/test_execution_host_daemon.py
+  - scripts/test_reviewed_source_daemon.py
   - scripts/test_execution_host_proxy.py
   - scripts/test_export_public_candidate.py
   - scripts/test_external_engine_runtime.py
@@ -1277,6 +1320,9 @@ rules:
   - scripts/test_telegram_live_launcher.py
   - scripts/test_template_validator.py
   - scripts/test_template_import_lifecycle.py
+  - scripts/test_public_repository_import.py
+  - scripts/test_operations_projection.py
+  - packages/persistent-app/src/stateport_persistent_app/operations.py
   - scripts/test_terminal_broker.py
   - scripts/test_terminal_connection_targets.py
   - scripts/test_terminal_frontend.py
@@ -1497,6 +1543,18 @@ rules:
   - docs/evidence/2026-07-12-overnight-program-convergence/evidence_manifest.json
   - evidence/one-line-release-001/alpha14-rejection.md
   - evidence/one-line-release-001/summary.md
+  - evidence/one-line-release-001/ui-audit-template-source.json
+  - evidence/one-line-release-001/ui-control-inventory.json
+  - evidence/one-line-release-001/ui-operation-audit.md
+  - evidence/one-line-release-001/efficiency-triage-20260906.md
+  - evidence/one-line-release-001/navigation-abort-classification-r24.md
+  - evidence/one-line-release-001/ui-static-inventory-20260906.md
+  - evidence/one-line-release-001/overnight-handoff.md
+  - evidence/one-line-release-001/public-install-four-hour-handoff.md
+  - evidence/one-line-release-001/public-release-one-hour-handoff.md
+  - evidence/one-line-release-001/public-release-two-hour-astra-luna-handoff.md
+  - evidence/one-line-release-001/resume-after-wait-config-20260908.md
+  - evidence/one-line-release-001/run-history-through-20260909.md
   - evidence/template-lifecycle-001/journey.json
   - evidence/template-lifecycle-001/summary.md
   - docs/evidence/2026-07-12-overnight-program-convergence/integration-order.md
@@ -1753,3 +1811,111 @@ rules:
   - evidence/one-line-release-001/alpha16-rehearsal-failure.json
   - evidence/one-line-release-001/product-completion-three-template.json
   - scripts/test_provider_setup.py
+  - scripts/test_template_lifecycle_journey_controller.py
+- id: codex-proc-mount-compatibility-patch
+  classification: third-party-reviewed
+  license: Apache-2.0
+  provenanceRationale: Proc diagnostic diff, regression tests, and exact dependency lock updates against OpenAI Codex commit e363b08c9175ac1cbe5893615dd2cb9ddf95043b; upstream context retains Apache-2.0 terms and build exports upstream LICENSE and NOTICE. No binary or credentials included.
+  paths:
+  - config/codex-runtime/proc-mount-compat.patch
+  - config/codex-runtime/dependency-updates.patch
+- id: native-repair-upstream-v8
+  classification: third-party-reviewed
+  license: BSD-3-Clause
+  provenanceRationale: Exact 53-file upstream V8 patch; commit, before/after hashes and retained original BSD notice bind
+    the reviewed material.
+  paths:
+  - config/codex-runtime/v8-repair/v8-security-update.patch
+- id: native-repair-upstream-codex
+  classification: third-party-reviewed
+  license: Apache-2.0
+  provenanceRationale: Minimal Codex consumer API and dependency diff; original Apache license and NOTICE retained in recipe/licenses.
+  paths:
+  - config/codex-runtime/v8-repair/codex-consumer-compat.patch
+- id: native-repair-upstream-icu
+  classification: third-party-reviewed
+  license: Unicode-3.0
+  provenanceRationale: Exact upstream ICU source corrections and full regression patches; immutable commits and original Unicode
+    license retained.
+  paths:
+  - config/codex-runtime/v8-repair/icu-corrections/icu-nfrule-fix.patch
+  - config/codex-runtime/v8-repair/icu-corrections/icu-source.patch
+  - config/codex-runtime/v8-repair/icu-corrections/icu-utfiterator-fix.patch
+- id: native-repair-public-domain-source
+  classification: third-party-reviewed
+  license: LicenseRef-Public-Domain
+  provenanceRationale: SQLite source/regression and maintained XZ v5.2 native index source explicitly disclaimed copyright;
+    exact source provenance and notices documented in recipe/licenses/README.md.
+  paths:
+  - config/codex-runtime/v8-repair/native-backports/libsqlite3-sys.patch
+  - config/codex-runtime/v8-repair/native-backports/lzma-sys.patch
+  - config/codex-runtime/v8-repair/native-backports/sqlite-upstream-regression.test
+- id: native-repair-xz-regression
+  classification: third-party-reviewed
+  license: 0BSD
+  provenanceRationale: Exact upstream XZ regression patch from SPDX-0BSD test source; verbatim 0BSD notice and original patch
+    author retained.
+  paths:
+  - config/codex-runtime/v8-repair/native-backports/xz-upstream-regression.patch
+- id: native-repair-rusty-v8-lock
+  classification: third-party-reviewed
+  license: MIT
+  provenanceRationale: Exact generated native Cargo lock from MIT-licensed rusty_v8 152.2.0; retains registry source identities
+    without relicensing dependencies.
+  paths:
+  - config/codex-runtime/v8-repair/native-Cargo.lock
+- id: native-repair-verbatim-notices
+  classification: third-party-reviewed
+  license: LicenseRef-Verbatim-License-Text
+  provenanceRationale: Verbatim license and notice texts from pinned upstream source commits; immutable URLs and digests retained.
+  paths:
+  - config/codex-runtime/v8-repair/icu-corrections/LICENSE-ICU
+  - config/codex-runtime/v8-repair/licenses/Codex-Apache-2.0.txt
+  - config/codex-runtime/v8-repair/licenses/Codex-NOTICE.txt
+  - config/codex-runtime/v8-repair/licenses/Rusty-V8-MIT.txt
+  - config/codex-runtime/v8-repair/licenses/V8-BSD-3-Clause.txt
+  - config/codex-runtime/v8-repair/licenses/XZ-0BSD.txt
+- id: native-repair-documentation
+  classification: public-documentation
+  license: CC-BY-4.0
+  provenanceRationale: StatePort-authored preparation and qualification-limit documentation; third-party legal notices are
+    separately classified.
+  paths:
+  - config/codex-runtime/v8-repair/README.md
+  - config/codex-runtime/v8-repair/icu-corrections/README.md
+  - config/codex-runtime/v8-repair/licenses/README.md
+  - config/codex-runtime/v8-repair/native-backports/README.md
+- id: native-repair-preparation-source
+  classification: public-source
+  license: AGPL-3.0-or-later
+  provenanceRationale: StatePort-authored offline preparation scripts, image recipe, integrity manifests and factual dependency
+    inventories. Exact paths only; no downloaded payloads, caches, secrets or artifacts included.
+  paths:
+  - config/codex-runtime/v8-repair/.gitattributes
+  - config/codex-runtime/v8-repair/Containerfile
+  - config/codex-runtime/v8-repair/Consumer.Containerfile
+  - config/codex-runtime/v8-repair/booked_pilot.py
+  - config/codex-runtime/v8-repair/chromium-vendor.json
+  - config/codex-runtime/v8-repair/chromium_vendor.py
+  - config/codex-runtime/v8-repair/consumer_context.py
+  - config/codex-runtime/v8-repair/context_verify.py
+  - config/codex-runtime/v8-repair/fetch.py
+  - config/codex-runtime/v8-repair/licenses/sources.json
+  - config/codex-runtime/v8-repair/native-backports/.gitattributes
+  - config/codex-runtime/v8-repair/native-backports/pins.json
+  - config/codex-runtime/v8-repair/native-backports/prepare_backports.py
+  - config/codex-runtime/v8-repair/native-backports/prepare_xz_regression.py
+  - config/codex-runtime/v8-repair/native-backports/run_xz_asan.py
+  - config/codex-runtime/v8-repair/pilot.py
+  - config/codex-runtime/v8-repair/prepare.py
+  - config/codex-runtime/v8-repair/recipe.json
+  - config/codex-runtime/v8-repair/source-submodules.json
+  - config/codex-runtime/v8-repair/upstream-deps.json
+  - config/codex-runtime/v8-repair/verify_cached_work.py
+- id: reviewed-xterm-ligatures-fallback
+  classification: third-party-reviewed
+  license: MIT
+  provenanceRationale: Deterministic fallback ranges and matching algorithm from official xterm.js 6.0.0 addon-ligatures 0.10.0, with StatePort lifecycle adaptation; original attribution and MIT notice retained in source and emitted unchanged in frontend build.
+  paths:
+  - apps/web/src/features/terminal/fallbackLigatures.ts
+  - apps/web/src/features/terminal/xterm-ligatures.LICENSE

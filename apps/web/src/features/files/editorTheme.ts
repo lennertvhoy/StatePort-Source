@@ -38,6 +38,9 @@ function luminance(color: string): number {
 
 /** Build the CodeMirror theme + syntax highlight extensions from tokens. */
 export function buildEditorTheme(font: EditorFontSpec): Extension {
+  const fontFamily = font.fontFamily === 'system'
+    ? 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+    : font.fontFamily
   const bg = token('--bg-sunken', '#F6F6F4')
   const fg = token('--text-primary', '#262B31')
   const secondary = token('--text-secondary', '#57606A')
@@ -67,7 +70,7 @@ export function buildEditorTheme(font: EditorFontSpec): Extension {
         height: '100%',
       },
       '.cm-content': {
-        fontFamily: font.fontFamily,
+        fontFamily,
         lineHeight: String(font.lineHeight),
         caretColor: accent,
         // Ligatures are opt-in (design.md §4.1) — off unless the setting says so.
@@ -125,7 +128,7 @@ export function buildEditorTheme(font: EditorFontSpec): Extension {
       '.cm-completionMatchedText': { color: accent, textDecoration: 'none', fontWeight: '600' },
       '.cm-placeholder': { color: tertiary },
       '&.cm-focused': { outline: 'none' },
-      '.cm-scroller': { fontFamily: font.fontFamily },
+      '.cm-scroller': { fontFamily },
     },
     { dark },
   )

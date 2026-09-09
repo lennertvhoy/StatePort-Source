@@ -7,13 +7,16 @@
  * - appearance edits live-preview into the workspace store
  * - settings search finds “font size” and jumps to the group
  */
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { format } from 'date-fns'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
 import { ClientError, getClient, resetClientForTests } from '@/client'
-import { useShortcutsStore, useWorkspaceStore } from '@/state'
+import { useSessionStore, useShortcutsStore, useWorkspaceStore } from '@/state'
 import { AppContextShell } from '@/shell/AppContextShell'
+import { useCommandStore } from '@/shell/commands'
+import { invalidateInstanceCache } from '@/shell/data'
 
 import SettingsPage from '../SettingsPage'
 
@@ -43,6 +46,7 @@ function renderAppSettings(instanceId: string, group?: string) {
 
 beforeEach(() => {
   resetClientForTests()
+  invalidateInstanceCache()
   useWorkspaceStore.setState({
     sidebar: 'expanded',
     sidebarUserChosen: false,
@@ -50,7 +54,9 @@ beforeEach(() => {
     density: 'compact',
     fontScale: 100,
     highContrast: false,
+    highContrastBase: 'dark',
     reducedMotion: false,
+    disableNonessentialAnimation: false,
     strongFocus: false,
     notificationQuietMode: false,
     notificationImportantOnly: false,
@@ -82,6 +88,19 @@ describe('settings: human labels (settings.md — no raw enums)', () => {
 })
 
 describe('settings: read-only effective values', () => {
+  it('reports an application pin failure without changing the displayed preference', async () => {
+    vi.spyOn(getClient().applications, 'setPinned').mockRejectedValue(new Error('Browser storage is full'))
+    const toast = vi.spyOn(useSessionStore.getState(), 'pushToast')
+    renderAppSettings('ins_cto_pilot', 'general')
+    const toggle = await screen.findByRole('switch', { name: 'Pinned' })
+    const before = toggle.getAttribute('aria-checked')
+    fireEvent.click(toggle)
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      kind: 'error', title: 'Pin preference could not be saved', body: 'Browser storage is full',
+    }))
+    expect(toggle.getAttribute('aria-checked')).toBe(before)
+  })
+
   it('adapter mode renders as wrapping text with no disabled input', async () => {
     renderGlobal('/settings/advanced')
     await screen.findByText(/Mock \(built-in simulation\)/, undefined, { timeout: 10_000 })
@@ -389,6 +408,34 @@ describe('settings: shortcuts', () => {
 })
 
 describe('settings: appearance live preview', () => {
+  it('previews and discards decorative-animation removal independently of reduced motion', async () => {
+    renderGlobal('/settings/accessibility')
+    const row = await screen.findByText('Disable nonessential animation')
+    const toggle = within(row.closest('[data-setting-anchor]') as HTMLElement).getByRole('switch')
+    fireEvent.click(toggle)
+    await waitFor(() => expect(useWorkspaceStore.getState().disableNonessentialAnimation).toBe(true))
+    expect(useWorkspaceStore.getState().reducedMotion).toBe(false)
+    fireEvent.click(screen.getByTestId('settings-discard'))
+    await waitFor(() => expect(useWorkspaceStore.getState().disableNonessentialAnimation).toBe(false))
+  })
+
+  it('previews, discards and saves the high-contrast fallback base', async () => {
+    await getClient().globalSettings.update({ appearance: { theme: 'high_contrast', highContrastBase: 'dark' } })
+    renderGlobal('/settings/appearance')
+    fireEvent.click(await screen.findByRole('radio', { name: 'Light base' }))
+    await waitFor(() => expect(useWorkspaceStore.getState().highContrastBase).toBe('light'))
+    fireEvent.click(screen.getByTestId('settings-discard'))
+    await waitFor(() => expect(useWorkspaceStore.getState().highContrastBase).toBe('dark'))
+    fireEvent.click(screen.getByRole('radio', { name: 'Light base' }))
+    fireEvent.click(screen.getByTestId('settings-save'))
+    await waitFor(() => expect(screen.queryByTestId('settings-save-bar')).toBeNull())
+    expect((await getClient().globalSettings.get()).appearance.highContrastBase).toBe('light')
+    cleanup()
+    useWorkspaceStore.setState({ highContrastBase: 'dark' })
+    renderGlobal('/settings/appearance')
+    await waitFor(() => expect(useWorkspaceStore.getState().highContrastBase).toBe('light'))
+  })
+
   it('theme change persists to the workspace store immediately', async () => {
     renderGlobal('/settings/appearance')
     const dark = await screen.findByRole('radio', { name: 'Dark' }, { timeout: 10_000 })
@@ -430,3 +477,166 @@ describe('settings: search', () => {
     expect((screen.getByTestId('settings-search') as HTMLInputElement).value).toBe('')
   }, 15_000)
 })
+
+describe('advanced settings: asynchronous failures preserve reviewed input', () => {
+  it('keeps pasted JSON when an older file read completes', async () => {
+    renderGlobal('/settings/advanced')
+    const input = await screen.findByLabelText('Choose settings file')
+    let finish!: (value: string) => void
+    const text = new Promise<string>((resolve) => { finish = resolve })
+    fireEvent.change(input, { target: { files: [{ size: 12, text: () => text }] } })
+    expect(screen.getByTestId('import-settings-apply')).toHaveProperty('disabled', true)
+    fireEvent.change(screen.getByTestId('import-settings-text'), { target: { value: '{"newer":"draft"}' } })
+    finish('{"older":"file"}')
+    await waitFor(() => expect(screen.getByTestId('import-settings-apply')).toHaveProperty('disabled', false))
+    expect(screen.getByTestId('import-settings-text')).toHaveProperty('value', '{"newer":"draft"}')
+  })
+
+  it('reports file read failure and permits deliberate retry', async () => {
+    renderGlobal('/settings/advanced')
+    const input = await screen.findByLabelText('Choose settings file')
+    fireEvent.change(input, { target: { files: [{ size: 12, text: () => Promise.reject(new Error('File unavailable')) }] } })
+    expect(await screen.findByText(/Settings file could not be read: File unavailable/)).toBeTruthy()
+    fireEvent.change(input, { target: { files: [{ size: 12, text: () => Promise.resolve('{"retry":true}') }] } })
+    await waitFor(() => expect(screen.getByTestId('import-settings-text')).toHaveProperty('value', '{"retry":true}'))
+    expect(screen.queryByTestId('import-issues')).toBeNull()
+  })
+
+  it('reports export, policy and descriptor failures', async () => {
+    const client = getClient()
+    const spies = [
+      vi.spyOn(client.globalSettings, 'exportJson').mockRejectedValue(new Error('Export unavailable')),
+      vi.spyOn(client.catalog, 'list').mockRejectedValue(new Error('Policy unavailable')),
+      vi.spyOn(client.applications, 'list').mockRejectedValue(new Error('Descriptor unavailable')),
+    ]
+    try {
+      renderGlobal('/settings/advanced')
+      fireEvent.click(await screen.findByRole('button', { name: 'Export settings' }))
+      expect(await screen.findByText(/Settings export failed: Export unavailable/)).toBeTruthy()
+      fireEvent.click(screen.getByText('Inspect effective policy'))
+      fireEvent.click(screen.getByRole('button', { name: 'Load policy summary' }))
+      expect(await screen.findByText(/Policy summary could not be loaded: Policy unavailable/)).toBeTruthy()
+      fireEvent.click(screen.getByText('View raw capability descriptor'))
+      fireEvent.click(screen.getByRole('button', { name: 'Load descriptor' }))
+      expect(await screen.findByText(/Capability descriptor could not be loaded: Descriptor unavailable/)).toBeTruthy()
+    } finally { spies.forEach((spy) => spy.mockRestore()) }
+  })
+
+  it('preserves cached bytes on storage refusal and clears only the exact key on retry', async () => {
+    window.localStorage.setItem('unrelated.cache', 'preserve')
+    renderGlobal('/settings/advanced')
+    const button = await screen.findByRole('button', { name: 'Clear caches' })
+    useCommandStore.setState({ recents: ['keep'] })
+    const before = window.localStorage.getItem('stateport.commands.v1')
+    const original = window.localStorage.removeItem
+    const denied = vi.spyOn(window.localStorage, 'removeItem').mockImplementation(function (this: Storage, key: string) {
+      if (key === 'stateport.commands.v1') throw new Error('Storage denied')
+      return original.call(this, key)
+    })
+    try {
+      fireEvent.click(button)
+      expect(await screen.findByText(/Caches could not be cleared: Storage denied/)).toBeTruthy()
+      expect(window.localStorage.getItem('stateport.commands.v1')).toBe(before)
+      expect(useCommandStore.getState().recents).toEqual(['keep'])
+    } finally { denied.mockRestore() }
+    fireEvent.click(button)
+    expect(window.localStorage.getItem('stateport.commands.v1')).toBeNull()
+    expect(window.localStorage.getItem('unrelated.cache')).toBe('preserve')
+    expect(useCommandStore.getState().recents).toEqual([])
+    expect(screen.queryByText(/Caches could not be cleared/)).toBeNull()
+    window.localStorage.removeItem('unrelated.cache')
+  })
+})
+
+
+describe('privacy clearance verification', () => {
+  it('refuses a success claim when storage becomes unreadable during confirmation', async () => {
+    renderGlobal('/settings/privacy')
+    fireEvent.click(await screen.findByTestId('clear-browser-data'))
+    const dialog = await screen.findByTestId('confirm-dialog')
+    const text = within(dialog).getByRole('textbox')
+    fireEvent.change(text, { target: { value: 'clear' } })
+    const previous = Object.getOwnPropertyDescriptor(window, 'localStorage')!
+    const toast = vi.spyOn(useSessionStore.getState(), 'pushToast')
+    toast.mockClear()
+    try {
+      Object.defineProperty(window, 'localStorage', { configurable: true, get: () => { throw new Error('Storage unavailable') } })
+      fireEvent.click(screen.getByTestId('confirm-action'))
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        kind: 'error', title: 'Browser data clearance could not be verified',
+        body: 'Browser storage is unavailable. Some data may remain; restore storage access and retry.',
+      }))
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'StatePort browser data cleared' }))
+    } finally {
+      Object.defineProperty(window, 'localStorage', previous)
+      toast.mockRestore()
+    }
+  })
+})
+
+
+it('application recovery and installed timestamps follow saved display mode without mutating facts', async () => {
+  const client = getClient()
+  const before = await client.applications.get('ins_cto_pilot')
+  const view = renderAppSettings(before.id, 'backup')
+  await screen.findByText('Last backup')
+  const last = view.container.querySelector('#setting-backup-last time')!
+  const next = view.container.querySelector('#setting-backup-next time')!
+  expect(last.getAttribute('datetime')).toBe(new Date(before.recovery.lastBackupAt!).toISOString())
+  expect(next.getAttribute('datetime')).toBe(new Date(before.recovery.nextDueAt!).toISOString())
+  act(() => useWorkspaceStore.getState().setDateTimeFormat('absolute'))
+  expect(last.textContent).toBe(format(new Date(before.recovery.lastBackupAt!), 'PPpp'))
+  expect(next.textContent).toBe(format(new Date(before.recovery.nextDueAt!), 'PPpp'))
+  act(() => useWorkspaceStore.getState().setDateTimeFormat('both'))
+  expect(last.textContent).toContain(' · ')
+  expect(last.classList.contains('whitespace-normal')).toBe(true)
+  expect(last.closest('[data-testid="read-only-value"]')).toBeTruthy()
+  view.unmount()
+  const advanced = renderAppSettings(before.id, 'advanced')
+  await screen.findByText('Installed')
+  const created = advanced.container.querySelector('#setting-app-created time')!
+  expect(created.getAttribute('datetime')).toBe(new Date(before.createdAt).toISOString())
+  expect(created.textContent).toContain(format(new Date(before.createdAt), 'PPpp'))
+  expect(created.textContent).toContain(' · ')
+  expect((await client.applications.get(before.id)).recovery).toEqual(before.recovery)
+  expect((await client.applications.get(before.id)).createdAt).toBe(before.createdAt)
+}, 20_000)
+
+it('keeps Never as a read-only value and omits absent next due dates', async () => {
+  const client = getClient()
+  const instance = await client.applications.get('ins_checklist_sample')
+  // Exact absent recovery facts exercise rendering only; no write API is called.
+  vi.spyOn(client.applications, 'get').mockResolvedValue({ ...instance, recovery: { state: 'not_configured' } })
+  const view = renderAppSettings(instance.id, 'backup')
+  await screen.findByText('Last backup')
+  const last = view.container.querySelector('#setting-backup-last')!
+  expect(within(last as HTMLElement).getByTestId('read-only-value').textContent).toBe('Never')
+  expect(last.querySelector('time,input')).toBeNull()
+  expect(view.container.querySelector('#setting-backup-next')).toBeNull()
+  vi.restoreAllMocks()
+}, 20_000)
+
+
+it('previews, discards, saves and rehydrates panel contrast without changing high-contrast or motion choices', async () => {
+  await getClient().globalSettings.update({ appearance: { panelContrast: 'default', highContrastBase: 'light' }, accessibility: { disableNonessentialAnimation: true } })
+  const view = renderGlobal('/settings/appearance')
+  fireEvent.click(await screen.findByRole('radio', { name: 'Increased' }))
+  await waitFor(() => expect(useWorkspaceStore.getState().panelContrast).toBe('increased'))
+  fireEvent.click(screen.getByTestId('settings-discard'))
+  await waitFor(() => expect(useWorkspaceStore.getState().panelContrast).toBe('default'))
+  fireEvent.click(screen.getByRole('radio', { name: 'Increased' }))
+  fireEvent.click(screen.getByTestId('settings-save'))
+  await waitFor(() => expect(screen.queryByTestId('settings-save-bar')).toBeNull())
+  expect((await getClient().globalSettings.get()).appearance.panelContrast).toBe('increased')
+  const stored = localStorage.getItem('stateport.workspace.v1')!
+  expect(JSON.parse(stored).state.panelContrast).toBe('increased')
+  view.unmount()
+  useWorkspaceStore.setState({ panelContrast: 'default' })
+  localStorage.setItem('stateport.workspace.v1', stored)
+  await useWorkspaceStore.persist.rehydrate()
+  expect(useWorkspaceStore.getState().panelContrast).toBe('increased')
+  renderGlobal('/settings/appearance')
+  await screen.findByRole('radio', { name: 'Increased' })
+  expect(useWorkspaceStore.getState().highContrastBase).toBe('light')
+  expect(useWorkspaceStore.getState().disableNonessentialAnimation).toBe(true)
+}, 20_000)

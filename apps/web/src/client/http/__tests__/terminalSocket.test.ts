@@ -170,6 +170,54 @@ describe('TerminalSocket', () => {
     expect(closes).toEqual([{ code: 1000, reason: '' }])
   })
 
+  it('waits for the cleanup-ordered close acknowledgement', async () => {
+    const socket = makeSocket()
+    const connecting = socket.connect()
+    const ws = FakeWebSocket.instances[0]
+    ws.serverOpen()
+    ws.serverSend(readyFrame())
+    await connecting
+
+    let settled = false
+    const closing = socket.closeAndWait().finally(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    ws.serverClose(1000, 'transport_detached')
+    await expect(closing).resolves.toBeUndefined()
+  })
+
+  it('rejects an abnormal close acknowledgement', async () => {
+    const socket = makeSocket()
+    const connecting = socket.connect()
+    const ws = FakeWebSocket.instances[0]
+    ws.serverOpen()
+    ws.serverSend(readyFrame())
+    await connecting
+
+    const closing = socket.closeAndWait()
+    ws.serverClose(1011, 'terminal_cleanup_unverified')
+    await expect(closing).rejects.toThrow('close was not acknowledged')
+  })
+
+  it('rejects when cleanup acknowledgement times out', async () => {
+    vi.useFakeTimers()
+    try {
+      const socket = makeSocket()
+      const connecting = socket.connect()
+      const ws = FakeWebSocket.instances[0]
+      ws.serverOpen()
+      ws.serverSend(readyFrame())
+      await connecting
+
+      const closing = socket.closeAndWait()
+      void closing.catch(() => undefined)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await expect(closing).rejects.toThrow('cleanup acknowledgement timed out')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('refuses a socket path that resolves cross-origin', async () => {
     const socket = new TerminalSocket({
       ticket: { ...TERMINAL_TICKET, socketPath: 'https://evil.example/v1/terminal/socket' },
@@ -220,6 +268,204 @@ describe('HttpTerminalClient — prepare + explicit connect', () => {
 
     client.sendInput(session.id, 'pwd\n')
     expect(new TextDecoder().decode(ws.sent[1] as ArrayBufferView)).toBe('pwd\n')
+  })
+
+  it('does not prepare an explicit reconnect before cleanup is acknowledged', async () => {
+    const secondTicket = { ...TERMINAL_TICKET_WIRE, sessionId: 'tsess_2', oneUseToken: 'secret-two' }
+    let preparationCount = 0
+    const fake = makeFakeFetch([
+      ['POST', '/v1/instances/ins_1/terminal/prepare', () => jsonResponse({ ok: true, result: preparationCount++ === 0 ? TERMINAL_TICKET_WIRE : secondTicket })],
+    ])
+    const client = new HttpTerminalClient(new HttpTransport({ fetchFn: fake.fetchFn }), {
+      webSocketFactory: FakeWebSocket.factory(),
+      origin: ORIGIN,
+    })
+    const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+    const events: string[] = []
+    client.subscribe(session.id, (event) => {
+      if (event.type === 'state') events.push(event.state)
+    })
+    const connecting = client.connect(session.id)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const first = FakeWebSocket.instances[0]
+    first.serverOpen()
+    first.serverSend(readyFrame())
+    await connecting
+
+    const reconnecting = client.reconnect(session.id)
+    await Promise.resolve()
+    expect(fake.callsTo('/terminal/prepare')).toHaveLength(1)
+    first.serverClose(1000, 'transport_detached')
+    await vi.waitFor(() => expect(fake.callsTo('/terminal/prepare')).toHaveLength(2))
+    const second = FakeWebSocket.instances[1]
+    second.serverOpen()
+    second.serverSend(readyFrame({ sessionId: secondTicket.sessionId }))
+    await expect(reconnecting).resolves.toMatchObject({ state: 'connected', preparedTarget: expect.objectContaining({ sessionId: secondTicket.sessionId }) })
+    expect(events).toEqual(['connecting', 'connected', 'reconnecting', 'connecting', 'connected'])
+    expect((await client.listSessions('ins_1'))[0].lastError).toBeUndefined()
+  })
+
+  it('does not install a second close waiter for overlapping reconnects', async () => {
+    const { fake, client } = makeTerminal()
+    const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+    const connecting = client.connect(session.id)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const first = FakeWebSocket.instances[0]
+    first.serverOpen()
+    first.serverSend(readyFrame())
+    await connecting
+
+    const reconnecting = client.reconnect(session.id)
+    await Promise.resolve()
+    await expect(client.reconnect(session.id)).rejects.toMatchObject({ status: 409 })
+    expect(fake.callsTo('/terminal/prepare')).toHaveLength(1)
+    first.serverClose(1000, 'transport_detached')
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+    const second = FakeWebSocket.instances[1]
+    second.serverOpen()
+    second.serverSend(readyFrame())
+    await expect(reconnecting).resolves.toMatchObject({ state: 'connected' })
+  })
+
+  it('preserves a rename made while reconnect cleanup is pending', async () => {
+    const { client } = makeTerminal()
+    const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+    const connecting = client.connect(session.id)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const first = FakeWebSocket.instances[0]
+    first.serverOpen()
+    first.serverSend(readyFrame())
+    await connecting
+
+    const reconnecting = client.reconnect(session.id)
+    await Promise.resolve()
+    await expect(client.renameSession(session.id, 'renamed during reconnect')).resolves.toMatchObject({ name: 'renamed during reconnect', state: 'reconnecting' })
+    first.serverClose(1000, 'transport_detached')
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+    const second = FakeWebSocket.instances[1]
+    second.serverOpen()
+    second.serverSend(readyFrame())
+    await expect(reconnecting).resolves.toMatchObject({ name: 'renamed during reconnect', state: 'connected' })
+  })
+
+  it.each(['end', 'disconnect'] as const)('preserves %s while reconnect cleanup is pending', async (action) => {
+    try {
+      const { fake, client } = makeTerminal()
+      const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+      const connecting = client.connect(session.id)
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const ws = FakeWebSocket.instances[0]
+      ws.serverOpen()
+      ws.serverSend(readyFrame())
+      await connecting
+
+      vi.useFakeTimers()
+      const reconnecting = client.reconnect(session.id)
+      await Promise.resolve()
+      const cancelled = action === 'end' ? client.endSession(session.id) : client.disconnect(session.id)
+      await expect(cancelled).resolves.toMatchObject({ state: action === 'end' ? 'ended' : 'idle' })
+      await vi.advanceTimersByTimeAsync(5_000)
+      await expect(reconnecting).resolves.toMatchObject({ state: action === 'end' ? 'ended' : 'idle' })
+      expect(fake.callsTo('/terminal/prepare')).toHaveLength(1)
+      expect((await client.listSessions('ins_1'))[0].state).toBe(action === 'end' ? 'ended' : 'idle')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['abnormal close', (ws: FakeWebSocket) => ws.serverClose(1011, 'terminal_cleanup_unverified')],
+    ['cleanup timeout', undefined],
+  ])('does not prepare after %s during explicit reconnect', async (_name, close) => {
+    try {
+      const { fake, client } = makeTerminal()
+      const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+      const events: string[] = []
+      client.subscribe(session.id, (event) => {
+        if (event.type === 'state') events.push(event.state)
+      })
+      const connecting = client.connect(session.id)
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const ws = FakeWebSocket.instances[0]
+      ws.serverOpen()
+      ws.serverSend(readyFrame())
+      await connecting
+
+      if (!close) vi.useFakeTimers()
+      const reconnecting = client.reconnect(session.id)
+      void reconnecting.catch(() => undefined)
+      await Promise.resolve()
+      expect(fake.callsTo('/terminal/prepare')).toHaveLength(1)
+      if (close) close(ws)
+      else await vi.advanceTimersByTimeAsync(5_000)
+      await expect(reconnecting).rejects.toBeInstanceOf(ClientError)
+      expect(fake.callsTo('/terminal/prepare')).toHaveLength(1)
+      expect(events).toEqual(['connecting', 'connected', 'reconnecting', 'failed'])
+      expect((await client.listSessions('ins_1'))[0]).toMatchObject({ state: 'failed', lastError: expect.any(String) })
+    } finally {
+      if (!close) vi.useRealTimers()
+    }
+  })
+
+  it('retains the authenticated capsule target and server session identity', async () => {
+    const { client } = makeTerminal({ ...TERMINAL_TICKET_WIRE, target: { ...TERMINAL_TICKET_WIRE.target, targetClass: 'capsule', targetId: 'workspace-reviewed', displayName: 'Application workspace terminal' } })
+    const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+    expect(session.preparedTarget).toBeUndefined()
+    const connecting = client.connect(session.id)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.serverOpen()
+    ws.serverSend(readyFrame({ targetClass: 'capsule', reconnect: false }))
+    const connected = await connecting
+    expect(connected.preparedTarget).toEqual({ targetId: 'workspace-reviewed', targetClass: 'capsule', displayName: 'Application workspace terminal', sessionId: TERMINAL_TICKET.sessionId })
+    expect(JSON.stringify(connected)).not.toContain(TERMINAL_TICKET.oneUseToken)
+  })
+
+  it.each(['before connect resolves', 'after connect resolves'])('normal authenticated process exit ends session %s', async (ordering) => {
+    const { client } = makeTerminal()
+    const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+    const events: Array<{ type: string; state?: string; text?: string }> = []
+    client.subscribe(session.id, event => events.push(event))
+    const connecting = client.connect(session.id)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.serverOpen()
+    ws.serverSend(readyFrame())
+    if (ordering === 'after connect resolves') await connecting
+    ws.serverSend(new TextEncoder().encode('final process output'))
+    ws.serverClose(1000, 'process_exit')
+    await connecting
+    expect((await client.listSessions('ins_1'))[0]).toMatchObject({ state: 'ended', lastError: undefined })
+    expect(events.filter(event => event.type === 'state').at(-1)?.state).toBe('ended')
+    expect(events.some(event => event.text === 'final process output')).toBe(true)
+    expect(events.some(event => event.type === 'exit')).toBe(false)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect(() => client.sendInput(session.id, 'must not send')).toThrow(ClientError)
+  })
+
+  it.each([[1006, 'dropped'], [1011, 'terminal_output_refused'], [1008, 'access_denied'], [1000, 'unknown_reason']])('preserves abnormal authenticated close %s/%s as failed', async (code, reason) => {
+    const { client } = makeTerminal()
+    const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+    const connecting = client.connect(session.id)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.serverOpen()
+    ws.serverSend(readyFrame())
+    ws.serverClose(Number(code), String(reason))
+    await connecting
+    expect((await client.listSessions('ins_1'))[0].state).toBe('failed')
+  })
+
+  it('does not accept process_exit before the authenticated ready frame', async () => {
+    const { client } = makeTerminal()
+    const session = await client.createSession('ins_1', 'tgt_ins_1_pty')
+    const connecting = client.connect(session.id).catch(error => error)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const ws = FakeWebSocket.instances[0]
+    ws.serverOpen()
+    ws.serverClose(1000, 'process_exit')
+    expect(await connecting).toBeInstanceOf(ClientError)
+    expect((await client.listSessions('ins_1'))[0].state).toBe('failed')
   })
 
   it('sendInput before connect fails closed', async () => {
@@ -277,5 +523,36 @@ describe('HttpTerminalClient — prepare + explicit connect', () => {
     const err = await client.runCommand(session.id, 'ls').catch((e: unknown) => e)
     expect(err).toBeInstanceOf(ClientError)
     expect((err as ClientError).kind).toBe('unavailable')
+  })
+})
+
+describe('platform workspace terminal scope', () => {
+  beforeEach(() => FakeWebSocket.reset())
+  it('uses verified capsule target and exact platform prepare without application experience', async () => {
+    const target = { ...TERMINAL_TICKET_WIRE.target, targetClass: 'capsule', targetId: 'terminal.workspace.checked', displayName: 'Application workspace terminal', availability: 'available' }
+    const fake = makeFakeFetch([
+      ['GET', '/v1/execution-host/workspaces/ins_1/terminal/target', jsonResponse({ ok: true, result: { target } })],
+      ['POST', '/v1/execution-host/workspaces/ins_1/terminal/prepare', jsonResponse({ ok: true, result: { ...TERMINAL_TICKET_WIRE, target } })],
+    ])
+    const client = new HttpTerminalClient(new HttpTransport({ fetchFn: fake.fetchFn }), { webSocketFactory: FakeWebSocket.factory(), origin: ORIGIN })
+    const targets = await client.listTargets('ins_1', 'workspace')
+    expect(targets[0].kind).toBe('capsule')
+    const session = await client.createSession('ins_1', targets[0].id)
+    const connecting = client.connect(session.id)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    expect(fake.callsTo('/terminal/prepare')[0].body).toEqual({ expectedInstanceId: 'ins_1', expectedTargetId: target.targetId, columns: 80, rows: 24 })
+    FakeWebSocket.instances[0].serverOpen()
+    FakeWebSocket.instances[0].serverSend(readyFrame({ targetClass: 'capsule', reconnect: false }))
+    expect((await connecting).state).toBe('connected')
+    expect(fake.callsTo('/experience')).toHaveLength(0)
+    expect(fake.callsTo('/v1/instances/')).toHaveLength(0)
+  })
+  it.each(['local_pty', 'changed-capsule'])('refuses a %s prepare target before any socket', async changed => {
+    const target = { ...TERMINAL_TICKET_WIRE.target, targetClass: changed === 'local_pty' ? 'local_pty' : 'capsule', targetId: changed === 'local_pty' ? 'terminal.workspace.checked' : 'foreign-capsule' }
+    const fake = makeFakeFetch([['POST', '/v1/execution-host/workspaces/ins_1/terminal/prepare', jsonResponse({ ok: true, result: { ...TERMINAL_TICKET_WIRE, target } })]])
+    const client = new HttpTerminalClient(new HttpTransport({ fetchFn: fake.fetchFn }), { webSocketFactory: FakeWebSocket.factory(), origin: ORIGIN })
+    const session = await client.createSession('ins_1', 'workspace-terminal:terminal.workspace.checked')
+    await expect(client.connect(session.id)).rejects.toThrow('Workspace terminal target changed')
+    expect(FakeWebSocket.instances).toHaveLength(0)
   })
 })

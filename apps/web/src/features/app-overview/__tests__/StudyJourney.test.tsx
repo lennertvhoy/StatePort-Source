@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApplicationInstance, GovernedAction, RunOperation, RunRecord, StudyStatePackageData } from '@/client'
 import { getClient, resetClientForTests } from '@/client'
 import { useApplicationsPrefs } from '@/features/applications/lib/prefsStore'
+import { useSessionStore } from '@/state'
 
 import { StudyJourney } from '../components/StudyJourney'
 
@@ -147,6 +148,7 @@ function mockLifecycle(
 beforeEach(() => {
   resetClientForTests()
   useApplicationsPrefs.setState({ studyReflectionDrafts: {} })
+  useSessionStore.setState({ operationsMutationCount: 0 })
 })
 
 afterEach(() => {
@@ -154,6 +156,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   resetClientForTests()
   useApplicationsPrefs.setState({ studyReflectionDrafts: {} })
+  useSessionStore.setState({ operationsMutationCount: 0 })
 })
 
 describe('StudyState focused learning journey', () => {
@@ -217,6 +220,7 @@ describe('StudyState focused learning journey', () => {
     expect(await screen.findByText('Activity started in durable learning state')).toBeTruthy()
     expect(screen.getByText(/validated closure receipt and re-read the durable instance state/)).toBeTruthy()
     expect(screen.getByTestId('study-control-receipt').textContent).toContain('receipt-study-control-1')
+    expect(useSessionStore.getState().operationsMutationCount).toBe(0)
   })
 
   it('derives Pause from the sole active activity and shows the exact durable transition', async () => {

@@ -6,7 +6,7 @@
  * bridge patch-drafts staged into the governed preview.
  * CodeMirror is mocked (textarea double; diff view stub) per the task brief.
  */
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
@@ -36,7 +36,8 @@ vi.mock('@/features/files/CodeEditor', () => ({
 }))
 
 vi.mock('@/features/files/DiffView', () => ({
-  DiffView: ({ path }: { path: string }) => <div data-testid={`diff-${path}`} />,
+  DiffView: ({ path, original, modified }: { path: string; original: string; modified: string }) =>
+    <div data-testid={`diff-${path}`} data-original={original} data-modified={modified} />,
 }))
 
 vi.mock('@/features/files/editorCommands', () => ({ openFindInView: () => true }))
@@ -58,7 +59,10 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
+  Reflect.deleteProperty(navigator, 'clipboard')
+  Reflect.deleteProperty(document, 'execCommand')
   window.location.hash = ''
 })
 
@@ -120,6 +124,8 @@ describe('FilesTool — governed write flow', () => {
     fireEvent.keyDown(window, { key: 's', ctrlKey: true })
     expect(await screen.findByTestId('save-preview')).toBeTruthy()
     expect(screen.getByTestId(`preview-file-${FILE}`)).toBeTruthy()
+    expect(screen.getByTestId(`diff-${FILE}`).getAttribute('data-original')).toBe(useFilesStore.getState().docs[ID]?.[FILE]?.savedContent)
+    expect(screen.getByTestId(`diff-${FILE}`).getAttribute('data-modified')).toBe('# edited\n')
     expect(screen.getByTestId('affected-paths').textContent).toContain(FILE)
     expect(writeSpy).not.toHaveBeenCalled()
   }, 20_000)
@@ -168,6 +174,33 @@ describe('FilesTool — governed write flow', () => {
     const doc = useFilesStore.getState().docs[ID]?.[FILE]
     expect(doc?.draft).toBe('# my version\n')
     expect(doc?.savedContent).toBe('# my version\n')
+  }, 25_000)
+
+  it('requires successful copying before replacing the reviewed draft with disk content', async () => {
+    const entry = await getClient().files.read(ID, FILE)
+    await renderFiles()
+    await openFile(FILE)
+    editFile(FILE, '# keep my draft\n')
+    await getClient().files.write(ID, FILE, { content: '# disk version\n', expectedRevision: entry.revision })
+    fireEvent.keyDown(window, { key: 's', ctrlKey: true })
+    fireEvent.click(await screen.findByTestId('confirm-save'))
+    await screen.findByTestId(`conflict-${FILE}`, undefined, { timeout: 10_000 })
+    const clipboard = vi.fn().mockRejectedValue(new Error('denied'))
+    const fallback = vi.fn().mockReturnValue(false)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } })
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: fallback })
+    const read = vi.spyOn(getClient().files, 'read')
+    fireEvent.click(screen.getByText('Copy my version, then reload'))
+    await screen.findByText(/Copy failed/)
+    expect(read).not.toHaveBeenCalled()
+    expect(useFilesStore.getState().docs[ID]?.[FILE]?.draft).toBe('# keep my draft\n')
+    expect(useFilesStore.getState().docs[ID]?.[FILE]?.conflict).toBeTruthy()
+    clipboard.mockResolvedValue(undefined)
+    fireEvent.click(screen.getByText('Copy my version, then reload'))
+    await waitFor(() => expect(useFilesStore.getState().docs[ID]?.[FILE]?.draft).toBe('# disk version\n'))
+    expect(clipboard).toHaveBeenLastCalledWith('# keep my draft\n')
+    expect(fallback).toHaveBeenCalledOnce()
+    expect(read).toHaveBeenCalledOnce()
   }, 25_000)
 
   it('surfaces a path-policy rejection with a permissions link and no retry', async () => {
@@ -331,3 +364,160 @@ describe('FilesTool — governed regular-file path mutations', () => {
     expect(screen.getByTestId(`tree-row-${FILE}`)).toBeTruthy()
   }, 25_000)
 })
+
+it('hides disabled diffs but cancel preserves disk and draft until explicit confirmation', async () => {
+  await getClient().globalSettings.update({ editor: { previewDiffBeforeSave: false } })
+  const entry = await getClient().files.read(ID, FILE)
+  const write = vi.spyOn(getClient().files, 'write')
+  await renderFiles()
+  await openFile(FILE)
+  editFile(FILE, '# confirmed without diff\n')
+  fireEvent.keyDown(window, { key: 's', ctrlKey: true })
+  const dialog = await screen.findByTestId('save-preview')
+  expect(screen.getByText('Diff preview disabled')).toBeTruthy()
+  expect(screen.queryByTestId(`diff-${FILE}`)).toBeNull()
+  expect(screen.queryByRole('group', { name: 'Diff layout' })).toBeNull()
+  expect(screen.getByTestId('affected-paths').textContent).toContain(FILE)
+  expect(write).not.toHaveBeenCalled()
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+  await waitFor(() => expect(screen.queryByTestId('save-preview')).toBeNull())
+  expect(write).not.toHaveBeenCalled()
+  expect((await getClient().files.read(ID, FILE)).revision).toBe(entry.revision)
+  expect(useFilesStore.getState().docs[ID]?.[FILE]?.draft).toBe('# confirmed without diff\n')
+  fireEvent.keyDown(window, { key: 's', ctrlKey: true })
+  fireEvent.click(await screen.findByTestId('confirm-save'))
+  await waitFor(() => expect(write).toHaveBeenCalledOnce())
+  expect(write).toHaveBeenCalledWith(ID, FILE, { content: '# confirmed without diff\n', expectedRevision: entry.revision })
+  await waitFor(() => expect(useFilesStore.getState().docs[ID]?.[FILE]?.lastReceiptId).toMatch(/^rcpt_/))
+}, 25_000)
+
+it('still refuses a stale revision with diff preview disabled and never overwrites on cancel', async () => {
+  await getClient().globalSettings.update({ editor: { previewDiffBeforeSave: false } })
+  const entry = await getClient().files.read(ID, FILE)
+  await renderFiles()
+  await openFile(FILE)
+  editFile(FILE, '# local draft\n')
+  await getClient().files.write(ID, FILE, { content: '# concurrent disk edit\n', expectedRevision: entry.revision })
+  const disk = await getClient().files.read(ID, FILE)
+  const write = vi.spyOn(getClient().files, 'write')
+  fireEvent.keyDown(window, { key: 's', ctrlKey: true })
+  fireEvent.click(await screen.findByTestId('confirm-save'))
+  await screen.findByTestId(`conflict-${FILE}`, undefined, { timeout: 10_000 })
+  expect(screen.queryByTestId(`diff-${FILE}`)).toBeNull()
+  expect(screen.getByText(/Your edited version would replace the changed disk version/)).toBeTruthy()
+  expect(write).toHaveBeenCalledOnce()
+  expect(write).toHaveBeenCalledWith(ID, FILE, { content: '# local draft\n', expectedRevision: entry.revision })
+  fireEvent.click(within(screen.getByTestId('save-preview')).getByRole('button', { name: 'Close' }))
+  await waitFor(() => expect(screen.queryByTestId('save-preview')).toBeNull())
+  expect(write).toHaveBeenCalledOnce()
+  expect((await getClient().files.read(ID, FILE)).revision).toBe(disk.revision)
+  expect(useFilesStore.getState().docs[ID]?.[FILE]?.draft).toBe('# local draft\n')
+}, 25_000)
+
+
+async function idlePause(ms = 1250) {
+  await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+}
+
+it('autosave queues review after idle, never writes, and cancellation waits for a new edit', async () => {
+  await getClient().globalSettings.update({ editor: { autosave: true } })
+  const write = vi.spyOn(getClient().files, 'write')
+  await renderFiles()
+  await openFile(FILE)
+  vi.useFakeTimers()
+  editFile(FILE, '# first idle edit')
+  await idlePause(700)
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  editFile(FILE, '# second idle edit')
+  await idlePause(700)
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  await idlePause(550)
+  expect(screen.getByTestId('save-preview')).toBeTruthy()
+  expect(write).not.toHaveBeenCalled()
+  fireEvent.click(within(screen.getByTestId('save-preview')).getByRole('button', { name: 'Close' }))
+  await idlePause(3000)
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  editFile(FILE, '# third edit')
+  await idlePause()
+  expect(screen.getByTestId('save-preview')).toBeTruthy()
+  expect(write).not.toHaveBeenCalled()
+  vi.useRealTimers()
+  fireEvent.click(screen.getByTestId('confirm-save'))
+  await waitFor(() => expect(write).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(useFilesStore.getState().docs[ID]?.[FILE]?.lastReceiptId).toMatch(/^rcpt_/))
+  expect((await getClient().files.read(ID, FILE)).content).toBe('# third edit')
+}, 20_000)
+
+it('autosave defers composition, cancels on selection changes, and ignores dirty reset/read-only edits', async () => {
+  await getClient().globalSettings.update({ editor: { autosave: true } })
+  await renderFiles()
+  await openFile(READONLY_FILE)
+  await openFile(FILE)
+  const original = useFilesStore.getState().docs[ID]![FILE]!.savedContent
+  vi.useFakeTimers()
+  fireEvent.compositionStart(screen.getByTestId(`cm-${FILE}`))
+  editFile(FILE, '# composing')
+  await idlePause(2500)
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  fireEvent.compositionEnd(screen.getByTestId(`cm-${FILE}`))
+  await idlePause()
+  expect(screen.getByTestId('save-preview')).toBeTruthy()
+  fireEvent.click(within(screen.getByTestId('save-preview')).getByRole('button', { name: 'Close' }))
+  editFile(FILE, '# changed before switch')
+  fireEvent.click(screen.getByTestId(`editor-tab-primary-${READONLY_FILE}`))
+  await idlePause()
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  editFile(READONLY_FILE, '# disallowed')
+  await idlePause()
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  fireEvent.click(screen.getByTestId(`editor-tab-primary-${FILE}`))
+  await idlePause()
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  editFile(FILE, '# reset before idle')
+  editFile(FILE, original)
+  await idlePause()
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+}, 20_000)
+
+it('autosave remains off by default and manual review consumes its pending timer', async () => {
+  await renderFiles()
+  await openFile(FILE)
+  vi.useFakeTimers()
+  editFile(FILE, '# no autosave')
+  await idlePause(2500)
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  vi.useRealTimers()
+  cleanup()
+  await getClient().globalSettings.update({ editor: { autosave: true } })
+  await renderFiles()
+  await openFile(FILE)
+  vi.useFakeTimers()
+  editFile(FILE, '# manual review first')
+  fireEvent.keyDown(window, { key: 's', ctrlKey: true })
+  expect(screen.getByTestId('save-preview')).toBeTruthy()
+  fireEvent.click(within(screen.getByTestId('save-preview')).getByRole('button', { name: 'Close' }))
+  await idlePause(3000)
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+}, 20_000)
+
+
+it('consumes idle review after explicit discard and cancels timers when leaving the editor', async () => {
+  await getClient().globalSettings.update({ editor: { autosave: true } })
+  const write = vi.spyOn(getClient().files, 'write')
+  await renderFiles()
+  await openFile(FILE)
+  vi.useFakeTimers()
+  editFile(FILE, '# discard me')
+  await idlePause()
+  fireEvent.click(screen.getByTestId('discard-changes'))
+  const confirmations = screen.getAllByRole('alertdialog')
+  fireEvent.click(within(confirmations[0]).getByRole('button', { name: /discard/i }))
+  await idlePause(2500)
+  expect(useFilesStore.getState().docs[ID]?.[FILE]?.draft).toBe(useFilesStore.getState().docs[ID]?.[FILE]?.savedContent)
+  expect(screen.queryByTestId('save-preview')).toBeNull()
+  editFile(FILE, '# leave before idle')
+  cleanup()
+  await idlePause(2500)
+  expect(useFilesStore.getState().savePreviewOpen).toBe(false)
+  expect(write).not.toHaveBeenCalled()
+}, 20_000)

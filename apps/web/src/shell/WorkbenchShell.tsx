@@ -49,8 +49,9 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
 import type { LayoutPreset } from '@/state'
-import { DEFAULT_LAYOUT, useWorkspaceStore } from '@/state'
+import { DEFAULT_LAYOUT, normalizeWorkbenchToolOrder, useWorkspaceStore } from '@/state'
 
+import { useStartupFocus } from './data'
 import { useCurrentInstance } from './currentInstance'
 import type { ShellCommand } from './commands'
 import { useRegisterCommands } from './commands'
@@ -160,10 +161,16 @@ export function WorkbenchShell() {
     (tool: ToolDef) => !tool.capabilities || tool.capabilities.some((c) => hasCapability(c)),
     [hasCapability],
   )
-  const availableTools = useMemo(() => TOOLS.filter(toolAvailable), [toolAvailable])
+  const savedToolOrder = useWorkspaceStore((s) => s.workbenchToolOrder)
+  const availableTools = useMemo(() => normalizeWorkbenchToolOrder(savedToolOrder)
+    .flatMap((id) => {
+      const tool = TOOLS.find((candidate) => candidate.id === id)
+      return tool && toolAvailable(tool) ? [tool] : []
+    }), [savedToolOrder, toolAvailable])
 
   // ── Guards: no workbench capability / deep link to unavailable tool ────────
   const workbenchAvailable = hasCapability('workbench')
+  useStartupFocus(Boolean(instance) && workbenchAvailable && toolAvailable(currentToolDef))
   useEffect(() => {
     if (instance && !workbenchAvailable) {
       void navigate(`/app/${instance.id}`, {
@@ -181,6 +188,18 @@ export function WorkbenchShell() {
       })
     }
   }, [instance, workbenchAvailable, currentToolDef, toolAvailable, navigate])
+
+  // Record only a resolved, permitted tool. AppContextShell owns the server
+  // opened timestamp; tool switches need only update local continuity.
+  useEffect(() => {
+    if (!instanceId || !workbenchAvailable || !toolAvailable(currentToolDef)
+      || (toolSegment !== undefined && toolSegment !== currentToolDef.route)) return
+    const workspace = useWorkspaceStore.getState()
+    if (workspace.lastInstanceId !== instanceId || workspace.lastView !== 'workbench'
+      || workspace.lastWorkbenchTool !== currentTool) {
+      workspace.setLastOpened(instanceId, 'workbench', currentTool)
+    }
+  }, [instanceId, workbenchAvailable, currentTool, currentToolDef, toolAvailable, toolSegment])
 
   // ── Focus / maximize mode (`?focus=1` deep link) ───────────────────────────
   const focusActive = searchParams.get('focus') === '1'
@@ -614,8 +633,8 @@ export function WorkbenchShell() {
           </DropdownMenu>
         </header>
 
-        {/* Regions */}
-        <div className="flex min-h-0 flex-1">
+        {/* Allow the region group to shrink below retained terminal/content widths. */}
+        <div className="flex min-h-0 min-w-0 flex-1">
           {layout.navCollapsed ? (
             <div className="flex w-6 shrink-0 flex-col items-center border-r border-border bg-surface py-1">
               <Tooltip content="Show panel" side="right">
@@ -634,7 +653,7 @@ export function WorkbenchShell() {
           <PanelGroup
             key={`${instanceId}-${layoutEpoch}-${String(layout.navCollapsed)}-${String(layout.rightDockCollapsed)}-${String(layout.bottomCollapsed)}`}
             orientation="horizontal"
-            className="min-h-0 flex-1"
+            className="min-h-0 min-w-0 flex-1"
           >
             {layout.navCollapsed ? null : (
               <>

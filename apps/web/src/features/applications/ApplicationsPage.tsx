@@ -10,7 +10,7 @@
  *
  * Keyboard (this route): ↑↓/Home/End move through row lists (roving tabindex),
  * Enter opens, Space opens the row menu, P pins the focused row,
- * Alt+↑/Alt+↓ reorders pinned rows, `/` focuses the filter,
+ * Alt+↑/Alt+↓ reorders pinned rows or unpinned rows in Manual mode, `/` focuses the filter,
  * Ctrl/Cmd+1…9 jumps to pinned applications 1–9.
  *
  * data-testid="applications-stub" is kept on the layout root as a legacy
@@ -58,7 +58,7 @@ const MAX_ATTENTION_ROWS = 5
 const MAX_OPERATION_ROWS = 5
 const MAX_RECENT_ROWS = 5
 
-const SORT_LABELS: Record<ApplicationsSort, string> = { recent: 'Recent', name: 'Name', package: 'Package' }
+const SORT_LABELS: Record<ApplicationsSort, string> = { recent: 'Recent', name: 'Name', package: 'Package', manual: 'Manual' }
 
 export default function ApplicationsPage() {
   const navigate = useNavigate()
@@ -69,13 +69,45 @@ export default function ApplicationsPage() {
   const pushToast = useSessionStore((s) => s.pushToast)
 
   // ── preferences (persisted) ────────────────────────────────────────────────
-  const sort = useApplicationsPrefs((s) => s.sort)
+  const sortOverride = useApplicationsPrefs((s) => s.sort)
   const setSort = useApplicationsPrefs((s) => s.setSort)
   const onboardingDismissed = useApplicationsPrefs((s) => s.onboardingDismissed)
   const dismissOnboarding = useApplicationsPrefs((s) => s.dismissOnboarding)
   const pinnedOrder = useApplicationsPrefs((s) => s.pinnedOrder)
   const reconcilePinned = useApplicationsPrefs((s) => s.reconcilePinned)
   const movePinned = useApplicationsPrefs((s) => s.movePinned)
+  const unpinnedOrder = useApplicationsPrefs((s) => s.unpinnedOrder)
+  const reconcileUnpinned = useApplicationsPrefs((s) => s.reconcileUnpinned)
+  const moveUnpinned = useApplicationsPrefs((s) => s.moveUnpinned)
+  const [defaultSort, setDefaultSort] = useState<ApplicationsSort>('recent')
+  const [sortSettingsError, setSortSettingsError] = useState(false)
+  const [showRecents, setShowRecents] = useState(false)
+  const [orderPersistenceError, setOrderPersistenceError] = useState(false)
+  const saveOrder = useCallback((change: () => void) => {
+    try {
+      const before = useApplicationsPrefs.getState()
+      change()
+      if (useApplicationsPrefs.getState() !== before) setOrderPersistenceError(false)
+    } catch {
+      // Zustand may already have applied the in-memory order before storage fails.
+      setOrderPersistenceError(true)
+    }
+  }, [])
+  const sort = sortOverride ?? defaultSort
+  useEffect(() => {
+    let cancelled = false
+    void getClient().globalSettings.get().then((settings) => {
+      if (!cancelled) {
+        setDefaultSort(settings.general.defaultApplicationSorting)
+        setShowRecents(settings.general.showRecentApplications)
+        setSortSettingsError(false)
+      }
+    }).catch(() => {
+      if (!cancelled) setSortSettingsError(true)
+    })
+    return () => { cancelled = true }
+  }, [])
+
 
   // ── workspace continuity + global density ─────────────────────────────────
   const continuity = useWorkspaceContinuity()
@@ -92,8 +124,12 @@ export default function ApplicationsPage() {
   // ── pinned order reconciliation (client pin flags ↔ persisted user order) ──
   const pinnedKey = instances.filter((i) => i.pinned).map((i) => i.id).join(',')
   useEffect(() => {
-    reconcilePinned(pinnedKey ? pinnedKey.split(',') : [])
-  }, [pinnedKey, reconcilePinned])
+    if (!loading && !error) saveOrder(() => reconcilePinned(pinnedKey ? pinnedKey.split(',') : []))
+  }, [pinnedKey, reconcilePinned, loading, error, saveOrder])
+  const unpinnedKey = instances.filter((i) => !i.pinned).map((i) => i.id).join(',')
+  useEffect(() => {
+    if (!loading && !error) saveOrder(() => reconcileUnpinned(unpinnedKey ? unpinnedKey.split(',') : []))
+  }, [unpinnedKey, reconcileUnpinned, loading, error, saveOrder])
 
   // ── dominant per-instance status (the ONE honest status per row) ──────────
   const statusById = useMemo(() => {
@@ -131,7 +167,7 @@ export default function ApplicationsPage() {
     return [...instances].sort((a, b) => (b.lastOpenedAt ?? '').localeCompare(a.lastOpenedAt ?? ''))[0] ?? null
   }, [instances, continuity.lastInstanceId])
   const heroTarget = useMemo(() => (hero ? resumeTargetFor(hero, continuity) : null), [hero, continuity])
-  const heroLiveOp = hero ? operations.find((o) => o.instanceId === hero.id && LIVE_OP_STATES.includes(o.state)) : undefined
+  const heroLiveOp = hero ? operations.filter((o) => o.kind !== 'infrastructure_observation').find((o) => o.instanceId === hero.id && LIVE_OP_STATES.includes(o.state)) : undefined
 
   // ── Recently used (excluding the hero, most recent first) ──────────────────
   const recents = useMemo(
@@ -154,9 +190,15 @@ export default function ApplicationsPage() {
         ? [...rest].sort((a, b) => a.name.localeCompare(b.name))
         : sort === 'package'
           ? [...rest].sort((a, b) => a.packageDisplayName.localeCompare(b.packageDisplayName) || a.name.localeCompare(b.name))
-          : [...rest].sort((a, b) => (b.lastOpenedAt ?? '').localeCompare(a.lastOpenedAt ?? ''))
+          : sort === 'manual'
+            ? [...rest].sort((a, b) => {
+              const aIndex = unpinnedOrder.indexOf(a.id)
+              const bIndex = unpinnedOrder.indexOf(b.id)
+              return (aIndex < 0 ? Number.MAX_SAFE_INTEGER : aIndex) - (bIndex < 0 ? Number.MAX_SAFE_INTEGER : bIndex)
+            })
+            : [...rest].sort((a, b) => (b.lastOpenedAt ?? '').localeCompare(a.lastOpenedAt ?? ''))
     return { pinnedRows: pinned, restRows: sorted }
-  }, [instances, pinnedOrder, sort])
+  }, [instances, pinnedOrder, unpinnedOrder, sort])
 
   const query = filter.trim().toLowerCase()
   const matches = useCallback(
@@ -209,7 +251,7 @@ export default function ApplicationsPage() {
 
   const rename = useCallback(
     async (instance: ApplicationInstance, name: string) => {
-      await getClient().applications.rename(instance.id, name)
+      await getClient().applications.rename(instance.id, name, instance.name)
       pushToast({ kind: 'success', title: `Renamed to ${name}` })
       refresh()
     },
@@ -218,11 +260,17 @@ export default function ApplicationsPage() {
 
   const move = useCallback(
     (instance: ApplicationInstance, direction: -1 | 1) => {
-      const index = pinnedOrder.indexOf(instance.id)
-      if (index === -1) return
-      movePinned(instance.id, index + direction)
+      if (query) return
+      const order = instance.pinned ? pinnedOrder : unpinnedOrder
+      if (!instance.pinned && sort !== 'manual') return
+      const index = order.indexOf(instance.id)
+      if (index === -1 || index + direction < 0 || index + direction >= order.length) return
+      saveOrder(() => {
+        if (instance.pinned) movePinned(instance.id, index + direction)
+        else moveUnpinned(instance.id, index + direction)
+      })
     },
-    [pinnedOrder, movePinned],
+    [pinnedOrder, unpinnedOrder, movePinned, moveUnpinned, sort, query, saveOrder],
   )
 
   // ── row-list keyboard model (roving tabindex over the flat visible rows) ───
@@ -322,6 +370,15 @@ export default function ApplicationsPage() {
       {/* Legacy alias for the shell route-smoke test (kept until the shell suite migrates). */}
       <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-6 p-4 md:p-6" data-testid="applications-stub">
         <h1 className="sr-only">Applications</h1>
+        {orderPersistenceError && <div role="alert" className="text-sm text-foreground-secondary">
+          This view's order could not be saved. Reloading may lose these changes.
+          <Button variant="outline" size="sm" onClick={() => saveOrder(() => {
+            const current = useApplicationsPrefs.getState()
+            useApplicationsPrefs.setState({ pinnedOrder: current.pinnedOrder, unpinnedOrder: current.unpinnedOrder, sort: current.sort })
+          })}>Retry saving order</Button>
+        </div>}
+        {sortSettingsError && <p role="status" className="text-sm text-foreground-secondary">Dashboard preferences could not be loaded. Recent applications are hidden{sortOverride === null ? ' and sorting uses recent order' : ''}; reopen Applications to retry. The full application list remains available.</p>}
+        {sort === 'manual' && <p role="status" className="text-sm text-foreground-secondary">{query ? 'Clear the filter to reorder applications. Hidden applications keep their positions.' : 'Use a row menu or Alt+↑ / Alt+↓ to reorder applications within their pinned or unpinned group.'}</p>}
 
         {serviceOffline ? (
           <InlineNotice
@@ -365,7 +422,7 @@ export default function ApplicationsPage() {
                 title="No applications yet"
                 description="Install a reviewed package to create your first governed workspace."
                 action={{ label: 'Browse Catalog', onClick: () => void navigate('/catalog') }}
-                secondaryAction={{ label: 'Import a local repository', onClick: () => void navigate('/catalog?import=1') }}
+                secondaryAction={{ label: 'Import a repository', onClick: () => void navigate('/catalog?import=1') }}
               />
             </div>
           </>
@@ -418,7 +475,7 @@ export default function ApplicationsPage() {
               <section aria-label="Active and recent operations" className="max-md:hidden" data-testid="operations-section">
                 <SectionHeader title="Operations" className="mb-2" />
                 <ul className="divide-y divide-border rounded-md border border-border bg-surface px-1">
-                  {[...operations]
+                  {operations.filter((o) => o.kind !== 'infrastructure_observation')
                     .sort((a, b) => Number(LIVE_OP_STATES.includes(b.state)) - Number(LIVE_OP_STATES.includes(a.state)) || b.updatedAt.localeCompare(a.updatedAt))
                     .slice(0, MAX_OPERATION_ROWS)
                     .map((op) => (
@@ -446,7 +503,7 @@ export default function ApplicationsPage() {
             ) : null}
 
             {/* ── Section 4 · Recently used (desktop/tablet only per design) ── */}
-            {recents.length > 0 ? (
+            {showRecents && recents.length > 0 ? (
               <section aria-label="Recently used" className="max-md:hidden" data-testid="recently-used-section">
                 <SectionHeader title="Recently used" className="mb-2" />
                 <ul
@@ -542,10 +599,12 @@ export default function ApplicationsPage() {
                     <span className="max-md:hidden">Sort: {SORT_LABELS[sort]}</span>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="bg-surface">
-                    <DropdownMenuRadioGroup value={sort} onValueChange={(v) => setSort(v as ApplicationsSort)}>
+                    <DropdownMenuRadioGroup value={sortOverride ?? 'default'} onValueChange={(v) => saveOrder(() => setSort(v === 'default' ? null : v as ApplicationsSort))}>
+                      <DropdownMenuRadioItem value="default">Use settings default ({SORT_LABELS[defaultSort]})</DropdownMenuRadioItem>
                       <DropdownMenuRadioItem value="recent">Recent</DropdownMenuRadioItem>
                       <DropdownMenuRadioItem value="name">Name</DropdownMenuRadioItem>
                       <DropdownMenuRadioItem value="package">Package</DropdownMenuRadioItem>
+                      <DropdownMenuRadioItem value="manual">Manual</DropdownMenuRadioItem>
                     </DropdownMenuRadioGroup>
                     <DropdownMenuSeparator className="md:hidden" />
                     <DropdownMenuItem className="md:hidden" onSelect={() => setDensity(density === 'compact' ? 'comfortable' : 'compact')}>
@@ -593,7 +652,7 @@ export default function ApplicationsPage() {
                       readOnly={readOnly}
                       index={index}
                       roving={roving}
-                      pinnedPosition={{ index, count: visiblePinned.length }}
+                      pinnedPosition={query ? undefined : { index, count: visiblePinned.length }}
                       onDragStartRow={(i) => {
                         dragIdRef.current = i.id
                       }}
@@ -602,7 +661,7 @@ export default function ApplicationsPage() {
                         dragIdRef.current = null
                         if (!dragged || dragged === target.id) return
                         const toIndex = pinnedOrder.indexOf(target.id)
-                        if (toIndex !== -1) movePinned(dragged, toIndex)
+                        if (toIndex !== -1 && !query) saveOrder(() => movePinned(dragged, toIndex))
                       }}
                       onOpen={open}
                       onTogglePin={togglePin}
@@ -624,6 +683,7 @@ export default function ApplicationsPage() {
                       readOnly={readOnly}
                       index={visiblePinned.length + restIndex}
                       roving={roving}
+                      manualPosition={sort === 'manual' && !query ? { index: restIndex, count: visibleRest.length } : undefined}
                       onOpen={open}
                       onTogglePin={togglePin}
                       onRename={canRename ? (i) => setRenameTarget(i) : undefined}
@@ -646,7 +706,7 @@ export default function ApplicationsPage() {
                       readOnly={readOnly}
                       index={index}
                       roving={roving}
-                      pinnedPosition={{ index, count: visiblePinned.length }}
+                      pinnedPosition={query ? undefined : { index, count: visiblePinned.length }}
                       onDragStartRow={(i) => {
                         dragIdRef.current = i.id
                       }}
@@ -655,7 +715,7 @@ export default function ApplicationsPage() {
                         dragIdRef.current = null
                         if (!dragged || dragged === target.id) return
                         const toIndex = pinnedOrder.indexOf(target.id)
-                        if (toIndex !== -1) movePinned(dragged, toIndex)
+                        if (toIndex !== -1 && !query) saveOrder(() => movePinned(dragged, toIndex))
                       }}
                       onOpen={open}
                       onTogglePin={togglePin}
@@ -672,6 +732,7 @@ export default function ApplicationsPage() {
                       readOnly={readOnly}
                       index={visiblePinned.length + restIndex}
                       roving={roving}
+                      manualPosition={sort === 'manual' && !query ? { index: restIndex, count: visibleRest.length } : undefined}
                       onOpen={open}
                       onTogglePin={togglePin}
                       onRename={canRename ? (i) => setRenameTarget(i) : undefined}

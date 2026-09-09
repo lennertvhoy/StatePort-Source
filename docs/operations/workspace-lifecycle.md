@@ -100,3 +100,79 @@ exact path and newly created branch after identity and cleanliness checks. Any
 uncertainty is preserved and emitted as typed failure residue. A later audit
 therefore sees either a valid lease, a classified external workspace, or an
 explicit unknown that blocks further creation.
+
+### Explicit development-image source seed prerequisite
+
+`parameters.sourceSeed.helperPolicy` may explicitly select
+`stateport.development-python-seed/v1`. Absence retains the existing pinned
+Python-image helper and unchanged source-review normalization. The new policy
+accepts only the fixed development-image digest in the daemon contract. Its
+policy identifier participates in the source review and normalized workload
+specification, so an existing exact operator grant cannot acquire this behavior
+without approving the changed specification. No arbitrary helper image,
+interpreter, command, UID, or namespace is accepted.
+
+The policy uses that same image's `/usr/bin/python3`, the fixed seed script,
+and UID/GID `10001:10001`. Helper and eventual workspace explicitly share the
+execution account's rootless Podman user namespace. Independently observed
+rootless status and exact user/namespace inspection are required; rootful,
+unavailable, or remapped observations refuse. Existing generic argv restrictions
+remain in force outside this exact policy. The helper refuses a nonempty or
+incorrectly owned target before copying. It does not chown or adopt existing
+volumes. Partial seed effects remain retained, and restart adoption checks the
+same identity contract.
+
+Snapshot files retain verified regular-file modes; its manifest is explicitly
+readable inside the read-only helper mount even when the daemon uses umask077.
+Only the snapshot subtree permits traversal; its daemon-private parent remains
+private. Original application files are never chmodded by this step.
+
+This is a source prerequisite, not activation of seeded operator issuance.
+Actual pinned-image interpreter/user metadata, fresh-volume ownership,
+provider-user writes, and installed restart remain subject to the real governed
+runtime journey. The new policy must not be presented as qualified from the
+existing Python-image fixture or source tests.
+
+### Fresh signed development-image binding
+
+New release topology explicitly selects `workspaceImageId: stateport-dev-workspace`.
+The existing verified signed image set supplies its immutable reference after the
+image build. Fresh provisioning derives the known `default-dev` template from
+that reference, binds its complete normalized digest into the private
+`control-plane-default` grant, and publishes the same image/spec pair to the web
+and daemon units. It pulls and verifies this image in the execution account's
+store through the existing image step. The image digest therefore does not need
+to be written back into the source that produced the image.
+
+The two installed configuration values are
+`STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE` and
+`STATEPORT_EXECUTION_HOST_WORKSPACE_SPEC_DIGEST`. A partial, malformed, or
+contradictory pair refuses. Both absent preserves the immutable legacy contract;
+fresh provisioning refuses an existing different or legacy binding rather than
+migrating its grant or unit. A dynamic fixed-default `listWorkloads` response
+includes `workspaceProfile` with `imageReference` and `workloadSpecDigest` only
+after checking the exact live private default grant. The web compares that pair
+with its installed configuration before preparing a dynamic profile. This proves
+image/spec binding and grant liveness; actual actions still require their normal
+operation, budget, and workload authorization checks.
+
+`stateport.signed-development-python-seed/v1` is a separate explicit helper
+policy. Normalization binds the policy and pinned image into the source review
+and workload digest, but normalization alone grants no authority. In addition
+to the exact requesting grant, seed effects and recovery require the daemon's
+installed image binding and live fixed private default grant. The existing
+fixed Python and fixed development-image policies retain their behavior.
+The helper command, UID, rootless namespace, snapshot readability, and
+refusal-only target ownership checks remain unchanged. Seeded operator issuance
+is not activated by this prerequisite.
+
+Revoking the default grant does not transitively revoke independent existing
+empty/terminal application grants on a running daemon. The new signed seed
+policy deliberately depends on that base grant: a ledger containing such a
+workspace refuses reconciliation when the base becomes unavailable or revoked.
+The existing global fail-closed boot rule then prevents daemon startup, including
+unrelated work on that restart. Effects are retained; no automatic adoption or
+quarantine is introduced. This mixed-ledger restart limitation must be resolved
+or explicitly qualified before activating signed seeded issuance. Source tests
+and fake-engine transport tests do not establish installed image, volume,
+provider execution, or restart qualification.

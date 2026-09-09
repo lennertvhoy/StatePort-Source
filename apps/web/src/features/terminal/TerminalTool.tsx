@@ -82,7 +82,12 @@ import type { TerminalThemePreference } from './terminalTheme'
 
 const EMPTY_TABS: readonly TerminalTab[] = []
 
-export default function TerminalTool() {
+export default function TerminalTool({ workspaceOnly = false }: { workspaceOnly?: boolean }) {
+  const { instanceId = '' } = useParams<{ instanceId: string }>()
+  return <ScopedTerminalTool key={`${workspaceOnly ? 'workspace' : 'application'}:${instanceId}`} workspaceOnly={workspaceOnly} />
+}
+
+function ScopedTerminalTool({ workspaceOnly }: { workspaceOnly: boolean }) {
   const { instanceId = '' } = useParams<{ instanceId: string }>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -92,16 +97,26 @@ export default function TerminalTool() {
   const [phase, setPhase] = useState<'loading' | 'error' | 'ready'>('loading')
   const [loadError, setLoadError] = useState<unknown>(null)
   const [targets, setTargets] = useState<TerminalTarget[]>([])
+  const targetGeneration = useRef(0)
+  const acceptsTarget = useCallback((target: TerminalTarget) => target.instanceId === instanceId && (!workspaceOnly || (target.kind === 'capsule' && target.id.startsWith('workspace-terminal:'))), [instanceId, workspaceOnly])
+  const validateTargets = useCallback((values: TerminalTarget[]) => {
+    if (values.some(target => !acceptsTarget(target))) throw new Error('Terminal target does not match this workspace scope')
+    return values
+  }, [acceptsTarget])
+
   const [settings, setSettings] = useState<TerminalSettings | null>(null)
   const [themePref, setThemePref] = useState<TerminalThemePreference>('match_interface')
   const [a11yScreenReader, setA11yScreenReader] = useState(false)
 
-  const tabs = useTerminalManager((s) => s.tabs[instanceId]) ?? EMPTY_TABS
+  const allTabs = useTerminalManager((s) => s.tabs[instanceId]) ?? EMPTY_TABS
+  const tabs = useMemo(() => allTabs.filter(tab => tab.targetId.startsWith('workspace-terminal:') === workspaceOnly), [allTabs, workspaceOnly])
   const activeSessionId = useWorkspaceStore((s) => s.activeTerminalSession[instanceId] ?? null)
   const setActiveTerminalSession = useWorkspaceStore((s) => s.setActiveTerminalSession)
   const activeTab = tabs.find((t) => t.sessionId === activeSessionId) ?? tabs[0] ?? null
   const activeTarget = activeTab ? targets.find((t) => t.id === activeTab.targetId) : undefined
   const targetIssue = activeTab ? !activeTarget || !activeTarget.available : false
+  const preparedTarget = activeTab?.lost ? undefined : activeTab?.preparedTarget
+  const targetLabel = preparedTarget ? `${preparedTarget.displayName} · ${preparedTarget.targetClass === 'capsule' ? 'Capsule' : preparedTarget.targetClass === 'local_pty' ? 'Local PTY' : preparedTarget.targetClass === 'ssh' ? 'SSH' : 'Managed attach'}` : activeTarget?.label
 
   const applyGlobalSettings = useCallback((gs: GlobalSettings) => {
     setSettings(gs.terminal)
@@ -112,29 +127,33 @@ export default function TerminalTool() {
   // Async load — every setState happens after an await, never synchronously
   // inside the mount effect. The retry handler resets `phase` in its event.
   const loadInitial = useCallback(async () => {
+    const generation = ++targetGeneration.current
     try {
       const [targetList, gs] = await Promise.all([
-        getClient().terminal.listTargets(instanceId),
+        getClient().terminal.listTargets(instanceId, workspaceOnly ? 'workspace' : undefined),
         getClient().globalSettings.get(),
       ])
-      setTargets(targetList)
+      if (generation !== targetGeneration.current) return
+      setTargets(validateTargets(targetList))
       applyGlobalSettings(gs)
       // Refresh honesty: restore tabs as ended (never reconnect), then drop
       // tabs whose mock session vanished (mock reset) to the same state.
       restoreInstanceTabs(instanceId, { restoreTabs: gs.terminal.restoreSessionTabs })
       await reconcileInstance(instanceId)
+      if (generation !== targetGeneration.current) return
       setPhase('ready')
     } catch (err) {
+      if (generation !== targetGeneration.current) return
       setLoadError(err)
       setPhase('error')
     }
-  }, [instanceId, applyGlobalSettings])
+  }, [instanceId, applyGlobalSettings, workspaceOnly, validateTargets])
 
   useEffect(() => {
     // Deferred so the async load (and its setStates) never runs synchronously
     // inside the effect body.
     const timer = window.setTimeout(() => void loadInitial(), 0)
-    return () => window.clearTimeout(timer)
+    return () => { window.clearTimeout(timer); targetGeneration.current += 1 }
   }, [loadInitial])
 
   const retryLoad = useCallback(() => {
@@ -157,12 +176,15 @@ export default function TerminalTool() {
   }, [applyGlobalSettings])
 
   const refreshTargets = useCallback(async () => {
+    const generation = targetGeneration.current
     try {
-      setTargets(await getClient().terminal.listTargets(instanceId))
+      const observed = await getClient().terminal.listTargets(instanceId, workspaceOnly ? 'workspace' : undefined)
+      if (generation !== targetGeneration.current) return
+      setTargets(validateTargets(observed))
     } catch {
       /* quiet refresh — explicit Reload shows errors via panes */
     }
-  }, [instanceId])
+  }, [instanceId, workspaceOnly, validateTargets])
 
   // ── active-tab sync with the workspace store ─────────────────────────────
   useEffect(() => {
@@ -198,6 +220,7 @@ export default function TerminalTool() {
     }
     return availableTargets[0]
   }, [settings, availableTargets, activeTab])
+  const replacementTarget = activeTab && targetIssue ? preferredTarget() : undefined
 
   const sessionNameFor = useCallback(
     (target: TerminalTarget): string | undefined =>
@@ -205,8 +228,11 @@ export default function TerminalTool() {
     [settings],
   )
 
+  const acceptsTab = useCallback((tab: TerminalTab) => tab.instanceId === instanceId && (!workspaceOnly || targets.some(target => acceptsTarget(target) && target.available && target.id === tab.targetId)), [instanceId, workspaceOnly, targets, acceptsTarget])
+
   const handleConnect = useCallback(
     async (tab: TerminalTab) => {
+      if (!acceptsTab(tab)) return
       const newKey = await connectTab(tab.key, (oldKey, nextKey, nextSessionId) =>
         moveRuntime(oldKey, nextKey, nextSessionId),
       )
@@ -219,28 +245,29 @@ export default function TerminalTool() {
       }
       if (!isMobile) getRuntime(newKey ?? tab.key)?.focus()
     },
-    [instanceId, isMobile, setActiveTerminalSession],
+    [instanceId, isMobile, setActiveTerminalSession, acceptsTab],
   )
 
   /** Start pane: one explicit click creates the session AND connects. */
   const handleStartConnect = useCallback(
     async (target: TerminalTarget) => {
+      if (!acceptsTarget(target) || !target.available) return
       const tab = await createSessionTab(instanceId, target, sessionNameFor(target))
       setActiveTerminalSession(instanceId, tab.sessionId)
       markActiveSession(instanceId, tab.sessionId)
       await handleConnect(tab)
     },
-    [instanceId, sessionNameFor, setActiveTerminalSession, handleConnect],
+    [instanceId, sessionNameFor, setActiveTerminalSession, handleConnect, acceptsTarget],
   )
 
   /** New session (Ctrl+Shift+` / +): creates an idle tab — Connect stays explicit. */
   const handleNewSession = useCallback(async () => {
     const target = preferredTarget()
-    if (!target) return
+    if (!target || !acceptsTarget(target) || !target.available) return
     const tab = await createSessionTab(instanceId, target, sessionNameFor(target))
     setActiveTerminalSession(instanceId, tab.sessionId)
     markActiveSession(instanceId, tab.sessionId)
-  }, [instanceId, preferredTarget, sessionNameFor, setActiveTerminalSession])
+  }, [instanceId, preferredTarget, sessionNameFor, setActiveTerminalSession, acceptsTarget])
 
   const handleCloseTab = useCallback(
     async (tab: TerminalTab) => {
@@ -255,10 +282,11 @@ export default function TerminalTool() {
   }, [])
 
   const handleLiveReconnect = useCallback(async (tab: TerminalTab) => {
+    if (!acceptsTab(tab)) return
     await reconnectLiveTab(tab.key, (oldKey, nextKey, nextSessionId) =>
       moveRuntime(oldKey, nextKey, nextSessionId),
     )
-  }, [])
+  }, [acceptsTab])
 
   const exportTab = useCallback((tab: TerminalTab) => {
     const text = getRuntime(tab.key)?.exportText() ?? ''
@@ -288,7 +316,7 @@ export default function TerminalTool() {
   const draftsRef = useRef<string[]>([])
   useEffect(() => {
     const activeConnectedRuntime = () => {
-      const tabs = tabsFor(instanceId)
+      const tabs = tabsFor(instanceId).filter(tab => tab.targetId.startsWith('workspace-terminal:') === workspaceOnly)
       const activeId = useWorkspaceStore.getState().activeTerminalSession[instanceId]
       const active = tabs.find((t) => t.sessionId === activeId) ?? tabs[0]
       if (!active || active.state !== 'connected') return undefined
@@ -330,7 +358,7 @@ export default function TerminalTool() {
       unWorkspace()
       window.removeEventListener('focus', consumeBridge)
     }
-  }, [instanceId])
+  }, [instanceId, workspaceOnly])
 
   // ── announcements (state changes → polite live region; adjust-during-render) ──
   const [announcement, setAnnouncement] = useState('')
@@ -485,7 +513,7 @@ export default function TerminalTool() {
         icon={SquareTerminal}
         title="No terminal target available"
         description="This application doesn't have a permitted terminal target in the current environment."
-        action={{ label: 'Review capabilities', onClick: () => void navigate(`/app/${instanceId}`) }}
+        action={{ label: 'Review capabilities', onClick: () => void navigate(workspaceOnly ? '/execution-host' : `/app/${instanceId}`) }}
       />
     )
   } else if (tabs.length === 0) {
@@ -498,16 +526,19 @@ export default function TerminalTool() {
   } else if (activeTab && targetIssue) {
     body = (
       <TargetUnavailablePane
+        tab={activeTab}
         target={activeTarget}
+        replacementTarget={replacementTarget}
         onRefresh={() => void refreshTargets()}
-        onReviewConfiguration={() => void navigate(`/app/${instanceId}/workbench/deployments`)}
+        onNewSession={() => void handleNewSession()}
+        onReviewConfiguration={() => void navigate(workspaceOnly ? '/execution-host' : `/app/${instanceId}/workbench/deployments`)}
       />
     )
   } else if (activeTab && effectiveSettings) {
     const runtime = getRuntime(activeTab.key)
     switch (activeTab.state) {
       case 'idle':
-        body = <StartPane targetLabel={activeTarget?.label ?? 'Terminal target'} onConnect={() => void handleConnect(activeTab)} />
+        body = <StartPane targetLabel={targetLabel ?? 'Terminal target'} onConnect={() => void handleConnect(activeTab)} />
         break
       case 'connecting':
         body = <ConnectingPane onCancel={() => cancelConnect(activeTab.key)} />
@@ -518,7 +549,7 @@ export default function TerminalTool() {
           <TerminalView
             tab={activeTab}
             instanceId={instanceId}
-            targetKind={activeTarget?.kind ?? 'local_pty'}
+            targetKind={preparedTarget?.targetClass ?? activeTarget?.kind ?? 'unresolved'}
             settings={effectiveSettings}
             themePref={themePref}
             findOpen={findOpen}
@@ -533,7 +564,7 @@ export default function TerminalTool() {
             <TerminalView
               tab={activeTab}
               instanceId={instanceId}
-              targetKind={activeTarget?.kind ?? 'local_pty'}
+              targetKind={preparedTarget?.targetClass ?? activeTarget?.kind ?? 'unresolved'}
               settings={effectiveSettings}
               themePref={themePref}
               findOpen={findOpen}
@@ -551,7 +582,7 @@ export default function TerminalTool() {
         break
       case 'ended':
         if (activeTab.lost && !runtime) {
-          body = <LostPane tab={activeTab} targetLabel={activeTarget?.label} onConnect={() => void handleConnect(activeTab)} />
+          body = <LostPane tab={activeTab} targetLabel={targetLabel} onConnect={() => void handleConnect(activeTab)} />
         } else {
           body = (
             <div className="flex min-h-0 flex-1 flex-col">
@@ -559,7 +590,7 @@ export default function TerminalTool() {
                 <TerminalView
                   tab={activeTab}
                   instanceId={instanceId}
-                  targetKind={activeTarget?.kind ?? 'local_pty'}
+                  targetKind={preparedTarget?.targetClass ?? activeTarget?.kind ?? 'unresolved'}
                   settings={effectiveSettings}
                   themePref={themePref}
                   findOpen={findOpen}
@@ -610,8 +641,8 @@ export default function TerminalTool() {
           <span className="truncate text-sm font-medium text-foreground">Terminal</span>
         )}
         {activeTab && activeTarget ? (
-          <span className="hidden truncate text-xs text-foreground-secondary lg:inline" title={activeTarget.label}>
-            {activeTarget.label}
+          <span className="hidden truncate text-xs text-foreground-secondary lg:inline" title={preparedTarget ? `Target ${preparedTarget.targetId} · Session ${preparedTarget.sessionId}` : targetLabel} data-testid="terminal-target-identity">
+            {targetLabel}
           </span>
         ) : null}
         {activeTab ? (
@@ -836,7 +867,7 @@ function NoTabsStart({
             >
               <SquareTerminal className="size-4 shrink-0 text-foreground-tertiary" aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate">{target.label}</span>
-              <span className="text-xs text-foreground-tertiary">{target.kind === 'ssh' ? 'SSH' : 'Local PTY'}</span>
+              <span className="text-xs text-foreground-tertiary">{target.kind === 'unresolved' ? 'Verified on connect' : target.kind === 'capsule' ? 'Capsule' : target.kind === 'ssh' ? 'SSH' : target.kind === 'herdr_attach' ? 'Managed attach' : 'Local PTY'}</span>
               <Plug className="size-3.5 shrink-0 text-foreground-tertiary" aria-hidden="true" />
             </button>
           </li>
@@ -871,12 +902,18 @@ function ConnectingPane({ onCancel }: { onCancel: () => void }) {
 }
 
 function TargetUnavailablePane({
+  tab,
   target,
+  replacementTarget,
   onRefresh,
+  onNewSession,
   onReviewConfiguration,
 }: {
+  tab: TerminalTab
   target: TerminalTarget | undefined
+  replacementTarget: TerminalTarget | undefined
   onRefresh: () => void
+  onNewSession: () => void
   onReviewConfiguration: () => void
 }) {
   return (
@@ -884,9 +921,22 @@ function TargetUnavailablePane({
       <Unplug className="size-5 text-status-attention" aria-hidden="true" />
       <h2 className="text-lg text-foreground">Target unavailable</h2>
       <p className="max-w-md text-sm text-foreground-secondary">
-        {target?.unavailableReason ??
-          'The terminal target cannot be verified in the current environment. Terminal access is blocked until the target is reachable.'}
+        Session “{tab.name}” stays bound to its original target{target?.label ? `, ${target.label}` : ''}, which is unavailable.
       </p>
+      <p className="max-w-md text-xs text-foreground-tertiary">
+        {target?.unavailableReason ?? 'The terminal target cannot be verified in the current environment.'}
+      </p>
+      {replacementTarget ? (
+        <div className="mt-2 flex max-w-md flex-col items-center gap-2">
+          <p className="text-sm text-foreground-secondary">
+            Available target: <span className="font-medium text-foreground">{replacementTarget.label}</span>. Create a new session here, then select Connect when you are ready.
+          </p>
+          <Button size="sm" onClick={onNewSession} data-testid="terminal-new-session">
+            <Plus aria-hidden="true" />
+            New session
+          </Button>
+        </div>
+      ) : null}
       <div className="mt-2 flex items-center gap-2">
         <Button size="sm" variant="outline" onClick={onRefresh}>
           <RotateCcw aria-hidden="true" />

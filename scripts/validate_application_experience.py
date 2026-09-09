@@ -99,6 +99,8 @@ def _path_covers(literal: str, declared: list[str]) -> bool:
 # the React-era equivalent of the old static-HTML hash-link allowlist. The
 # app-scoped "settings" path doubles as the advanced-control surface.
 ROUTE_CLASSIFICATION: dict[str, set[str]] = {
+    "platform": {"platform-hub-route"},
+    "settings/provider": {"provider-settings-route"},
     "applications": {"home-route"},
     "catalog": {"catalog-route"},
     "sources": {"platform-route"},

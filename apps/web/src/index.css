@@ -68,6 +68,15 @@
     scroll-behavior: auto !important;
   }
 
+  /* Optional decorative effects; status spinners/progress remain informative. */
+  [data-decorative-motion='none'] [class*='animate-in'],
+  [data-decorative-motion='none'] [class*='animate-out'],
+  [data-decorative-motion='none'] [class*='animate-accordion'],
+  [data-decorative-motion='none'] [class*='animate-[shimmer'],
+  [data-decorative-motion='none'] .animate-caret-blink {
+    animation: none !important;
+  }
+
   /* HC: selected nav/list items get a 2 px border-strong outline in addition to tint (§3.4). */
   [data-theme^='hc-'] .nav-item[data-active='true'] {
     outline: 2px solid var(--border-strong);

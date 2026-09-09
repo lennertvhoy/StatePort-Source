@@ -1,6 +1,9 @@
 formatVersion: stateport.frontend-dynamic-preservation/v1
 scope: BL-WORKSPACE-002
 controls:
+  - {id: readiness-action-links, evidence: {file: apps/web/src/shell/ReadinessSummary.tsx, contains: '<Link to={check.to}'}}
+  - {id: platform-control-links, evidence: {file: apps/web/src/shell/PlatformPage.tsx, contains: '<Link key={control.to} to={control.to}'}}
+  - {id: catalog-reviewed-install-control, evidence: {file: apps/web/src/features/catalog/CatalogPage.tsx, contains: 'data-testid={`install-${pkg.name}`}'}}
   - {id: file-tree-and-tabs, evidence: {file: apps/web/src/features/files/EditorTabs.tsx, contains: 'role="tablist"'}}
   - {id: editor-refresh-directory, evidence: {file: apps/web/src/features/files/FilesTreePanel.tsx, contains: 'aria-label="Refresh tree"'}}
   - {id: editor-find, evidence: {file: apps/web/src/features/files/FilesTool.tsx, contains: 'Find in file'}}
@@ -25,6 +28,9 @@ operations:
   - {id: file-rename, method: POST, operation: renamePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'renamePath', {"}}
   - {id: file-delete, method: POST, operation: deletePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'deletePath', {"}}
 behaviors:
+  - {id: provider-operator-refusal, evidence: {file: apps/web/src/features/settings/ProviderSettings.tsx, contains: 'Provider changes require an authorized platform operator session.'}}
+  - {id: readiness-provider-observations, evidence: {file: apps/web/src/shell/ReadinessSummary.tsx, contains: 'authentication: ${observation.authenticationStatus}; request: ${observation.requestStatus}'}}
+  - {id: catalog-durable-install-confirmation, evidence: {file: apps/web/src/features/catalog/InstallReview.tsx, contains: 'The durable installation receipt did not match the created application or digest.'}}
   - {id: editor-lazy-load, evidence: {file: apps/web/src/App.tsx, contains: "lazy(() => import('@/features/files/FilesTool'))"}}
   - {id: mobile-governed-editor, evidence: {file: apps/web/src/features/files/FilesTool.tsx, contains: 'data-testid="mobile-review-save"'}}
   - {id: stale-write-refusal, evidence: {file: apps/web/src/features/files/SavePreviewDialog.tsx, contains: 'This file changed on disk since you opened it'}}

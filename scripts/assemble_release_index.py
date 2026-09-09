@@ -27,6 +27,10 @@ import sys
 import tarfile
 import tempfile
 from typing import Any, Mapping, Sequence
+import urllib.request
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 import zipfile
 
 import jsonschema
@@ -42,6 +46,7 @@ from release_safe_io import (
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages/release-contracts/src"))
+sys.path.insert(0, str(ROOT / "packages/execution-host/src"))
 from stateport_release import (  # noqa: E402
     CosignVerificationError,
     CosignVerifier,
@@ -83,12 +88,18 @@ TOOLS = ROOT / "config/release-tool-inputs.yaml"
 SCAN_EXCEPTIONS = ROOT / "config/release-scan-exceptions.v1.yaml"
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SINGLE_BYTE_CONTENT_RANGE = re.compile(r"^bytes 0-0/([1-9][0-9]*)$")
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _SEMVER = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 _TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+_REGISTRY_HOST = "ghcr.io"
+_REGISTRY_REDIRECT_HOSTS = frozenset({"ghcr.io", "pkg-containers.githubusercontent.com"})
+_MAX_REGISTRY_MANIFEST_BYTES = 4 * 1024 * 1024
+_MAX_REGISTRY_TOKEN_BYTES = 256 * 1024
+_MAX_REGISTRY_BLOB_PROBE_BYTES = 1024
 
 
 def _semver_key(version: str) -> tuple[int, int, int, int, str]:
@@ -202,6 +213,281 @@ def _checked_str(value: Any, pattern: re.Pattern[str], description: str) -> str:
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise AssemblyError(f"{description} is invalid: {value!r}")
     return value
+
+
+def _registry_reference_parts(reference: str, *, image_id: str, repository: str) -> tuple[str, str]:
+    """Return the exact GHCR repository and manifest digest for a public check."""
+
+    expected_prefix = repository.rstrip("/") + "/" + image_id
+    if not reference.startswith(expected_prefix + "@"):
+        raise AssemblyError(
+            f"public image reference is outside the reviewed repository: {reference}"
+        )
+    name, separator, digest = reference.partition("@")
+    if not separator or name != expected_prefix or not _DIGEST.fullmatch(digest):
+        raise AssemblyError(f"public image reference is not exact and digest-bound: {reference}")
+    return name, digest
+
+
+def _registry_token_url(challenge: str, *, repository: str) -> str:
+    # WWW-Authenticate parameters are comma-separated, but commas inside
+    # quoted values (notably scope) are data.  Do not use a plain split.
+    parts: list[str] = []
+    start = 0
+    quoted = False
+    escaped = False
+    for position, character in enumerate(challenge):
+        if escaped:
+            escaped = False
+        elif character == "\\" and quoted:
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == "," and not quoted:
+            parts.append(challenge[start:position].strip())
+            start = position + 1
+    parts.append(challenge[start:].strip())
+    if quoted or escaped:
+        raise AssemblyError("anonymous registry auth challenge has an unclosed quote")
+    bearer_index = next(
+        (index for index, part in enumerate(parts) if re.match(r"^Bearer(?:\s|$)", part, re.I)),
+        None,
+    )
+    if bearer_index is None:
+        raise AssemblyError("anonymous registry access returned an unsupported auth challenge")
+    bearer = parts[bearer_index:]
+    parameter_text = re.sub(r"^Bearer\s*", "", bearer[0], flags=re.IGNORECASE)
+    values: dict[str, str] = {}
+    for item in [parameter_text, *bearer[1:]]:
+        key, separator, value = item.partition("=")
+        if not separator or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key.strip()):
+            raise AssemblyError("anonymous registry auth challenge is malformed")
+        value = value.strip()
+        if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+            raise AssemblyError("anonymous registry auth challenge requires quoted parameters")
+        normalized_key = key.strip().lower()
+        if normalized_key in values:
+            raise AssemblyError("anonymous registry auth challenge repeats a parameter")
+        values[normalized_key] = value[1:-1]
+    realm = values.get("realm")
+    realm_parts = urlsplit(realm) if isinstance(realm, str) else None
+    if realm_parts is None or realm_parts.scheme != "https" or realm_parts.hostname != _REGISTRY_HOST:
+        raise AssemblyError("anonymous registry auth challenge has no HTTPS token realm")
+    query = [(key, value) for key, value in parse_qsl(realm_parts.query, keep_blank_values=True)]
+    for key in ("service", "scope"):
+        if key in values:
+            query.append((key, values[key]))
+    scope = f"repository:{repository}:pull"
+    if not any(key == "scope" for key, _value in query):
+        query.append(("scope", scope))
+    return urlunsplit(urlsplit(realm)._replace(query=urlencode(query)))
+
+
+def _registry_get(url: str, *, repository: str, range_header: str | None = None,
+                  maximum_bytes: int = _MAX_REGISTRY_MANIFEST_BYTES) -> tuple[dict[str, str], bytes]:
+    """Read one registry response anonymously, retrying only its bearer challenge."""
+
+    headers = {
+        "Accept": (
+            "application/vnd.oci.image.index.v1+json, "
+            "application/vnd.oci.image.manifest.v1+json, "
+            "application/vnd.docker.distribution.manifest.list.v2+json, "
+            "application/vnd.docker.distribution.manifest.v2+json"
+        )
+    }
+    if range_header is not None:
+        headers["Range"] = range_header
+    def open_no_redirect(request: Request):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        return urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
+
+    def open_registry(request: Request, *, allow_storage: bool = False):
+        allowed_hosts = {_REGISTRY_HOST}
+        if allow_storage:
+            allowed_hosts.update(_REGISTRY_REDIRECT_HOSTS)
+        current = request.full_url
+        for _ in range(4):
+            current_parts = urlsplit(current)
+            if (
+                current_parts.scheme != "https" or current_parts.username is not None
+                or current_parts.password is not None or current_parts.fragment
+                or current_parts.port not in {None, 443}
+                or current_parts.hostname not in allowed_hosts
+            ):
+                raise AssemblyError("registry request URL is outside approved HTTPS hosts")
+            try:
+                response = open_no_redirect(Request(current, headers=dict(request.header_items())))
+            except HTTPError as exc:
+                if exc.code not in {301, 302, 303, 307, 308}:
+                    raise
+                location = exc.headers.get("Location")
+                exc.close()
+                target = urlsplit(urljoin(current, location or ""))
+                allowed = target.scheme == "https" and target.hostname in allowed_hosts
+                if target.username is not None or target.password is not None or target.fragment:
+                    allowed = False
+                if target.port not in {None, 443}:
+                    allowed = False
+                if not allowed:
+                    raise AssemblyError("registry redirect leaves the approved HTTPS hosts") from exc
+                current = target.geturl()
+                request = Request(current, headers={k: v for k, v in request.header_items() if k.lower() != "authorization"})
+                continue
+            if urlsplit(response.geturl()).hostname not in allowed_hosts:
+                response.close()
+                raise AssemblyError("anonymous registry response came from an unapproved host")
+            return response
+        raise AssemblyError("registry redirect chain is too long")
+
+    request = Request(url, headers=headers)
+    try:
+        response = open_registry(request, allow_storage=range_header is not None)
+    except HTTPError as exc:
+        if exc.code != 401:
+            raise AssemblyError(f"anonymous registry request refused ({exc.code}): {url}") from exc
+        token_url = _registry_token_url(str(exc.headers.get("WWW-Authenticate", "")), repository=repository)
+        try:
+            with open_registry(Request(token_url, headers={"Accept": "application/json"})) as token_response:
+                token_bytes = token_response.read(_MAX_REGISTRY_TOKEN_BYTES + 1)
+        except (HTTPError, URLError, OSError) as token_exc:
+            raise AssemblyError("anonymous registry token request refused") from token_exc
+        if len(token_bytes) > _MAX_REGISTRY_TOKEN_BYTES:
+            raise AssemblyError("anonymous registry token response is too large")
+        try:
+            token_document = json.loads(token_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as token_exc:
+            raise AssemblyError("anonymous registry token response is malformed") from token_exc
+        token = token_document.get("token") or token_document.get("access_token") if isinstance(token_document, Mapping) else None
+        if not isinstance(token, str) or not token:
+            raise AssemblyError("anonymous registry token response has no bearer token")
+        headers["Authorization"] = "Bearer " + token
+        try:
+            response = open_registry(Request(url, headers=headers), allow_storage=range_header is not None)
+        except (HTTPError, URLError, OSError) as retry_exc:
+            status = retry_exc.code if isinstance(retry_exc, HTTPError) else "unavailable"
+            raise AssemblyError(f"anonymous registry access refused after token challenge ({status})") from retry_exc
+    except (URLError, OSError) as exc:
+        raise AssemblyError(f"anonymous registry request unavailable: {url}") from exc
+    with response:
+        response_headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+        body = response.read(maximum_bytes + 1)
+    if len(body) > maximum_bytes:
+        raise AssemblyError("registry response is too large")
+    return response_headers, body
+
+
+def _verify_registry_manifest(
+    *, base_url: str, repository: str, expected_digest: str, seen: set[str], depth: int = 0
+) -> tuple[int, int]:
+    if depth > 2:
+        raise AssemblyError("registry manifest index nesting is too deep")
+    headers, body = _registry_get(
+        f"{base_url}/manifests/{expected_digest}", repository=repository
+    )
+    observed = "sha256:" + hashlib.sha256(body).hexdigest()
+    if observed != expected_digest or headers.get("docker-content-digest") != expected_digest:
+        raise AssemblyError("anonymous registry manifest digest disagrees with the signed digest")
+    try:
+        manifest = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssemblyError("anonymous registry manifest is malformed JSON") from exc
+    if not isinstance(manifest, Mapping):
+        raise AssemblyError("anonymous registry manifest is not an object")
+    manifests = manifest.get("manifests")
+    if isinstance(manifests, list):
+        if not manifests or not all(isinstance(item, Mapping) for item in manifests):
+            raise AssemblyError("anonymous registry manifest index contains malformed entries")
+        candidates = [
+            item for item in manifests
+            if isinstance(item.get("platform"), Mapping)
+            and item["platform"].get("os") == "linux"
+            and item["platform"].get("architecture") == "amd64"
+        ]
+        if len(candidates) != 1 or not _DIGEST.fullmatch(str(candidates[0].get("digest", ""))):
+            raise AssemblyError("anonymous registry index has no unique linux/amd64 manifest")
+        nested_digest = str(candidates[0]["digest"])
+        if nested_digest in seen:
+            raise AssemblyError("anonymous registry manifest index repeats a digest")
+        seen.add(nested_digest)
+        return _verify_registry_manifest(
+            base_url=base_url, repository=repository, expected_digest=nested_digest, seen=seen, depth=depth + 1
+        )
+    descriptors: list[Mapping[str, Any]] = []
+    config = manifest.get("config")
+    layers = manifest.get("layers")
+    if isinstance(config, Mapping):
+        descriptors.append(config)
+    if isinstance(layers, list):
+        descriptors.extend(item for item in layers if isinstance(item, Mapping))
+    if not isinstance(config, Mapping) or not isinstance(layers, list) or not layers:
+        raise AssemblyError("anonymous registry manifest has no config and layers")
+    if not all(isinstance(item, Mapping) for item in layers):
+        raise AssemblyError("anonymous registry manifest contains malformed layers")
+    blob_count = 0
+    for descriptor in descriptors:
+        digest = descriptor.get("digest")
+        if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
+            raise AssemblyError("anonymous registry manifest contains an invalid blob digest")
+        blob_headers, blob = _registry_get(
+            f"{base_url}/blobs/{digest}", repository=repository, range_header="bytes=0-0",
+            maximum_bytes=_MAX_REGISTRY_BLOB_PROBE_BYTES,
+        )
+        content_range = _SINGLE_BYTE_CONTENT_RANGE.fullmatch(blob_headers.get("content-range", ""))
+        declared_size = descriptor.get("size")
+        if (
+            len(blob) != 1
+            or content_range is None
+            or (declared_size is not None and (
+                not isinstance(declared_size, int)
+                or isinstance(declared_size, bool)
+                or declared_size < 1
+                or int(content_range.group(1)) != declared_size
+            ))
+        ):
+            raise AssemblyError("anonymous registry blob is not readable")
+        blob_count += 1
+    return 1, blob_count
+
+
+def public_transport_preflight(index_path: Path, *, image_repository: str) -> dict[str, Any]:
+    """Require anonymous GHCR manifest and blob access for every signed image."""
+
+    repository_parts = urlsplit("https://" + image_repository)
+    try:
+        port = repository_parts.port
+    except ValueError as exc:
+        raise AssemblyError("public image repository has an invalid port") from exc
+    path = repository_parts.path
+    if (
+        repository_parts.scheme != "https" or repository_parts.hostname != _REGISTRY_HOST
+        or port is not None or repository_parts.username is not None
+        or repository_parts.password is not None or repository_parts.query
+        or repository_parts.fragment or not path.strip("/")
+        or "//" in path or any(part in {"", ".", ".."} for part in path.strip("/").split("/"))
+        or any(character == "%" for character in path)
+    ):
+        raise AssemblyError("public image repository must be an explicit ghcr.io path")
+    image_repository = repository_parts.netloc + repository_parts.path.rstrip("/")
+    index = load_release_index_file(index_path)
+    images = index.document["signed"]["images"]
+    checked: list[dict[str, Any]] = []
+    for image in images:
+        image_id = _checked_str(image.get("imageId"), _RELEASE_ID, "signed image ID")
+        reference = _checked_str(image.get("reference"), _DIGEST_REFERENCE, f"{image_id} image reference")
+        repository, digest = _registry_reference_parts(reference, image_id=image_id, repository=image_repository)
+        if image.get("digest") != digest:
+            raise AssemblyError(f"signed image digest disagrees with its reference: {image_id}")
+        base_url = "https://" + _REGISTRY_HOST + "/v2/" + repository.removeprefix(_REGISTRY_HOST + "/")
+        manifest_count, blob_count = _verify_registry_manifest(
+            base_url=base_url,
+            repository=repository.removeprefix(_REGISTRY_HOST + "/"),
+            expected_digest=digest,
+            seen={digest},
+        )
+        checked.append({"imageId": image_id, "reference": reference, "manifestCount": manifest_count, "blobCount": blob_count})
+    return {"repository": image_repository, "images": checked, "result": "anonymous-manifests-and-blobs-readable"}
 
 
 @dataclass(frozen=True)
@@ -986,6 +1272,12 @@ def _assemble_targets(
                 contract_image is not None and contract_image["role"] == "stable-host-service",
                 f"topology target {target_id} execution contract names a missing or non-host image",
             )
+            if "workspaceImageId" in execution_contract:
+                workspace = image_by_id.get(str(execution_contract["workspaceImageId"]))
+                _require(execution_contract["workspaceImageId"] == "stateport-dev-workspace"
+                         and workspace is not None and workspace["role"] == "optional-profile",
+                         "fresh workspace image selector requires the verified development role")
+                execution_contract = {**execution_contract, "workspaceImageId": workspace["imageId"]}
             if execution_contract.get("imageDigest") is None:
                 # The digest is knowable only after the double build; the
                 # assembler binds it to the exact signed stable-host image.
@@ -2247,13 +2539,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     verify_parser.add_argument("--expected-target")
     verify_parser.add_argument("--updater-version", required=True)
     verify_parser.add_argument("--bundle-root", type=Path)
+    transport_parser = commands.add_parser(
+        "public-transport", help="verify anonymous GHCR manifest and blob transport"
+    )
+    transport_parser.add_argument("--index", type=Path, required=True)
+    transport_parser.add_argument("--image-repository", required=True)
     args = parser.parse_args(argv)
     if args.command in {"assemble", "sign-images", "sign"}:
         require_guard(
             "candidate_construction" if args.command == "assemble" else "signing",
             sys.argv if argv is None else [str(Path(__file__)), *argv],
         )
-    if args.command == "assemble":
+    if args.command == "public-transport":
+        result = public_transport_preflight(args.index, image_repository=args.image_repository)
+    elif args.command == "assemble":
         result = assemble(_assembly_request(args, args.output_root))
     elif args.command == "sign-images":
         result = sign_images(

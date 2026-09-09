@@ -415,7 +415,7 @@ def test_persistent_app_upgrades_the_selected_studystate_instance_with_independe
                 "actorRole": actor_role,
             },
         })
-        assert status == 200 and imported["result"]["destinationMutated"] is True
+        assert status == 200 and imported["result"]["destinationMutated"] is True, imported
         status, copied = request("/v1/instances/study-upgrade-copy")
         assert status == 200
         assert copied["result"]["version"] == "0.2.0"
@@ -673,12 +673,289 @@ def _retained_candidate_fixture(tmp_path: Path) -> dict[str, Path]:
 
 def test_retained_candidate_preflight_binds_site_bootstrap_and_archives(tmp_path: Path) -> None:
     paths = _retained_candidate_fixture(tmp_path)
-    facts, evidence = validate_retained_candidate_inputs(**paths)
+    _mark_retained_simulation(paths)
+    facts, evidence = validate_retained_candidate_inputs(**paths, retained_simulation=True)
 
     assert facts["releaseId"] == "release-test-1"
     assert evidence["siteRoot"] == str(paths["site_root"])
     assert evidence["archiveRoot"] == str(paths["archive_root"])
     assert evidence["archiveDigests"]["stateport-web"].startswith("sha256:")
+
+
+def _mark_retained_native(paths):
+    """Model actual public native receipt topology, without archive authority."""
+    receipt = json.loads((paths["vm_dir"].parent / "receipt.json").read_text())
+    distro = "StatePort-Rehearsal-native-fixture"
+    receipt["rehearsalBaseline"].update({
+        "evidenceClass": "owner_path_qualification", "distroName": distro,
+        "machineId": "a" * 32, "windowsIdentity": "Microsoft Windows 11|10.0|26200",
+    })
+    receipt["binding"]["images"] = {"stateport-web": "sha256:" + "d" * 64}
+    receipt["binding"].pop("archives", None)
+    (paths["vm_dir"] / "receipt.json").write_text(json.dumps(receipt))
+    return {**paths, "archive_root": None, "native_distro_name": distro}
+
+
+def test_native_retained_preflight_needs_neither_qemu_disk_nor_archives(tmp_path):
+    paths = _retained_candidate_fixture(tmp_path)
+    native = _mark_retained_native(paths)
+    (paths["vm_dir"] / "vm.qcow2").unlink()
+    (paths["archive_root"] / "stateport-web.oci.tar").unlink()
+    facts, evidence = validate_retained_candidate_inputs(**native)
+    assert facts["releaseId"] == "release-test-1"
+    assert evidence["archiveRoot"] is None and evidence["archiveDigests"] == {}
+    assert evidence["nativeIdentity"]["machineId"] == "a" * 32
+    assert evidence["fullJ1Receipt"] == str(paths["vm_dir"] / "receipt.json")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("machineId", None), ("machineId", ""), ("machineId", "a" * 31),
+    ("windowsIdentity", None), ("windowsIdentity", "  "),
+    ("distroName", "StatePort-Rehearsal-different"),
+])
+def test_native_retained_preflight_refuses_incomplete_identity(tmp_path, field, value):
+    paths = _retained_candidate_fixture(tmp_path)
+    native = _mark_retained_native(paths)
+    validate_retained_candidate_inputs(**native)
+    receipt_path = paths["vm_dir"] / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["rehearsalBaseline"][field] = value
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="identity|distro|native"):
+        validate_retained_candidate_inputs(**native)
+
+
+def test_native_preflight_accepts_transported_build_receipt_and_preserves_qualification_bytes(tmp_path):
+    paths = _retained_candidate_fixture(tmp_path)
+    native = _mark_retained_native(paths)
+    (paths["vm_dir"] / "vm.qcow2").unlink()
+    qualification_path = paths["candidate_dir"] / "qualification-receipt.json"
+    before = qualification_path.read_bytes()
+    qualification = json.loads(before)
+    copied = tmp_path / "windows-workspace" / "build-receipt.json"
+    copied.parent.mkdir()
+    original = Path(qualification["buildReceipt"])
+    copied.write_bytes(original.read_bytes())
+    original.unlink()
+    _, evidence = validate_retained_candidate_inputs(
+        **native, qualification_build_receipt=copied
+    )
+    assert evidence["buildReceiptSha256"] == journey_common._sha256_file(copied)
+    assert qualification_path.read_bytes() == before
+
+
+def test_native_preflight_rejects_changed_transported_build_receipt(tmp_path):
+    paths = _retained_candidate_fixture(tmp_path)
+    native = _mark_retained_native(paths)
+    copied = tmp_path / "copied-build-receipt.json"
+    copied.write_text("changed")
+    with pytest.raises(ValueError, match="build receipt digest mismatch"):
+        validate_retained_candidate_inputs(**native, qualification_build_receipt=copied)
+
+
+def _mark_retained_simulation(paths: dict[str, Path]) -> dict:
+    receipt_path = paths["vm_dir"].parent / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt.update({
+        "mode": "j1",
+        "evidenceClass": "simulation_only",
+        "rehearsalBaseline": {
+            "evidenceClass": "simulation_only",
+            "substrate": "qemu-wsl-identity-simulation",
+            "rootfsIdentity": journey_common.QEMU_ROOTFS_IDENTITY,
+            "identityShims": ["wsl_kernel_identity_only", "windows_interop_identity_only"],
+            "extraBinaries": ["cloud-guest-utils", "docker-registry", "skopeo"],
+        },
+        "siteTransport": {"mode": "guest-local-staged-pages", "guestLocalServer": True},
+        "guestRegistryTransport": {
+            "mode": "digest-only-prepublication-mirror", "digestOnly": True,
+            "guestLocalMirror": True, "retainedArchiveTransport": True,
+        },
+    })
+    receipt["phases"].pop("public-transport-boundary")
+    receipt["phases"].update({name: {"ok": True} for name in (
+        "guest-swap", "install-services", "install-rerun-services"
+    )})
+    receipt["binding"]["images"] = {"stateport-web": "sha256:" + "d" * 64}
+    receipt_path.write_text(json.dumps(receipt))
+    return receipt
+
+
+def test_retained_simulation_requires_opt_in_and_preserves_fidelity(tmp_path: Path) -> None:
+    paths = _retained_candidate_fixture(tmp_path)
+    receipt = _mark_retained_simulation(paths)
+    with pytest.raises(ValueError, match="genuine native WSL2"):
+        validate_retained_candidate_inputs(**paths)
+    facts, evidence = validate_retained_candidate_inputs(**paths, retained_simulation=True)
+    assert facts["releaseId"] == "release-test-1"
+    assert evidence["evidenceClass"] == "simulation_only"
+    assert evidence["lane"] == "retained-installed-simulation"
+    assert evidence["admissibleForQualification"] is False
+    assert evidence["freshInstallEvidence"] is False
+    assert evidence["rehearsalBaseline"] == receipt["rehearsalBaseline"]
+    assert evidence["siteTransport"] == receipt["siteTransport"]
+    assert evidence["guestRegistryTransport"] == receipt["guestRegistryTransport"]
+
+
+def _production_retained_fixture(tmp_path: Path) -> tuple[dict, Path]:
+    paths = _retained_candidate_fixture(tmp_path)
+    _mark_retained_simulation(paths)
+    (paths["candidate_dir"] / "qualification-receipt.json").unlink()
+    digest = "sha256:" + "d" * 64
+    builds = [{"ordinal": ordinal, "pushedDigest": digest,
+               "digestFileDigest": "sha256:" + str(ordinal) * 64,
+               "localImageId": "sha256:" + str(ordinal + 2) * 64} for ordinal in (1, 2)]
+    comparison = {
+        "formatVersion": "stateport.release-double-build-comparison/v1",
+        "images": {"stateport-web": {
+            "formatVersion": "stateport.double-build-comparison/v1",
+            "imageId": "stateport-web", "reproducible": True,
+            **{name: {"digest": build["pushedDigest"],
+                      "digestObservationDigest": build["digestFileDigest"],
+                      "localImageId": build["localImageId"]}
+               for name, build in zip(("first", "second"), builds)},
+        }},
+    }
+    proof_path = paths["candidate_dir"] / "supply-chain" / "double-build-comparison.json"
+    proof_path.parent.mkdir()
+    proof_path.write_text(json.dumps(comparison))
+    index_path = paths["candidate_dir"] / "release-index.json"
+    index = json.loads(index_path.read_text())
+    index["signed"]["supplyChain"] = {"doubleBuildComparison": {
+        "uri": "operator://release/supply-chain/double-build-comparison.json",
+        "digest": journey_common._sha256_file(proof_path), "size": proof_path.stat().st_size,
+        "mediaType": "application/json",
+    }}
+    index_path.write_text(json.dumps(index))
+    (paths["site_root"] / "download" / "0.1.0-test.1" / "release-index.json").write_bytes(index_path.read_bytes())
+    receipt_path = paths["vm_dir"].parent / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["binding"]["releaseIndexDigest"] = journey_common._sha256_file(index_path)
+    receipt_path.write_text(json.dumps(receipt))
+    archive_path = paths["archive_root"] / "stateport-web.oci.tar"
+    build_path = tmp_path / "production-build-receipt.json"
+    build_path.write_text(json.dumps({
+        "formatVersion": "stateport.release-image-build-receipt/v1",
+        "identity": {"commit": "a" * 40, "tree": "b" * 40, "version": "0.1.0-test.1"},
+        "images": {"stateport-web": {
+            "acceptedReference": "registry.example/stateport-web@" + digest,
+            "reproducible": True, "builds": builds,
+            "releaseAuthority": {"kind": "retained-oci-archive", "manifestDigest": digest,
+                "digest": journey_common._sha256_file(archive_path),
+                "sizeBytes": archive_path.stat().st_size},
+        }},
+    }))
+    return paths, build_path
+
+
+def test_production_retained_simulation_uses_real_receipt_without_synthetic_qualification(tmp_path: Path) -> None:
+    paths, build_path = _production_retained_fixture(tmp_path)
+    facts, evidence = validate_retained_candidate_inputs(**paths, retained_simulation=True, build_receipt=build_path)
+    assert facts["releaseId"] == "release-test-1"
+    assert evidence["buildReceipt"] == str(build_path)
+    assert evidence["buildReceiptSha256"] == journey_common._sha256_file(build_path)
+    assert "candidateQualificationReceipt" not in evidence
+    assert evidence["admissibleForQualification"] is False
+    assert not (paths["candidate_dir"] / "qualification-receipt.json").exists()
+    with pytest.raises(ValueError, match="only for retained simulation"):
+        validate_retained_candidate_inputs(**paths, build_receipt=build_path)
+    with pytest.raises(ValueError, match="candidate qualification receipt"):
+        validate_retained_candidate_inputs(**paths)
+
+
+@pytest.mark.parametrize("drift", (
+    "format", "source", "tree", "version", "image-set", "accepted", "first", "second",
+    "ordinal", "reproducible", "observation", "local-id", "archive-digest", "archive-size",
+    "archive-manifest", "proof-bytes", "proof-missing", "index-binding", "staged-index",
+))
+def test_production_retained_simulation_refuses_build_and_proof_drift(tmp_path: Path, drift: str) -> None:
+    paths, build_path = _production_retained_fixture(tmp_path)
+    receipt = json.loads(build_path.read_text())
+    image = receipt["images"]["stateport-web"]
+    if drift == "format":
+        receipt["formatVersion"] = "invented"
+    elif drift in {"source", "tree", "version"}:
+        receipt["identity"][{"source": "commit"}.get(drift, drift)] = "f" * 40
+    elif drift == "image-set":
+        receipt["images"]["unexpected"] = dict(image)
+    elif drift == "accepted":
+        image["acceptedReference"] = "registry.example/stateport-web@sha256:" + "f" * 64
+    elif drift in {"first", "second"}:
+        image["builds"][0 if drift == "first" else 1]["pushedDigest"] = "sha256:" + "f" * 64
+    elif drift == "ordinal":
+        image["builds"][1]["ordinal"] = 1
+    elif drift == "reproducible":
+        image["reproducible"] = False
+    elif drift == "observation":
+        image["builds"][0]["digestFileDigest"] = "sha256:" + "f" * 64
+    elif drift == "local-id":
+        image["builds"][1]["localImageId"] = "other"
+    elif drift.startswith("archive-"):
+        image["releaseAuthority"][{"archive-digest": "digest", "archive-size": "sizeBytes", "archive-manifest": "manifestDigest"}[drift]] = "drift"
+    elif drift.startswith("proof-"):
+        proof_path = paths["candidate_dir"] / "supply-chain" / "double-build-comparison.json"
+        if drift == "proof-missing":
+            proof_path.unlink()
+        else:
+            proof_path.write_text('{}')
+    elif drift == "index-binding":
+        receipt_path = paths["vm_dir"].parent / "receipt.json"
+        full_j1 = json.loads(receipt_path.read_text())
+        full_j1["binding"]["releaseIndexDigest"] = "sha256:" + "f" * 64
+        receipt_path.write_text(json.dumps(full_j1))
+    else:
+        (paths["site_root"] / "download" / "0.1.0-test.1" / "release-index.json").write_text('{}')
+    build_path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError):
+        validate_retained_candidate_inputs(**paths, retained_simulation=True, build_receipt=build_path)
+
+
+@pytest.mark.parametrize("drift", (
+    "native-class", "baseline-class", "rootfs", "substrate", "hidden-shims",
+    "diagnostic", "partial-mode", "public-site", "missing-mirror", "images",
+    "missing-install", "failed-rerun", "missing-services", "failed-services",
+    "missing-swap", "failed-extra-phase", "failed-result",
+))
+def test_retained_simulation_refuses_incomplete_or_misclassified_evidence(tmp_path: Path, drift: str) -> None:
+    paths = _retained_candidate_fixture(tmp_path)
+    receipt = _mark_retained_simulation(paths)
+    if drift == "native-class":
+        receipt["evidenceClass"] = "owner_path_qualification"
+    elif drift == "baseline-class":
+        receipt["rehearsalBaseline"]["evidenceClass"] = "owner_path_qualification"
+    elif drift == "rootfs":
+        receipt["rehearsalBaseline"]["rootfsIdentity"] = journey_common.WSL_ROOTFS_IDENTITY
+    elif drift == "substrate":
+        receipt["rehearsalBaseline"]["substrate"] = "native-wsl2"
+    elif drift == "hidden-shims":
+        receipt["rehearsalBaseline"]["identityShims"] = []
+    elif drift == "diagnostic":
+        receipt["diagnostic"] = {"admissibleForQualification": False}
+    elif drift == "partial-mode":
+        receipt["mode"] = "phase0-transport"
+    elif drift == "public-site":
+        receipt["siteTransport"]["mode"] = "anonymous-public-pages"
+    elif drift == "missing-mirror":
+        receipt["guestRegistryTransport"]["retainedArchiveTransport"] = False
+    elif drift == "images":
+        receipt["binding"]["images"] = {}
+    elif drift == "missing-install":
+        receipt["phases"].pop("install")
+    elif drift == "failed-rerun":
+        receipt["phases"]["install-rerun"]["ok"] = False
+    elif drift == "missing-services":
+        receipt["phases"].pop("install-services")
+    elif drift == "failed-services":
+        receipt["phases"]["install-rerun-services"]["ok"] = False
+    elif drift == "missing-swap":
+        receipt["phases"].pop("guest-swap")
+    elif drift == "failed-extra-phase":
+        receipt["phases"]["unexpected"] = {"ok": False}
+    else:
+        receipt["result"] = "failed"
+    (paths["vm_dir"].parent / "receipt.json").write_text(json.dumps(receipt))
+    with pytest.raises(ValueError):
+        validate_retained_candidate_inputs(**paths, retained_simulation=True)
 
 
 @pytest.mark.parametrize(
@@ -694,10 +971,20 @@ def test_retained_candidate_preflight_binds_site_bootstrap_and_archives(tmp_path
         "build-receipt",
     ),
 )
+@pytest.mark.parametrize("retained_simulation", (False, True))
 def test_retained_candidate_preflight_refuses_artifact_drift(
-    tmp_path: Path, drift: str
+    tmp_path: Path, drift: str, retained_simulation: bool
 ) -> None:
     paths = _retained_candidate_fixture(tmp_path)
+    if retained_simulation:
+        _mark_retained_simulation(paths)
+        inputs = {**paths, "retained_simulation": True}
+    else:
+        if drift in {"archive", "extra-archive"}:
+            pytest.skip("native public qualification has no staged archive dependency")
+        inputs = _mark_retained_native(paths)
+    # Prove that the chosen lane is valid before testing the named mutation.
+    validate_retained_candidate_inputs(**inputs)
     version_root = paths["site_root"] / "download" / "0.1.0-test.1"
     if drift == "bootstrap":
         (paths["site_root"] / "download" / "install.sh").write_bytes(b"drift")
@@ -715,7 +1002,7 @@ def test_retained_candidate_preflight_refuses_artifact_drift(
         qualification["candidateSourceCommit"] = "f" * 40
         qualification_path.write_text(json.dumps(qualification), encoding="utf-8")
     elif drift == "full-j1-identity":
-        receipt_path = paths["vm_dir"].parent / "receipt.json"
+        receipt_path = (paths["vm_dir"].parent if retained_simulation else paths["vm_dir"]) / "receipt.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["binding"]["releaseIndexDigest"] = "sha256:" + "f" * 64
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -728,7 +1015,7 @@ def test_retained_candidate_preflight_refuses_artifact_drift(
         Path(qualification["buildReceipt"]).write_bytes(b"drift")
 
     with pytest.raises(ValueError):
-        validate_retained_candidate_inputs(**paths)
+        validate_retained_candidate_inputs(**inputs)
 
 
 def test_retained_candidate_preflight_refuses_symlinked_root(tmp_path: Path) -> None:

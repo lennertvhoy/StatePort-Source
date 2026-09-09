@@ -1,0 +1,78 @@
+diff --git a/source/i18n/nfrule.cpp b/source/i18n/nfrule.cpp
+index 26a6e818d5a9..3857f9f45f2e 100644
+--- a/source/i18n/nfrule.cpp
++++ b/source/i18n/nfrule.cpp
+@@ -158,12 +158,17 @@ NFRule::makeRules(UnicodeString& description,
+         UnicodeString sbuf;
+         int32_t orElseOp = description.indexOf(gVerticalLine);
+ 
++        uint64_t mod = util64_pow(rule1->radix, rule1->exponent);
+         // we'll actually only split the rule into two rules if its
+         // base value is an even multiple of its divisor (or it's one
+         // of the special rules)
++        if (rule1->baseValue > 0 && rule1->radix != 0 && mod == 0) {
++            status = U_NUMBER_ARG_OUTOFBOUNDS_ERROR;
++            return;
++        }
+         if ((rule1->baseValue > 0
+             && (rule1->radix != 0) // ICU-23109 Ensure next line won't "% 0"
+-            && (rule1->baseValue % util64_pow(rule1->radix, rule1->exponent)) == 0)
++            && (rule1->baseValue % mod == 0))
+             || rule1->getType() == kImproperFractionRule
+             || rule1->getType() == kDefaultRule) {
+ 
+diff --git a/source/common/unicode/utfiterator.h b/source/common/unicode/utfiterator.h
+index 7e9fc4ba314d..6e79a4403057 100644
+--- a/source/common/unicode/utfiterator.h
++++ b/source/common/unicode/utfiterator.h
+@@ -557,9 +557,11 @@ class UTFImpl<
+ public:
+     // Handle ill-formed UTF-8
+     U_FORCE_INLINE static CP32 sub() {
+-        switch (behavior) {
+-            case UTF_BEHAVIOR_NEGATIVE: return U_SENTINEL;
+-            case UTF_BEHAVIOR_FFFD: return 0xfffd;
++        if constexpr (behavior == UTF_BEHAVIOR_NEGATIVE) {
++            return U_SENTINEL;
++        } else {
++            static_assert(behavior == UTF_BEHAVIOR_FFFD);
++            return 0xfffd;
+         }
+     }
+ 
+@@ -736,10 +738,13 @@ class UTFImpl<
+ public:
+     // Handle ill-formed UTF-16: One unpaired surrogate.
+     U_FORCE_INLINE static CP32 sub(CP32 surrogate) {
+-        switch (behavior) {
+-            case UTF_BEHAVIOR_NEGATIVE: return U_SENTINEL;
+-            case UTF_BEHAVIOR_FFFD: return 0xfffd;
+-            case UTF_BEHAVIOR_SURROGATE: return surrogate;
++        if constexpr (behavior == UTF_BEHAVIOR_NEGATIVE) {
++            return U_SENTINEL;
++        } else if constexpr (behavior == UTF_BEHAVIOR_FFFD) {
++            return 0xfffd;
++        } else {
++            static_assert(behavior == UTF_BEHAVIOR_SURROGATE);
++            return surrogate;
+         }
+     }
+ 
+@@ -822,10 +827,13 @@ class UTFImpl<
+ public:
+     // Handle ill-formed UTF-32
+     U_FORCE_INLINE static CP32 sub(bool forSurrogate, CP32 surrogate) {
+-        switch (behavior) {
+-            case UTF_BEHAVIOR_NEGATIVE: return U_SENTINEL;
+-            case UTF_BEHAVIOR_FFFD: return 0xfffd;
+-            case UTF_BEHAVIOR_SURROGATE: return forSurrogate ? surrogate : 0xfffd;
++        if constexpr (behavior == UTF_BEHAVIOR_NEGATIVE) {
++            return U_SENTINEL;
++        } else if constexpr (behavior == UTF_BEHAVIOR_FFFD) {
++            return 0xfffd;
++        } else {
++            static_assert(behavior == UTF_BEHAVIOR_SURROGATE);
++            return forSurrogate ? surrogate : 0xfffd;
+         }
+     }
+ 

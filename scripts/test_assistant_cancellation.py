@@ -230,3 +230,47 @@ def test_final_disconnect_reaps_process_group_and_never_reinvokes() -> None:
         assert restarted.process_once() is False
         assert router.invocations == 1
         assert restarted.work_store.get(str(queued["workId"]))["state"] == "cancelled"
+
+
+def test_pre_execution_governed_cancellation_keeps_real_bundle_and_source(tmp_path, monkeypatch):
+    """Separate RunStore proof; no assistant provider/process execution is claimed."""
+    import json
+    import pytest
+
+    for source in (ROOT / 'packages').glob('*/src'):
+        monkeypatch.syspath_prepend(str(source))
+    from stateport_persistent_app import LocalLayout, PersistentApp
+    from stateport_portable_execution.runtime import PortableExecutionService
+
+    for kind in ('CONFIG', 'DATA', 'STATE'):
+        monkeypatch.setenv(f'XDG_{kind}_HOME', str(tmp_path / kind.lower()))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance('studystate.sample', 'cancel-before-execution')
+    root = app.layout.instances_root / 'cancel-before-execution'
+
+    def source_bytes():
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+
+    before = source_bytes()
+    prepared = execution.prepare('cancel-before-execution', 'studystate.sample.record-evidence/v1', 'synthetic', {'activityId': 'evidence-practice', 'evidenceSummary': 'Do not execute this action'})['run']
+    cancelled = execution.cancel(prepared['runId'], expected_instance_id=prepared['instanceId'], expected_revision=prepared['revision'])
+    assert cancelled['status'] == 'cancelled'
+    assert any(e.get('from') == 'awaiting_approval' and e.get('to') == 'cancelled' for e in cancelled['events'])
+    assert not cancelled.get('process') and not cancelled.get('result') and not cancelled.get('receiptId')
+    assert not cancelled.get('proposal')
+    bundle = execution.bundle(prepared['runId'])
+    assert bundle['verification']['verified'] is True
+    bundle_root = Path(cancelled['runBundle']['path'])
+    bundle_bytes = {str(p.relative_to(bundle_root)): p.read_bytes() for p in bundle_root.rglob('*') if p.is_file()}
+    assert json.loads(bundle_bytes['execution/result.json']) == {'status': 'cancelled'}
+    assert source_bytes() == before
+    with pytest.raises(ValueError, match='revision'):
+        execution.cancel(prepared['runId'], expected_instance_id=prepared['instanceId'], expected_revision=prepared['revision'])
+    assert execution.store.get(prepared['runId']) == cancelled
+    resumed = PortableExecutionService(PersistentApp(LocalLayout.from_environment()), ROOT)
+    assert resumed.store.get(prepared['runId']) == cancelled
+    assert resumed.bundle(prepared['runId'])['verification']['verified'] is True
+    assert {str(p.relative_to(bundle_root)): p.read_bytes() for p in bundle_root.rglob('*') if p.is_file()} == bundle_bytes
+    assert source_bytes() == before

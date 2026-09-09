@@ -510,6 +510,7 @@ def test_registry_is_loopback_http_explicit_health_checked_and_removed(
         "127.0.0.1:5000",
         identity,
         storage=tmp_path / "registry-data",
+        cgroup_parent="/test-governor-parent",
         registry_base={
             "baseId": "registry-2",
             "reference": build_release_images.REGISTRY_IMAGE,
@@ -519,6 +520,9 @@ def test_registry_is_loopback_http_explicit_health_checked_and_removed(
             "verification": "exact-index-and-platform-manifest",
         },
     )
+    registry_run = next(command for command in commands if "run" in command)
+    assert registry_run[1:3] == ["--cgroup-manager=cgroupfs", "run"]
+    assert registry_run[registry_run.index("--cgroup-parent") + 1] == "/test-governor-parent"
     stopped = build_release_images.stop_local_registry(record)
     assert record["transport"] == "insecure-http-loopback-only"
     assert record["retention"] == "running-until-explicit-proof-cleanup"
@@ -695,3 +699,68 @@ def test_retained_archive_push_uses_registry_push_manifest_format(
     authority = images["stateport-web"]["releaseAuthority"]
     assert authority["manifestDigest"] == accepted
     assert accepted_references["stateport-web"].endswith("@" + accepted)
+
+
+def test_governor_cgroup_requires_bounded_service_membership(tmp_path: Path) -> None:
+    parent = "/user.slice/user-1000.slice/user@1000.service/stateport.slice/stateport-heavy.slice/stateport-heavy-123-456.service"
+    proc = tmp_path / "membership"
+    controls = tmp_path / "cgroups" / parent.lstrip("/")
+    controls.mkdir(parents=True)
+    (controls / "memory.max").write_text("8589934592\n")
+    (controls / "cpu.max").write_text("70000 100000\n")
+    proc.write_text(f"0::{parent}\n")
+    assert build_release_images.governor_cgroup_parent(proc_cgroup=proc, cgroup_root=tmp_path / "cgroups") == parent
+    for invalid in (
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/terminal.scope\n",
+        "0::/user.slice/user-1000.slice/user@1000.service/stateport.slice/stateport-heavy.slice\n",
+        f"0::{parent}/../escape\n",
+        "1:memory:/legacy\n",
+    ):
+        proc.write_text(invalid)
+        with pytest.raises(build_release_images.ReleaseBuildError, match="governor"):
+            build_release_images.governor_cgroup_parent(proc_cgroup=proc, cgroup_root=tmp_path / "cgroups")
+    proc.write_text(f"0::{parent}\n")
+    for name, invalid, valid in (("memory.max", "max", "8589934592"), ("cpu.max", "max 100000", "70000 100000")):
+        (controls / name).write_text(invalid)
+        with pytest.raises(build_release_images.ReleaseBuildError, match="finite"):
+            build_release_images.governor_cgroup_parent(proc_cgroup=proc, cgroup_root=tmp_path / "cgroups")
+        (controls / name).write_text(valid)
+
+
+def test_protected_build_refuses_outside_governor_before_podman(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def refuse() -> str:
+        raise build_release_images.ReleaseBuildError("not in governor")
+    calls: list[str] = []
+    monkeypatch.setattr(build_release_images, "governor_cgroup_parent", refuse)
+    monkeypatch.setattr(build_release_images, "verify_podman_builder", lambda: calls.append("podman"))
+    monkeypatch.setattr(build_release_images, "_release_identities", lambda *_args: calls.append("identity"))
+    with pytest.raises(build_release_images.ReleaseBuildError, match="governor"):
+        build_release_images.build_release(version="0.1.0-alpha.17", registry="127.0.0.1:5000", output_root=tmp_path)
+    assert calls == []
+
+
+def test_governed_build_commands_keep_run_children_under_service() -> None:
+    parent = "/user.slice/user-1000.slice/user@1000.service/stateport.slice/stateport-heavy.slice/stateport-heavy-123-456.service"
+    identity = build_release_images.SourceIdentity("b" * 40, "c" * 40, "0.1.0-alpha.17", "2026-09-05T00:00:00Z", 1788566400)
+    commands = build_release_images.build_commands(
+        build_release_images.validate_definitions(), identity, registry="127.0.0.1:5000",
+        context_root=Path("/tmp/context"), digest_root=Path("/tmp/digests"), cgroup_parent=parent,
+    )
+    builds = [command for command in commands if "build" in command]
+    assert len(builds) == 14
+    child_paths = [command[command.index("--cgroup-parent") + 1] for command in builds]
+    assert len(set(child_paths)) == 14
+    assert all(re.fullmatch(re.escape(parent) + r"/stateport-build-[0-9a-f]{24}", child) for child in child_paths)
+    for command in builds:
+        assert command[1:3] == ["--cgroup-manager=cgroupfs", "build"]
+        assert "--isolation=oci" in command
+        assert "--network=private" in command
+
+
+def test_build_cgroup_child_is_stable_per_create_only_digest_slot() -> None:
+    parent = "/bounded.service"
+    slot = Path("/external/run1/digests/web-build1.digest")
+    child = build_release_images.build_cgroup_path(parent, digest_file=slot)
+    assert child == build_release_images.build_cgroup_path(parent, digest_file=slot)
+    assert child.startswith(parent + "/stateport-build-")
+    assert child != build_release_images.build_cgroup_path(parent, digest_file=Path("/external/run2/digests/web-build1.digest"))

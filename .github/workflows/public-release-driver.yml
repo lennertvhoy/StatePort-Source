@@ -48,8 +48,15 @@ jobs:
       BUILDER_DESCRIPTOR: /opt/stateport/release/builder-descriptor.json
       RELEASE_OUTPUT: /opt/stateport/release/public-driver/${{ github.sha }}
       RELEASE_VERSION: 0.1.0-alpha.10
-      TMPDIR: ${{ runner.temp }}
     steps:
+      - name: Initialize runner temporary directory
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          test -d "${RUNNER_TEMP:?}"
+          printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "${GITHUB_ENV:?}"
+
       - name: Check out exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

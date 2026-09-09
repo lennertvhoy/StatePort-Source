@@ -145,11 +145,18 @@ jobs:
     timeout-minutes: 35
     env:
       STATEPORT_STUDYDD_RECOVERY_ROOT: /opt/stateport/private/studydd-cffc45a2
-      TMPDIR: ${{ runner.temp }}
     defaults:
       run:
         working-directory: apps/web
     steps:
+      - name: Initialize runner temporary directory
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          test -d "${RUNNER_TEMP:?}"
+          printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "${GITHUB_ENV:?}"
+
       - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

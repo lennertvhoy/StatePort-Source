@@ -215,7 +215,7 @@ export function TerminalDock({ instanceId, tool }: WorkbenchSlotProps) {
           <TerminalView
             tab={activeTab}
             instanceId={instanceId}
-            targetKind={targets.find((t) => t.id === activeTab.targetId)?.kind ?? 'local_pty'}
+            targetKind={activeTab.preparedTarget?.targetClass ?? targets.find((t) => t.id === activeTab.targetId)?.kind ?? 'unresolved'}
             settings={settings}
             themePref={themePref}
             findOpen={findOpen}

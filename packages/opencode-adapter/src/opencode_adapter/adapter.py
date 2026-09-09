@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
 import json
-import os
 import re
 from pathlib import Path
 import shlex
 import shutil
 import signal
 import subprocess
-import tempfile
 import threading
 import time
 from typing import Any
@@ -28,6 +25,7 @@ _CAPABILITY_NAMES = (
 _OPENCODE_DEEPSEEK_V4_FLASH = "opencode/deepseek-v4-flash"
 _OPENCODE_DEEPSEEK_V4_FLASH_FREE = "opencode/deepseek-v4-flash-free"
 _DEFAULT_MODEL = _OPENCODE_DEEPSEEK_V4_FLASH_FREE
+_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 _SUPPORTED_RUN_FORMATS = frozenset({"default", "json"})
 
@@ -174,12 +172,15 @@ class OpenCodeAdapter:
         spec: AgentRunSpec,
         staging_root: Path,
         *,
-        model: str = _DEFAULT_MODEL,
+        model: str | None = None,
     ) -> tuple[str, ...]:
         if not self.probe.installed:
             raise RuntimeError("opencode executable is unavailable")
-        if not staging_root.is_absolute() or not staging_root.is_dir():
+        if not staging_root.is_absolute() or not staging_root.is_dir() or staging_root.is_symlink():
             raise ValueError("staging_root must be an existing absolute directory")
+        selected_model = spec.model_identifier if model is None else model
+        if not isinstance(selected_model, str) or _MODEL.fullmatch(selected_model) is None:
+            raise ValueError("OpenCode model identifier is invalid")
         repository_instructions = " ".join(spec.repository_instructions) or "Use only the staging workspace."
         validation_commands = "; ".join(spec.validation_commands) or "No validation command was supplied."
         prompt = (
@@ -194,7 +195,7 @@ class OpenCodeAdapter:
             self.probe.executable,
             "run",
             "--format", "json",
-            "--model", model,
+            "--model", selected_model,
             "--dir", staging_root.as_posix(),
             prompt,
         ]
@@ -205,7 +206,7 @@ class OpenCodeAdapter:
         spec: AgentRunSpec,
         staging_root: Path,
         *,
-        model: str = _DEFAULT_MODEL,
+        model: str | None = None,
         cancel_event: threading.Event | None = None,
         timeout_seconds: int = 300,
     ) -> OpenCodeRunResult:
@@ -332,137 +333,13 @@ def run_opencode_in_container(
     cancel_event: threading.Event | None = None,
     timeout_seconds: int = 300,
 ) -> OpenCodeRunResult:
-    """
-    QUARANTINED: This function is not safe for production use.
+    """Refuse the retired standalone container path before probing or mutation.
 
-    The standalone container helper was found to have multiple critical bugs
-    during audit (read-only FS writes, broken shell chaining). It is retained
-    for reference only. Use ContainerOpenCodeEnforcer from container-opencode
-    for any real container execution.
+    This helper has no sealed image, operator grant binding, or qualified
+    isolation. Keep the callable as an explicit refusal for existing imports;
+    managed support must be qualified through the execution host.
     """
-    resolved_image = container_image or "docker.io/python:3.14-slim"
-    adapter = OpenCodeAdapter()
-    opencode_bin = shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode")
-    opencode_dir = Path(opencode_bin).resolve().parent.parent
-    container_name = "stateport-opencode-" + hashlib.sha256(
-        spec.run_id.encode("utf-8")
-    ).hexdigest()[:16]
-    uid = os.getuid()
-    gid = os.getgid()
-    shm_dir = Path(tempfile.mkdtemp(prefix="opencode-shm-"))
-    setup_script = shm_dir / "setup_and_run.sh"
-    script_lines: list[str] = [
-        "#!/bin/sh",
-        "set -e",
-        "mkdir -p /tmp/home /tmp/bin",
-        "ln -sf /opencode-bin/bin/opencode /tmp/bin/opencode",
-        "export HOME=/tmp/home",
-        "export PATH=/tmp/bin:/usr/local/bin:/usr/bin:/bin",
-        'exec "$@"',
-    ]
-    setup_script.write_text("\n".join(script_lines) + "\n")
-    os.chmod(setup_script, 0o500)
-    run_args = [
-        "opencode", "run", "--format", "json", "--model", model,
-        "--dir", "/stateport",
-        f"Execute inside /stateport. Never access files outside this directory. Run identity: {spec.run_id}.",
-    ]
-    start = time.monotonic()
-    process = None
-    cancelled = False
-    try:
-        podman_args = [
-            "podman", "run", "--rm",
-            "--read-only",
-            "--tmpfs", "/tmp:size=64M",
-            "--network=none",
-            "--cap-drop=ALL",
-            "--security-opt", "no-new-privileges:true",
-            "--userns=keep-id",
-            "--pids-limit", "128",
-            "--memory", "1024m",
-            "--cpus", "2",
-            "--ulimit", "nofile=1024:1024",
-            "--name", container_name,
-            "--user", f"{uid}:{gid}",
-            "--workdir", "/stateport",
-            "--mount", f"type=bind,src={staging_root},dst=/stateport,relabel=private",
-            "--mount", f"type=bind,src={opencode_dir},dst=/opencode-bin,readonly,relabel=private",
-            "--mount", f"type=bind,src={shm_dir},dst=/shm,readonly,relabel=private",
-            resolved_image,
-            "sh", "/shm/setup_and_run.sh",
-            *run_args,
-        ]
-        process = subprocess.Popen(
-            podman_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        deadline = start + timeout_seconds
-        while process.poll() is None:
-            if cancel_event is not None and cancel_event.is_set():
-                process.send_signal(signal.SIGTERM)
-                cancelled = True
-                try:
-                    process.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-                _cleanup_container(container_name)
-                break
-            if time.monotonic() >= deadline:
-                process.send_signal(signal.SIGTERM)
-                try:
-                    process.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-                _cleanup_container(container_name)
-                break
-            time.sleep(0.1)
-        stdout_text, stderr_text = process.communicate(timeout=15)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        duration = time.monotonic() - start
-        _cleanup_container(container_name)
-        if shm_dir.exists():
-            shutil.rmtree(shm_dir, ignore_errors=True)
-        return OpenCodeRunResult(
-            success=False, returncode=-1,
-            error=str(exc), duration_seconds=duration,
-            cancelled=cancelled,
-        )
-    duration = time.monotonic() - start
-    if shm_dir.exists():
-        shutil.rmtree(shm_dir, ignore_errors=True)
-    events = adapter._parse_events(stdout_text or "")
-    changed_files = adapter._extract_changed_files(events, stdout_text or "")
-    returncode = process.poll() if process else -1
-    return OpenCodeRunResult(
-        success=returncode == 0,
-        returncode=returncode or 0,
-        events=events,
-        stdout=stdout_text or "",
-        stderr=stderr_text or "",
-        duration_seconds=duration,
-        changed_files=changed_files,
-        cancelled=cancelled,
+    raise RuntimeError(
+        "opencode_container_helper_quarantined: managed OpenCode execution "
+        "requires a qualified execution-host image, grant and sandbox"
     )
-
-
-def _cleanup_container(name: str) -> None:
-    try:
-        subprocess.run(
-            ("podman", "rm", "--force", name),
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    try:
-        subprocess.run(
-            ("podman", "container", "cleanup", name),
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass

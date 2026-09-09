@@ -1941,6 +1941,7 @@ function defaultValidation(result: ReceiptResult): ReceiptValidation {
 }
 
 const HUMAN_RECEIPT_ACTIONS: Readonly<Record<string, string>> = {
+  'application.rename': 'Application renamed',
   'application.install.fixture': 'Application installed',
   'backup.create': 'Backup created',
   'conversation.clear': 'Conversation cleared',
@@ -2314,16 +2315,19 @@ export function mapConversation(payload: unknown, instanceId: string): Conversat
       instanceId,
     }),
   )
-  const webBinding = wire.channelBindings?.find((b) => b.channel === 'web') ?? wire.channelBindings?.[0]
-  const bindingState = webBinding?.state ?? webBinding?.status
+  // Channel binding availability is not proof of delivery. Only preserve an
+  // explicit status from one unambiguous binding for this thread's channel.
+  const bindings = wire.channelBindings?.filter((binding) =>
+    (thread.channel === 'web' || thread.channel === 'telegram') && binding.channel === thread.channel) ?? []
+  const binding = bindings.length === 1 ? bindings[0] : undefined
+  const conflicting = binding?.state !== undefined && binding.status !== undefined && binding.state !== binding.status
+  const bindingState = conflicting ? undefined : binding?.state ?? binding?.status
   const deliveryState: Conversation['deliveryState'] =
-    bindingState === 'pending'
-      ? 'pending'
-      : bindingState === 'failed'
-        ? 'failed'
-        : bindingState === 'not_configured' || bindingState === 'unconfigured'
-          ? 'not_configured'
-          : 'delivered'
+    bindingState === 'delivered' || bindingState === 'pending' || bindingState === 'failed'
+      ? bindingState
+      : bindingState === 'not_configured' || bindingState === 'unconfigured'
+        ? 'not_configured'
+        : 'unknown'
   const retention = wire.retentionStatus
   return {
     id: threadId,
@@ -2701,6 +2705,41 @@ const runWire = z.object({
   createdAt: isoTimestamp.optional(),
   updatedAt: isoTimestamp.optional(),
 })
+
+/** Metadata-only operation index; closure bindings are validated by the service. */
+export function mapOperationIndex(payload: unknown) {
+  const wire = z.object({
+    formatVersion: z.literal('stateport.operations/v1'),
+    runs: z.array(runWire.pick({ runId: true, id: true, instanceId: true, applicationId: true,
+      actionId: true, engineId: true, revision: true, formatVersion: true, lifecycleState: true,
+      status: true, state: true, requestedAt: true, createdAt: true, updatedAt: true,
+      receiptId: true }).strict()),
+    infrastructureInstanceIds: z.array(z.string().min(1)),
+    infrastructurePlans: z.array(z.object({
+      id: z.string().min(1), instanceId: z.string().min(1), operation: z.string().min(1),
+      title: z.string().min(1), state: z.enum(['prepared', 'preparing', 'awaiting_approval', 'approved', 'running', 'completed', 'failed', 'blocked']),
+      createdAt: isoTimestamp, updatedAt: isoTimestamp, receiptId: z.string().optional(), error: z.string().optional(),
+    }).strict()).optional(),
+    observationErrors: z.array(z.object({ instanceId: z.string().min(1), code: z.string().min(1), message: z.string().min(1) }).strict()).optional(),
+  }).parse(payload)
+  return {
+    infrastructurePlans: wire.infrastructurePlans ?? [],
+    observationErrors: wire.observationErrors ?? (wire.infrastructurePlans === undefined
+      ? wire.infrastructureInstanceIds.map((instanceId) => ({ instanceId, code: 'projection_unavailable',
+          message: 'The service does not expose stored infrastructure operations. Their state could not be confirmed.' })) : []),
+    runs: wire.runs.map((run) => {
+      const id = run.runId ?? run.id
+      const createdAt = run.requestedAt ?? run.createdAt
+      const state = run.status ? RUN_STATUS_PRESENTATION[run.status] : LEGACY_RUN_STATE_MAP[run.state ?? '']
+      if (!id || !run.instanceId || !run.actionId || !run.engineId || run.revision === undefined ||
+          !createdAt || !state || (run.formatVersion && !run.lifecycleState)) {
+        failClosed('operation run metadata is incomplete')
+      }
+      return { id, instanceId: run.instanceId, actionId: run.actionId, state,
+        createdAt, updatedAt: run.updatedAt ?? createdAt, receiptId: run.receiptId }
+    }),
+  }
+}
 
 export function mapRun(payload: unknown, fallbackInstanceId?: string): RunRecord {
   if (!isRecord(payload)) failClosed('run projection was not an object')
@@ -3970,7 +4009,9 @@ const terminalTicketWire = z
     expiresAt: isoTimestamp,
     target: z
       .object({
-        targetClass: z.string().min(1),
+        targetClass: z.enum(['local_pty', 'ssh', 'capsule', 'herdr_attach']),
+        targetId: z.string().min(1),
+        displayName: z.string().min(1),
       })
       .passthrough(),
   })
@@ -3983,7 +4024,9 @@ export interface TerminalTicket {
   sessionId: string
   oneUseToken: string
   purpose: string
-  targetClass: string
+  targetClass: 'local_pty' | 'ssh' | 'capsule' | 'herdr_attach'
+  targetId: string
+  displayName: string
 }
 
 export function mapTerminalTicket(payload: unknown): TerminalTicket {
@@ -4015,6 +4058,8 @@ export function mapTerminalTicket(payload: unknown): TerminalTicket {
     oneUseToken: wire.oneUseToken,
     purpose: wire.purpose,
     targetClass: wire.target.targetClass,
+    targetId: wire.target.targetId,
+    displayName: wire.target.displayName,
   }
 }
 
@@ -4027,8 +4072,8 @@ export function terminalTargetsFromCapabilities(instanceId: string, capabilities
     {
       id: `tgt_${instanceId}_pty`,
       instanceId,
-      label: 'Local PTY',
-      kind: 'local_pty',
+      label: 'Application terminal — target verified on connect',
+      kind: 'unresolved',
       available,
       unavailableReason: available
         ? undefined

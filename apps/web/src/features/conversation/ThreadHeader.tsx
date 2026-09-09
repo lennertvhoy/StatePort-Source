@@ -32,6 +32,7 @@ import {
 import { cn } from '@/lib/utils'
 
 import { IconAction } from './MessageRow'
+import { conversationDeliveryPresentation } from './deliveryPresentation'
 
 export interface ThreadHeaderProps {
   title: string
@@ -51,21 +52,6 @@ export interface ThreadHeaderProps {
   compact?: boolean
 }
 
-function deliveryLabel(conversation: Conversation | null): { state: 'success' | 'neutral' | 'attention' | 'danger'; label: string } {
-  if (!conversation) return { state: 'neutral', label: 'Not configured' }
-  const channel = conversation.channel === 'telegram' ? 'Telegram' : 'Web'
-  switch (conversation.deliveryState) {
-    case 'delivered':
-      return { state: 'success', label: `${channel} · Delivered` }
-    case 'pending':
-      return { state: 'attention', label: `${channel} · Pending` }
-    case 'failed':
-      return { state: 'danger', label: `${channel} · Delivery failed` }
-    default:
-      return { state: 'neutral', label: 'Not configured' }
-  }
-}
-
 export function ThreadHeader({
   title,
   conversation,
@@ -82,7 +68,7 @@ export function ThreadHeader({
   onToggleFocusMode,
   compact,
 }: ThreadHeaderProps) {
-  const delivery = deliveryLabel(conversation)
+  const delivery = conversationDeliveryPresentation(conversation)
   return (
     <header
       className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-surface px-3"

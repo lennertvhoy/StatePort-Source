@@ -91,7 +91,9 @@ export function AppContextShell({ children }: { children?: ReactNode }) {
   )
 
   const view = location.pathname.split('/').filter(Boolean)[2] ?? 'overview'
-  useMarkLastOpened(instanceId, view)
+  // A route id alone is not an opened application: failed/deleted links must
+  // not replace continuity or mutate the server's last-opened timestamp.
+  useMarkLastOpened(instance?.id === instanceId ? instanceId : undefined, view)
 
   const value = useMemo<CurrentInstanceContext>(
     () => ({ instance, capabilities, loading, error, refresh, hasCapability, capability }),

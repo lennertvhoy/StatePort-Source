@@ -86,6 +86,31 @@ def _socket_signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
     return value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode
 
 
+def _connect_pinned_socket(connection: socket.socket, path: Path, expected: tuple[int, int, int, int, int]) -> None:
+    """Connect through a pinned parent descriptor, retaining socket identity checks.
+
+    Linux limits pathname AF_UNIX addresses to 107 bytes. The daemon already
+    binds through directory descriptors, so valid configured session paths may
+    exceed that limit even while the control socket remains short enough.
+    """
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        raise TerminalBrokerError("execution-host socket path is invalid")
+    descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for component in path.parts[1:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        observed = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+        if not stat.S_ISSOCK(observed.st_mode) or _socket_signature(observed) != expected:
+            raise TerminalBrokerError("execution-host socket identity changed before connection")
+        connection.connect(f"/proc/self/fd/{descriptor}/{path.name}")
+        if _socket_signature(os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)) != expected:
+            raise TerminalBrokerError("execution-host socket identity changed during connection")
+    finally:
+        os.close(descriptor)
+
+
 @dataclass
 class _Pending:
     session_id: str
@@ -140,6 +165,8 @@ class ExecutionHostTerminalGateway:
         token_ttl_seconds: int = 30,
         idle_timeout_seconds: int = 900,
         maximum_lifetime_seconds: int = 3600,
+        expected_container_identity_digest: str | None = None,
+        require_container_identity: bool = False,
     ) -> None:
         if _ID.fullmatch(workspace_id) is None or _ID.fullmatch(instance_id) is None:
             raise ValueError("execution-host terminal identity is invalid")
@@ -169,6 +196,9 @@ class ExecutionHostTerminalGateway:
             raise ValueError("maximum_lifetime_seconds is outside policy")
         if not allowed_origins or len(allowed_origins) > 32 or len(set(allowed_origins)) != len(allowed_origins):
             raise ValueError("an explicit bounded origin allowlist is required")
+        if (require_container_identity or expected_container_identity_digest is not None) and (not isinstance(expected_container_identity_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", expected_container_identity_digest) is None):
+            raise ValueError("an exact workspace container identity is required")
+        self._expected_container_identity_digest = expected_container_identity_digest
         self._client = client
         self._workspace_id = workspace_id
         self._instance_id = instance_id
@@ -470,7 +500,7 @@ class ExecutionHostTerminalGateway:
         control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             control.settimeout(_CONNECT_TIMEOUT_SECONDS)
-            control.connect(str(control_path))
+            _connect_pinned_socket(control, control_path, control_identity)
             if _socket_signature(self._socket_metadata(control_path)) != control_identity:
                 raise TerminalBrokerError("execution-host control socket changed during connection")
             expected_peer = self._peer_credentials(control)
@@ -486,7 +516,7 @@ class ExecutionHostTerminalGateway:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             connection.settimeout(_CONNECT_TIMEOUT_SECONDS)
-            connection.connect(str(socket_path))
+            _connect_pinned_socket(connection, socket_path, socket_identity)
             if _socket_signature(self._socket_metadata(socket_path)) != socket_identity:
                 raise TerminalBrokerError("execution-host terminal socket changed during connection")
             peer = self._peer_credentials(connection)
@@ -560,6 +590,19 @@ class ExecutionHostTerminalGateway:
         except Exception:
             pass
 
+    @staticmethod
+    def _close_receipt_is_verified(receipt: object, session_id: str) -> bool:
+        """Accept close only after the daemon reports completed cleanup."""
+
+        if not isinstance(receipt, Mapping):
+            return False
+        result = receipt.get("result")
+        return (
+            isinstance(result, Mapping)
+            and result.get("sessionId") == session_id
+            and result.get("state") == "closed"
+        )
+
     def accept_handshake(
         self,
         handshake: GatewayHandshake,
@@ -614,6 +657,7 @@ class ExecutionHostTerminalGateway:
                 pending.session_id,
                 columns=columns,
                 rows=rows,
+                **({"expected_container_identity_digest": self._expected_container_identity_digest} if self._expected_container_identity_digest is not None else {}),
             )
             if not isinstance(open_receipt, Mapping):
                 raise TerminalBrokerError("execution host returned an invalid terminal session")
@@ -826,7 +870,13 @@ class ExecutionHostTerminalGateway:
                 if self._sessions.get(live.session.session_id) is live:
                     self._sessions.pop(live.session.session_id, None)
             try:
-                self._client.close_terminal(live.session.session_id)
+                close_receipt = self._client.close_terminal(live.session.session_id)
+                if not self._close_receipt_is_verified(
+                    close_receipt, live.session.session_id
+                ):
+                    raise TerminalBrokerError(
+                        "execution-host terminal cleanup was not confirmed"
+                    )
                 cleanup = "terminated"
             except Exception:
                 cleanup = "unverified"

@@ -122,7 +122,10 @@ def build_deployment_archive(
             source = _regular_confined(context_root, relative, "source inventory file")
             observed = source.stat()
             expected_mode = 0o755 if raw.get("mode") == "100755" else 0o644
-            if raw.get("mode") not in {"100644", "100755"} or stat.S_IMODE(observed.st_mode) != expected_mode:
+            # Managed template imports deliberately keep source files owner-only.
+            # The archive preserves Git's executable bit, never widens the source.
+            allowed_modes = (0o755, 0o700) if raw.get("mode") == "100755" else (0o644, 0o600)
+            if raw.get("mode") not in {"100644", "100755"} or stat.S_IMODE(observed.st_mode) not in allowed_modes:
                 raise DeploymentStagingError(
                     "deployment-context-invalid", "source inventory mode changed before transfer"
                 )
@@ -131,7 +134,17 @@ def build_deployment_archive(
                 raise DeploymentStagingError(
                     "deployment-context-too-large", "deployment context exceeds the byte bound"
                 )
-            with source.open("rb") as source_handle:
+            def source_identity(info: os.stat_result) -> tuple[int, ...]:
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                        info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+            descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as source_handle:
+                opened = os.fstat(source_handle.fileno())
+                if not stat.S_ISREG(opened.st_mode) or source_identity(opened) != source_identity(observed):
+                    raise DeploymentStagingError(
+                        "deployment-context-invalid", "source inventory identity changed before transfer"
+                    )
                 digest, size = _stream_digest(source_handle)
                 if digest != raw.get("contentDigest") or size != observed.st_size:
                     raise DeploymentStagingError(
@@ -142,6 +155,10 @@ def build_deployment_archive(
                     _tar_info(f"context/{relative}", size=size, mode=expected_mode),
                     source_handle,
                 )
+                if source_identity(os.fstat(source_handle.fileno())) != source_identity(opened):
+                    raise DeploymentStagingError(
+                        "deployment-context-invalid", "source inventory changed during transfer"
+                    )
             written.append(
                 {
                     "path": relative,
@@ -305,9 +322,12 @@ def materialize_deployment_snapshot(
     plan: Mapping[str, Any],
     snapshots_root: Path,
     operation_id: str,
+    max_context_bytes: int = contract.MAX_DEPLOYMENT_CONTEXT_BYTES,
 ) -> dict[str, Any]:
     """Verify an archive descriptor and publish one private daemon snapshot."""
 
+    if isinstance(max_context_bytes, bool) or not 0 < max_context_bytes <= contract.MAX_DEPLOYMENT_CONTEXT_BYTES:
+        raise DeploymentStagingError("deployment-context-too-large", "context byte limit is invalid")
     if _OPERATION_ID.fullmatch(operation_id) is None:
         raise DeploymentStagingError("deployment-snapshot-unsafe", "operation id is invalid")
     try:
@@ -401,6 +421,8 @@ def materialize_deployment_snapshot(
                             raise DeploymentStagingError(
                                 "deployment-context-invalid", "deployment archive source mode differs"
                             )
+                        if member.size < 0 or source_bytes + member.size > max_context_bytes:
+                            raise DeploymentStagingError("deployment-context-too-large", "source content exceeds its admitted byte bound")
                         digest, size = _write_member(
                             archive,
                             member,
@@ -410,7 +432,7 @@ def materialize_deployment_snapshot(
                             mode=expected_mode,
                         )
                         source_bytes += size
-                        if source_bytes > contract.MAX_DEPLOYMENT_CONTEXT_BYTES:
+                        if source_bytes > max_context_bytes:
                             raise DeploymentStagingError(
                                 "deployment-context-too-large", "deployment context exceeds the byte bound"
                             )

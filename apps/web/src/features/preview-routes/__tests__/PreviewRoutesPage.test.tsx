@@ -4,7 +4,7 @@
  * unavailable state and hides every control that would register or proxy
  * preview content. When enabled, the registry and register form render.
  */
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -91,4 +91,21 @@ describe('PreviewRoutesPage — disabled containment state', () => {
     expect(screen.getByTestId('preview-route-register-start')).toBeTruthy()
     expect(screen.queryByTestId('preview-routes-disabled')).toBeNull()
   })
+})
+
+
+it('submits the reviewed digest and exposes the returned receipt and gateway path', async () => {
+  const client = getClient()
+  const previewPath = '/preview/capsule%3Ademo-classdd%3A001/web/'
+  vi.spyOn(client.previewRoutes, 'list').mockResolvedValue({ routes: [{ ...ROUTE, previewPath }], availability: { status: 'enabled' } })
+  const receipt = { schema: 'stateport.preview-route-receipt/v1' as const, receiptId: 'receipt_' + 'd'.repeat(24), routeId: ROUTE.routeId, sequence: 2, event: 'rewritten' as const, actor: 'operator', createdAt: '2026-09-06T00:00:00Z', data: {}, previousReceiptDigest: ROUTE.routeDigest, receiptDigest: ROUTE.routeDigest }
+  const rewrite = vi.spyOn(client.previewRoutes, 'rewrite').mockResolvedValue({ ...ROUTE, receipt })
+  renderPage()
+  expect((await screen.findByText('Open preview')).getAttribute('href')).toBe(previewPath)
+  fireEvent.click(screen.getByTestId(`preview-route-rewrite-start-${ROUTE.routeId}`))
+  fireEvent.change(screen.getByLabelText('New revision digest'), { target: { value: ROUTE.revisionDigest } })
+  fireEvent.change(screen.getByLabelText('New upstream port'), { target: { value: '8080' } })
+  fireEvent.click(screen.getByTestId(`preview-route-rewrite-confirm-${ROUTE.routeId}`))
+  await waitFor(() => expect(rewrite).toHaveBeenCalledWith(ROUTE.routeId, { revisionDigest: ROUTE.revisionDigest, upstreamPort: 8080, expectedRouteDigest: ROUTE.routeDigest }))
+  expect((await screen.findByTestId('preview-route-receipt')).textContent).toContain(receipt.receiptId)
 })

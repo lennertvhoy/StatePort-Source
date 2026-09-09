@@ -27,6 +27,7 @@ import { ClientError, getClient } from '@/client'
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface TerminalTab {
+  preparedTarget?: TerminalSession['preparedTarget']
   /** `${instanceId}:${sessionId}` — changes when a lost/ended session is replaced. */
   key: string
   instanceId: string
@@ -350,7 +351,7 @@ export async function connectTab(key: string, onReplaced?: SessionReplacedHandle
   if (tab.state === 'connected' || tab.state === 'connecting' || tab.state === 'reconnecting') return key
   const token = nextToken(key)
   pendingCancels.delete(key)
-  updateTab(key, { state: 'connecting', lastError: undefined })
+  updateTab(key, { state: 'connecting', lastError: undefined, preparedTarget: undefined })
   try {
     const session = await getClient().terminal.connect(tab.sessionId)
     if (pendingCancels.has(key) || opTokens.get(key) !== token) {
@@ -400,7 +401,7 @@ export async function reconnectLiveTab(key: string, onReplaced?: SessionReplaced
     return
   }
   const token = nextToken(key)
-  updateTab(key, { state: 'reconnecting', lastError: undefined })
+  updateTab(key, { state: 'reconnecting', lastError: undefined, preparedTarget: undefined })
   try {
     const session = await getClient().terminal.reconnect(tab.sessionId)
     if (opTokens.get(key) !== token) return
@@ -422,7 +423,7 @@ export async function restartSession(key: string, onReplaced?: SessionReplacedHa
   const tab = getTab(key)
   if (!tab) return null
   const token = nextToken(key)
-  updateTab(key, { state: 'connecting', lastError: undefined })
+  updateTab(key, { state: 'connecting', lastError: undefined, preparedTarget: undefined })
   let session: TerminalSession
   try {
     session = await getClient().terminal.createSession(tab.instanceId, tab.targetId, tab.name)
@@ -451,6 +452,7 @@ export async function restartSession(key: string, onReplaced?: SessionReplacedHa
     ...tab,
     key: newKey,
     sessionId: session.id,
+    preparedTarget: undefined,
     state: 'idle',
     lost: false,
     lastError: undefined,
@@ -524,6 +526,7 @@ export async function submitCommand(key: string, line: string): Promise<CommandR
 
 function applySession(key: string, session: TerminalSession): void {
   updateTab(key, {
+    preparedTarget: session.preparedTarget,
     name: session.name,
     state: session.state,
     cwd: session.cwd,

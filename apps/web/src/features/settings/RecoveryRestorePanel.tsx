@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { RecoveryStatus, RestoreApproval, RestorePlan, RestoreReceipt } from '@/client'
 import { getClient } from '@/client'
@@ -17,13 +17,22 @@ const RESTORE_STATUS_LABEL: Record<RecoveryStatus['restore']['status'], string> 
   failed: 'Failed',
 }
 
-export function RecoveryRestorePanel({
-  instanceId,
-  onRestored,
-}: {
+type RecoveryRestorePanelProps = {
   instanceId: string
   onRestored: () => void
-}) {
+}
+
+export function RecoveryRestorePanel(props: RecoveryRestorePanelProps) {
+  // Reviewed plans, approvals and drafts belong to exactly one application.
+  return <InstanceRecoveryRestorePanel key={props.instanceId} {...props} />
+}
+
+function InstanceRecoveryRestorePanel({ instanceId, onRestored }: RecoveryRestorePanelProps) {
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
   const serviceStatus = useSessionStore((state) => state.serviceStatus)
   const pushToast = useSessionStore((state) => state.pushToast)
   const client = getClient()
@@ -32,6 +41,7 @@ export function RecoveryRestorePanel({
   const [status, setStatus] = useState<RecoveryStatus | null>(null)
   const [loading, setLoading] = useState(connected)
   const [busy, setBusy] = useState(false)
+  const [backupBusy, setBackupBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [destinationId, setDestinationId] = useState(`${instanceId}-restored`)
   const [destinationName, setDestinationName] = useState('')
@@ -44,15 +54,18 @@ export function RecoveryRestorePanel({
     if (!connected) return
     setLoading(true)
     try {
-      setStatus(await client.recovery.getStatus(instanceId))
+      const next = await client.recovery.getStatus(instanceId)
+      if (!mounted.current) return
+      setStatus(next)
       if (reportError) setError(null)
     } catch (cause) {
+      if (!mounted.current) return
       setStatus(null)
       if (reportError) {
         setError(cause instanceof Error ? cause.message : 'Recovery status is unavailable.')
       }
     } finally {
-      setLoading(false)
+      if (mounted.current) setLoading(false)
     }
   }, [client, connected, instanceId])
 
@@ -61,10 +74,33 @@ export function RecoveryRestorePanel({
   }, [reload])
 
   const resetDecision = () => {
+    setConfirmApply(false)
     setPlan(null)
     setApproval(null)
     setReceipt(null)
     setError(null)
+  }
+
+  const backup = async () => {
+    if (!operator || busy) return
+    setBusy(true)
+    setBackupBusy(true)
+    try {
+      const result = await client.recovery.runBackup(instanceId)
+      if (!mounted.current) return
+      resetDecision()
+      await reload()
+      if (!mounted.current) return
+      onRestored()
+      pushToast({ kind: 'success', title: 'Backup completed', body: `Validated receipt ${result.receipt.id} was recorded.` })
+    } catch {
+      if (!mounted.current) return
+      await reload(false)
+      if (!mounted.current) return
+      setError('No validated backup receipt was received. Refresh recovery status before retrying; the operation may have completed.')
+    } finally {
+      if (mounted.current) { setBusy(false); setBackupBusy(false) }
+    }
   }
 
   const createPlan = async () => {
@@ -85,14 +121,16 @@ export function RecoveryRestorePanel({
         destinationInstanceId: trimmedId,
         destinationName: destinationName.trim() || null,
       })
+      if (!mounted.current) return
       setPlan(next)
       setApproval(null)
       setReceipt(null)
       setError(null)
     } catch (cause) {
+      if (!mounted.current) return
       setError(cause instanceof Error ? cause.message : 'Restore planning failed.')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -100,12 +138,15 @@ export function RecoveryRestorePanel({
     if (!plan) return
     setBusy(true)
     try {
-      setApproval(await client.recovery.approveRestore(instanceId, plan.planDigest))
+      const next = await client.recovery.approveRestore(instanceId, plan.planDigest)
+      if (!mounted.current) return
+      setApproval(next)
       setError(null)
     } catch (cause) {
+      if (!mounted.current) return
       setError(cause instanceof Error ? cause.message : 'Restore approval failed.')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -117,9 +158,11 @@ export function RecoveryRestorePanel({
         planDigest: plan.planDigest,
         approvalDigest: approval.approvalDigest,
       })
+      if (!mounted.current) return
       setReceipt(next)
       setError(null)
       await reload()
+      if (!mounted.current) return
       onRestored()
       pushToast({
         kind: 'success',
@@ -127,11 +170,13 @@ export function RecoveryRestorePanel({
         body: `Created ${next.destinationInstanceId} as a separately validated instance.`,
       })
     } catch (cause) {
+      if (!mounted.current) return
       const message = cause instanceof Error ? cause.message : 'Restore apply failed.'
       await reload(false)
+      if (!mounted.current) return
       setError(message)
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -155,6 +200,13 @@ export function RecoveryRestorePanel({
           {error}
         </InlineNotice>
       ) : null}
+      <SettingSubsection title="Managed backup" description="Create and verify a managed backup before restoring into a new instance. The source instance remains unchanged.">
+        <SettingRow anchor="recovery-backup" label="Create a verified backup">
+          <Button variant="outline" size="sm" onClick={() => void backup()} disabled={!operator || busy || loading} data-testid="recovery-backup-action">
+            {backupBusy ? 'Backing up…' : 'Back up now'}
+          </Button>
+        </SettingRow>
+      </SettingSubsection>
       {status?.restore.status === 'failed' ? (
         <InlineNotice
           tone={status.restore.operatorInspectionRequired ? 'danger' : 'attention'}
@@ -235,7 +287,7 @@ export function RecoveryRestorePanel({
             disabled={!operator || busy || loading || status?.status !== 'verified'}
             data-testid="restore-plan-action"
           >
-            {busy && !plan ? 'Planning…' : 'Plan restore'}
+            {busy && !backupBusy && !plan ? 'Planning…' : 'Plan restore'}
           </Button>
         </SettingRow>
       </SettingSubsection>

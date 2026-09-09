@@ -8,7 +8,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getClient, resetClientForTests } from '@/client'
+import { ClientError, getClient, resetClientForTests } from '@/client'
 
 import PlatformDeploymentsPage from '../PlatformDeploymentsPage'
 import AuthorityPage from '../../authority/AuthorityPage'
@@ -104,4 +104,26 @@ describe('PreviewRoutesPage (honest error state)', () => {
     // The mock refuses; the surface must not fabricate a route table.
     expect(screen.queryByTestId('preview-routes-table')).toBeNull()
   })
+})
+
+
+it('does not claim unchanged authority when a mutation response is lost', async () => {
+  let paused = false
+  vi.spyOn(getClient().authority, 'getIndex').mockImplementation(async () => ({
+    control: { paused }, reviewableDigests: { controlDigest: `sha256:${'a'.repeat(64)}` },
+    activeGrants: [], inactiveGrants: [], policy: { defaultProfile: 'balanced' },
+  }) as never)
+  vi.spyOn(getClient().authority, 'setPaused').mockImplementation(async () => {
+    paused = true // The service may commit before its response becomes unavailable.
+    throw new ClientError('network', 'Response could not be received')
+  })
+  renderAt('/authority', <AuthorityPage />)
+  fireEvent.click(await screen.findByTestId('authority-pause-start'))
+  fireEvent.change(screen.getByTestId('authority-directive-input'), { target: { value: 'OD-FIXTURE-001' } })
+  fireEvent.change(screen.getByTestId('authority-reason-input'), { target: { value: 'reviewed pause' } })
+  fireEvent.click(screen.getByTestId('authority-pause-confirm'))
+  expect(await screen.findByText('No success was confirmed. Refresh authority state before retrying.')).toBeTruthy()
+  expect(screen.queryByText('The authority store is unchanged by a refused request.')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  expect((await screen.findByTestId('authority-unpause-start') as HTMLButtonElement).disabled).toBe(false)
 })

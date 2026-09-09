@@ -5216,3 +5216,61 @@ def test_zipimported_wheel_loads_release_index_schema(
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "stateport-alpha-0.2.0-rc.1"
+
+
+@pytest.mark.parametrize("query", ["is-active", "is-enabled"])
+def test_uninstall_refuses_unobservable_control_manager_before_removal(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    query: str,
+) -> None:
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    original = runner.run
+    existing_files = {path.name: path.read_bytes() for path in config.live_quadlet_root.iterdir()}
+    runner.calls.clear()
+
+    def denied(argv: Sequence[str], *, timeout: int) -> installer.Completed:
+        if argv[0] == "runuser" and query in argv:
+            runner.calls.append(tuple(argv))
+            return installer.Completed(1, "", "runuser: may not be used by non-root users")
+        return original(argv, timeout=timeout)
+
+    runner.run = denied  # type: ignore[method-assign]
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "refused"
+    assert result.code == "unit_observation_failed"
+    assert {path.name: path.read_bytes() for path in config.live_quadlet_root.iterdir()} == existing_files
+    assert not any(call[:2] == ("podman", "rm") for call in runner.calls)
+    assert not any(call[:3] == ("podman", "volume", "rm") for call in runner.calls)
+    assert not any((config.state_root / "receipts").glob("*uninstall*"))
+
+
+@pytest.mark.parametrize("resource", ["container", "volume"])
+def test_removal_refuses_engine_error_instead_of_receipting_absence(resource: str) -> None:
+    class BrokenEngine:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, argv: Sequence[str], *, timeout: int) -> installer.Completed:
+            self.calls.append(tuple(argv))
+            return installer.Completed(125, "", "cannot connect to engine")
+
+    runner = BrokenEngine()
+    remove = installer._remove_containers if resource == "container" else installer._remove_volumes
+    with pytest.raises(installer.InstallerRefusal, match="engine failure is not absence"):
+        remove(runner, ["recorded-resource"])
+    assert runner.calls == [("podman", resource, "exists", "recorded-resource")]
+
+
+@pytest.mark.parametrize(
+    ("code", "state"), [(1, "disabled"), (1, "masked"), (4, "not-found")]
+)
+def test_uninstall_enablement_absence_requires_a_known_manager_result(code: int, state: str) -> None:
+    installer._require_unit_enablement_observed(installer.Completed(code, state + "\n", ""), "known.service")
+    with pytest.raises(installer.InstallerRefusal):
+        installer._require_unit_enablement_observed(
+            installer.Completed(code, state + "\n", "failed to connect to bus"), "known.service"
+        )

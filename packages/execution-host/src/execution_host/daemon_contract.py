@@ -165,6 +165,70 @@ def _int(value: Any, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
+DEVELOPMENT_SEED_POLICY = "stateport.development-python-seed/v1"
+DEVELOPMENT_SEED_IMAGE = "ghcr.io/lennertvhoy/stateport-dev-workspace@sha256:0102c422aa8cf9ba1abb5f708f5ba5280799e9407d9db938f2e771d069524b0f"
+
+
+SIGNED_DEVELOPMENT_SEED_POLICY = "stateport.signed-development-python-seed/v1"
+
+
+def workspace_descriptor_for_image(image_reference: str) -> dict[str, Any]:
+    """Pure known template shape; this never authorizes the supplied image."""
+    if not isinstance(image_reference, str) or re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image_reference) is None:
+        raise ValueError("workspace image must be an exact pinned reference")
+    return {
+        "formatVersion": "stateport.workspace-spec/v1",
+        "workspaceId": "default-dev",
+        "imageDigest": image_reference.rsplit("@", 1)[1],
+        "workspacePath": "/workspace",
+        "shell": ["/bin/sh"],
+        "resources": {
+            "memoryMaxBytes": 256 * 1024 * 1024,
+            "cpuQuotaPercent": 100,
+            "pidsMax": 128,
+            "diskMaxBytes": 256 * 1024 * 1024,
+        },
+        "networkProfile": {"mode": "disabled", "allowlist": []},
+        "cacheVolumes": [],
+        "lifecyclePolicy": {
+            "idleTimeoutSeconds": 3600,
+            "stopAfterIdle": True,
+            "preserveDataOnRemove": True,
+        },
+    }
+
+
+def workspace_template_for_image(image_reference: str) -> dict[str, Any]:
+    """Normalize the fixed default template; installed authority validates image."""
+    parameters: dict[str, Any] = {
+        "workspaceId": "default-dev",
+        "workspaceSpecDigest": canonical_digest(workspace_descriptor_for_image(image_reference)),
+        "volumeName": "stateport-workspace-default-dev",
+        "stopAfterIdle": True,
+        "shell": ["/bin/sh"],
+        "networkMode": "none",
+        "cacheVolumes": [],
+        "cpuQuotaPercent": 100,
+        "diskMaxBytes": 256 * 1024 * 1024,
+        "workSeconds": 0,
+        "emitBytes": 0,
+    }
+    workload = {
+        "kind": "workspace",
+        "workloadId": "default-dev",
+        "image": {"reference": image_reference},
+        "parameters": parameters,
+        "timeoutSeconds": 3600,
+        "outputByteBound": 65536,
+        "resources": {
+            "memoryMaxBytes": 256 * 1024 * 1024,
+            "pidsMax": 128,
+        },
+    }
+    return validate_workload_spec(workload)
+
+
+
 def _mapping(value: Any, name: str, keys: set[str]) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != keys:
         raise ValueError(f"{name} has an invalid shape")
@@ -237,6 +301,27 @@ def _workspace_cache_volumes(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _source_material(inventory: Any, archive_value: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(inventory, list) or not 1 <= len(inventory) <= MAX_DEPLOYMENT_FILES:
+        raise ValueError("source inventory must be bounded and nonempty")
+    paths: set[str] = set()
+    normalized_inventory = []
+    for item in inventory:
+        row = _mapping(item, "sourceInventory entry", {"path", "mode", "contentDigest"})
+        relative = _string(row["path"], "sourceInventory.path")
+        path = PurePosixPath(relative)
+        if path.is_absolute() or path.as_posix() != relative or ".." in path.parts or relative in {".", ""} or "\\" in relative or "\x00" in relative or len(relative.encode("utf-8")) > 4096 or relative in paths:
+            raise ValueError("source inventory path is unsafe or duplicated")
+        if row["mode"] not in {"100644", "100755"}:
+            raise ValueError("source inventory admits regular files only")
+        paths.add(relative)
+        normalized_inventory.append({"path": relative, "mode": row["mode"], "contentDigest": _digest(row["contentDigest"], "sourceInventory.contentDigest")})
+    archive = _archive_metadata(archive_value)
+    if archive["fileCount"] != len(normalized_inventory):
+        raise ValueError("source file count differs from inventory")
+    return normalized_inventory, archive
+
+
 def validate_workload_spec(value: Any) -> dict[str, Any]:
     """Validate a sealed workload spec; unknown kinds and fields refuse."""
 
@@ -254,12 +339,14 @@ def validate_workload_spec(value: Any) -> dict[str, Any]:
     param_allowed = set(_KIND_IDENTITY_FIELDS[kind]) | {"workSeconds", "emitBytes"}
     if kind == "agent-run":
         # Optional base revision binding for authority-bound managed runs.
-        param_allowed |= {"baseRevision"}
+        param_allowed |= {"baseRevision", "ownership", "command", "commandDigest", "sourceInventory", "sourceArchive"}
     if kind == "workspace":
         # Every WorkspaceSpec field stays representable: base identity,
         # lifecycle, shell, network mode, caches, and resource ceilings.
         param_allowed |= {
             "baseRevision",
+            "ownership",
+            "sourceSeed",
             "stopAfterIdle",
             "shell",
             "networkMode",
@@ -318,11 +405,55 @@ def validate_workload_spec(value: Any) -> dict[str, Any]:
             raise ValueError(
                 "validator-run parameters.commandDigest does not match parameters.command"
             )
+    if kind == "agent-run":
+        source_fields = {"command", "commandDigest", "sourceInventory", "sourceArchive"}
+        present = source_fields & set(parameters)
+        if present and present != source_fields:
+            raise ValueError("agent-run command and source fields must be supplied together")
+        if present:
+            command = _bounded_argv(parameters["command"], "parameters.command")
+            _posix_absolute(command[0], "parameters.command[0]")
+            command_digest = _digest(parameters["commandDigest"], "parameters.commandDigest")
+            if canonical_digest(command) != command_digest:
+                raise ValueError("agent-run command digest does not match its exact argv")
+            normalized_inventory, archive = _source_material(parameters["sourceInventory"], parameters["sourceArchive"])
+            normalized_parameters.update(command=command, commandDigest=command_digest, sourceInventory=normalized_inventory, sourceArchive=archive)
+    if "ownership" in parameters:
+        owner = _mapping(parameters["ownership"], "parameters.ownership", {
+            "applicationId", "instanceId", "catalogIdentityDigest", "runId"
+        })
+        normalized_parameters["ownership"] = {
+            "applicationId": _id(owner["applicationId"], "ownership.applicationId"),
+            "instanceId": _id(owner["instanceId"], "ownership.instanceId"),
+            "catalogIdentityDigest": _digest(owner["catalogIdentityDigest"], "ownership.catalogIdentityDigest"),
+            "runId": None if owner["runId"] is None else _id(owner["runId"], "ownership.runId"),
+        }
     if "baseRevision" in parameters:
         raw = parameters["baseRevision"]
         if not isinstance(raw, str) or not _GIT_SHA.fullmatch(raw):
             raise ValueError("parameters.baseRevision must be a full lowercase git sha")
         normalized_parameters["baseRevision"] = raw
+    if "sourceSeed" in parameters:
+        if kind != "workspace" or "ownership" not in normalized_parameters or "baseRevision" not in normalized_parameters:
+            raise ValueError("workspace source seed requires exact application ownership and base revision")
+        seed_keys = {"sourceInventory", "sourceArchive", "descriptorDigest", "reviewDigest"}
+        raw_seed = parameters["sourceSeed"]
+        if isinstance(raw_seed, Mapping) and "helperPolicy" in raw_seed:
+            seed_keys.add("helperPolicy")
+        seed = _mapping(raw_seed, "parameters.sourceSeed", seed_keys)
+        if "helperPolicy" in seed and (seed["helperPolicy"] not in {DEVELOPMENT_SEED_POLICY, SIGNED_DEVELOPMENT_SEED_POLICY} or (seed["helperPolicy"] == DEVELOPMENT_SEED_POLICY and reference != DEVELOPMENT_SEED_IMAGE)):
+            raise ValueError("workspace seed helper policy requires its exact development image")
+        inventory, archive = _source_material(seed["sourceInventory"], seed["sourceArchive"])
+        descriptor_digest = _digest(seed["descriptorDigest"], "sourceSeed.descriptorDigest")
+        review = {"workloadId": workload_id, "image": reference, "ownership": normalized_parameters["ownership"], "baseRevision": normalized_parameters["baseRevision"], "sourceInventory": inventory, "sourceArchive": archive, "descriptorDigest": descriptor_digest}
+        if "helperPolicy" in seed:
+            review["helperPolicy"] = seed["helperPolicy"]
+        review_digest = _digest(seed["reviewDigest"], "sourceSeed.reviewDigest")
+        if canonical_digest(review) != review_digest:
+            raise ValueError("workspace source review digest does not bind exact source and ownership")
+        normalized_parameters["sourceSeed"] = {"sourceInventory": inventory, "sourceArchive": archive, "descriptorDigest": descriptor_digest, "reviewDigest": review_digest}
+        if "helperPolicy" in seed:
+            normalized_parameters["sourceSeed"]["helperPolicy"] = seed["helperPolicy"]
     if kind == "workspace":
         if normalized_parameters["workspaceId"] != workload_id:
             raise ValueError("parameters.workspaceId must equal workloadId")
@@ -951,8 +1082,10 @@ def validate_request_payload(request: Mapping[str, Any], payload: Any) -> dict[s
         data = _mapping(payload, f"{operation} payload", {"workloadId"})
         return {"workloadId": _id(data["workloadId"], "workloadId")}
     if operation == "openTerminal":
-        data = _mapping(payload, "openTerminal payload", {"workloadId", "sessionId", "columns", "rows"})
+        optional = {"expectedContainerIdentityDigest"} if isinstance(payload, Mapping) and "expectedContainerIdentityDigest" in payload else set()
+        data = _mapping(payload, "openTerminal payload", {"workloadId", "sessionId", "columns", "rows"} | optional)
         return {
+            **({"expectedContainerIdentityDigest": _digest(data["expectedContainerIdentityDigest"], "expectedContainerIdentityDigest")} if optional else {}),
             "workloadId": _id(data["workloadId"], "workloadId"),
             "sessionId": _id(data["sessionId"], "sessionId"),
             "columns": _int(data["columns"], "columns", 1, 1000),

@@ -196,7 +196,7 @@ export function AppearanceGroup({ settings, set }: GroupProps) {
 
       <SettingSubsection title="Code">
         <SettingRow anchor="code-font" label="Code font" description="Monospace font used by the editor and terminal.">
-          <SelectControl value={a.codeFont} options={CODE_FONT_OPTIONS} onChange={(v) => set(['appearance.codeFont', v])} />
+          <SelectControl value={a.codeFont} options={CODE_FONT_OPTIONS} onChange={(v) => set(['appearance.codeFont', v], ['editor.fontFamily', v], ['terminal.fontFamily', v])} />
         </SettingRow>
         <SettingRow anchor="editor-theme" label="Editor theme" description="Editor colors follow the interface or stay light/dark.">
           <SelectControl value={a.editorTheme} options={options(UI_THEME_LABELS)} onChange={(v) => set(['appearance.editorTheme', v])} />

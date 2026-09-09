@@ -75,6 +75,37 @@ describe('filesStore documents', () => {
     }
   }, 10_000)
 
+  it('explicit reload replaces the reviewed draft but preserves concurrent edits', async () => {
+    const store = useFilesStore.getState()
+    const original = await store.openDocument(ID, 'README.md')
+    store.setDraft(ID, 'README.md', 'reviewed edit')
+    const disk = await getClient().files.read(ID, 'README.md')
+    let release!: (value: typeof disk) => void
+    vi.spyOn(getClient().files, 'read').mockImplementation(() => new Promise((resolve) => { release = resolve }))
+    const loading = store.reloadDocument(ID, 'README.md', { draft: 'reviewed edit', revision: original!.revision })
+    store.setDraft(ID, 'README.md', 'newer edit')
+    release({ ...disk, content: 'fresh disk', revision: 'rev_fresh' })
+    expect((await loading)?.draft).toBe('newer edit')
+    const second = store.reloadDocument(ID, 'README.md', { draft: 'newer edit', revision: 'rev_fresh' })
+    release({ ...disk, content: 'fresh disk', revision: 'rev_fresh' })
+    const reloaded = await second
+    expect(reloaded?.draft).toBe('fresh disk')
+    expect(docIsDirty(reloaded!)).toBe(false)
+  }, 10_000)
+
+  it('failed explicit reload retains the draft and conflict', async () => {
+    const store = useFilesStore.getState()
+    const doc = await store.openDocument(ID, 'README.md')
+    store.setDraft(ID, 'README.md', 'reviewed edit')
+    const conflict = { detail: 'disk changed', currentRevision: 'rev_disk', currentContent: 'disk' }
+    store.setConflict(ID, 'README.md', conflict)
+    vi.spyOn(getClient().files, 'read').mockRejectedValue(new Error('offline'))
+    expect(await store.reloadDocument(ID, 'README.md', { draft: 'reviewed edit', revision: doc!.revision })).toBeNull()
+    const retained = useFilesStore.getState().docs[ID]!['README.md']!
+    expect(retained.draft).toBe('reviewed edit')
+    expect(retained.conflict).toEqual(conflict)
+  }, 10_000)
+
   it('reloadDocument never clobbers an in-flight dirty draft', async () => {
     await useFilesStore.getState().openDocument(ID, 'README.md')
     useFilesStore.getState().setDraft(ID, 'README.md', 'conflicting edit')

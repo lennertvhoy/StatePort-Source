@@ -28,6 +28,10 @@ interface SessionState {
   activeScenario: ScenarioId | null
   scenarioLabOpen: boolean
   operations: OperationRecord[]
+  /** Monotonic wake signal for the shell's operations projection poller. */
+  operationsRefreshGeneration: number
+  /** Number of in-flight mutations whose operation state may not be projected yet. */
+  operationsMutationCount: number
   /** Set when the operations poll fails — the mirrored `operations` are stale. */
   operationsError: string | null
   toasts: Toast[]
@@ -38,6 +42,8 @@ interface SessionState {
   setScenarioLabOpen(open: boolean): void
   setOperations(records: OperationRecord[]): void
   setOperationsError(error: string | null): void
+  requestOperationsRefresh(): void
+  beginOperationsMutation(): () => void
   upsertOperation(record: OperationRecord): void
   pushToast(toast: Omit<Toast, 'id' | 'createdAt'>): string
   dismissToast(id: string): void
@@ -52,6 +58,8 @@ export const useSessionStore = create<SessionState>()((set) => ({
   activeScenario: useScenarioStore.getState().active,
   scenarioLabOpen: useScenarioStore.getState().labOpen,
   operations: [],
+  operationsRefreshGeneration: 0,
+  operationsMutationCount: 0,
   operationsError: null,
   toasts: [],
 
@@ -67,6 +75,22 @@ export const useSessionStore = create<SessionState>()((set) => ({
   },
   setOperations: (operations) => set({ operations }),
   setOperationsError: (operationsError) => set({ operationsError }),
+  requestOperationsRefresh: () => set((s) => ({ operationsRefreshGeneration: s.operationsRefreshGeneration + 1 })),
+  beginOperationsMutation: () => {
+    set((s) => ({
+      operationsRefreshGeneration: s.operationsRefreshGeneration + 1,
+      operationsMutationCount: s.operationsMutationCount + 1,
+    }))
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      set((s) => ({
+        operationsRefreshGeneration: s.operationsRefreshGeneration + 1,
+        operationsMutationCount: Math.max(0, s.operationsMutationCount - 1),
+      }))
+    }
+  },
   upsertOperation: (record) =>
     set((s) => {
       const idx = s.operations.findIndex((o) => o.id === record.id)
@@ -74,7 +98,10 @@ export const useSessionStore = create<SessionState>()((set) => ({
         idx === -1
           ? [record, ...s.operations]
           : s.operations.map((o) => (o.id === record.id ? record : o))
-      return { operations }
+      // Local operation actions (for example Operation Center cancellation)
+      // already update the visible row; also wake the projection so the next
+      // server read confirms the durable state promptly.
+      return { operations, operationsRefreshGeneration: s.operationsRefreshGeneration + 1 }
     }),
   pushToast: (toast) => {
     const id = `toast_${++toastSeq}`

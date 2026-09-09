@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import { execFileSync, spawnSync } from 'node:child_process'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProviderSettings } from '../ProviderSettings'
@@ -29,7 +29,7 @@ describe('Provider settings', () => {
     await screen.findByText('Codex is missing in this runtime.')
     await user.type(screen.getByRole('textbox'), 'test-model')
     await user.click(screen.getByRole('button', { name: 'Save model and enable' }))
-    expect(providerClient.configure).toHaveBeenCalledWith('test-model')
+    expect(providerClient.configure).toHaveBeenCalledWith('test-model', 'codex')
     expect(providerClient.verify).not.toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: 'Verify bounded request' }))
     expect(await screen.findByText('Present (expiry not guaranteed)')).not.toBeNull()
@@ -82,6 +82,8 @@ it('provides labelled keyboard form controls without nested main landmarks at a 
   const user = userEvent.setup()
   const view = render(<main><ProviderSettings /></main>)
   await screen.findByText('Codex is missing in this runtime.')
+  await user.tab()
+  expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Coding provider' }))
   await user.tab()
   expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Codex model identifier' }))
   expect(screen.getByRole('textbox').getAttribute('aria-describedby')).toBe('provider-model-help')
@@ -164,4 +166,65 @@ it.each([
     expect(result.stdout).toContain('MOCK_EXEC:--version')
     expect(result.stdout).not.toContain('MOCK_EXEC:login')
   } else expect(result.stdout).not.toContain('MOCK_EXEC:')
+})
+
+it('saves OpenCode as the actual selection, shows refusal, and retains it after reopening', async () => {
+  vi.resetAllMocks()
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'platform_operator', actorId: 'operator', platformOperationsAllowed: true, statebenchInspectionAllowed: false } } })
+  const selected: ProviderStatus = {
+    ...status, providerId: 'opencode', configured: true, connected: false, model: 'opencode/test',
+    executableInstalled: true, executableStatus: 'installed', authenticationStatus: 'unavailable',
+    executionRefusal: 'sandboxed_validation_not_implemented',
+    detail: 'OpenCode selection is saved; isolated post-agent validation is not implemented. No Codex fallback is enabled.',
+  }
+  vi.mocked(providerClient.getStatus).mockResolvedValueOnce(status).mockResolvedValue({ ...selected, executableStatus: 'unverified' })
+  vi.mocked(providerClient.configure).mockResolvedValue(selected)
+  vi.mocked(providerClient.verify).mockResolvedValue({ ...selected, requestStatus: 'failed' })
+  const user = userEvent.setup()
+  const view = render(<ProviderSettings />)
+  await screen.findByRole('combobox', { name: 'Coding provider' })
+  await user.selectOptions(screen.getByRole('combobox'), 'opencode')
+  await user.type(screen.getByRole('textbox', { name: 'OpenCode model identifier' }), 'opencode/test')
+  await user.click(screen.getByRole('button', { name: 'Save provider selection' }))
+  expect(providerClient.configure).toHaveBeenCalledExactlyOnceWith('opencode/test', 'opencode')
+  expect(await screen.findByText(selected.detail)).not.toBeNull()
+  expect(screen.queryByRole('button', { name: 'Show installed login command' })).toBeNull()
+  expect(screen.getByText('Disconnected')).not.toBeNull()
+  await user.click(screen.getByRole('button', { name: 'Check selected adapter' }))
+  expect(providerClient.verify).toHaveBeenCalledTimes(1)
+  expect(await screen.findByText('failed')).not.toBeNull()
+  view.unmount()
+  render(<ProviderSettings />)
+  await waitFor(() => expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('opencode'))
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('opencode/test')
+  expect(screen.getByText('Not checked in this service session')).not.toBeNull()
+  expect(providerClient.configure).toHaveBeenCalledTimes(1)
+})
+
+
+it.each([true, false])('preserves a draft and newer saved status when initial status arrives before save=%s', async (beforeSave) => {
+  vi.resetAllMocks()
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'platform_operator', actorId: 'operator', platformOperationsAllowed: true, statebenchInspectionAllowed: false } } })
+  let resolveInitial!: (value: ProviderStatus) => void
+  vi.mocked(providerClient.getStatus).mockReturnValueOnce(new Promise(resolve => { resolveInitial = resolve }))
+  const selected: ProviderStatus = { ...status, providerId: 'opencode', configured: true, model: 'openai/test-model', detail: 'Selected OpenCode result' }
+  vi.mocked(providerClient.configure).mockResolvedValue(selected)
+  const user = userEvent.setup()
+  render(<ProviderSettings />)
+  await user.selectOptions(screen.getByRole('combobox'), 'opencode')
+  await user.type(screen.getByRole('textbox', { name: 'OpenCode model identifier' }), 'openai/test-model')
+  if (beforeSave) {
+    await act(async () => resolveInitial(status))
+    expect((screen.getByRole('textbox', { name: 'OpenCode model identifier' }) as HTMLInputElement).value).toBe('openai/test-model')
+    vi.mocked(providerClient.getStatus).mockResolvedValue(status)
+    await user.click(screen.getByRole('button', { name: 'Refresh status' }))
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('opencode')
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('openai/test-model')
+  }
+  await user.click(screen.getByRole('button', { name: 'Save provider selection' }))
+  await screen.findByText('Selected OpenCode result')
+  if (!beforeSave) await act(async () => resolveInitial(status))
+  expect(screen.getByText('Selected OpenCode result')).toBeTruthy()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('opencode')
+  expect(providerClient.configure).toHaveBeenCalledExactlyOnceWith('openai/test-model', 'opencode')
 })

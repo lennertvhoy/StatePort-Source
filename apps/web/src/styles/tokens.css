@@ -330,3 +330,11 @@
   --dur-med: 1ms;
   --dur-layout: 1ms;
 }
+
+
+/* Saved panel contrast strengthens existing separators, without changing their
+   width or the theme's surface/status colors. Strong colors are literal in all
+   four themes, so this one-way alias cannot form a variable cycle. */
+:root[data-panel-contrast="increased"] {
+  --border-default: var(--border-strong);
+}

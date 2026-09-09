@@ -569,3 +569,43 @@ describe('seeded history rendering', () => {
     expect(screen.getByTestId('thread-header').textContent).toContain('Web · Delivered')
   })
 })
+
+
+it('saved compact message spacing survives reopening without changing conversation data or controls', async () => {
+  const id = 'ins_cto_pilot'
+  const client = getClient()
+  const before = await client.conversation.get(id)
+  await client.globalSettings.update({ conversation: { compactMessageLayout: true } })
+  const view = renderSurface(id)
+  await waitForReady()
+  await waitFor(() => expect(screen.getByTestId('transcript').firstElementChild?.classList.contains('gap-1.5')).toBe(true))
+  expect(screen.getByTestId('composer')).toBeTruthy()
+  expect(view.container.querySelectorAll('[data-message-id]').length).toBe(before.messages.length)
+  view.unmount()
+  await client.globalSettings.update({ conversation: { compactMessageLayout: false } })
+  renderSurface(id)
+  await waitForReady()
+  await waitFor(() => expect(screen.getByTestId('transcript').firstElementChild?.classList.contains('gap-3')).toBe(true))
+  expect((await client.conversation.get(id)).messages).toEqual(before.messages)
+  expect(screen.getByTestId('composer')).toBeTruthy()
+}, 20_000)
+
+
+it('shows unknown thread delivery neutrally while keeping transcript and send controls', async () => {
+  const client = getClient()
+  const conversation = await client.conversation.get('ins_cto_pilot')
+  const get = vi.spyOn(client.conversation, 'get').mockResolvedValue({ ...conversation, deliveryState: 'unknown' })
+  try {
+    renderSurface('ins_cto_pilot')
+    await waitForReady()
+    const header = screen.getByTestId('thread-header')
+    expect(header.textContent).toContain('Delivery status unavailable')
+    expect(header.textContent).not.toContain('Delivered')
+    expect(header.textContent).not.toContain('Not configured')
+    expect(screen.getByRole('log', { name: 'Conversation transcript' })).toBeTruthy()
+    expect(screen.getByTestId('composer')).toBeTruthy()
+    render(<MemoryRouter><DetailsPanel instanceId="ins_cto_pilot" conversation={{ ...conversation, deliveryState: 'unknown' }}
+      messages={conversation.messages} pinnedIds={[]} onJumpToMessage={() => undefined} /></MemoryRouter>)
+    expect(screen.getAllByText(/Delivery status unavailable/)).toHaveLength(2)
+  } finally { get.mockRestore() }
+}, 20_000)

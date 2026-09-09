@@ -3368,7 +3368,7 @@ export class MockClient implements StatePortClient {
       this.guard()
       const extras = this.refreshExtras()
       return [...Object.values(this.db.operations), ...extras.operations].sort((a, b) =>
-        b.startedAt.localeCompare(a.startedAt),
+        (b.startedAt ?? '').localeCompare(a.startedAt ?? ''),
       )
     },
     get: async (operationId) => {
@@ -3823,6 +3823,8 @@ export class MockClient implements StatePortClient {
       await this.lat()
       return { accepted: false, refusal: { reason: 'execution_unavailable' } }
     },
+    workspaceAuthority: async () => { throw new Error('Workspace authority preparation requires the real service') },
+    prepareWorkspaceAuthority: async () => { throw new Error('Workspace authority preparation requires the real service') },
     createDefaultWorkload: async () => {
       await this.lat()
       return { accepted: false, refusal: { reason: 'execution_unavailable' } }
@@ -3914,6 +3916,9 @@ export class MockClient implements StatePortClient {
   // ── repository import (additive domain, for future wiring) ───────────────────
 
   repositoryImport: StatePortClient['repositoryImport'] = {
+    async inspectPublic() {
+      throw new ClientError('unavailable', 'Public repository acquisition requires a connected StatePort service.')
+    },
     listLocalCandidates: async () => {
       await this.lat()
       this.guard()

@@ -265,6 +265,12 @@ def _require_provisioned_provider_home(target: Mapping[str, Any]) -> None:
                     raise OSError("provider directory ownership differs")
                 if component != "stateport-control" and stat.S_IMODE(info.st_mode) != 0o700:
                     raise OSError("provider directory mode differs")
+    except PermissionError as exc:
+        raise UpdateHostError(
+            "provider_home_updater_identity_unavailable",
+            "the installed updater identity cannot inspect the control account's private provider directory; installed upgrade is blocked by the updater/control-account identity boundary. Re-running provisioning does not resolve this refusal. No supported account handoff is available here; do not change directory permissions or copy authentication files.",
+            effect="not_applied",
+        ) from exc
     except OSError as exc:
         raise UpdateHostError(
             "provider_home_provisioning_required",

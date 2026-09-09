@@ -17,9 +17,11 @@ export async function copyText(text: string): Promise<boolean> {
       el.style.opacity = '0'
       document.body.appendChild(el)
       el.select()
-      document.execCommand('copy')
-      document.body.removeChild(el)
-      return true
+      try {
+        return document.execCommand('copy')
+      } finally {
+        document.body.removeChild(el)
+      }
     } catch {
       return false
     }

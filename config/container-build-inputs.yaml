@@ -191,7 +191,7 @@ definitions:
   apps/web/Dockerfile: sha256:47913635b565fe4bf9b96c6ac106461c3a7286847bbf6527af56f1d1a4f8303f
   apps/worker/Dockerfile: sha256:949a106e76d6cb0016783274f80f305b801c5424024c11660bb595989b3f991f
   apps/runner/Dockerfile: sha256:2895b2ee36cebb8b9133fa930b6ef3cc88d1508dad62fe19aaccca2abdbd49a3
-  images/stateport-dev-workspace/Containerfile: sha256:a7699a362e502d32281db0a6c05c5dca9369451d438297621b3e47f0232a69e8
+  images/stateport-dev-workspace/Containerfile: sha256:b9dca76cc68b6f3663e3baae2bbdd7c8805b73e8962a0e966bc88e17c3582b01
   images/stateport-execution-host/Containerfile: sha256:83554c3ee7077e14f18fc856526bc63fca06dbbb55378feadeb63cb9c5af4b64
   images/stateport-playwright/Containerfile: sha256:c0c36820945e04b5eb451a02e7ae7d6ce939ca76a58c5ee3ecd606cd2eae8c28
   images/packaged-content.v1.yaml: sha256:4c34dbaa74b96fc3bcc5d2c061f7992c4d2513d3b80fab8fead207e2d217818c

@@ -770,11 +770,11 @@ describe('HttpPreviewRoutesClient', () => {
       }],
     ])
     const client = new HttpPreviewRoutesClient(new HttpTransport({ fetchFn: fake.fetchFn }))
-    const route = await client.revoke(ROUTE.routeId, { reason: 'rolled back' })
+    const route = await client.revoke(ROUTE.routeId, { reason: 'rolled back', expectedRouteDigest: ROUTE.routeDigest })
     expect(route.status).toBe('revoked')
     expect(route.revocationReason).toBe('rolled back')
     const call = fake.callsTo('/revoke')[0]
-    expect(call.body).toEqual({ reason: 'rolled back' })
+    expect(call.body).toEqual({ reason: 'rolled back', expectedRouteDigest: ROUTE.routeDigest })
   })
 
   it('atomically rewrites a route to a new revision and port', async () => {
@@ -787,11 +787,19 @@ describe('HttpPreviewRoutesClient', () => {
       }],
     ])
     const client = new HttpPreviewRoutesClient(new HttpTransport({ fetchFn: fake.fetchFn }))
-    const route = await client.rewrite(ROUTE.routeId, { revisionDigest: newDigest, upstreamPort: 4000 })
+    const route = await client.rewrite(ROUTE.routeId, { revisionDigest: newDigest, upstreamPort: 4000, expectedRouteDigest: ROUTE.routeDigest })
     expect(route.revisionDigest).toBe(newDigest)
     expect(route.upstream.port).toBe(4000)
     const call = fake.callsTo('/rewrite')[0]
-    expect(call.body).toEqual({ revisionDigest: newDigest, upstreamPort: 4000 })
+    expect(call.body).toEqual({ revisionDigest: newDigest, upstreamPort: 4000, expectedRouteDigest: ROUTE.routeDigest })
+  })
+
+  it.each(['https://attacker.invalid/', '//attacker.invalid/', '/session', '/preview/other/web/'])('rejects unbound preview navigation %s', async (previewPath) => {
+    const fake = makeFakeFetch([
+      ['GET', '/v1/preview-routes', jsonResponse({ ok: true, result: { routes: [{ ...ROUTE, previewPath }] } })],
+    ])
+    const client = new HttpPreviewRoutesClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    await expect(client.list()).rejects.toBeInstanceOf(ClientError)
   })
 
   it('validates the route document (rejects an unknown schema)', async () => {

@@ -22,13 +22,14 @@
 import { Compass } from 'lucide-react'
 import type { ComponentType, LazyExoticComponent, ReactNode } from 'react'
 import { lazy, Suspense } from 'react'
-import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { HashRouter, Route, Routes } from 'react-router-dom'
 
 import { EmptyState, SkeletonRows } from '@/components'
 import { ApplicationViewGuard } from '@/features/application-experience/ApplicationViewGuard'
 import type { ApplicationDestination } from '@/features/application-experience/registry'
 import { AppShell } from '@/shell/AppShell'
 import { AppContextShell } from '@/shell/AppContextShell'
+import { StartupRoute } from '@/shell/StartupRoute'
 
 // ── Lazy feature surfaces ────────────────────────────────────────────────────
 
@@ -105,7 +106,7 @@ export default function App() {
     <HashRouter>
       <Routes>
         <Route element={<AppShell />}>
-          <Route index element={<Navigate to="/applications" replace />} />
+          <Route index element={<StartupRoute />} />
           <Route path="platform" element={page(PlatformPage)} />
           <Route path="applications" element={page(ApplicationsPage)} />
           <Route path="catalog" element={page(CatalogPage)} />
@@ -113,6 +114,7 @@ export default function App() {
           <Route path="sources/:sourceId" element={page(SourceRegistryPage)} />
           <Route path="statebench" element={page(PlatformStateBenchPage)} />
           <Route path="execution-host" element={page(ExecutionHostPage)} />
+          <Route path="execution-host/workspaces/:instanceId/terminal" element={<Suspense fallback={null}><TerminalTool workspaceOnly /></Suspense>} />
           <Route path="deployments" element={page(PlatformDeploymentsPage)} />
           <Route path="authority" element={page(AuthorityPage)} />
           <Route path="updater" element={page(UpdaterPage)} />

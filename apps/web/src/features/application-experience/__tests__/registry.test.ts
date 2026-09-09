@@ -366,3 +366,26 @@ describe('trusted application-view registry', () => {
     expect(applicationDestinationAvailable(value, 'workbench')).toBe(false)
   })
 })
+
+describe('managed template history routes', () => {
+  it.each([
+    ['stateport.template.projectstate', 'managed-project'],
+    ['stateport.template.studystate', 'managed-study'],
+    ['stateport.template.generic', 'managed-template'],
+  ])('resolves exact granted Runs and Receipts for %s', (applicationId, prefix) => {
+    const controls = [
+      { controlId: `${prefix}-runs`, label: 'Runs', component: 'run_history' as const, capability: 'goal_execution' as const },
+      { controlId: `${prefix}-receipts`, label: 'Receipts', component: 'receipt_list' as const, capability: 'receipts' as const },
+    ].map((control, order) => ({ ...control, order, status: 'available' as const, reasons: [], visible: true }))
+    const value = instance(experience({ applicationId, advancedControls: controls }))
+    value.capabilities.push({ id: 'receipts', status: 'available' })
+    expect(applicationDestinationAvailable(value, 'runs')).toBe(true)
+    expect(applicationDestinationAvailable(value, 'receipts')).toBe(true)
+    for (const control of value.experience!.advancedControls) control.visible = false
+    expect(applicationDestinationAvailable(value, 'runs')).toBe(false)
+    expect(applicationDestinationAvailable(value, 'receipts')).toBe(false)
+    for (const control of value.experience!.advancedControls) { control.visible = true; control.controlId = `foreign-${control.controlId}` }
+    expect(applicationDestinationAvailable(value, 'runs')).toBe(false)
+    expect(applicationDestinationAvailable(value, 'receipts')).toBe(false)
+  })
+})

@@ -1004,3 +1004,88 @@ def test_local_user_cannot_read_authority_index_or_mutate_authority_with_csrf(
     assert status == 403
     assert payload["error"]["code"] == "authority_access_denied"
     assert harness.manager.get_grant(grant_id)["status"] == "active"
+
+
+def test_authority_http_controls_stop_real_file_consumer_and_survive_restart(platform_harness: WebHarness):
+    """Real manager.execute file effects; no deployment adapter/container calls."""
+    from governed_runner.authority import AuthorityRefusal
+    harness = platform_harness
+    manager = harness.manager
+    grants = {}
+    for suffix in ('a', 'b'):
+        grant = grant_template(manager, grant_id=f'grant_browser_{suffix}', profile='balanced',
+            actor_id=ACTOR, role='primary', branch_pattern='main', slice_id=None,
+            application_id=None, run_id=None, paths=(f'proof-{suffix}.txt',),
+            allow=('edit_scoped_files',), require_approval=(), forbid=(),
+            owner_directive_id='OD-BROWSER-AUTHORITY-PROOF', expires_when='timestamp',
+            expires_at='2099-01-01T00:00:00Z', max_actions=100,
+            max_duration_seconds=7200, max_cost_usd=0)
+        grants[suffix] = manager.activate_grant(grant, owner_actor_id='fixture-owner')['grant']
+
+    def consume(suffix, text):
+        path = manager.checkout / f'proof-{suffix}.txt'
+        return manager.execute('edit_scoped_files', lambda: path.write_text(text),
+            actor_id=ACTOR, grant_id=grants[suffix]['grantId'], branch='main', paths=[path.name])
+
+    def pause(paused, reviewed=None):
+        control = harness.get('/v1/authority/index')[1]['result']['control']
+        digest = reviewed or control['controlDigest']
+        return harness.post('/v1/authority/pause', {'paused': paused,
+            'ownerDirectiveId': 'OD-BROWSER-AUTHORITY-PROOF', 'reason': 'source service proof',
+            'controlDigest': digest, 'approval': harness.approval(digest)})
+
+    for suffix in grants:
+        _, receipt = consume(suffix, 'before')
+        assert receipt['result']['status'] == 'succeeded'
+    initial_control = harness.get('/v1/authority/index')[1]['result']['control']['controlDigest']
+    status, paused = pause(True)
+    assert status == 200
+    assert paused['result']['receipt']['result']['status'] == 'succeeded'
+    assert pause(False, initial_control)[0] == 409
+    for suffix in grants:
+        with pytest.raises(AuthorityRefusal) as refused:
+            consume(suffix, 'must not be written')
+        assert refused.value.code == 'autonomous_execution_paused'
+        assert refused.value.receipt['result']['status'] == 'not_executed'
+        assert (manager.checkout / f'proof-{suffix}.txt').read_text() == 'before'
+    assert pause(False)[0] == 200
+    for suffix in grants:
+        consume(suffix, 'unpaused')
+    grant_a = grants['a']
+    status, revoked = harness.post(f"/v1/authority/grants/{grant_a['grantId']}/revoke", {
+        'ownerDirectiveId': 'OD-BROWSER-AUTHORITY-PROOF', 'reason': 'revoke only a',
+        'grantDigest': grant_a['grantDigest'], 'approval': harness.approval(grant_a['grantDigest'])})
+    assert status == 200
+    assert revoked['result']['revokedGrantDigest'] == grant_a['grantDigest']
+    with pytest.raises(AuthorityRefusal) as refused:
+        consume('a', 'must not be written')
+    assert refused.value.code == 'grant_revoked'
+    assert (manager.checkout / 'proof-a.txt').read_text() == 'unpaused'
+    consume('b', 'independent')
+    receipt_files = {path.name: path.read_bytes() for path in manager.receipts_root.glob('*.json')}
+    assert receipt_files
+    old_server = harness.server
+    harness.close()
+    manager = AuthorityManager(manager.checkout, state_root=manager.state_root)
+    harness.manager = manager
+    harness.server = AppServer(('127.0.0.1', 0), old_server.layout,
+                              old_server.product_root / 'apps/web', actor_role='platform_operator')
+    harness.server._authority_manager = manager
+    harness.thread = threading.Thread(target=harness.server.serve_forever, kwargs={'poll_interval': 0.02}, daemon=True)
+    harness.thread.start()
+    harness.port = int(harness.server.server_address[1])
+    harness.origin = f'http://127.0.0.1:{harness.port}'
+    with urlopen(harness.origin + '/session', timeout=10) as response:
+        harness.cookie = response.headers['Set-Cookie'].split(';', 1)[0]
+        harness.csrf = json.loads(response.read())['result']['csrfToken']
+    index = harness.get('/v1/authority/index')[1]['result']
+    assert [grant['grantId'] for grant in index['activeGrants']] == [grants['b']['grantId']]
+    assert index['control']['paused'] is False
+    for name, content in receipt_files.items():
+        assert (manager.receipts_root / name).read_bytes() == content
+    with pytest.raises(AuthorityRefusal) as refused:
+        consume('a', 'must not be written after restart')
+    assert refused.value.code == 'grant_revoked'
+    consume('b', 'after restart')
+    assert (manager.checkout / 'proof-a.txt').read_text() == 'unpaused'
+    assert (manager.checkout / 'proof-b.txt').read_text() == 'after restart'

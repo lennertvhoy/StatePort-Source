@@ -431,3 +431,41 @@ def test_capsule_external_receipt_accepts_capsule_target_class() -> None:
 
 def test_capsule_target_class_registered_in_contracts() -> None:
     assert "capsule" in TARGET_CLASSES
+
+
+def test_capsule_socket_connect_handles_long_path_without_losing_pinned_identity(tmp_path):
+    import os
+    import socket
+    from stateport_terminal_broker.execution_host_gateway import _connect_pinned_socket, _socket_signature
+    from stateport_terminal_broker.broker import TerminalBrokerError
+    parent = tmp_path / ('confined-directory-' + 'x' * 90)
+    parent.mkdir(mode=0o750)
+    target = parent / 'terminal-session.sock'
+    assert len(str(target).encode()) > 107
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(f'/proc/self/fd/{descriptor}/{target.name}')
+        target.chmod(0o660)
+        listener.listen(1)
+        identity = _socket_signature(target.lstat())
+        _connect_pinned_socket(client, target, identity)
+        peer, _ = listener.accept()
+        try:
+            client.sendall(b'pinned real socket')
+            assert peer.recv(64) == b'pinned real socket'
+        finally:
+            peer.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as other:
+            with pytest.raises(TerminalBrokerError, match='identity changed'):
+                _connect_pinned_socket(other, target, (identity[0], identity[1] + 1, *identity[2:]))
+        alias = tmp_path / 'alias'
+        alias.symlink_to(parent, target_is_directory=True)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as other:
+            with pytest.raises(OSError):
+                _connect_pinned_socket(other, alias / target.name, identity)
+    finally:
+        client.close()
+        listener.close()
+        os.close(descriptor)

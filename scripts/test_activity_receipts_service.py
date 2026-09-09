@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+import struct
 import sys
+import threading
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -25,6 +27,14 @@ for relative in (
     "packages/conversation-service/src",
     "packages/context-lifecycle/src",
     "packages/portable-execution/src",
+    "packages/execution-host/src",
+    "packages/codex-adapter/src",
+    "packages/external-engine-runtime/src",
+    "packages/opencode-adapter/src",
+    "packages/container-opencode/src",
+    "packages/run-bundle/src",
+    "packages/sandbox-runtime/src",
+    "packages/statebench/src",
     "packages/runtime-contracts/src",
     "packages/goal-execution/src",
 ):
@@ -34,6 +44,7 @@ for relative in (
 
 from stateport_persistent_app import LocalLayout, PersistentApp  # noqa: E402
 from stateport_persistent_app.activity_receipts import ActivityReceiptError, ActivityReceiptStore  # noqa: E402
+from stateport_persistent_app.service_process import AppServer, Handler  # noqa: E402
 
 
 def _settings_receipt(instance_id: str) -> dict[str, object]:
@@ -86,6 +97,124 @@ def _application_install_receipt(instance_id: str) -> dict[str, object]:
         "consent": "explicit_browser_confirmation",
         "createdAt": "2026-07-19T00:00:00Z",
     }
+
+
+def test_response_serialization_and_non_disconnect_io_errors_propagate() -> None:
+    class Writer:
+        def write(self, body: bytes) -> int:
+            return len(body)
+
+    class FailingWriter:
+        def write(self, body: bytes) -> int:
+            raise OSError("sentinel write failure")
+
+    handler = object.__new__(Handler)
+    handler.close_connection = False
+    handler.wfile = Writer()
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda _key, _value: None
+    handler.end_headers = lambda: (_ for _ in ()).throw(ValueError("sentinel I/O failure"))
+
+    with pytest.raises(ValueError, match="sentinel I/O failure"):
+        Handler._send(handler, 200, {"ok": True})
+    handler.end_headers = lambda: None
+    handler.wfile = FailingWriter()
+    with pytest.raises(OSError, match="sentinel write failure"):
+        Handler._send(handler, 200, {"ok": True})
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        Handler._send(handler, 200, object())
+
+
+def test_client_rst_does_not_trigger_second_error_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    server = AppServer(("127.0.0.1", 0), app.layout, ROOT / "apps" / "web")
+    log_path = Path(server.log.name)
+    response_started = threading.Event()
+    response_release = threading.Event()
+    request_finished = threading.Event()
+    handler_errors: list[tuple[object, object]] = []
+    original_send = Handler._send
+
+    def gated_send(
+        handler: Handler,
+        status: int,
+        payload: object,
+        *,
+        content_type: str = "application/json; charset=utf-8",
+        extra: dict[str, str] | None = None,
+    ) -> None:
+        if not response_started.is_set():
+            response_started.set()
+            assert response_release.wait(timeout=3)
+        original_send(
+            handler,
+            status,
+            payload,
+            content_type=content_type,
+            extra=extra,
+        )
+
+    monkeypatch.setattr(Handler, "_send", gated_send)
+
+    def handle_error(request: object, client_address: object) -> None:
+        handler_errors.append((request, client_address))
+
+    server.handle_error = handle_error  # type: ignore[method-assign]
+    original_process_request_thread = server.process_request_thread
+
+    def tracked_process_request_thread(request: object, client_address: object) -> None:
+        try:
+            original_process_request_thread(request, client_address)
+        finally:
+            request_finished.set()
+
+    server.process_request_thread = tracked_process_request_thread  # type: ignore[method-assign]
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
+    thread.start()
+    port = int(server.server_address[1])
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as probe:
+            probe.sendall(
+                (
+                    f"GET /health HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{port}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+            )
+            assert response_started.wait(timeout=3)
+            probe.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_LINGER,
+                struct.pack("ii", 1, 0),
+            )
+        response_release.set()
+        assert request_finished.wait(timeout=3)
+
+        server.log.flush()
+        log_text = log_path.read_text(encoding="utf-8")
+        assert handler_errors == []
+        assert "status=400" not in log_text
+
+        with urlopen(f"http://127.0.0.1:{port}/health", timeout=3) as response:
+            assert response.status == 200
+            assert json.loads(response.read())["result"]["status"] == "ok"
+    finally:
+        response_release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        server.log.close()
 
 
 def test_activity_projection_persists_attention_state_and_receipt_details(tmp_path: Path) -> None:

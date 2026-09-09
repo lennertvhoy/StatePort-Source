@@ -470,7 +470,7 @@ export default function AppOverviewPage() {
           currentName={instance.name}
           onOpenChange={setRenameOpen}
           onSubmit={async (name) => {
-            await getClient().applications.rename(instance.id, name)
+            await getClient().applications.rename(instance.id, name, instance.name)
             invalidateInstanceCache(instance.id)
             pushToast({ kind: 'success', title: `Renamed to ${name}` })
             refresh()

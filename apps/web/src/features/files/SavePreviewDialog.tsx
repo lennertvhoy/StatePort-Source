@@ -1,9 +1,10 @@
 /**
  * SavePreviewDialog — THE governed write flow (files.md §The governed save
  * flow; brief "File-write workflow"). Ctrl/Cmd+S or "Review & save" opens
- * this preview; nothing ever writes silently.
+ * this confirmation; the saved preference controls diff visibility only.
+ * Nothing ever writes silently.
  *
- *   review exact diff → affected paths → warnings → Confirm → typed write
+ *   optional exact diff → affected paths → warnings → Confirm → typed write
  *   (expectedRevision) → validated write → receipt link | honest conflict /
  *   path-policy / read-only / write-failure outcomes.
  *
@@ -92,6 +93,7 @@ export function SavePreviewDialog({
   const [saving, setSaving] = useState(false)
   const [failures, setFailures] = useState<Record<string, FileFailure>>({})
   const [discardOpen, setDiscardOpen] = useState(false)
+  const [reloadError, setReloadError] = useState<string | null>(null)
   const isMobile = useIsMobile()
 
   const dirtyDocs = useMemo(() => {
@@ -206,15 +208,29 @@ export function SavePreviewDialog({
     }
   }
 
-  const reloadDisk = (doc: FileDoc) => {
-    void useFilesStore.getState().reloadDocument(instanceId, doc.path)
-    onAnnounce?.(`Reloaded ${doc.path} from disk. Your edited version was discarded.`)
-  }
-
-  const copyThenReload = (doc: FileDoc) => {
-    void copyText(doc.draft)
-    void useFilesStore.getState().reloadDocument(instanceId, doc.path)
-    onAnnounce?.(`Copied your version of ${doc.path}, then reloaded the disk version.`)
+  const reloadDisk = async (doc: FileDoc, copyFirst = false) => {
+    if (saving) return
+    setSaving(true)
+    setReloadError(null)
+    try {
+      if (copyFirst && !(await copyText(doc.draft))) {
+        setReloadError('Copy failed. Your editor content is preserved; allow clipboard access or copy it manually before reloading.')
+        return
+      }
+      const reloaded = await useFilesStore.getState().reloadDocument(instanceId, doc.path, {
+        draft: doc.draft,
+        revision: doc.revision,
+      })
+      if (!reloaded) {
+        setReloadError('The disk version could not be loaded. Your editor content is preserved.')
+      } else if (docIsDirty(reloaded)) {
+        onAnnounce?.(`Loaded the disk version of ${doc.path}. Your newer editor changes were preserved.`)
+      } else {
+        onAnnounce?.(`${copyFirst ? 'Copied your reviewed version, then reloaded' : 'Reloaded'} ${doc.path} from disk.`)
+      }
+    } finally {
+      setSaving(false)
+    }
   }
 
   const discardAll = () => {
@@ -227,7 +243,7 @@ export function SavePreviewDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next) }}>
         <DialogContent
           className={cn(
             'flex flex-col gap-0 overflow-hidden border-border bg-surface p-0 shadow-2',
@@ -241,20 +257,24 @@ export function SavePreviewDialog({
             <div className="flex items-center justify-between gap-2 pr-6">
               <DialogTitle className="flex items-center gap-2 text-xl">
                 <FileDiff className="size-5 text-foreground-secondary" aria-hidden="true" />
-                Review changes — {dirtyDocs.length} file{dirtyDocs.length === 1 ? '' : 's'}
+                {settings.previewDiffBeforeSave ? 'Review changes' : 'Confirm changes'} — {dirtyDocs.length} file{dirtyDocs.length === 1 ? '' : 's'}
               </DialogTitle>
-              <ModeToggle mode={mode} onChange={setMode} />
+              {settings.previewDiffBeforeSave && <ModeToggle mode={mode} onChange={setMode} />}
             </div>
             <DialogDescription className="sr-only">
-              Review the exact affected paths and diff before confirming this governed file write.
+              {settings.previewDiffBeforeSave ? 'Review the exact affected paths and diff before confirming this governed file write.' : 'Review the affected paths and confirm this governed file write. Diff preview is disabled in editor settings.'}
             </DialogDescription>
           </DialogHeader>
+          {!settings.previewDiffBeforeSave && <div className="px-4 pt-3"><InlineNotice tone="attention" title="Diff preview disabled">
+            Your editor preference hides the diff. Review the affected paths below; nothing is written until you explicitly confirm.
+          </InlineNotice></div>}
+          {reloadError ? <div className="p-3"><InlineNotice tone="danger" title="Reload could not be completed">{reloadError}</InlineNotice></div> : null}
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
             {originNote ? (
               <div className="mb-3">
                 <InlineNotice tone="informational" title="Proposed change">
-                  {originNote} It is staged as an unsaved edit — review the diff before saving.
+                  {originNote} It is staged as an unsaved edit — {settings.previewDiffBeforeSave ? 'review the diff' : 'review the affected paths'} before saving.
                 </InlineNotice>
               </div>
             ) : null}
@@ -293,10 +313,11 @@ export function SavePreviewDialog({
                         {doc.conflict.detail}
                       </InlineNotice>
                       <p className="text-xs text-foreground-secondary">
-                        The diff below compares the current disk version (left/before) with your edited version
-                        (right/after). Choose how to proceed — nothing is overwritten silently.
+                        {settings.previewDiffBeforeSave
+                          ? 'The diff below compares the current disk version (left/before) with your edited version (right/after).'
+                          : 'Diff preview is disabled. Your edited version would replace the changed disk version.'} Choose how to proceed — nothing is overwritten silently.
                       </p>
-                      <div className="h-56 overflow-hidden rounded-sm border border-border">
+                      {settings.previewDiffBeforeSave && <div className="h-56 overflow-hidden rounded-sm border border-border">
                         <DiffView
                           path={doc.path}
                           original={doc.conflict.currentContent}
@@ -305,15 +326,15 @@ export function SavePreviewDialog({
                           settings={settings}
                           ariaLabel={`Conflict diff for ${doc.path}`}
                         />
-                      </div>
+                      </div>}
                       <div className="flex flex-wrap items-center gap-2">
                         <Button size="sm" onClick={() => void saveAnyway(doc)} disabled={saving} data-testid={`conflict-save-anyway-${doc.path}`}>
                           Save my version anyway
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => reloadDisk(doc)} disabled={saving}>
+                        <Button size="sm" variant="outline" onClick={() => void reloadDisk(doc)} disabled={saving}>
                           Reload disk version
                         </Button>
-                        <Button size="sm" variant="ghost" onClick={() => copyThenReload(doc)} disabled={saving}>
+                        <Button size="sm" variant="ghost" onClick={() => void reloadDisk(doc, true)} disabled={saving}>
                           Copy my version, then reload
                         </Button>
                       </div>
@@ -356,7 +377,7 @@ export function SavePreviewDialog({
                           </InlineNotice>
                         </div>
                       ) : null}
-                      <div className="h-64 overflow-hidden">
+                      {settings.previewDiffBeforeSave && <div className="h-64 overflow-hidden">
                         <DiffView
                           path={doc.path}
                           original={doc.savedContent}
@@ -365,7 +386,7 @@ export function SavePreviewDialog({
                           settings={settings}
                           ariaLabel={`Diff of ${doc.path}`}
                         />
-                      </div>
+                      </div>}
                     </>
                   )}
                 </section>

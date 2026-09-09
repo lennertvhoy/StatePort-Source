@@ -19,6 +19,7 @@ import type {
 } from '@/client'
 import { ClientError, getClient } from '@/client'
 import { useCurrentInstance } from '@/shell/currentInstance'
+import { useSessionStore } from '@/state'
 
 import type { RunPhase } from './infrastructureModel'
 
@@ -195,31 +196,51 @@ export function useInfrastructure(instanceId: string): InfrastructureState & Inf
 
   // ── Read-only operations ───────────────────────────────────────────────────
   const observe = useCallback(async () => {
-    const next = await getClient().infrastructure.observe(instanceId)
-    setTarget(next)
-    setTargetUnavailable(!next.available)
-    setUnavailableReason(next.unavailableReason)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+    try {
+      const next = await getClient().infrastructure.observe(instanceId)
+      setTarget(next)
+      setTargetUnavailable(!next.available)
+      setUnavailableReason(next.unavailableReason)
+    } finally {
+      releaseOperationsMutation()
+    }
   }, [instanceId])
 
   const validateConfiguration = useCallback(async () => {
-    const result = await getClient().infrastructure.validateConfiguration(instanceId)
-    setReceipts((prev) => [result.receipt, ...prev])
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+    try {
+      const result = await getClient().infrastructure.validateConfiguration(instanceId)
+      setReceipts((prev) => [result.receipt, ...prev])
+    } finally {
+      releaseOperationsMutation()
+    }
   }, [instanceId])
 
   const healthCheck = useCallback(async () => {
-    const result = await getClient().infrastructure.healthCheck(instanceId)
-    setTarget(result.target)
-    setReceipts((prev) => [result.receipt, ...prev])
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+    try {
+      const result = await getClient().infrastructure.healthCheck(instanceId)
+      setTarget(result.target)
+      setReceipts((prev) => [result.receipt, ...prev])
+    } finally {
+      releaseOperationsMutation()
+    }
   }, [instanceId])
 
   // ── Plan lifecycle ─────────────────────────────────────────────────────────
   const preparePlan = useCallback(
     async (operation: InfrastructureOperation): Promise<InfrastructurePlan> => {
-      const plan = await getClient().infrastructure.preparePlan(instanceId, operation)
-      setPlans((prev) => [plan, ...prev.filter((p) => p.id !== plan.id)])
-      setActivePlanId(plan.id)
-      setRun(null)
-      return plan
+      const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+      try {
+        const plan = await getClient().infrastructure.preparePlan(instanceId, operation)
+        setPlans((prev) => [plan, ...prev.filter((p) => p.id !== plan.id)])
+        setActivePlanId(plan.id)
+        setRun(null)
+        return plan
+      } finally {
+        releaseOperationsMutation()
+      }
     },
     [instanceId],
   )
@@ -237,6 +258,7 @@ export function useInfrastructure(instanceId: string): InfrastructureState & Inf
   const runPlan = useCallback(
     async (plan: InfrastructurePlan): Promise<void> => {
       const client = getClient()
+      const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
       const startedAt = new Date().toISOString()
       setRun({
         planId: plan.id,
@@ -335,6 +357,7 @@ export function useInfrastructure(instanceId: string): InfrastructureState & Inf
             : prev,
         )
       } finally {
+        releaseOperationsMutation()
         // Refresh truth after the run settles (VM power/SSH/health moved).
         try {
           const next = await client.infrastructure.getTarget(instanceId)
@@ -351,24 +374,39 @@ export function useInfrastructure(instanceId: string): InfrastructureState & Inf
 
   // ── Daily-driver authorization ─────────────────────────────────────────────
   const proposeAuthorization = useCallback(async () => {
-    const grant = await getClient().infrastructure.proposeAuthorization(instanceId)
-    setAuthorization(grant)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+    try {
+      const grant = await getClient().infrastructure.proposeAuthorization(instanceId)
+      setAuthorization(grant)
+    } finally {
+      releaseOperationsMutation()
+    }
   }, [instanceId])
 
   const activateAuthorization = useCallback(
     async (approvalId: string) => {
-      const result = await getClient().infrastructure.activateAuthorization(instanceId, { approvalId })
-      setAuthorization(result.grant)
-      setReceipts((prev) => [result.receipt, ...prev])
+      const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+      try {
+        const result = await getClient().infrastructure.activateAuthorization(instanceId, { approvalId })
+        setAuthorization(result.grant)
+        setReceipts((prev) => [result.receipt, ...prev])
+      } finally {
+        releaseOperationsMutation()
+      }
     },
     [instanceId],
   )
 
   const revokeAuthorization = useCallback(async (): Promise<Receipt | null> => {
-    const result = await getClient().infrastructure.revokeAuthorization(instanceId)
-    setAuthorization(result.grant)
-    setReceipts((prev) => [result.receipt, ...prev])
-    return result.receipt
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+    try {
+      const result = await getClient().infrastructure.revokeAuthorization(instanceId)
+      setAuthorization(result.grant)
+      setReceipts((prev) => [result.receipt, ...prev])
+      return result.receipt
+    } finally {
+      releaseOperationsMutation()
+    }
   }, [instanceId])
 
   return {

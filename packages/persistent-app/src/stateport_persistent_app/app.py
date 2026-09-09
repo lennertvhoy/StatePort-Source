@@ -5,6 +5,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+from functools import wraps
 import json
 import os
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ from instance_backup import (
     restore_staging_retained,
 )
 from instance_catalog import CatalogError, CatalogSchemaError, InstanceCatalog
+from instance_catalog.catalog import CatalogConflictError, catalog_lock, reviewed_name_change
 from stateport_persistent_app.repository_content import (
     RepositoryContentError,
     repository_content_snapshot,
@@ -106,6 +108,12 @@ class AppError(ValueError):
     """A safe, user-facing local application error."""
 
 
+class ApplicationRenameError(AppError):
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
 class BootstrapError(AppError):
     pass
 
@@ -146,6 +154,9 @@ def _managed_incarnation_binding(
     try:
         payload = os.read(descriptor, 4097)
         after = os.fstat(descriptor)
+        fsid = os.fstatvfs(descriptor).f_fsid
+        if type(fsid) is not int or not 0 < fsid < 2**64:
+            raise AppError("managed instance filesystem identity is unavailable")
     finally:
         os.close(descriptor)
     before_identity = (
@@ -186,9 +197,28 @@ def _managed_incarnation_binding(
         "markerFilesystem": {
             "device": after.st_dev,
             "inode": after.st_ino,
+            "filesystemId": f"statvfs:{fsid:016x}",
             "kind": "regular_file",
         },
     }
+
+
+def _managed_incarnation_equivalent(expected: Any, observed: Mapping[str, Any]) -> bool:
+    if not isinstance(expected, Mapping) or not isinstance(expected.get("markerFilesystem"), Mapping):
+        return False
+    old = dict(expected["markerFilesystem"])
+    new = dict(observed["markerFilesystem"])
+    if any(type(old.get(key)) is not int or old[key] < 0 for key in ("device", "inode")):
+        return False
+    if "filesystemId" in old:
+        # Keep inode and persistent filesystem ID; only mount-local device IDs vary.
+        old.pop("device", None)
+        new.pop("device", None)
+    else:
+        # Legacy comparison retains its original exact device/inode requirement.
+        new.pop("filesystemId", None)
+    return secrets.compare_digest(_digest({**expected, "markerFilesystem": old}),
+                                  _digest({**observed, "markerFilesystem": new}))
 
 
 def _managed_incarnation_matches(
@@ -205,10 +235,7 @@ def _managed_incarnation_matches(
         )
     except AppError:
         return False
-    return secrets.compare_digest(
-        _digest(dict(expected)),
-        _digest(observed),
-    )
+    return _managed_incarnation_equivalent(expected, observed)
 
 
 def initialize_instance_repository(root: Path | str) -> str:
@@ -629,6 +656,16 @@ def _load_json(path: Path, default: Any) -> Any:
         raise AppError(f"invalid JSON metadata {path}: {exc}") from exc
 
 
+def _catalog_mutation(method):
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        # All external writers share one outer lock. Canonical operations take
+        # their existing inner lock in this order; no inverse order is used.
+        with catalog_lock(self.layout.external_catalog_file.with_suffix(".json.lock")):
+            return method(self, *args, **kwargs)
+    return serialized
+
+
 class PersistentCatalog:
     def __init__(self, layout: LocalLayout):
         self.layout = layout
@@ -686,6 +723,7 @@ class PersistentCatalog:
             "lastBackup": value.get("lastBackup"),
         }
 
+    @_catalog_mutation
     def register_external(self, path: Path, *, instance_id: str, name: str, application_id: str, source: Mapping[str, Any]) -> dict[str, Any]:
         root = _safe_instance_root(path, must_exist=True).resolve(strict=True)
         if not re.fullmatch(r"[a-z][a-z0-9-]{1,63}", instance_id):
@@ -733,6 +771,7 @@ class PersistentCatalog:
         self._external_write(entries)
         return self._external_entry(entry)
 
+    @_catalog_mutation
     def rebind_external_content(
         self,
         instance_id: str,
@@ -794,12 +833,17 @@ class PersistentCatalog:
         value["path"] = root.as_posix()
         managed_incarnation = metadata.get("managedIncarnation")
         if managed_incarnation is not None and value.get("pathState") == "present":
-            if not _managed_incarnation_matches(
-                root,
-                str(value.get("instanceId", "")),
-                managed_incarnation,
-            ):
+            try:
+                observed = _managed_incarnation_binding(root, expected_instance_id=record.instance_id)
+            except (AppError, OSError):
+                observed = None
+            if observed is None or not _managed_incarnation_equivalent(managed_incarnation, observed):
                 value["pathState"] = "stale"
+            elif "filesystemId" not in managed_incarnation["markerFilesystem"]:
+                upgraded = self._canonical().merge_metadata_if_matches(record, {"managedIncarnation": observed})
+                if upgraded is not None:
+                    metadata = dict(upgraded.metadata)
+                    value["metadata"] = metadata
         value["applicationId"] = metadata.get("applicationId", "studydd")
         value["observedSource"] = dict(metadata.get("source", {}))
         value["lastVerifiedAt"] = metadata.get("lastVerifiedAt", record.last_validated_at)
@@ -833,7 +877,7 @@ class PersistentCatalog:
                 root,
                 expected_instance_id=instance_id,
             )
-            if _digest(observed_incarnation) != _digest(dict(managed_incarnation)):
+            if not _managed_incarnation_equivalent(managed_incarnation, observed_incarnation):
                 raise AppError("managed instance incarnation changed before catalog registration")
             metadata["managedIncarnation"] = observed_incarnation
         try:
@@ -881,6 +925,24 @@ class PersistentCatalog:
             raise AppError(str(exc)) from exc
         return self._entry(record)
 
+    def operation_owners(self) -> list[dict[str, Any]]:
+        """Read current catalog membership without inspecting repository contents."""
+        try:
+            entries = [{"instanceId": record.instance_id,
+                        "applicationId": record.metadata.get("applicationId", "studydd"),
+                        "infrastructure": False}
+                       for record in self._canonical().list(refresh=False)]
+        except CatalogSchemaError as exc:
+            raise AppError("legacy catalog detected; StatePort will not use it as a dashboard source") from exc
+        entries.extend({"instanceId": entry["instanceId"],
+                        "applicationId": entry.get("applicationId", "nixos-infrastructure"),
+                        "repositoryPath": entry.get("path"),
+                        "repositoryFilesystem": entry.get("filesystem"),
+                        "infrastructure": entry.get("applicationId", "nixos-infrastructure") == "nixos-infrastructure"
+                        and entry.get("metadata", {}).get("externalRepository") is True}
+                       for entry in self._external_load())
+        return entries
+
     def list(self) -> list[dict[str, Any]]:
         try:
             return [self._entry(record) for record in self._canonical().list()] + [self._external_entry(item) for item in self._external_load()]
@@ -896,6 +958,35 @@ class PersistentCatalog:
         except CatalogError as exc:
             raise AppError(str(exc)) from exc
 
+    @_catalog_mutation
+    def rename(self, instance_id: str, *, name: str, expected_name: str,
+               actor_id: str, actor_role: str) -> dict[str, Any]:
+        try:
+            entries = self._external_load()
+            for item in entries:
+                if item.get("instanceId") != instance_id:
+                    continue
+                metadata, receipt, replayed = reviewed_name_change(
+                    instance_id, item["name"], item.get("metadata", {}), name=name,
+                    expected_name=expected_name, actor_id=actor_id, actor_role=actor_role,
+                )
+                if not replayed:
+                    item.update(name=name, metadata=metadata, updatedAt=_now())
+                    self._external_write(entries)
+                break
+            else:
+                _record, receipt, replayed = self._canonical().rename_reviewed(
+                    instance_id, name, expected_name=expected_name,
+                    actor_id=actor_id, actor_role=actor_role,
+                )
+        except CatalogConflictError as exc:
+            raise ApplicationRenameError("rename_conflict", str(exc)) from exc
+        except CatalogError as exc:
+            raise ApplicationRenameError("rename_invalid", str(exc)) from exc
+        return {"formatVersion": "stateport.application-rename-result/v1",
+                "instanceId": instance_id, "name": name, "receipt": receipt, "replayed": replayed}
+
+    @_catalog_mutation
     def forget(self, instance_id: str) -> dict[str, Any]:
         external = self._external_load()
         retained = [item for item in external if item.get("instanceId") != instance_id]
@@ -943,6 +1034,7 @@ class PersistentCatalog:
             return False
         return removed is not None
 
+    @_catalog_mutation
     def update(self, instance_id: str, **fields: Any) -> dict[str, Any]:
         external = self._external_load()
         for item in external:
@@ -954,10 +1046,7 @@ class PersistentCatalog:
                 self._external_write(external)
                 return self._external_entry(item)
         try:
-            record = self._canonical().get(instance_id)
-            metadata = dict(record.metadata)
-            metadata.update(fields)
-            return self._entry(self._canonical().update_metadata(instance_id, metadata))
+            return self._entry(self._canonical().merge_metadata(instance_id, fields))
         except CatalogError as exc:
             raise AppError(str(exc)) from exc
 
@@ -2516,7 +2605,7 @@ class PersistentApp:
         identity = inspection.get("sourceIdentity")
         if (
             inspection.get("formatVersion") != "stateport.repository-inspection/v1"
-            or inspection.get("sourceKind") != "local"
+            or inspection.get("sourceKind") not in {"local", "public_https"}
             or not isinstance(identity, Mapping)
             or not isinstance(identity.get("headCommit"), str)
             or not _GIT_OID.fullmatch(str(identity.get("headCommit")))
@@ -2525,9 +2614,9 @@ class PersistentApp:
             or not isinstance(identity.get("dirty"), bool)
             or not isinstance(identity.get("contentIdentity"), Mapping)
         ):
-            raise AppError("repository inspection lacks an exact local Git identity")
+            raise AppError("repository inspection lacks an exact Git identity")
         return {
-            "sourceKind": "local_git_snapshot",
+            "sourceKind": "public_git_snapshot" if inspection.get("sourceKind") == "public_https" else "local_git_snapshot",
             "resolvedCommit": str(identity["headCommit"]),
             "resolvedTree": str(identity["headTree"]),
             "workingTreeDirty": bool(identity["dirty"]),
@@ -2770,6 +2859,8 @@ class PersistentApp:
                 "resolvedTree": expected_tree,
                 "workingTreeChangesExcluded": True,
             }
+            if source.get("sourceKind") == "public_git_snapshot":
+                origin["remote"] = source["remote"]
             catalog_entry = self.catalog.register(
                 destination,
                 instance_id=instance_id,
@@ -3457,6 +3548,16 @@ class PersistentApp:
             source=source,
         )
 
+    def rename_instance(self, instance_id: str, *, name: Any, expected_name: Any,
+                        actor_id: str, actor_role: str) -> dict[str, Any]:
+        """Change the local display name without touching source or instance files."""
+        if actor_role not in {"local_user", "platform_operator"}:
+            raise ApplicationRenameError("rename_forbidden", "application rename requires local mutation authority")
+        if not isinstance(name, str) or not isinstance(expected_name, str):
+            raise ApplicationRenameError("rename_invalid", "application name and reviewed name must be strings")
+        return self.catalog.rename(instance_id, name=name, expected_name=expected_name,
+                                   actor_id=actor_id, actor_role=actor_role)
+
     def instance_list_public(self) -> list[dict[str, Any]]:
         """Return the browser-safe catalog representation without local paths."""
 
@@ -3490,6 +3591,14 @@ class PersistentApp:
             item.pop("metadata", None)
             public.append(item)
         return public
+
+    def application_rename_receipts(self, instance_id: str) -> list[dict[str, Any]]:
+        """Read the atomic catalog history used to rebuild the receipt index."""
+        metadata = self.catalog.get(instance_id).get("metadata", {})
+        history = metadata.get("displayNameChanges", []) if isinstance(metadata, Mapping) else None
+        if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+            raise AppError("catalog name-change history is invalid")
+        return copy.deepcopy(history)
 
     @staticmethod
     def _validated_application_install_receipt(
@@ -4675,6 +4784,8 @@ class PersistentApp:
                 "sourceBindingDigest"
             ):
                 raise AppError("restore source binding changed after planning")
+            if not isinstance(source_entry.get("applicationId"), str) or not source_entry["applicationId"]:
+                raise AppError("restore source application identity is invalid")
             planned_source_access = plan.get("effects", {}).get("sourceAccess")
             if planned_source_access != source_binding.get("sourceAccess"):
                 raise AppError("restore source access changed after planning")
@@ -4751,6 +4862,7 @@ class PersistentApp:
                     instance_id=destination_instance_id,
                     name=str(plan["destinationName"]),
                     source=catalog_source,
+                    application_id=source_entry["applicationId"],
                 )
                 if source_access:
                     require_source_access_unchanged()

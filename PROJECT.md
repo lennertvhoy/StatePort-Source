@@ -15,7 +15,43 @@ StudyState templates and any other template that satisfies the supported public
 template contract. The API, worker, execution host, persistence, restart, and
 template actions work together; success is not limited to a compiled frontend.
 
+## Owner acceptance additions — 2026-09-05
+
+The next product session must establish both UI correctness and UI completeness.
+Every visible feature must work through its real backend/orchestration effect,
+including durable state and failure/recovery behavior. Separately, all operations
+needed for the supported product journey must be available in the UI. Inspect
+container/workspace lifecycle controls, coding-agent/provider selection and
+management, orchestration, approvals, execution, results and recovery explicitly.
+An API or CLI capability alone does not satisfy a required UI operation. Inventory
+supported and intended agents/providers; record missing implementations or controls
+honestly rather than silently shrinking the supported product to what already works.
+
+The product must run efficiently on a decent office laptop: a decent general-purpose
+CPU, 16 GB total system RAM, SSD storage and integrated graphics. No discrete GPU
+may be required for the supported product journey. Exact CPU and free-disk figures
+are not specified. Measure the complete installed stack, including WSL/container
+and browser overhead, idle and representative active workloads, CPU, memory, swap,
+disk growth and responsiveness. Leave usable capacity for ordinary office work;
+do not treat all 16 GB as StatePort's memory budget. Identify and remove unnecessary
+services, polling, duplicate work and unbounded concurrency using measurements.
+Resource reductions must preserve functionality, persistence and isolation.
+
+A dependable anonymous installer remains a foundation of acceptance. Agent-owned
+UI and efficiency checks must ultimately run against the complete installed product;
+a developer environment alone does not establish readiness. Routine qualification
+stays on the workstation using bounded virtualization/containers, not the owner's
+work laptop. The hardware target is a product requirement, not a claim of measured
+compatibility or authorization to move tests to that laptop.
+
 ## Scope
+
+Owner execution directive, 2026-09-05: prepare the next session as a sustained
+orchestrator with bounded parallel work until 2026-09-06 07:00 Europe/Brussels
+(05:00 UTC). Prioritize complete application workspace management, qualified
+provider execution, installed UI journeys and measured office-machine resource
+use. The execution plan is in `evidence/one-line-release-001/overnight-handoff.md`;
+this time window does not relax product acceptance or authorize unqualified release.
 
 - Excellent public documentation centered on the supported user journey.
 - One anonymous, integrity-checked installer command for Windows 11 + WSL2 +

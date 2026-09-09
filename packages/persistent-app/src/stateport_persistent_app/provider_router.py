@@ -1,6 +1,6 @@
 """One durable provider authority for the first StatePort AI vertical slice.
 
-The router deliberately supports one selected Codex profile. It does not own
+The router persists one selected provider profile. Only Codex invocation is enabled. It does not own
 credentials, fallback chains, or agent state. Those remain outside canonical
 application state and are only widened after the first application outcome is
 qualified.
@@ -23,6 +23,12 @@ from external_engine_runtime import ProcessIdentity, ProcessRuntimeError, decode
 
 
 FORMAT = "stateport.provider-router/v1"
+PROVIDERS = {
+    key: {"id": f"{key}-local", "backendId": key, "adapterId": f"{key}-cli",
+          "authenticationRouteClass": "operator_authenticated_unverified"}
+    for key in ("codex", "opencode")
+}
+OPENCODE_REFUSAL = "sandboxed_validation_not_implemented"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -103,7 +109,7 @@ def _safe_path(value: Path | str) -> Path:
 
 
 class ProviderRouter:
-    """Resolve and invoke the one explicitly selected Codex runtime profile."""
+    """Resolve the selected provider; refuse unsupported execution before effects."""
 
     def __init__(
         self,
@@ -112,8 +118,18 @@ class ProviderRouter:
         adapter: CodexAdapter | None = None,
     ) -> None:
         self.profile_path = _safe_path(profile_path)
-        self.adapter = adapter or CodexAdapter()
         self._profile = self._load_profile()
+        self._adapter = adapter
+
+    @property
+    def adapter(self):
+        if self._adapter is None:
+            if self._profile['provider']['backendId'] == 'opencode':
+                from opencode_adapter import OpenCodeAdapter
+                self._adapter = OpenCodeAdapter()
+            else:
+                self._adapter = CodexAdapter()
+        return self._adapter
 
     @staticmethod
     def configure_codex(
@@ -123,8 +139,16 @@ class ProviderRouter:
         time_seconds: int = 120,
         steps: int = 8,
     ) -> dict[str, Any]:
+        return ProviderRouter.configure(profile_path, provider_id="codex", model_identifier=model_identifier,
+                                        time_seconds=time_seconds, steps=steps)
+
+    @staticmethod
+    def configure(profile_path: Path | str, *, provider_id: str, model_identifier: str,
+                  time_seconds: int = 120, steps: int = 8) -> dict[str, Any]:
+        if not isinstance(provider_id, str) or provider_id not in PROVIDERS:
+            raise ProviderRouterError("provider identity is invalid")
         path = _safe_path(profile_path)
-        if _MODEL.fullmatch(model_identifier) is None:
+        if not isinstance(model_identifier, str) or _MODEL.fullmatch(model_identifier) is None:
             raise ProviderRouterError("model identifier is invalid")
         if (
             isinstance(time_seconds, bool)
@@ -137,12 +161,7 @@ class ProviderRouter:
         profile: dict[str, Any] = {
             "formatVersion": FORMAT,
             "revision": 1,
-            "provider": {
-                "id": "codex-local",
-                "backendId": "codex",
-                "adapterId": "codex-cli",
-                "authenticationRouteClass": "operator_authenticated_unverified",
-            },
+            "provider": dict(PROVIDERS[provider_id]),
             "model": {"id": model_identifier},
             "sandbox": {"profile": "workspace-write"},
             "budgets": {
@@ -172,12 +191,16 @@ class ProviderRouter:
         return profile
 
     def _load_profile(self) -> dict[str, Any]:
-        if not self.profile_path.is_file() or self.profile_path.is_symlink():
+        return self.read_profile(self.profile_path)
+
+    @staticmethod
+    def read_profile(profile_path: Path) -> dict[str, Any]:
+        if not profile_path.is_file() or profile_path.is_symlink():
             raise ProviderRouterError(
-                "provider profile is not configured; select an explicit Codex model first"
+                "provider profile is not configured; select an explicit provider and model first"
             )
         try:
-            value = json.loads(self.profile_path.read_text(encoding="utf-8"))
+            value = json.loads(profile_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ProviderRouterError("provider profile is unreadable") from exc
         if not isinstance(value, dict):
@@ -201,13 +224,8 @@ class ProviderRouter:
             "id", "backendId", "adapterId", "authenticationRouteClass"
         }:
             raise ProviderRouterError("provider identity is invalid")
-        if provider != {
-            "id": "codex-local",
-            "backendId": "codex",
-            "adapterId": "codex-cli",
-            "authenticationRouteClass": "operator_authenticated_unverified",
-        }:
-            raise ProviderRouterError("only the bounded Codex provider is supported")
+        if provider not in PROVIDERS.values():
+            raise ProviderRouterError("provider identity is invalid")
         if (
             not isinstance(model, dict)
             or set(model) != {"id"}
@@ -270,9 +288,14 @@ class ProviderRouter:
         on_started: Callable[[ProcessIdentity], None] | None = None,
         on_finished: Callable[[ProcessIdentity], None] | None = None,
     ) -> ProviderInvocation:
-        if self.profile_path.with_suffix(".disabled").exists():
-            raise ProviderRouterError("provider_disconnected")
+        previous_provider = self._profile['provider']['backendId']
         self._profile = self._load_profile()
+        if self._profile['provider']['backendId'] != previous_provider:
+            self._adapter = None
+        if self._profile['provider']['backendId'] == 'opencode':
+            raise ProviderRouterError(OPENCODE_REFUSAL)
+        if os.path.lexists(self.profile_path.with_suffix(".disabled")):
+            raise ProviderRouterError("provider_disconnected")
         for value, label in (
             (work_id, "work_id"), (attempt_id, "attempt_id"),
             (instance_id, "instance_id"), (conversation_id, "conversation_id"),

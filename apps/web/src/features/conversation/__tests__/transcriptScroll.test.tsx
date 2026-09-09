@@ -5,9 +5,9 @@
  * delivers `scroll` after `wheel`, so waiting for onScroll leaves a race where
  * a stream delta can yank the reader back to the bottom first.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ConversationMessage, ConversationSettings } from '@/client'
 
@@ -88,4 +88,42 @@ describe('Transcript streaming scroll anchoring', () => {
     expect(scrollTop).toBe(0)
     expect(screen.getByTestId('jump-to-latest')).toBeTruthy()
   })
+})
+
+
+// Substitute viewport geometry only; actual Transcript/MessageRow behavior remains.
+const measurements = vi.hoisted(() => ({ measure: vi.fn() }))
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 110,
+    getVirtualItems: () => count ? [{ index: 1, key: 1, start: 110, size: 110 }] : [],
+    measureElement: () => undefined,
+    measure: measurements.measure,
+    scrollToIndex: () => undefined,
+  }),
+}))
+afterEach(cleanup)
+
+it('applies compact spacing to virtualized rows and remeasures without changing sidecar density', () => {
+  const messages = Array.from({ length: 65 }, (_, index) => ({ ...message(`Message ${index}`), id: `msg_${index}` }))
+  const callbacks = {
+    onTogglePin: vi.fn(), onQuote: vi.fn(), onRetryResponse: vi.fn(), onResend: vi.fn(),
+    onEdit: vi.fn(), onDiscard: vi.fn(), onAtBottom: vi.fn(),
+  }
+  const component = (compactMessageLayout: boolean) => <MemoryRouter>
+    <Transcript {...callbacks} messages={messages} instanceId="ins_1" pinnedIds={[]}
+      lastSeenId={null} unreadActive={false} currentMatchId={null} dense
+      settings={{ ...settings, compactMessageLayout }} />
+  </MemoryRouter>
+  const view = render(component(false))
+  const row = view.container.querySelector('[data-index]')!
+  expect(row.classList.contains('pb-3')).toBe(true)
+  const before = measurements.measure.mock.calls.length
+  view.rerender(component(true))
+  expect(row.classList.contains('pb-1.5')).toBe(true)
+  expect(measurements.measure.mock.calls.length).toBeGreaterThan(before)
+  expect(screen.getByTestId('transcript').firstElementChild?.classList.contains('max-w-none')).toBe(true)
+  expect(view.container.querySelector('[data-message-id]')?.textContent).toContain('Message 0')
+  view.rerender(component(false))
+  expect(row.classList.contains('pb-3')).toBe(true)
 })

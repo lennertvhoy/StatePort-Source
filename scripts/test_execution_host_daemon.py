@@ -21,9 +21,12 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -61,8 +64,60 @@ PYTHONPATH = os.pathsep.join(
 for _path in PYTHONPATH.split(os.pathsep):
     if _path not in sys.path:
         sys.path.insert(0, _path)
+for _source_root in sorted((ROOT / "packages").glob("*/src")):
+    if str(_source_root) not in sys.path:
+        sys.path.insert(0, str(_source_root))
+for _source_root in sorted((ROOT / "apps").glob("*/src")):
+    if str(_source_root) not in sys.path:
+        sys.path.insert(0, str(_source_root))
 
 from execution_host import daemon_contract as contract  # noqa: E402
+
+
+def _booked_scope() -> str:
+    rows = Path("/proc/self/cgroup").read_text().splitlines()
+    scopes = [row.split("::", 1)[1] for row in rows if row.startswith("0::")]
+    if len(scopes) != 1:
+        raise RuntimeError("governed container fixture requires unified cgroup membership")
+    parts = Path(scopes[0]).parts
+    for index, component in enumerate(parts):
+        if component.startswith("stateport-heavy-") and component.endswith(".service") and "stateport-heavy.slice" in parts[:index]:
+            return Path(*parts[:index + 1]).as_posix()
+    raise RuntimeError("real container fixture is outside a booked governor service")
+
+
+def _governed_engine_environment(root: Path, environment: dict[str, str]) -> tuple[dict[str, str], str]:
+    """Test-only last config overlay; no production cgroup option is admitted."""
+    scope = _booked_scope()
+    if environment.get("CONTAINERS_CONF_OVERRIDE"):
+        raise RuntimeError("fixture cannot replace an existing operator containers.conf override")
+    overlay = root / "governed-containers.conf"
+    with overlay.open("x", encoding="utf-8") as stream:
+        stream.write('[containers]\ncgroups="split"\n')
+    overlay.chmod(0o600)
+    return {**environment, "CONTAINERS_CONF_OVERRIDE": str(overlay)}, scope
+
+
+def _governed_container_membership(container_id: str, scope: str, *, environment: dict[str, str] | None = None) -> dict:
+    if scope != _booked_scope():
+        raise RuntimeError("container evidence does not name this booked governor scope")
+    observed = subprocess.run(["podman", "inspect", "--format", "{{json .}}", container_id], env=environment, capture_output=True, text=True, timeout=15)
+    if observed.returncode != 0:
+        raise RuntimeError("container inspection unavailable for cgroup proof")
+    info = json.loads(observed.stdout)
+    if info.get("Id") != container_id:
+        raise RuntimeError("container identity changed during cgroup proof")
+    processes = {}
+    for label, pid in (("init", info["State"]["Pid"]), ("conmon", info["State"]["ConmonPid"])):
+        if not isinstance(pid, int) or pid <= 0:
+            raise RuntimeError(label + " process identity is unavailable")
+        rows = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+        membership = next((row.split("::", 1)[1] for row in rows if row.startswith("0::")), None)
+        if not membership or not (membership == scope or membership.startswith(scope + "/")):
+            raise RuntimeError(f"{label} pid={pid} cgroup={membership!r} is outside booked scope {scope!r}")
+        directory = Path("/sys/fs/cgroup") / membership.lstrip("/")
+        processes[label] = {"pid": pid, "cgroup": membership, "limits": {name: (directory / name).read_text().strip() for name in ("memory.max", "cpu.max", "pids.max")}}
+    return {"containerId": container_id, "bookedScope": scope, "processes": processes, "containerDeclaredParent": info["HostConfig"]["CgroupParent"]}
 
 
 def _grant_document(grant_id: str, spec: dict) -> dict:
@@ -131,9 +186,9 @@ def _heavy_task_lock():
 def _workload_image(_heavy_task_lock):
     if shutil_which_podman() is None:
         pytest.skip("podman is not available on this host")
-    if _podman("image", "exists", WORKLOAD_IMAGE).returncode != 0:
+    if _podman("image", "inspect", WORKLOAD_IMAGE).returncode != 0:
         pulled = _podman("pull", WORKLOAD_IMAGE)
-        if pulled.returncode != 0 or _podman("image", "exists", WORKLOAD_IMAGE).returncode != 0:
+        if pulled.returncode != 0 or _podman("image", "inspect", WORKLOAD_IMAGE).returncode != 0:
             pytest.skip(f"pinned workload image unavailable: {pulled.stderr.strip()[:200]}")
     yield
     leftover = _podman(
@@ -161,7 +216,9 @@ class DaemonHandle:
     ) -> None:
         self.root = root
         self.validator_staging_root = validator_staging_root
-        self.socket_dir = (socket_root or root) / "execution-control"
+        # Evidence roots can exceed AF_UNIX's pathname limit. Keep sockets in
+        # the existing short-root seam, independent of durable test artifacts.
+        self.socket_dir = (socket_root or Path(tempfile.mkdtemp(prefix="s-", dir="/tmp"))) / "execution-control"
         self.socket_dir.mkdir(parents=True, exist_ok=True)
         os.chown(self.socket_dir, TEST_RUNTIME_UID, TEST_SOCKET_GROUP_GID)
         os.chmod(self.socket_dir, 0o750)
@@ -215,6 +272,7 @@ class DaemonHandle:
                     # Stale socket from a previous epoch; the daemon reclaims it.
                     pass
             time.sleep(0.1)
+        self.stop()
         raise AssertionError("daemon did not create its control socket within 60s")
 
     def stop(self) -> None:
@@ -271,6 +329,71 @@ def _wait_state(client: ExecutionHostClient, workload_id: str, state: str, timeo
             return last
         time.sleep(0.5)
     raise AssertionError(f"workload {workload_id} never reached {state}; last={last}")
+
+
+def _start_app_server(layout_root: Path) -> tuple[object, threading.Thread, str, str, str]:
+    from stateport_persistent_app import LocalLayout  # noqa: PLC0415
+    from stateport_persistent_app.service_process import AppServer  # noqa: PLC0415
+
+    layout = LocalLayout(
+        layout_root / "config",
+        layout_root / "data",
+        layout_root / "state",
+    )
+    layout.initialize()
+    server = AppServer(("127.0.0.1", 0), layout, ROOT / "apps" / "web")
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.02},
+        daemon=True,
+    )
+    thread.start()
+    origin = f"http://127.0.0.1:{int(server.server_address[1])}"
+    with urlopen(f"{origin}/session") as response:
+        session = json.loads(response.read())["result"]
+        cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+    return server, thread, origin, cookie, str(session["csrfToken"])
+
+
+def _stop_app_server(server: object, thread: threading.Thread) -> None:
+    server.shutdown()
+    thread.join(timeout=5)
+    server.server_close()
+    assert not thread.is_alive()
+
+
+def _app_post(
+    origin: str,
+    cookie: str,
+    csrf: str,
+    path: str,
+    body: dict,
+) -> dict:
+    request = Request(
+        f"{origin}{path}",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Cookie": cookie,
+            "Origin": origin,
+            "X-StatePort-CSRF": csrf,
+        },
+        method="POST",
+    )
+    with urlopen(request) as response:
+        assert response.status == 200
+        return json.loads(response.read())["result"]
+
+
+def _app_get(origin: str, cookie: str, path: str) -> dict:
+    request = Request(
+        f"{origin}{path}",
+        headers={"Cookie": cookie},
+        method="GET",
+    )
+    with urlopen(request) as response:
+        assert response.status == 200
+        return json.loads(response.read())["result"]
 
 
 def test_sealed_workload_run_and_output_bound(tmp_path: Path) -> None:
@@ -495,7 +618,11 @@ def _remove_workspace_volume(workload_id: str) -> None:
     _podman("volume", "rm", "--force", f"stateport-workspace-{workload_id}")
 
 
-def test_workspace_persists_across_restart_and_remove_preserves_data(tmp_path: Path) -> None:
+def test_workspace_recovery_and_real_history_survive_restarts(tmp_path: Path) -> None:
+    from stateport_persistent_app.execution_host_proxy import (  # noqa: PLC0415
+        ExecutionHostProxy,
+    )
+
     handle = DaemonHandle(tmp_path)
     handle.boot()
     workspace_id = _workload_id("ws")
@@ -505,6 +632,29 @@ def test_workspace_persists_across_restart_and_remove_preserves_data(tmp_path: P
     try:
         created = client.create_workspace(_workspace_spec(workspace_id))
         assert created["result"]["state"] == "created"
+        inventory = client.list_workloads()["result"]["workloads"]
+        assert len(inventory) == 1
+        assert inventory[0]["ownership"] == {
+            "grantId": doc["grantId"],
+            "applicationId": None,
+            "runId": None,
+        }
+        assert inventory[0]["declaredLimits"] == {
+            "memoryMaxBytes": 268435456,
+            "pidsMax": 128,
+            "timeoutSeconds": 600,
+            "outputByteBound": 1048576,
+            "cpuQuotaPercent": 100,
+            "diskMaxBytes": 268435456,
+        }
+        disk_enforcement = inventory[0]["resourceEnforcement"][
+            "persistentVolumeDiskMaxBytes"
+        ]
+        assert disk_enforcement["status"] == "unsupported"
+        assert disk_enforcement["requestedBytes"] == 268435456
+        assert "do not expose an enforceable per-volume byte quota" in disk_enforcement[
+            "detail"
+        ]
         client.start(workspace_id)
         # Typed exec writes through the daemon-owned named volume.
         written = client.exec_workload(
@@ -545,17 +695,178 @@ def test_workspace_persists_across_restart_and_remove_preserves_data(tmp_path: P
             assert removed["result"]["state"] == "removed"
             assert "volume is preserved" in removed["cleanup"]["detail"]
             assert _podman("volume", "exists", volume).returncode == 0
+            recovered = client2.create_workspace(_workspace_spec(workspace_id))
+            assert recovered["result"]["state"] == "created"
+            assert recovered["result"]["recovered"] is True
+            assert recovered["result"]["recoveredFromState"] == "removed"
+            # App state is isolated without changing either the daemon's or
+            # this test process's rootless Podman storage environment.
+            app_layout_root = tmp_path / "app-layout"
+            app_server, app_thread, origin, cookie, csrf = _start_app_server(
+                app_layout_root
+            )
+            try:
+                app_server.execution_host = ExecutionHostProxy(
+                    socket_path=restarted.socket_path,
+                    grant_id=doc["grantId"],
+                    authority_grant_digest=contract.canonical_digest(doc),
+                )
+                started = _app_post(
+                    origin,
+                    cookie,
+                    csrf,
+                    "/v1/execution-host/workloads/start",
+                    {"workloadId": workspace_id},
+                )
+                assert started["result"]["state"] == "running"
+                recovered_readback = _app_post(
+                    origin,
+                    cookie,
+                    csrf,
+                    "/v1/execution-host/workloads/exec",
+                    {"workloadId": workspace_id, "argv": ["cat", "/workspace/marker.txt"]},
+                )
+                assert recovered_readback["result"]["exitStatus"] == 0
+                assert recovered_readback["result"]["output"].strip() == "stateport-marker"
+                stopped = _app_post(
+                    origin,
+                    cookie,
+                    csrf,
+                    "/v1/execution-host/workloads/stop",
+                    {"workloadId": workspace_id},
+                )
+                assert stopped["result"]["state"] == "stopped"
+                removed_through_app = _app_post(
+                    origin,
+                    cookie,
+                    csrf,
+                    "/v1/execution-host/workloads/remove",
+                    {"workloadId": workspace_id},
+                )
+                assert removed_through_app["result"]["state"] == "removed"
+                assert all(
+                    result["receipt"]["actorId"] == "local-user"
+                    for result in (
+                        started,
+                        recovered_readback,
+                        stopped,
+                        removed_through_app,
+                    )
+                )
+                before_restart = _app_get(
+                    origin, cookie, "/v1/execution-host/receipts"
+                )["receipts"]
+                assert [item["action"] for item in before_restart] == [
+                    "execution_host.removeWorkload",
+                    "execution_host.stop",
+                    "execution_host.execWorkload",
+                    "execution_host.start",
+                ]
+                assert [item["receiptId"] for item in before_restart] == [
+                    result["receipt"]["receiptId"]
+                    for result in (
+                        removed_through_app,
+                        stopped,
+                        recovered_readback,
+                        started,
+                    )
+                ]
+            finally:
+                _stop_app_server(app_server, app_thread)
             probe = _podman(
                 "run", "--rm", "--network", "none", "-v", f"{volume}:/workspace:ro",
                 WORKLOAD_IMAGE, "cat", "/workspace/marker.txt",
             )
             assert probe.returncode == 0
             assert probe.stdout.strip() == "stateport-marker"
+            restarted.stop()
+            offline_server, offline_thread, offline_origin, offline_cookie, _ = (
+                _start_app_server(app_layout_root)
+            )
+            try:
+                after_restart = _app_get(
+                    offline_origin,
+                    offline_cookie,
+                    "/v1/execution-host/receipts",
+                )["receipts"]
+                assert after_restart == before_restart
+            finally:
+                _stop_app_server(offline_server, offline_thread)
         finally:
             restarted.stop()
     finally:
         handle.stop()
         _remove_workspace_volume(workspace_id)
+
+
+def test_two_grant_owned_workspaces_remain_independent(tmp_path: Path) -> None:
+    handle = DaemonHandle(tmp_path)
+    handle.boot()
+    workspace_a = _workload_id("owner-a")
+    workspace_b = _workload_id("owner-b")
+    spec_a = _workspace_spec(workspace_a, parameters={"ownership": {"applicationId": "application-a", "instanceId": "instance-a", "catalogIdentityDigest": "sha256:" + "a" * 64, "runId": "run-a"}})
+    spec_b = _workspace_spec(workspace_b, parameters={"ownership": {"applicationId": "application-b", "instanceId": "instance-b", "catalogIdentityDigest": "sha256:" + "b" * 64, "runId": "run-b"}})
+    doc_a = _provision_grant(handle, spec_a)
+    doc_b = _provision_grant(handle, spec_b)
+    client_a = _client(handle, doc_a)
+    client_b = _client(handle, doc_b)
+    try:
+        client_a.create_workspace(spec_a)
+        client_b.create_workspace(spec_b)
+        client_a.start(workspace_a)
+        client_b.start(workspace_b)
+        assert client_a.exec_workload(
+            workspace_a, ["sh", "-c", "echo owner-a > /workspace/owner.txt"]
+        )["result"]["exitStatus"] == 0
+        assert client_b.exec_workload(
+            workspace_b, ["sh", "-c", "echo owner-b > /workspace/owner.txt"]
+        )["result"]["exitStatus"] == 0
+
+        # A separately provisioned grant may deliberately overlap the same
+        # workload id, but durable grant ownership still hides and refuses it.
+        intruder_doc = _grant_document(f"grant-intruder-{workspace_a}", spec_a)
+        (handle.state_dir / "grants" / f"{intruder_doc['grantId']}.json").write_text(
+            json.dumps(intruder_doc), encoding="utf-8"
+        )
+        intruder = _client(handle, intruder_doc)
+        assert intruder.list_workloads()["result"]["workloads"] == []
+        with pytest.raises(ExecutionHostRefusal, match="grant-identity-mismatch"):
+            intruder.status(workspace_a)
+        with pytest.raises(ExecutionHostRefusal, match="grant-identity-mismatch"):
+            intruder.stop(workspace_a)
+
+        assert client_a.stop(workspace_a)["result"]["state"] == "stopped"
+        assert client_a.remove_workload(workspace_a)["result"]["state"] == "removed"
+        assert client_b.status(workspace_b)["result"]["state"] == "running"
+        read_b = client_b.exec_workload(workspace_b, ["cat", "/workspace/owner.txt"])
+        assert read_b["result"]["output"].strip() == "owner-b"
+        assert [
+            item["workloadId"]
+            for item in client_a.list_workloads()["result"]["workloads"]
+        ] == [workspace_a]
+        assert [
+            item["workloadId"]
+            for item in client_b.list_workloads()["result"]["workloads"]
+        ] == [workspace_b]
+        assert client_b.remove_workload(workspace_b)["result"]["state"] == "removed"
+
+        probe_a = _podman(
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-v",
+            f"stateport-workspace-{workspace_a}:/workspace:ro",
+            WORKLOAD_IMAGE,
+            "cat",
+            "/workspace/owner.txt",
+        )
+        assert probe_a.returncode == 0
+        assert probe_a.stdout.strip() == "owner-a"
+    finally:
+        handle.stop()
+        _remove_workspace_volume(workspace_a)
+        _remove_workspace_volume(workspace_b)
 
 
 def test_workspace_idle_timeout_stops_container_and_preserves_volume(tmp_path: Path) -> None:
@@ -910,3 +1221,358 @@ def test_managed_run_engine_executes_a_real_container_through_the_daemon(tmp_pat
         assert manager.configured("cfg.managed")
     finally:
         handle.stop()
+
+
+def test_agent_source_command_isolated_candidate_and_durable_exit(tmp_path: Path) -> None:
+    """Real daemon+SCM_RIGHTS+Podman proof; only run in booked heavy slot."""
+    from execution_host.deployment_staging import build_deployment_archive
+    from execution_host.ledger import OperationLedger
+
+    source = tmp_path / 'source'
+    source.mkdir()
+    script = b'''import pathlib, socket, subprocess, sys
+assert {name for _, name in socket.if_nameindex()} == {'lo'}
+print('source-command-stderr-canary', file=sys.stderr, flush=True)
+probe = pathlib.Path('noexec-probe')
+probe.write_text('#!/bin/sh\\nexit 0\\n')
+probe.chmod(0o755)
+try:
+ subprocess.run([str(probe.resolve())], check=True)
+except PermissionError:
+ pass
+else:
+ raise AssertionError('candidate permits direct executable launch')
+p = pathlib.Path('marker.txt')
+assert p.read_text() == 'original'
+p.write_text('candidate changed')
+assert pathlib.Path('/agent-input/marker.txt').read_text() == 'original'
+try:
+ pathlib.Path('/agent-input/marker.txt').write_text('escape')
+except OSError:
+ pass
+else:
+ raise AssertionError('source writable')
+try:
+ pathlib.Path('/outside-candidate').write_text('escape')
+except OSError:
+ pass
+else:
+ raise AssertionError('root writable')
+pathlib.Path('escape-link').symlink_to('/agent-input/marker.txt')
+try:
+ pathlib.Path('escape-link').write_text('escape')
+except OSError:
+ pass
+else:
+ raise AssertionError('symlink escape')
+s = socket.socket()
+s.settimeout(1)
+try:
+ s.connect(('192.0.2.1', 443))
+except OSError:
+ pass
+else:
+ raise AssertionError('network reachable')
+finally:
+ s.close()
+print('candidate-isolated-original-preserved', flush=True)
+raise SystemExit(7)
+'''
+    files = {'main.py': script, 'marker.txt': b'original'}
+    inventory, context = [], []
+    for name, content in sorted(files.items()):
+        path = source / name
+        path.write_bytes(content)
+        path.chmod(0o644)
+        digest = 'sha256:' + hashlib.sha256(content).hexdigest()
+        inventory.append({'path': name, 'mode': '100644', 'contentDigest': digest})
+        context.append({'path': name, 'mode': '100644', 'size': len(content), 'sha256': digest})
+    archive_path = tmp_path / 'source.tar'
+    with archive_path.open('w+b') as archive:
+        metadata = build_deployment_archive(archive, plan={'sourceInventory': inventory, 'overlay': {}}, context_root=source, overlay_root=source, context_digest=contract.canonical_digest(context))
+    workload_id = _workload_id('source-command')
+    command = ['/usr/local/bin/python3', 'main.py']
+    workload = contract.validate_workload_spec({
+        'kind': 'agent-run', 'workloadId': workload_id,
+        'image': {'reference': WORKLOAD_IMAGE},
+        'parameters': {'runSpecDigest': GRANT_DIGEST, 'statePackReference': 'statepack:real-source-proof', 'command': command, 'commandDigest': contract.canonical_digest(command), 'sourceInventory': inventory, 'sourceArchive': metadata},
+        'timeoutSeconds': 60, 'outputByteBound': 4096,
+        'resources': {'memoryMaxBytes': 268435456, 'cpuQuotaPercent': 100, 'pidsMax': 128, 'diskMaxBytes': 67108864},
+    })
+    handle = DaemonHandle(tmp_path)
+    handle.boot()
+    client = _client(handle, _provision_grant(handle, workload))
+    try:
+        with archive_path.open('rb') as archive:
+            client.create_workload(workload, source_fd=archive.fileno())
+        client.start(workload_id)
+        ledger = OperationLedger(handle.state_dir)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            entry = ledger.get(workload_id)
+            if entry.get('sourceCommandOutput'):
+                break
+            time.sleep(.1)
+        evidence = entry['sourceCommandOutput']
+        assert evidence['exitStatus'] == 7
+        assert evidence['terminationReason'] == 'exited'
+        assert 'candidate-isolated-original-preserved' in evidence['output']
+        assert 'source-command-stderr-canary' in evidence['output']
+        assert evidence['durableChangedFiles'] is False
+        assert evidence['commandDigest'] == contract.canonical_digest(command)
+        assert evidence['sourceArchiveDigest'] == metadata['archiveDigest']
+        for name, content in files.items():
+            assert (source / name).read_bytes() == content
+        client.remove_workload(workload_id)
+        assert _podman('container', 'exists', f'stateport-exec-{workload_id}').returncode != 0
+        assert not list((handle.state_dir / 'validator-snapshots').glob('*'))
+        handle.stop()
+        handle.boot()
+        observed = client.logs(workload_id)['result']
+        assert observed['sourceCommand']['evidenceDigest'] == evidence['evidenceDigest']
+        assert observed['output'] == evidence['output']
+    finally:
+        handle.stop()
+
+
+def test_governed_container_cgroup_containment(tmp_path: Path) -> None:
+    """Book this single sleeping-container premise before the browser journey."""
+    from execution_host.engine import PodmanCliEngine
+    handle = DaemonHandle(tmp_path)
+    environment, scope = _governed_engine_environment(tmp_path, handle.env())
+    handle.env = lambda: environment
+    workload = contract.validate_workload_spec(_workspace_spec(_workload_id("governed")))
+    handle.boot()
+    client = _client(handle, _provision_grant(handle, workload))
+    created = False
+    try:
+        client.create_workspace(workload)
+        created = True
+        client.start(workload["workloadId"])
+        entry = json.loads((handle.state_dir / "workloads" / (workload["workloadId"] + ".json")).read_text())
+        proof = _governed_container_membership(entry["containerId"], scope, environment=environment)
+        (tmp_path / "cgroup-proof.json").write_text(json.dumps(proof, indent=2), encoding="utf-8")
+    finally:
+        try:
+            if created:
+                # Existing daemon removal validates the exact durable grant/container identity.
+                client.remove_workload(workload["workloadId"])
+                engine = PodmanCliEngine(runner=lambda args, **kwargs: subprocess.run(args, **{**kwargs, "env": environment}))
+                engine.verify_workspace_volumes(workload)
+                removed = subprocess.run(["podman", "volume", "rm", workload["parameters"]["volumeName"]], env=environment, capture_output=True, text=True, timeout=30)
+                if removed.returncode != 0:
+                    raise RuntimeError("governed premise volume cleanup failed; retained")
+        finally:
+            handle.stop()
+
+
+def _materialize_seeded_workspace_source(layout_root: Path) -> Path:
+    """Materialize the generic source fixture inside the actual managed root."""
+    import shutil
+    from stateport_persistent_app import LocalLayout
+    layout = LocalLayout(layout_root / 'config', layout_root / 'data', layout_root / 'state')
+    layout.initialize()
+    source = layout.instances_root / 'seeded-template'
+    shutil.copytree(ROOT / 'fixtures' / 'apps' / 'development-reference', source)
+    executable = source / 'workspace-proof.sh'
+    executable.write_text("#!/bin/sh\nprintf 'SEEDED_SOURCE_%s\\n' VERIFIED\n", encoding='utf-8')
+    executable.chmod(0o755)
+    for args in [('init',), ('add', '--all'), ('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgSign=false', 'commit', '-m', 'reviewed fixture source')]:
+        subprocess.run(['git', '-C', str(source), *args], check=True, capture_output=True)
+    return source
+
+
+def test_seeded_application_workspace_source_modes_and_restart(tmp_path: Path) -> None:
+    """Real source AppServer+daemon+Podman; requires booked measured split mode."""
+    from urllib.error import HTTPError
+    from execution_host.application_workspaces import FORMAT, catalog_identity
+    from execution_host.engine import PodmanCliEngine
+    from stateport_persistent_app.execution_host_proxy import ExecutionHostProxy, prepare_workspace_source_seed
+
+    source = _materialize_seeded_workspace_source(tmp_path / 'app-layout')
+    handle = DaemonHandle(tmp_path)
+    environment, scope = _governed_engine_environment(tmp_path, handle.env())
+    handle.env = lambda: environment
+    server = None
+    thread = None
+    created = False
+    workload = None
+    client = None
+    try:
+        handle.boot()
+        server, thread, origin, cookie, csrf = _start_app_server(tmp_path / 'app-layout')
+        entry = server.source_app().catalog.register(source, instance_id='seeded-template', name='Seeded generic template', application_id='stateport.development-reference', source={'templateId': 'stateport.development-reference'})
+        workload = _workspace_spec(_workload_id('seeded-template'), parameters={'ownership': {'applicationId': entry['applicationId'], 'instanceId': entry['instanceId'], 'catalogIdentityDigest': catalog_identity(entry), 'runId': None}})
+        workload = prepare_workspace_source_seed(entry, workload)
+        seed = workload['parameters']['sourceSeed']
+        originals = {row['path']: ((source / row['path']).read_bytes(), (source / row['path']).stat().st_mode & 0o777) for row in seed['sourceInventory']}
+        grant = _provision_grant(handle, workload)
+        client = _client(handle, grant)
+        manifest = tmp_path / 'reviewed-bindings.json'
+        manifest.write_text(json.dumps({'formatVersion': FORMAT, 'bindings': [{'grantId': grant['grantId'], 'authorityGrantDigest': contract.canonical_digest(grant), 'workload': workload}]}), encoding='utf-8')
+        manifest.chmod(0o600)
+        server.execution_host = ExecutionHostProxy(socket_path=handle.socket_path, grant_id=grant['grantId'], authority_grant_digest=contract.canonical_digest(grant), catalog_entry=server.workspace_catalog_entry, bindings_path=manifest, bindings_owner_uid=os.getuid())
+        reviewed_body = {'instanceId': entry['instanceId'], 'sourceReviewDigest': seed['reviewDigest']}
+        original_descriptor = (source / 'application.yaml').read_bytes()
+        (source / 'application.yaml').write_bytes(original_descriptor + b'\n# operator changed after review\n')
+        with pytest.raises(HTTPError) as refused:
+            _app_post(origin, cookie, csrf, '/v1/execution-host/workloads', reviewed_body)
+        assert json.loads(refused.value.read())['error']['code'] == 'workspace_source_stale'
+        assert not (handle.state_dir / 'workloads' / (workload['workloadId'] + '.json')).exists()
+        assert _podman('volume', 'exists', workload['parameters']['volumeName']).returncode == 1
+        (source / 'application.yaml').write_bytes(original_descriptor)
+        result = _app_post(origin, cookie, csrf, '/v1/execution-host/workloads', reviewed_body)
+        assert result['accepted'] is True
+        assert result['result']['sourceSeed']['status'] == 'complete'
+        created = True
+        _app_post(origin, cookie, csrf, '/v1/execution-host/workloads/start', {'workloadId': workload['workloadId']})
+        durable = json.loads((handle.state_dir / 'workloads' / (workload['workloadId'] + '.json')).read_text())
+        proof = _governed_container_membership(durable['containerId'], scope, environment=environment)
+        (tmp_path / 'seeded-cgroup-proof.json').write_text(json.dumps(proof, indent=2), encoding='utf-8')
+        observed = client.exec_workload(workload['workloadId'], ['/bin/sh', '-c', './workspace-proof.sh && stat -c %a workspace-proof.sh && printf retained-workspace-edit > /workspace/retained-marker'])['result']
+        assert observed['exitStatus'] == 0
+        assert 'SEEDED_SOURCE_VERIFIED' in observed['output']
+        assert '755' in observed['output']
+        for relative, (content, mode) in originals.items():
+            assert (source / relative).read_bytes() == content
+            assert (source / relative).stat().st_mode & 0o777 == mode
+        client.remove_workload(workload['workloadId'])
+        handle.stop()
+        handle.boot()
+        recovered = _app_post(origin, cookie, csrf, '/v1/execution-host/workloads', reviewed_body)
+        assert recovered['result']['sourceSeed']['reused'] is True
+        client.start(workload['workloadId'])
+        preserved = client.exec_workload(workload['workloadId'], ['/bin/sh', '-c', 'cat /workspace/retained-marker; ./workspace-proof.sh'])['result']
+        assert preserved['exitStatus'] == 0
+        assert 'retained-workspace-edit' in preserved['output']
+        assert 'SEEDED_SOURCE_VERIFIED' in preserved['output']
+        assert not (source / 'retained-marker').exists()
+        durable = json.loads((handle.state_dir / 'workloads' / (workload['workloadId'] + '.json')).read_text())
+        assert len([row for row in durable['receipts'] if row['kind'] == 'workspace-source-seeded']) == 1
+    finally:
+        try:
+            if server is not None:
+                _stop_app_server(server, thread)
+        finally:
+            try:
+                if created and client is not None:
+                    client.remove_workload(workload['workloadId'])
+            finally:
+                handle.stop()
+        if created:
+            engine = PodmanCliEngine(runner=lambda args, **kwargs: subprocess.run(args, **{**kwargs, 'env': environment}))
+            engine.verify_workspace_volumes(workload)
+            removed = subprocess.run(['podman', 'volume', 'rm', workload['parameters']['volumeName']], env=environment, capture_output=True, text=True, timeout=30)
+            if removed.returncode != 0:
+                raise RuntimeError('seeded test volume cleanup failed; retained')
+
+
+def test_governed_daemon_foreign_ledger_and_replaced_name_retained(tmp_path: Path) -> None:
+    """Real Podman identity race; only the coordinator launches under a governor."""
+    import tempfile
+    from execution_host.engine import KIND_LABEL, MANAGED_LABEL_KEY, WORKLOAD_LABEL, PodmanCliEngine, container_name
+    from execution_host.ledger import OperationLedger
+
+    socket_root = Path(tempfile.mkdtemp(prefix='sp-id-'))
+    owner = DaemonHandle(tmp_path / 'owner', socket_root=socket_root / 'owner')
+    stranger = DaemonHandle(tmp_path / 'stranger', socket_root=socket_root / 'stranger')
+    owner_env, scope = _governed_engine_environment(tmp_path, owner.env())
+    owner.env = lambda: owner_env
+    stranger_env = {**stranger.env(), 'CONTAINERS_CONF_OVERRIDE': owner_env['CONTAINERS_CONF_OVERRIDE']}
+    stranger.env = lambda: stranger_env
+    engine = PodmanCliEngine(runner=lambda args, **kwargs: subprocess.run(args, **{**kwargs, 'env': owner_env}))
+    workload = contract.validate_workload_spec(_workspace_spec(_workload_id('identity-retention')))
+    wid = workload['workloadId']
+    tracked: list[str] = []
+    proof: dict = {'workloadId': wid, 'containers': [], 'socketRoot': str(socket_root)}
+    complete = False
+
+    def podman(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(['podman', *args], env=owner_env, capture_output=True, text=True, timeout=30)
+
+    def exact_info(cid: str) -> dict:
+        result = podman('inspect', '--format', '{{json .}}', cid)
+        assert result.returncode == 0, 'tracked container inspection unavailable; retain evidence'
+        info = json.loads(result.stdout)
+        labels = info.get('Config', {}).get('Labels') or {}
+        assert info.get('Id') == cid
+        assert info.get('ImageDigest') == WORKLOAD_IMAGE.rsplit('@', 1)[1]
+        assert all(labels.get(key) == value for key, value in {MANAGED_LABEL_KEY: 'true', WORKLOAD_LABEL: wid, KIND_LABEL: 'workspace'}.items())
+        return info
+
+    try:
+        owner.boot()
+        grant = _provision_grant(owner, workload)
+        client = _client(owner, grant)
+        client.create_workspace(workload)
+        original = OperationLedger(owner.state_dir).get(wid)['containerId']
+        tracked.append(original)
+        client.start(wid)
+        marker = client.exec_workload(wid, ['/bin/sh', '-c', 'printf identity-volume-preserved > /workspace/identity-marker'])['result']
+        assert marker['exitStatus'] == 0
+        proof['containers'].append(_governed_container_membership(original, scope, environment=owner_env))
+        owner.stop()
+        original_ledger = (owner.state_dir / 'workloads' / (wid + '.json')).read_bytes()
+        with pytest.raises(AssertionError, match='no reservation in this ledger'):
+            stranger.boot()
+        stranger.stop()
+        assert exact_info(original)['State']['Running'] is True
+        assert (owner.state_dir / 'workloads' / (wid + '.json')).read_bytes() == original_ledger
+        proof['foreignLedgerRetainedOriginal'] = True
+        owner.boot()
+        assert OperationLedger(owner.state_dir).get(wid)['state'] == 'running'
+        owner.stop()
+
+        # Test-owned adversarial mutation after checking the original exact ID.
+        assert exact_info(original)['State']['Running'] is True
+        assert podman('rename', original, container_name(wid) + '-retained').returncode == 0
+        replacement = engine.create(workload).strip()
+        assert len(replacement) == 64 and set(replacement) <= set('0123456789abcdef')
+        tracked.append(replacement)
+        exact_info(replacement)
+        engine.start(wid, expected_container_id=replacement)
+        proof['containers'].append(_governed_container_membership(replacement, scope, environment=owner_env))
+        # The earlier checked identity remains the target despite name replacement.
+        engine.stop(wid, expected_container_id=original)
+        assert exact_info(original)['State']['Running'] is False
+        assert exact_info(replacement)['State']['Running'] is True
+        engine.remove(wid, expected_container_id=original)
+        assert podman('container', 'exists', original).returncode == 1
+        assert exact_info(replacement)['State']['Running'] is True
+        proof['replacementSurvivedOriginalIdControls'] = True
+        with pytest.raises(AssertionError, match='container ID does not match'):
+            owner.boot()
+        owner.stop()
+        assert exact_info(replacement)['State']['Running'] is True
+        observed = engine.exec_workload(wid, ['cat', '/workspace/identity-marker'], timeout=10, max_bytes=1024, expected_container_id=replacement)
+        assert observed['exitStatus'] == 0
+        assert observed['output'] == 'identity-volume-preserved'
+        proof['ownerLedgerRefusedReplacement'] = True
+        proof['volumeMarkerPreserved'] = True
+        complete = True
+    finally:
+        owner.stop()
+        stranger.stop()
+        failures = []
+        for cid in tracked:
+            try:
+                exists = podman('container', 'exists', cid)
+                if exists.returncode == 1:
+                    continue
+                assert exists.returncode == 0
+                exact_info(cid)
+                engine.stop(wid, expected_container_id=cid)
+                engine.remove(wid, expected_container_id=cid)
+                assert podman('container', 'exists', cid).returncode == 1
+            except Exception as exc:
+                failures.append(f'{cid}: {type(exc).__name__}')
+        if complete and not failures:
+            engine.verify_workspace_volumes(workload)
+            removed = podman('volume', 'rm', workload['parameters']['volumeName'])
+            if removed.returncode != 0:
+                failures.append('verified test volume cleanup failed')
+        proof['cleanupFailures'] = failures
+        proof['volumeRetained'] = not complete or bool(failures)
+        (tmp_path / 'identity-retention-proof.json').write_text(json.dumps(proof, indent=2), encoding='utf-8')
+        if failures:
+            raise AssertionError('tracked identity cleanup failed; retained evidence: ' + ', '.join(failures))

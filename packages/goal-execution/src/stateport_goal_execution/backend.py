@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-import sys
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "packages" / "execution-host" / "src"))
-_source_root = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(_source_root / "packages" / "opencode-adapter" / "src"))
-sys.path.insert(0, str(_source_root / "packages" / "container-opencode" / "src"))
-
-from execution_host.opencode_backend import OpenCodeContainerBackend
-from execution_host.contracts import BackendCapabilities
 
 
 _BACKEND_REGISTRY: dict[str, Any] = {}
@@ -19,31 +9,16 @@ _BACKEND_REGISTRY: dict[str, Any] = {}
 def _init_backends() -> None:
     if _BACKEND_REGISTRY:
         return
-    try:
-        opencode = OpenCodeContainerBackend()
-        readiness = opencode.container_readiness()
-        # Container escape checks prove the agent's staging boundary only.
-        # Closure also requires running the exact validation contract without
-        # executing agent-owned staging content on the host.  Until that
-        # isolated validator exists, keep the managed backend capability-gated.
-        _BACKEND_REGISTRY["opencode_container"] = {
-            "backend": opencode,
-            "ready": False,
-            "readiness": readiness,
-            "capabilities": opencode.capabilities(),
-            "error": (
-                "sandboxed_validation_not_implemented"
-                if readiness is not None and readiness.passed()
-                else "container_enforcement_unavailable"
-            ),
-        }
-    except Exception as exc:
-        _BACKEND_REGISTRY["opencode_container"] = {
-            "backend": None,
-            "ready": False,
-            "readiness": None,
-            "error": str(exc),
-        }
+    # This provider cannot execute managed work until the sealed runtime and
+    # separate validator qualify. Listing that fact must not probe the operator's
+    # CLI, launch Podman, or pull a mutable image on an ordinary UI request.
+    _BACKEND_REGISTRY["opencode_container"] = {
+        "backend": None,
+        "ready": False,
+        "readiness": None,
+        "capabilities": None,
+        "error": "sandboxed_validation_not_implemented",
+    }
 
 
 def register_synthetic_test_backend() -> None:

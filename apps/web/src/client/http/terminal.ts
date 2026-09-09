@@ -44,6 +44,7 @@ interface SessionRuntime {
   socket: TerminalSocket | null
   /** True while a close was requested by the user (not a failure). */
   intentionalClose: boolean
+  reconnectAttempt: symbol | null
 }
 
 export class HttpTerminalClient implements TerminalClient {
@@ -70,7 +71,11 @@ export class HttpTerminalClient implements TerminalClient {
   }
 
   /** Targets derive from the experience descriptor's terminal capability. */
-  async listTargets(instanceId: string): Promise<TerminalTarget[]> {
+  async listTargets(instanceId: string, scope?: 'workspace'): Promise<TerminalTarget[]> {
+    if (scope === 'workspace') {
+      const payload = await this.transport.request(`/v1/execution-host/workspaces/${encodeURIComponent(instanceId)}/terminal/target`, { schema: z.object({ target: z.object({ targetId: z.string().min(1), targetClass: z.literal('capsule'), displayName: z.string().min(1), availability: z.literal('available') }) }) })
+      return [{ id: `workspace-terminal:${payload.target.targetId}`, instanceId, label: payload.target.displayName, kind: 'capsule', available: true }]
+    }
     const payload = await this.transport.request(endpoints.instanceExperience(instanceId), {
       schema: unknownPayload,
     })
@@ -96,7 +101,7 @@ export class HttpTerminalClient implements TerminalClient {
       cwd: '~',
       createdAt: new Date().toISOString(),
     }
-    this.sessions.set(session.id, { session, socket: null, intentionalClose: false })
+    this.sessions.set(session.id, { session, socket: null, intentionalClose: false, reconnectAttempt: null })
     return session
   }
 
@@ -122,10 +127,18 @@ export class HttpTerminalClient implements TerminalClient {
     })
     socket.onData((text) => this.emit(runtime.session.id, { type: 'output', text }))
     socket.onClose(({ code, reason }) => {
+      if (runtime.socket !== socket) return
       const wasIntentional = runtime.intentionalClose
       runtime.socket = null
       if (runtime.session.state === 'ended') return
-      if (wasIntentional) {
+      if (code === 1000 && reason === 'process_exit') {
+        // Authenticated gateway EOF ends the session; it does not report a process exit code.
+        runtime.session = { ...runtime.session, state: 'ended', lastError: undefined }
+        this.emit(runtime.session.id, { type: 'state', state: 'ended' })
+      } else if (wasIntentional && runtime.session.state === 'reconnecting') {
+        // Explicit reconnect waits for closeAndWait() to confirm cleanup.
+        // Keep the transition pending until that promise starts the fresh connect.
+      } else if (wasIntentional) {
         runtime.session = { ...runtime.session, state: 'idle' }
         this.emit(runtime.session.id, { type: 'state', state: 'idle' })
       } else {
@@ -140,25 +153,39 @@ export class HttpTerminalClient implements TerminalClient {
   }
 
   async connect(sessionId: string, dimensions?: { columns?: number; rows?: number }): Promise<TerminalSession> {
+    return this.connectInternal(sessionId, dimensions)
+  }
+
+  private async connectInternal(sessionId: string, dimensions?: { columns?: number; rows?: number }, reconnectAttempt?: symbol): Promise<TerminalSession> {
     const runtime = this.requireSession(sessionId)
     if (runtime.session.state === 'ended') {
       throw new ClientError('http', 'Session has ended — create a new session', { status: 409 })
     }
+    if (runtime.session.state === 'reconnecting' && reconnectAttempt === undefined) {
+      throw new ClientError('http', 'Terminal session is already reconnecting', { status: 409 })
+    }
+    if (reconnectAttempt !== undefined && runtime.reconnectAttempt !== reconnectAttempt) return runtime.session
     if (runtime.session.state === 'connected' && runtime.socket?.ready) return runtime.session
     const columns = dimensions?.columns ?? 80
     const rows = dimensions?.rows ?? 24
     runtime.session = { ...runtime.session, state: 'connecting' }
     this.emit(sessionId, { type: 'state', state: 'connecting' })
     try {
-      const ticketPayload = await this.transport.request(endpoints.terminalPrepare(runtime.session.instanceId), {
+      const workspaceOnly = runtime.session.targetId.startsWith('workspace-terminal:')
+      const ticketPayload = await this.transport.request(workspaceOnly ? `/v1/execution-host/workspaces/${encodeURIComponent(runtime.session.instanceId)}/terminal/prepare` : endpoints.terminalPrepare(runtime.session.instanceId), {
         method: 'POST',
-        body: { expectedInstanceId: runtime.session.instanceId, columns, rows },
+        body: { expectedInstanceId: runtime.session.instanceId, columns, rows, ...(workspaceOnly ? { expectedTargetId: runtime.session.targetId.slice('workspace-terminal:'.length) } : {}) },
         schema: unknownPayload,
       })
+      if (reconnectAttempt !== undefined && (runtime.reconnectAttempt !== reconnectAttempt || runtime.session.state !== 'connecting')) return runtime.session
       const ticket = mapTerminalTicket(ticketPayload)
+      if (workspaceOnly && (ticket.targetClass !== 'capsule' || ticket.targetId !== runtime.session.targetId.slice('workspace-terminal:'.length))) throw new ClientError('http', 'Workspace terminal target changed', { status: 409 })
       runtime.intentionalClose = false
       await this.openSocket(runtime, ticket, columns, rows)
+      if (reconnectAttempt !== undefined && (runtime.reconnectAttempt !== reconnectAttempt || runtime.session.state !== 'connecting')) return runtime.session
+      runtime.session = { ...runtime.session, preparedTarget: { targetId: ticket.targetId, targetClass: ticket.targetClass, displayName: ticket.displayName, sessionId: ticket.sessionId } }
     } catch (err) {
+      if (reconnectAttempt !== undefined && (runtime.reconnectAttempt !== reconnectAttempt || runtime.session.state !== 'connecting')) return runtime.session
       const message = err instanceof Error ? err.message : 'Connection failed'
       runtime.session = { ...runtime.session, state: 'failed', lastError: message }
       this.emit(sessionId, { type: 'state', state: 'failed', error: message })
@@ -166,13 +193,17 @@ export class HttpTerminalClient implements TerminalClient {
         ? err
         : new ClientError('network', 'Terminal connection failed', { detail: message })
     }
+    // A process may exit immediately after ready, before this continuation runs.
+    if (runtime.session.state !== 'connecting' || !runtime.socket?.ready) return runtime.session
     runtime.session = { ...runtime.session, state: 'connected', lastError: undefined }
+    if (reconnectAttempt !== undefined && runtime.reconnectAttempt === reconnectAttempt) runtime.reconnectAttempt = null
     this.emit(sessionId, { type: 'state', state: 'connected' })
     return runtime.session
   }
 
   async disconnect(sessionId: string): Promise<TerminalSession> {
     const runtime = this.requireSession(sessionId)
+    runtime.reconnectAttempt = null
     runtime.intentionalClose = true
     runtime.socket?.close()
     runtime.socket = null
@@ -189,16 +220,34 @@ export class HttpTerminalClient implements TerminalClient {
     if (runtime.session.state === 'ended') {
       throw new ClientError('http', 'Session has ended — create a new session', { status: 409 })
     }
+    if (runtime.session.state === 'reconnecting') {
+      throw new ClientError('http', 'Terminal session is already reconnecting', { status: 409 })
+    }
+    const reconnectAttempt = Symbol('terminal-reconnect')
+    runtime.reconnectAttempt = reconnectAttempt
     runtime.intentionalClose = true
-    runtime.socket?.close()
-    runtime.socket = null
     runtime.session = { ...runtime.session, state: 'reconnecting' }
     this.emit(sessionId, { type: 'state', state: 'reconnecting' })
-    return this.connect(sessionId)
+    const socket = runtime.socket
+    try {
+      if (socket) await socket.closeAndWait()
+    } catch (err) {
+      if (runtime.reconnectAttempt !== reconnectAttempt || runtime.session.state !== 'reconnecting') return runtime.session
+      const message = err instanceof Error ? err.message : 'Reconnect cleanup failed'
+      runtime.reconnectAttempt = null
+      runtime.session = { ...runtime.session, state: 'failed', lastError: message }
+      this.emit(sessionId, { type: 'state', state: 'failed', error: message })
+      throw err
+    } finally {
+      if (runtime.socket === socket) runtime.socket = null
+    }
+    if (runtime.reconnectAttempt !== reconnectAttempt || runtime.session.state !== 'reconnecting') return runtime.session
+    return this.connectInternal(sessionId, undefined, reconnectAttempt)
   }
 
   async endSession(sessionId: string): Promise<TerminalSession> {
     const runtime = this.requireSession(sessionId)
+    runtime.reconnectAttempt = null
     runtime.intentionalClose = true
     runtime.socket?.end()
     runtime.socket = null

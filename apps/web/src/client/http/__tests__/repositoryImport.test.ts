@@ -126,6 +126,26 @@ describe('HttpRepositoryImportClient', () => {
     },
   )
 
+  it.each(['valid', 'commit', 'source', 'dirty'])('binds public inspection to the exact requested identity: %s', async (outcome) => {
+    const url = 'https://example.com/template'
+    const revision = 'c'.repeat(40)
+    const result = {
+      ...TEMPLATE_INSPECTION,
+      candidateId: `repo-${'a'.repeat(32)}`,
+      sourceKind: 'public_https',
+      source: outcome === 'source' ? 'https://other.example/template' : url,
+      sourceIdentity: { ...TEMPLATE_INSPECTION.sourceIdentity,
+        headCommit: outcome === 'commit' ? 'b'.repeat(40) : revision,
+        dirty: outcome === 'dirty',
+      },
+    }
+    const fake = makeFakeFetch([['POST', '/v1/repository-import/inspect', jsonResponse({ ok: true, result })]])
+    const client = new HttpRepositoryImportClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+    if (outcome === 'valid') expect((await client.inspectPublic(url, revision)).headCommit).toBe(revision)
+    else await expect(client.inspectPublic(url, revision)).rejects.toMatchObject({ kind: 'validation' })
+    expect(fake.callsTo('/v1/repository-import/inspect')[0].body).toEqual({ url, revision })
+  })
+
   it('maps allowlisted local candidates', async () => {
     const fake = makeFakeFetch([
       ['GET', '/v1/repository-import/local-candidates', jsonResponse({ ok: true, result: CANDIDATES })],

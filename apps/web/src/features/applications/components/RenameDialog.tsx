@@ -4,6 +4,8 @@
  */
 import { useEffect, useState } from 'react'
 
+import { InlineNotice } from '@/components'
+
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -24,11 +26,13 @@ export interface RenameDialogProps {
 export function RenameDialog({ open, currentName, onOpenChange, onSubmit }: RenameDialogProps) {
   const [name, setName] = useState(currentName)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) {
       setName(currentName)
       setBusy(false)
+      setError(null)
     }
   }, [open, currentName])
 
@@ -49,9 +53,12 @@ export function RenameDialog({ open, currentName, onOpenChange, onSubmit }: Rena
             e.preventDefault()
             if (!valid || busy) return
             setBusy(true)
+            setError(null)
             try {
               await onSubmit(trimmed)
               onOpenChange(false)
+            } catch (cause) {
+              setError(cause instanceof Error ? cause.message : 'Rename could not be confirmed. Refresh the application before retrying.')
             } finally {
               setBusy(false)
             }
@@ -63,11 +70,14 @@ export function RenameDialog({ open, currentName, onOpenChange, onSubmit }: Rena
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="h-control rounded-sm border border-input bg-surface px-2 text-sm text-foreground"
+              maxLength={120}
+              disabled={busy}
               autoComplete="off"
               spellCheck={false}
               data-testid="rename-input"
             />
           </label>
+          {error ? <InlineNotice tone="danger" title="Rename could not be confirmed">{error}</InlineNotice> : null}
           <DialogFooter className="mt-4">
             <Button type="button" variant="ghost" size="sm" onClick={() => onOpenChange(false)} disabled={busy}>
               Cancel

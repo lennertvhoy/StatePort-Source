@@ -62,6 +62,7 @@ import { defaultAppSettings, defaultGlobalSettings } from '../mock/seed'
 import { endpoints } from './endpoints'
 import {
   mapActivityProjection,
+  mapOperationIndex,
   mapAttentionItem,
   mapCatalog,
   mapExperience,
@@ -318,11 +319,15 @@ class OverlayStore {
     return parsed
   }
 
-  private save(state: UiOverlay): void {
+  private save(state: UiOverlay): boolean {
     try {
-      if (typeof localStorage !== 'undefined') localStorage.setItem(OVERLAY_KEY, JSON.stringify(state))
+      if (typeof localStorage === 'undefined') return false
+      const serialized = JSON.stringify(state)
+      localStorage.setItem(OVERLAY_KEY, serialized)
+      return localStorage.getItem(OVERLAY_KEY) === serialized
     } catch {
       // Storage full/blocked — overlay stays unchanged for this session.
+      return false
     }
   }
 
@@ -333,7 +338,9 @@ class OverlayStore {
   setPinned(instanceId: string, pinned: boolean): void {
     const state = this.load()
     state.pinned[instanceId] = pinned
-    this.save(state)
+    if (!this.save(state)) {
+      throw new ClientError('unavailable', 'The pin could not be saved because browser storage is unavailable. Free browser storage and try again.')
+    }
   }
 
   getLastOpened(instanceId: string): string | undefined {
@@ -412,7 +419,7 @@ export class HttpSessionClient implements SessionClient {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class HttpApplicationsClient implements ApplicationsClient {
-  readonly canRename = false
+  readonly canRename = true
   private readonly overlay = new OverlayStore()
   private readonly transport: HttpTransport
 
@@ -501,22 +508,42 @@ export class HttpApplicationsClient implements ApplicationsClient {
     }))
   }
 
-  /**
-   * The contract has no instance-rename endpoint (the user-owned name is set
-   * at fixture-install time). Fail closed instead of inventing one.
-   */
-  rename(): Promise<ApplicationInstance> {
-    return Promise.reject(
-      unavailable(
-        'Renaming an application is not supported by the connected service',
-        'The backend contract has no instance rename endpoint; the name is fixed at install time.',
-      ),
-    )
+  async rename(instanceId: string, name: string, expectedName?: string): Promise<ApplicationInstance> {
+    const previous = expectedName ?? (await this.get(instanceId)).name
+    const result = await this.transport.request(endpoints.instanceRename(instanceId), {
+      method: 'POST',
+      body: { name, expectedName: previous },
+      schema: z.object({
+        formatVersion: z.literal('stateport.application-rename-result/v1'),
+        instanceId: z.string(), name: z.string(), replayed: z.boolean(),
+        receipt: z.object({
+          formatVersion: z.literal('stateport.application-rename-receipt/v1'),
+          receiptId: z.string().min(1), instanceId: z.string(),
+          oldName: z.string(), newName: z.string(),
+          actorId: z.string().min(1), actorRole: z.enum(['local_user', 'platform_operator']),
+          createdAt: z.string().min(1),
+        }).strict().nullable(),
+      }).strict(),
+    })
+    if (result.instanceId !== instanceId || result.name !== name ||
+        (result.receipt ? result.receipt.instanceId !== instanceId ||
+          result.receipt.oldName !== previous || result.receipt.newName !== name
+          : previous !== name || !result.replayed)) {
+      throw new ClientError('validation', 'The rename receipt did not match the reviewed application name.')
+    }
+    const instance = await this.get(instanceId)
+    if (instance.name !== name) {
+      throw new ClientError('validation', 'The application name could not be confirmed after renaming. Refresh before trying again.')
+    }
+    return instance
   }
 
   async setPinned(instanceId: string, pinned: boolean): Promise<ApplicationInstance> {
+    // Resolve the service identity before changing browser-owned state, so a
+    // failed read never reports failure after already applying the pin.
+    const instance = await this.get(instanceId)
     this.overlay.setPinned(instanceId, pinned)
-    return this.get(instanceId)
+    return this.withOverlay(instance)
   }
 
   async touchOpened(instanceId: string): Promise<void> {
@@ -710,6 +737,21 @@ export class HttpRepositoryImportClient implements RepositoryImportClient {
     return inspection
   }
 
+  async inspectPublic(url: string, revision: string) {
+    const payload = await this.transport.request(endpoints.repositoryImportInspect, {
+      method: 'POST', body: { url, revision }, schema: z.object({ sourceKind: z.literal('public_https') }).passthrough(),
+    })
+    const inspection = mapRepositoryInspection(payload)
+    if (
+      !inspection.candidateId?.match(/^repo-[0-9a-f]{32}$/) ||
+      inspection.headCommit !== revision || inspection.source !== new URL(url).href ||
+      inspection.dirty || inspection.mutated !== false || !inspection.template
+    ) {
+      throw new ClientError('validation', 'Public repository inspection did not confirm the requested URL and exact commit')
+    }
+    return inspection
+  }
+
   /** The status projection carries the exact local actor identity. */
   private actorId: string | null = null
 
@@ -859,9 +901,10 @@ function readLocalJson<T>(key: string, fallback: T): T {
 
 function writeLocalJson(key: string, value: unknown): void {
   try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(key, JSON.stringify(value))
+    if (typeof localStorage === 'undefined') throw new Error('storage unavailable')
+    localStorage.setItem(key, JSON.stringify(value))
   } catch {
-    // Browser presentation preferences remain in-memory if storage is blocked.
+    throw new ClientError('unavailable', 'Browser settings could not be saved. Check browser storage and retry.')
   }
 }
 
@@ -953,7 +996,16 @@ export class HttpGlobalSettingsClient implements GlobalSettingsClient {
         mergeRecords(projection.settings, uiOnlyGlobalSettings(candidate)),
       )
     }
-    writeLocalJson(GLOBAL_SETTINGS_OVERLAY_KEY, uiOnlyGlobalSettings(candidate))
+    try {
+      writeLocalJson(GLOBAL_SETTINGS_OVERLAY_KEY, uiOnlyGlobalSettings(candidate))
+    } catch (error) {
+      if (Object.keys(changes).length > 0) {
+        this.current = null
+        this.revision = null
+        throw new ClientError('unavailable', 'Service settings were saved, but browser preferences could not be saved. Reload settings before retrying.')
+      }
+      throw error
+    }
     this.current = serviceSettings
     return serviceSettings
   }
@@ -1086,14 +1138,25 @@ export class HttpActivityClient implements ActivityClient {
   private readonly overlay = new OverlayStore()
   /** Per-attention-item expected versions for optimistic transitions. */
   private versions = new Map<string, number>()
-  /** Activity/attention id → owning instance (from the last projection). */
-  private owners = new Map<string, string>()
+  /** IDs may repeat across applications; an unscoped transition must be unique. */
+  private owners = new Map<string, Set<string>>()
   /** Last-known attention items (for acknowledge responses). */
   private attentionCache = new Map<string, AttentionItem>()
+  private instanceNames = new Map<string, string>()
   private readonly transport: HttpTransport
 
   constructor(transport: HttpTransport) {
     this.transport = transport
+  }
+
+  private cacheKey(instanceId: string, id: string): string {
+    return JSON.stringify([instanceId, id])
+  }
+
+  private rememberOwner(id: string, instanceId: string): void {
+    const owners = this.owners.get(id) ?? new Set<string>()
+    owners.add(instanceId)
+    this.owners.set(id, owners)
   }
 
   private async targetInstances(instanceId?: string): Promise<string[]> {
@@ -1101,8 +1164,13 @@ export class HttpActivityClient implements ActivityClient {
     const payload = await this.transport.request(endpoints.instances, { schema: unknownPayload })
     return mapInstanceIndex(payload)
       .map((entry) => {
-        const record = entry as { id?: unknown; instanceId?: unknown }
-        return typeof record.id === 'string' ? record.id : record.instanceId
+        const record = entry as { id?: unknown; instanceId?: unknown; name?: unknown }
+        const id = typeof record.id === 'string' ? record.id : record.instanceId
+        if (typeof id === 'string') {
+          if (typeof record.name === 'string' && record.name.trim()) this.instanceNames.set(id, record.name)
+          else this.instanceNames.delete(id)
+        }
+        return id
       })
       .filter((id): id is string => typeof id === 'string')
   }
@@ -1110,13 +1178,20 @@ export class HttpActivityClient implements ActivityClient {
   private async projectionFor(instanceId: string) {
     const payload = await this.transport.request(endpoints.activity(instanceId), { schema: unknownPayload })
     const projection = mapActivityProjection(payload, instanceId)
-    for (const [attentionId, version] of Object.entries(projection.attentionVersions)) {
-      this.versions.set(attentionId, version)
+    // A newly missing item/version must invalidate the prior observation.
+    for (const [key, item] of this.attentionCache) {
+      if (item.instanceId === instanceId) {
+        this.attentionCache.delete(key)
+        this.versions.delete(key)
+      }
     }
-    for (const item of projection.activity) this.owners.set(item.id, instanceId)
+    for (const [attentionId, version] of Object.entries(projection.attentionVersions)) {
+      this.versions.set(this.cacheKey(instanceId, attentionId), version)
+    }
+    for (const item of projection.activity) this.rememberOwner(item.id, instanceId)
     for (const item of projection.attention) {
-      this.owners.set(item.id, instanceId)
-      this.attentionCache.set(item.id, item)
+      this.rememberOwner(item.id, instanceId)
+      this.attentionCache.set(this.cacheKey(instanceId, item.id), item)
     }
     return projection
   }
@@ -1131,7 +1206,11 @@ export class HttpActivityClient implements ActivityClient {
   }
 
   private resolveOwner(id: string, context?: { instanceId?: string }): string {
-    const instanceId = context?.instanceId ?? this.owners.get(id)
+    const owners = this.owners.get(id)
+    if (!context?.instanceId && owners && owners.size > 1) {
+      throw new ClientError('validation', 'The activity identity is ambiguous across application instances')
+    }
+    const instanceId = context?.instanceId ?? owners?.values().next().value
     if (!instanceId) {
       throw unavailable(
         'The owning application of this activity item is unknown',
@@ -1143,7 +1222,7 @@ export class HttpActivityClient implements ActivityClient {
 
   async markActivityRead(activityId: string, context?: { instanceId?: string }): Promise<void> {
     const instanceId = this.resolveOwner(activityId, context)
-    const expectedVersion = this.versions.get(activityId)
+    const expectedVersion = this.versions.get(this.cacheKey(instanceId, activityId))
     if (expectedVersion === undefined) {
       throw unavailable(
         'The attention item version is unknown',
@@ -1156,9 +1235,9 @@ export class HttpActivityClient implements ActivityClient {
       schema: unknownPayload,
     })
     if (payload === undefined) {
-      this.versions.set(activityId, expectedVersion + 1)
-      const known = this.attentionCache.get(activityId)
-      if (known) this.attentionCache.set(activityId, { ...known, read: true })
+      this.versions.set(this.cacheKey(instanceId, activityId), expectedVersion + 1)
+      const known = this.attentionCache.get(this.cacheKey(instanceId, activityId))
+      if (known) this.attentionCache.set(this.cacheKey(instanceId, activityId), { ...known, read: true })
       return
     }
     const record = payload as { attention?: unknown }
@@ -1166,11 +1245,11 @@ export class HttpActivityClient implements ActivityClient {
       record.attention !== undefined
         ? mapAttentionItem(record.attention, instanceId)
         : mapActivityProjection(payload, instanceId).attention.find((item) => item.id === activityId)
-    if (!updated) {
+    if (!updated || updated.id !== activityId || updated.instanceId !== instanceId) {
       throw new ClientError('validation', 'The read attention item is not present in the service response')
     }
-    this.versions.set(activityId, expectedVersion + 1)
-    this.attentionCache.set(activityId, updated)
+    this.versions.set(this.cacheKey(instanceId, activityId), expectedVersion + 1)
+    this.attentionCache.set(this.cacheKey(instanceId, activityId), updated)
   }
 
   async listAttention(instanceId?: string): Promise<AttentionItem[]> {
@@ -1183,7 +1262,7 @@ export class HttpActivityClient implements ActivityClient {
 
   async acknowledgeAttention(attentionId: string, context?: { instanceId?: string }): Promise<AttentionItem> {
     const instanceId = this.resolveOwner(attentionId, context)
-    const expectedVersion = this.versions.get(attentionId)
+    const expectedVersion = this.versions.get(this.cacheKey(instanceId, attentionId))
     if (expectedVersion === undefined) {
       throw unavailable(
         'The attention item version is unknown',
@@ -1201,9 +1280,9 @@ export class HttpActivityClient implements ActivityClient {
         record.attention !== undefined
           ? mapAttentionItem(record.attention, instanceId)
           : mapActivityProjection(payload, instanceId).attention.find((a) => a.id === attentionId)
-      if (updated) {
-        this.versions.set(attentionId, expectedVersion + 1)
-        this.attentionCache.set(attentionId, updated)
+      if (updated && updated.id === attentionId && updated.instanceId === instanceId) {
+        this.versions.set(this.cacheKey(instanceId, attentionId), expectedVersion + 1)
+        this.attentionCache.set(this.cacheKey(instanceId, attentionId), updated)
         return updated
       }
       throw new ClientError(
@@ -1213,16 +1292,16 @@ export class HttpActivityClient implements ActivityClient {
     }
     // A 204/void success is also accepted for compatible services. Derive the
     // local projection only from the exact versioned item loaded beforehand.
-    const known = this.attentionCache.get(attentionId)
+    const known = this.attentionCache.get(this.cacheKey(instanceId, attentionId))
     if (!known) {
       throw unavailable(
         'The acknowledged attention item is not present in the service response',
         'The service did not return the updated activity projection.',
       )
     }
-    this.versions.set(attentionId, expectedVersion + 1)
+    this.versions.set(this.cacheKey(instanceId, attentionId), expectedVersion + 1)
     const derived = { ...known, read: true, acknowledged: true }
-    this.attentionCache.set(attentionId, derived)
+    this.attentionCache.set(this.cacheKey(instanceId, attentionId), derived)
     return derived
   }
 
@@ -1232,6 +1311,7 @@ export class HttpActivityClient implements ActivityClient {
     const projections = await Promise.all(ids.map((id) => this.projectionFor(id)))
     return notificationsFromAttention(projections.flatMap((projection) => projection.attention)).map((n) => ({
       ...n,
+      ...(n.instanceId && this.instanceNames.has(n.instanceId) ? { instanceName: this.instanceNames.get(n.instanceId) } : {}),
       snoozedUntil: this.overlay.getSnoozed(n.id),
     }))
   }
@@ -2181,62 +2261,51 @@ const CANCELLABLE_RUN_STATES: ReadonlySet<OperationRecord['state']> = new Set([
 export class HttpOperationsClient implements OperationsClient {
   private readonly transport: HttpTransport
   private readonly runs: Pick<import('../client').RunsClient, 'getHistory' | 'transition'>
-  private readonly infrastructure: Pick<import('../client').InfrastructureClient, 'getTarget' | 'listPlans'>
 
   constructor(
     transport: HttpTransport,
     runs: Pick<import('../client').RunsClient, 'getHistory' | 'transition'>,
-    infrastructure: Pick<import('../client').InfrastructureClient, 'getTarget' | 'listPlans'>,
+    _infrastructure: Pick<import('../client').InfrastructureClient, 'getTarget' | 'listPlans'>,
   ) {
     this.transport = transport
     this.runs = runs
-    this.infrastructure = infrastructure
+    // Preserve the constructor contract; polling uses only the metadata endpoint.
+    void _infrastructure
   }
 
   async list(): Promise<OperationRecord[]> {
-    const payload = await this.transport.request(endpoints.instances, { schema: unknownPayload })
-    const ids = mapInstanceIndex(payload)
-      .map((entry) => (entry as { id?: unknown }).id)
-      .filter((id): id is string => typeof id === 'string')
-    const records: OperationRecord[] = []
-    for (const instanceId of ids) {
-      const history = await this.runs.getHistory(instanceId).catch(() => [])
-      for (const run of history) {
-        records.push({
-          id: `op_${run.id}`,
-          instanceId,
-          kind: 'orchestration_run',
-          title: `Run ${run.actionId}`,
-          state: run.state,
-          stageLabel: run.state.replaceAll('_', ' '),
-          startedAt: run.createdAt,
-          updatedAt: run.updatedAt,
-          canPause: false,
-          canCancel: CANCELLABLE_RUN_STATES.has(run.state),
-          log: [],
-          relatedReceiptId: run.receiptId,
-        })
-      }
-      const plans = await this.infrastructure.listPlans(instanceId).catch(() => [])
-      for (const plan of plans) {
-        records.push({
-          id: `op_${plan.id}`,
-          instanceId,
-          kind: 'infrastructure_plan',
-          title: plan.title,
-          state: plan.state,
-          stageLabel: plan.operation.replaceAll('_', ' '),
-          startedAt: plan.createdAt,
-          updatedAt: plan.createdAt,
-          canPause: false,
-          canCancel: false,
-          log: [],
-          relatedPlanId: plan.id,
-          relatedReceiptId: plan.receiptId,
-        })
-      }
+    const payload = await this.transport.request(endpoints.operations, { schema: unknownPayload })
+    const index = mapOperationIndex(payload)
+    const records: import('../types').OperationExecutionRecord[] = []
+    for (const run of index.runs) {
+      const instanceId = run.instanceId
+      records.push({
+        id: `op_${run.id}`,
+        instanceId,
+        kind: 'orchestration_run',
+        title: `Run ${run.actionId}`,
+        state: run.state,
+        stageLabel: run.state.replaceAll('_', ' '),
+        startedAt: run.createdAt,
+        updatedAt: run.updatedAt,
+        canPause: false,
+        canCancel: CANCELLABLE_RUN_STATES.has(run.state),
+        log: [],
+        relatedReceiptId: run.receiptId,
+      })
     }
-    return records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    for (const plan of index.infrastructurePlans) {
+      records.push({ id: `op_${plan.id}`, instanceId: plan.instanceId, kind: 'infrastructure_plan',
+        title: plan.title, state: plan.state, stageLabel: plan.operation.replaceAll('_', ' '),
+        startedAt: plan.createdAt, updatedAt: plan.updatedAt, canPause: false, canCancel: false, log: [],
+        relatedPlanId: plan.id, relatedReceiptId: plan.receiptId, error: plan.error })
+    }
+    return [
+      ...index.observationErrors.map((error, index) => ({ id: `observation_infrastructure_${error.instanceId}_${index}`,
+        instanceId: error.instanceId, kind: 'infrastructure_observation' as const,
+        title: 'Infrastructure operations unavailable', observationError: error.message })),
+      ...records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    ]
   }
 
   async get(operationId: string): Promise<OperationRecord> {

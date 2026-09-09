@@ -487,6 +487,47 @@ def verify_frozen_payload_build_contract(
             )
 
 
+def governor_cgroup_parent(
+    *, proc_cgroup: Path = Path("/proc/self/cgroup"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> str:
+    """Bind container children to the actual bounded governor service, not a slice."""
+    try:
+        lines = proc_cgroup.read_text().splitlines()
+        if len(lines) != 1 or not lines[0].startswith("0::/"):
+            raise ValueError("not a unified cgroup v2 membership")
+        membership = lines[0][3:]
+        match = re.fullmatch(
+            r"(/user\.slice/user-[0-9]+\.slice/user@[0-9]+\.service/"
+            r"stateport\.slice/stateport-heavy\.slice/stateport-heavy-[0-9]+-[0-9]+\.service)(/[^.][^:]*)?",
+            membership,
+        )
+        if match is None or ".." in PurePosixPath(membership).parts:
+            raise ValueError("not inside a governor service")
+        parent = match.group(1)
+        controls = cgroup_root / parent.lstrip("/")
+        memory = controls.joinpath("memory.max").read_text().strip()
+        quota, period = controls.joinpath("cpu.max").read_text().split()
+        if int(memory) <= 0 or int(quota) <= 0 or int(period) <= 0:
+            raise ValueError("unbounded governor controls")
+        return parent
+    except (OSError, ValueError) as exc:
+        raise ReleaseBuildError(
+            "release image execution requires a governor service with finite memory.max and cpu.max"
+        ) from exc
+
+
+def build_cgroup_path(parent: str, *, digest_file: Path) -> str:
+    """Buildah passes this directly to OCI; never target the occupied service.
+
+    The create-only evidence root plus image/build digest filename gives every
+    RUN build its own path while keeping the recorded plan and execution equal.
+    Podman run instead creates its own child below its supplied parent.
+    """
+    key = hashlib.sha256(str(digest_file).encode("utf-8")).hexdigest()[:24]
+    return f"{parent}/stateport-build-{key}"
+
+
 def base_pull_commands() -> list[list[str]]:
     base_manifest = _load_yaml(BASE_IMAGES)
     return [
@@ -502,6 +543,7 @@ def build_commands(
     registry: str,
     context_root: Path,
     digest_root: Path,
+    cgroup_parent: str | None = None,
 ) -> list[list[str]]:
     validate_registry_endpoint(registry)
     if not context_root.is_absolute() or not digest_root.is_absolute():
@@ -525,7 +567,9 @@ def build_commands(
             digest_file = digest_root / f"{image_id}-build{build_number}.digest"
             command = [
                 str(PODMAN),
+                *(["--cgroup-manager=cgroupfs"] if cgroup_parent else []),
                 "build",
+                *(["--cgroup-parent", build_cgroup_path(cgroup_parent, digest_file=digest_file), "--isolation=oci"] if cgroup_parent else []),
                 "--no-cache",
                 "--pull=never",
                 "--network=private",
@@ -714,6 +758,7 @@ def start_local_registry(
     *,
     storage: Path,
     registry_base: Mapping[str, Any],
+    cgroup_parent: str | None = None,
 ) -> dict[str, Any]:
     port = validate_registry_endpoint(registry)
     name = f"stateport-release-registry-{identity.commit[:12]}-{os.getpid()}"
@@ -743,7 +788,9 @@ def start_local_registry(
     container_id = _run(
         [
             str(PODMAN),
+            *(["--cgroup-manager=cgroupfs"] if cgroup_parent else []),
             "run",
+            *(["--cgroup-parent", cgroup_parent] if cgroup_parent else []),
             "--pull=never",
             "--detach",
             "--name",
@@ -1008,6 +1055,7 @@ def _execute_image_builds(
     registry: str,
     context: Path,
     output: Path,
+    cgroup_parent: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     digest_root = safe_path(output, "digests")
     digest_root.mkdir(mode=0o700)
@@ -1019,6 +1067,7 @@ def _execute_image_builds(
         registry=registry,
         context_root=context,
         digest_root=digest_root,
+        cgroup_parent=cgroup_parent,
     )
     command_iterator = iter(commands)
     images: dict[str, Any] = {}
@@ -1210,11 +1259,13 @@ def build_release(
     # Reject a non-local proof registry before Podman inspection, context
     # materialization, or any digest-pinned base-image pull.
     validate_registry_endpoint(registry)
+    cgroup_parent = governor_cgroup_parent()
     identity, controller_identity = _release_identities(version, source_commit)
     verify_frozen_payload_build_contract(identity.commit, inputs)
     controller = _controller_attestation(controller_identity)
     image_set = validate_definitions()
     builder = verify_podman_builder()
+    builder["containerCgroup"] = {"manager": "cgroupfs", "parent": cgroup_parent}
     output = prepare_output_root(output_root, repository=ROOT)
     output_identity = directory_identity(output)
     context, context_receipt = materialize_committed_context(output, identity)
@@ -1234,6 +1285,7 @@ def build_release(
             registry=registry,
             context_root=context,
             digest_root=digest_root,
+            cgroup_parent=cgroup_parent,
         ),
         "compatibilityFloor": "podman-5.0.0",
         "outputRootIdentity": output_identity,
@@ -1254,6 +1306,7 @@ def build_release(
             identity,
             storage=safe_path(output, "registry-data"),
             registry_base=registry_base,
+            cgroup_parent=cgroup_parent,
         )
         images, references = _execute_image_builds(
             image_set,
@@ -1261,6 +1314,7 @@ def build_release(
             registry=registry,
             context=context,
             output=output,
+            cgroup_parent=cgroup_parent,
         )
     except BaseException as failure:
         if registry_record is not None:

@@ -10,7 +10,7 @@ export interface RecordedCall {
   body?: unknown
 }
 
-export type RouteHandler = (call: RecordedCall) => Response
+export type RouteHandler = (call: RecordedCall) => Response | Promise<Response>
 
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -58,7 +58,7 @@ export function makeFakeFetch(
     for (const [routeMethod, match, handler] of routes) {
       if (method === routeMethod && path === match) {
         // Static responses are cloned per call (a Response body is single-use).
-        const res = typeof handler === 'function' ? handler(call) : handler.clone()
+        const res = typeof handler === 'function' ? await handler(call) : handler.clone()
         if (method === 'GET' && path === '/session' && res.ok) {
           const merged = new Headers(res.headers)
           merged.set('X-StatePort-CSRF', options.csrfToken ?? 'test-csrf')
@@ -152,6 +152,8 @@ export const TERMINAL_TICKET: import('../mappers').TerminalTicket = {
   oneUseToken: 'secret-one-use-token',
   purpose: 'create',
   targetClass: 'local_pty',
+  targetId: 'local-project',
+  displayName: 'Local project terminal',
 }
 
 /** Exact service response before the mapper normalizes the nested target. */

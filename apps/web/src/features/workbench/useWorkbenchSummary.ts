@@ -12,13 +12,14 @@ import type {
   Approval,
   ApplicationInstance,
   InfrastructureTarget,
-  OperationRecord,
+  OperationExecutionRecord,
   OrchestrationSession,
   Receipt,
   TerminalSession,
 } from '@/client'
 import { getClient } from '@/client'
 import { useSessionStore } from '@/state'
+import { isLiveOperationState } from '@/features/applications/lib/dominantStatus'
 
 export interface WorkbenchSummary {
   loading: boolean
@@ -28,13 +29,11 @@ export interface WorkbenchSummary {
   receiptCount: number
   activity: ActivityItem[]
   pendingApprovals: Approval[]
-  operations: OperationRecord[]
+  operations: OperationExecutionRecord[]
   terminalSession: TerminalSession | null
   infraTarget: InfrastructureTarget | null
   orchestration: OrchestrationSession | null
 }
-
-const LIVE_OPERATION_STATES = ['preparing', 'queued', 'running', 'validating', 'awaiting_approval', 'paused']
 
 export function useWorkbenchSummary(
   instance: ApplicationInstance | null,
@@ -100,7 +99,7 @@ export function useWorkbenchSummary(
           receiptCount: receipts.length,
           activity,
           pendingApprovals: approvals,
-          operations: operations.filter((op) => op.instanceId === instanceId && LIVE_OPERATION_STATES.includes(op.state)),
+          operations: operations.filter((op) => op.kind !== 'infrastructure_observation').filter((op) => op.instanceId === instanceId && isLiveOperationState(op.state)),
           terminalSession: liveTerminal,
           infraTarget,
           orchestration,

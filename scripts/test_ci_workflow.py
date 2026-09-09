@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 
 import yaml
@@ -166,7 +167,6 @@ def test_self_hosted_jobs_reject_untrusted_fork_code_and_keep_secret_scan() -> N
     assert canonical["if"] == "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
     assert canonical["env"] == {
         "STATEPORT_STUDYDD_RECOVERY_ROOT": "/opt/stateport/private/studydd-cffc45a2",
-        "TMPDIR": "${{ runner.temp }}",
     }
 
     security = jobs["security"]
@@ -298,7 +298,7 @@ def test_ci_canonical_source_gate_uses_owner_private_recovery_bundle_and_live_br
     assert "npm run test:live-core-browser" in commands
     assert "npm ci --ignore-scripts" in commands
     assert "npx playwright install chromium" in commands
-    assert canonical["env"]["TMPDIR"] == "${{ runner.temp }}"
+    assert "TMPDIR" not in canonical["env"]
 
 
 def test_public_release_driver_is_manual_exact_main_alpha10_and_runs_preflights() -> None:
@@ -313,7 +313,7 @@ def test_public_release_driver_is_manual_exact_main_alpha10_and_runs_preflights(
     assert source["if"] == "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
     assert builder["if"] == "needs.source-preflight.result == 'success' && github.ref == 'refs/heads/main'"
     assert builder["env"]["RELEASE_VERSION"] == "0.1.0-alpha.10"
-    assert builder["env"]["TMPDIR"] == "${{ runner.temp }}"
+    assert "TMPDIR" not in builder["env"]
     for job in (source, builder):
         checkout = next(step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@"))
         assert checkout["with"]["ref"] == "${{ github.sha }}"
@@ -457,3 +457,45 @@ def test_gitleaks_allowlist_is_exact_and_keeps_default_rules() -> None:
         f"--trust-key-fingerprint {fingerprint.group(1)} ",
         "generic-api-key",
     )
+
+
+def test_workflow_runner_context_is_not_used_before_runner_assignment() -> None:
+    # GitHub's context table excludes runner from these job-level fields;
+    # YAML parsing alone cannot detect this zero-job validation failure.
+    for path in (WORKFLOW, RELEASE_WORKFLOW):
+        workflow = yaml.safe_load(path.read_text())
+        for name, job in workflow["jobs"].items():
+            for field in ("env", "if", "name", "runs-on", "timeout-minutes", "defaults", "concurrency", "strategy"):
+                value = yaml.safe_dump(job.get(field))
+                assert not re.search(r"\brunner\s*(?:\.|\[)", value), (path.name, name, field)
+
+
+def test_runner_tmpdir_initialization_executes_before_checkout(tmp_path: Path) -> None:
+    runner_temp = tmp_path / "runner temporary files"
+    runner_temp.mkdir()
+    for path, name in ((WORKFLOW, "canonical-source-browser"), (RELEASE_WORKFLOW, "reproducible-builder")):
+        job = yaml.safe_load(path.read_text())["jobs"][name]
+        first = job["steps"][0]
+        assert first["name"] == "Initialize runner temporary directory"
+        assert first["shell"] == "bash"
+        # This job can default to apps/web, which does not exist pre-checkout.
+        assert first["working-directory"] == "${{ runner.temp }}"
+        env_file = tmp_path / (path.name + ".env")
+        env_file.write_text("EXISTING=preserved\n")
+        result = subprocess.run(
+            ["/usr/bin/bash", "--noprofile", "--norc", "-c", first["run"]],
+            cwd=runner_temp,
+            env={"PATH": "/usr/bin:/bin", "RUNNER_TEMP": str(runner_temp), "GITHUB_ENV": str(env_file)},
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+        assert env_file.read_text() == f"EXISTING=preserved\nTMPDIR={runner_temp}\n"
+        before = env_file.read_bytes()
+        refused = subprocess.run(
+            ["/usr/bin/bash", "--noprofile", "--norc", "-c", first["run"]],
+            cwd=runner_temp,
+            env={"PATH": "/usr/bin:/bin", "RUNNER_TEMP": str(tmp_path / "absent"), "GITHUB_ENV": str(env_file)},
+            capture_output=True, text=True, timeout=5,
+        )
+        assert refused.returncode != 0
+        assert env_file.read_bytes() == before

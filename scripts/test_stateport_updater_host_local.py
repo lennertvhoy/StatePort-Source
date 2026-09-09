@@ -104,6 +104,31 @@ def test_provider_home_preflight_refuses_before_any_runtime_effect(tmp_path: Pat
     assert runner.calls == []
 
 
+
+def test_provider_home_permission_refusal_names_unavailable_updater_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = HostRunner()
+    host = _local_host(tmp_path, runner)
+    opened = []
+    closed = []
+    def open_directory(path, flags, **kwargs):
+        opened.append(path)
+        if path == "provider-auth":
+            raise PermissionError("private control-account directory")
+        return len(opened)
+    monkeypatch.setattr(host_module.os, "open", open_directory)
+    monkeypatch.setattr(host_module.os, "close", closed.append)
+    monkeypatch.setattr(host_module.os, "fstat", lambda _: SimpleNamespace(st_uid=65531, st_gid=65531, st_mode=0o40700))
+    release = SimpleNamespace(verified=SimpleNamespace(target={"services": [{"providerHome": dict(PROVIDER_HOME_CONTRACT)}]}))
+    with pytest.raises(UpdateHostError, match="updater/control-account identity boundary") as error:
+        host.preflight(release)
+    assert error.value.code == "provider_home_updater_identity_unavailable"
+    assert error.value.effect == "not_applied"
+    assert "Re-running provisioning does not resolve" in str(error.value)
+    assert "No supported account handoff" in str(error.value)
+    assert runner.calls == []
+    assert opened == ["/", "var", "lib", "stateport-control", "provider-auth"]
+    assert closed == [4, 3, 2, 1]
+
 def test_provider_home_preflight_reads_no_provider_files_and_legacy_needs_no_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_root = tmp_path / "host"
     home = fake_root / str(PROVIDER_HOME_CONTRACT["hostPath"]).lstrip("/")

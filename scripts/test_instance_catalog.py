@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "instance-catalog" / "src"))
@@ -25,6 +26,76 @@ from instance_catalog import (  # noqa: E402
 
 def _catalog(root: Path) -> InstanceCatalog:
     return InstanceCatalog(root / ".stateport" / "instances.json", root / "instances")
+
+
+def test_stable_identity_survives_device_change_and_move(tmp_path: Path) -> None:
+    target = tmp_path / "instances/project"
+    target.mkdir(parents=True)
+    catalog = _catalog(tmp_path)
+    original = catalog.register(target, instance_id="project")
+    document = json.loads(catalog.catalog_path.read_text())
+    document["entries"][0]["filesystem"]["device"] += 1000
+    catalog.catalog_path.write_text(json.dumps(document))
+    assert catalog.get("project").path_state == "present"
+    target.rename(target.with_name("moved"))
+    moved = catalog.get("project")
+    assert (moved.path_state, moved.path) == ("moved", "moved")
+    assert moved.metadata["filesystemId"] == original.metadata["filesystemId"]
+    with pytest.raises(DuplicateInstanceError):
+        catalog.register("moved", instance_id="duplicate")
+
+
+@pytest.mark.parametrize("mutation", ["filesystem", "directory", "legacy_after_change"])
+def test_stable_identity_refuses_unproved_replacement(tmp_path: Path, mutation: str) -> None:
+    target = tmp_path / "instances/project"
+    target.mkdir(parents=True)
+    catalog = _catalog(tmp_path)
+    catalog.register(target, instance_id="project")
+    document = json.loads(catalog.catalog_path.read_text())
+    row = document["entries"][0]
+    if mutation == "filesystem":
+        row["metadata"]["filesystemId"] = "statvfs:0000000000000001"
+    elif mutation == "directory":
+        target.rename(tmp_path / "retained-original")
+        target.mkdir()
+    else:
+        del row["metadata"]["filesystemId"]
+        row["filesystem"]["device"] += 1000
+    catalog.catalog_path.write_text(json.dumps(document))
+    assert catalog.get("project").path_state == "stale"
+
+
+def test_legacy_identity_upgrade_and_metadata_compare_and_swap(tmp_path: Path) -> None:
+    target = tmp_path / "instances/project"
+    target.mkdir(parents=True)
+    catalog = _catalog(tmp_path)
+    initial = catalog.register(target, instance_id="project")
+    document = json.loads(catalog.catalog_path.read_text())
+    del document["entries"][0]["metadata"]["filesystemId"]
+    catalog.catalog_path.write_text(json.dumps(document))
+    upgraded = catalog.get("project")
+    assert upgraded.metadata["filesystemId"] == initial.metadata["filesystemId"]
+    catalog.merge_metadata("project", {"other": "concurrent change"})
+    assert catalog.merge_metadata_if_matches(upgraded, {"stale": True}) is None
+    assert "stale" not in catalog.get("project").metadata
+
+
+def test_opened_identity_keeps_device_check_within_observation(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "instances/project"
+    target.mkdir(parents=True)
+    catalog = _catalog(tmp_path)
+    real_fstat = os.fstat
+    wanted = target.stat().st_ino
+    def changed(fd):
+        value = real_fstat(fd)
+        if value.st_ino == wanted:
+            fields = list(value)
+            fields[2] += 1000
+            return os.stat_result(fields)
+        return value
+    monkeypatch.setattr(os, "fstat", changed)
+    with pytest.raises(PathSafetyError, match="changed during identity"):
+        catalog.register(target, instance_id="project")
 
 
 def test_register_and_import_are_read_only_and_never_capture_content() -> None:

@@ -30,9 +30,9 @@ function applicationsClient(experience: unknown) {
 }
 
 describe('capability gating from the experience descriptor', () => {
-  it('advertises that the HTTP contract has no durable instance rename', () => {
+  it('advertises the durable instance rename contract', () => {
     const client = applicationsClient({ capabilities: [] })
-    expect(client.canRename).toBe(false)
+    expect(client.canRename).toBe(true)
   })
 
   it('terminal=unavailable in the descriptor is reflected on the instance', async () => {
@@ -821,7 +821,7 @@ describe('capability gating from the experience descriptor', () => {
     const terminal = new HttpTerminalClient(new HttpTransport({ fetchFn: fake.fetchFn }))
     const targets = await terminal.listTargets('ins_1')
     expect(targets).toHaveLength(1)
-    expect(targets[0]).toMatchObject({ kind: 'local_pty', available: true, instanceId: 'ins_1' })
+    expect(targets[0]).toMatchObject({ kind: 'unresolved', label: 'Application terminal — target verified on connect', available: true, instanceId: 'ins_1' })
   })
 })
 

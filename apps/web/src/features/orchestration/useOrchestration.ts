@@ -17,6 +17,7 @@ import type {
   Receipt,
 } from '@/client'
 import { ClientError, getClient } from '@/client'
+import { useSessionStore } from '@/state'
 
 export type OrchestrationStatus = 'loading' | 'ready' | 'unavailable' | 'error'
 
@@ -105,9 +106,11 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
 
   const withBusy = useCallback(async (action: () => Promise<void>) => {
     setBusy(true)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
     try {
       await action()
     } finally {
+      releaseOperationsMutation()
       setBusy(false)
     }
   }, [])
@@ -137,6 +140,7 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
     if (!session) return
     const controller = new AbortController()
     runRef.current = controller
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
     setRun({ running: true, logs: [], startedAt: new Date().toISOString() })
     setSession((prev) => (prev ? { ...prev, state: 'running' } : prev))
     try {
@@ -162,6 +166,7 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
         error: err instanceof Error ? err.message : String(err),
       }))
     } finally {
+      releaseOperationsMutation()
       // Settle truth from the client (stage/state/budget moved).
       try {
         const current = await getClient().orchestration.getCurrent(instanceId)

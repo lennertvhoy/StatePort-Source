@@ -247,11 +247,12 @@ def test_create_argv_hardening_accepts_only_daemon_owned_volumes():
         evil[evil.index("--volume") + 1] = "/home/operator:/workspace:rw"
         assert_create_argv_hardened(evil)
     with pytest.raises(EngineError):
-        evil = list(argv) + ["--volume", "stateport-workspace-x:/etc:rw"]
+        evil = list(argv)
+        evil[evil.index(IMAGE):evil.index(IMAGE)] = ["--volume", "stateport-workspace-x:/etc:rw"]
         assert_create_argv_hardened(evil)
     with pytest.raises(EngineError):
         evil = [item for item in argv if item != "--network" and item != "none"]
-        evil.extend(["--network", "host"])
+        evil[evil.index(IMAGE):evil.index(IMAGE)] = ["--network", "host"]
         assert_create_argv_hardened(evil)
 
 

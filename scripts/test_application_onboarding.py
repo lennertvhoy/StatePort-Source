@@ -331,7 +331,11 @@ def test_shell_keeps_install_primary_and_developer_tools_progressively_disclosed
     # Reviewed installation is the primary path and always passes an explicit
     # identity-bound confirmation; the repository import stays a quiet
     # secondary path that never pretends to be the ordinary flow.
-    assert "Install a reviewed sample" in onboarding
+    readiness = (ROOT / "apps/web/src/shell/ReadinessSummary.tsx").read_text(encoding="utf-8")
+    assert "<ReadinessSummary />" in onboarding
+    assert "'/catalog'" in readiness and "<Link to={check.to}" in readiness
+    assert 'data-testid={`install-${pkg.name}`}' in catalog
+    assert "onClick={() => openInstall(pkg.id)}" in catalog
     assert "Installing this package requires your confirmation" in review
     assert 'data-testid="confirm-install"' in review
     assert "Quiet secondary path at the foot of the list" in catalog

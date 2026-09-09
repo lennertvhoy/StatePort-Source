@@ -87,6 +87,24 @@ def _portable_document_projection(path: Path) -> bytes:
     if not isinstance(value, dict):
         raise PortabilityError(f"portable metadata is invalid: {path.name}")
     projected = copy.deepcopy(value)
+    template = value.get("template")
+    canonical_lock = (
+        path.name == "lock.yaml"
+        and value.get("formatVersion") == "statedd.lock/v1"
+        and isinstance(template, dict)
+        and template.get("instanceSchemaVersion") == "statedd.stateport.io/instance/v1alpha1"
+    )
+    embedded_relative: str | None = None
+    if canonical_lock:
+        relative = template.get("sourcePath")
+        if isinstance(relative, str) and not Path(relative).is_absolute() and relative != ".":
+            if "\\" in relative or "\x00" in relative or any(part in {"", ".", ".."} for part in relative.split("/")):
+                raise PortabilityError("portable embedded source path is not confined")
+            from template_validator.validator import validate_instance
+
+            if not validate_instance(path.parent.parent).ok:
+                raise PortabilityError("portable embedded source failed exact StateSpec validation")
+            embedded_relative = relative
 
     def scrub(item: Any) -> None:
         if isinstance(item, dict):
@@ -109,6 +127,15 @@ def _portable_document_projection(path: Path) -> bytes:
                 scrub(child)
 
     scrub(projected)
+    if embedded_relative is not None:
+        projected["template"]["sourcePath"] = embedded_relative
+        projected["template"]["source"]["checkoutLocation"] = embedded_relative
+    if canonical_lock:
+        class IndentedDumper(yaml.SafeDumper):
+            def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
+                return super().increase_indent(flow, False)
+
+        return yaml.dump(projected, Dumper=IndentedDumper, sort_keys=True).encode("utf-8")
     return (json.dumps(projected, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 

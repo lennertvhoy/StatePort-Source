@@ -494,6 +494,14 @@ export function PrivacyGroup({ settings, set }: GroupProps) {
           setBrowserStorage(result.remaining)
           const removed =
             result.removedLocalKeys.length + result.removedSessionKeys.length
+          if (!result.remaining.local.available || !result.remaining.session.available) {
+            pushToast({
+              kind: 'error',
+              title: 'Browser data clearance could not be verified',
+              body: 'Browser storage is unavailable. Some data may remain; restore storage access and retry.',
+            })
+            return
+          }
           if (result.remaining.totalKeys > 0) {
             pushToast({
               kind: 'error',

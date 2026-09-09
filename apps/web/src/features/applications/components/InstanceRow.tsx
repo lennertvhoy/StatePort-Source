@@ -7,7 +7,7 @@
  * Every row carries ONE honest status (icon + label, never a repeated
  * "Ready"), an attention count when > 0, last activity, a Pin mark when
  * pinned, and the context menu. Rows are roving-tabindex list items:
- * Enter opens · Space menu · P pins · Alt+↑↓ reorders pinned rows.
+ * Enter opens · Space menu · P pins · Alt+↑↓ reorders enabled manual groups.
  */
 import { EllipsisVertical, GripVertical, Pin, TriangleAlert } from 'lucide-react'
 import { useRef } from 'react'
@@ -47,8 +47,10 @@ interface RowProps extends InstanceRowActions {
   readOnly: boolean
   index: number
   roving: ReturnType<typeof useRovingFocus>
-  /** Pinned-group position (1-based) when this row is in the pinned group. */
+  /** Pinned-group position (zero-based) when this row is in the pinned group. */
   pinnedPosition?: { index: number; count: number }
+  /** Manual unpinned ordering exposes menu/keyboard controls, without drag. */
+  manualPosition?: { index: number; count: number }
   onDragStartRow?: (instance: ApplicationInstance) => void
   onDropOnRow?: (instance: ApplicationInstance) => void
 }
@@ -86,6 +88,7 @@ function PinnedMark() {
 /** Compact single-line row (default density). */
 export function InstanceRow(props: RowProps) {
   const { instance, status, readOnly, index, roving, pinnedPosition } = props
+  const position = props.manualPosition ?? pinnedPosition
   const { triggerRef, openMenu } = useRowMenu()
   const StatusIcon = status.presentation.icon
   const lastActivity = instance.lastOpenedAt ?? instance.createdAt
@@ -95,8 +98,8 @@ export function InstanceRow(props: RowProps) {
     <li
       className="group flex items-center gap-1 rounded-sm px-1 transition-colors duration-instant hover:bg-hover max-md:min-h-11"
       aria-label={`${instance.name}, ${status.presentation.label}`}
-      aria-posinset={pinnedPosition ? pinnedPosition.index + 1 : undefined}
-      aria-setsize={pinnedPosition ? pinnedPosition.count : undefined}
+      aria-posinset={position ? position.index + 1 : undefined}
+      aria-setsize={position ? position.count : undefined}
       draggable={Boolean(pinnedPosition) && !readOnly}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
@@ -114,8 +117,8 @@ export function InstanceRow(props: RowProps) {
         onOpen: () => props.onOpen(instance),
         onMenu: openMenu,
         onTogglePin: readOnly ? undefined : () => props.onTogglePin(instance),
-        onMoveUp: pinnedPosition && !readOnly ? () => move(-1) : undefined,
-        onMoveDown: pinnedPosition && !readOnly ? () => move(1) : undefined,
+        onMoveUp: position && position.index > 0 && !readOnly ? () => move(-1) : undefined,
+        onMoveDown: position && position.index < position.count - 1 && !readOnly ? () => move(1) : undefined,
       })}
     >
       {pinnedPosition && !readOnly ? (
@@ -176,8 +179,8 @@ export function InstanceRow(props: RowProps) {
             onTogglePin={() => props.onTogglePin(instance)}
             onRename={props.onRename ? () => props.onRename?.(instance) : undefined}
             onOpenSettings={() => props.onOpenSettings(instance)}
-            onMoveUp={pinnedPosition && !readOnly ? () => move(-1) : undefined}
-            onMoveDown={pinnedPosition && !readOnly ? () => move(1) : undefined}
+            onMoveUp={position && position.index > 0 && !readOnly ? () => move(-1) : undefined}
+            onMoveDown={position && position.index < position.count - 1 && !readOnly ? () => move(1) : undefined}
           />
         </DropdownMenuContent>
       </DropdownMenu>
@@ -188,6 +191,7 @@ export function InstanceRow(props: RowProps) {
 /** Comfortable-mode panel (two-column grid cell; same content, more air). */
 export function InstanceCard(props: RowProps) {
   const { instance, status, readOnly, index, roving, pinnedPosition } = props
+  const position = props.manualPosition ?? pinnedPosition
   const { triggerRef, openMenu } = useRowMenu()
   const StatusIcon = status.presentation.icon
   const lastActivity = instance.lastOpenedAt ?? instance.createdAt
@@ -197,8 +201,8 @@ export function InstanceCard(props: RowProps) {
     <li
       className="group rounded-md border border-border bg-surface p-3 transition-colors duration-instant hover:border-border-strong"
       aria-label={`${instance.name}, ${status.presentation.label}`}
-      aria-posinset={pinnedPosition ? pinnedPosition.index + 1 : undefined}
-      aria-setsize={pinnedPosition ? pinnedPosition.count : undefined}
+      aria-posinset={position ? position.index + 1 : undefined}
+      aria-setsize={position ? position.count : undefined}
       draggable={Boolean(pinnedPosition) && !readOnly}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
@@ -216,8 +220,8 @@ export function InstanceCard(props: RowProps) {
         onOpen: () => props.onOpen(instance),
         onMenu: openMenu,
         onTogglePin: readOnly ? undefined : () => props.onTogglePin(instance),
-        onMoveUp: pinnedPosition && !readOnly ? () => move(-1) : undefined,
-        onMoveDown: pinnedPosition && !readOnly ? () => move(1) : undefined,
+        onMoveUp: position && position.index > 0 && !readOnly ? () => move(-1) : undefined,
+        onMoveDown: position && position.index < position.count - 1 && !readOnly ? () => move(1) : undefined,
       })}
     >
       <div className="flex items-start gap-2">
@@ -254,8 +258,8 @@ export function InstanceCard(props: RowProps) {
               onTogglePin={() => props.onTogglePin(instance)}
               onRename={props.onRename ? () => props.onRename?.(instance) : undefined}
               onOpenSettings={() => props.onOpenSettings(instance)}
-              onMoveUp={pinnedPosition && !readOnly ? () => move(-1) : undefined}
-              onMoveDown={pinnedPosition && !readOnly ? () => move(1) : undefined}
+              onMoveUp={position && position.index > 0 && !readOnly ? () => move(-1) : undefined}
+              onMoveDown={position && position.index < position.count - 1 && !readOnly ? () => move(1) : undefined}
             />
           </DropdownMenuContent>
         </DropdownMenu>

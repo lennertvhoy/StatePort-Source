@@ -37,6 +37,7 @@ from .engine import (
     MANAGED_LABEL_KEY,
     PodmanCliEngine,
     WORKLOAD_LABEL,
+    development_seed_identity_error,
 )
 from .deployment_staging import (
     DeploymentStagingError,
@@ -65,6 +66,7 @@ class DaemonBootError(RuntimeError):
 
 MAX_CLEANUP_RETRY_ATTEMPTS = 5
 MAX_TERMINAL_SESSIONS = 32
+TERMINAL_CLEANUP_TIMEOUT_SECONDS = 3.0
 _TERMINAL_SIGNAL_BYTES = {"SIGINT": b"\x03", "SIGQUIT": b"\x1c", "SIGTSTP": b"\x1a"}
 CLIENT_IDENTITY_FILE = ".stateport-control-client"
 
@@ -87,6 +89,8 @@ class _TerminalSession:
     socket_identity: tuple[int, int]
     grant_id: str = "unbound"
     closing: threading.Event = field(default_factory=threading.Event)
+    cleanup_complete: threading.Event = field(default_factory=threading.Event)
+    cleanup_status: str = "unverified"
     mutex: Any = field(default_factory=threading.RLock)
 
 
@@ -101,6 +105,8 @@ class DaemonConfig:
     socket_path: Path
     state_dir: Path
     grants_dir: Path | None = None
+    workspace_image_reference: str | None = None
+    workspace_spec_digest: str | None = None
     socket_group_name: str = "stateport-execution-control"
     socket_group_gid: int | None = None
     allowed_client_user: str = "stateport-control"
@@ -121,6 +127,15 @@ class DaemonConfig:
     clock: Callable[[], str] = field(default=_utcnow, compare=False)
 
     def __post_init__(self) -> None:
+        if (self.workspace_image_reference is None) != (self.workspace_spec_digest is None):
+            raise DaemonBootError("installed workspace image/spec configuration requires both fields")
+        if self.workspace_image_reference is not None:
+            try:
+                expected = contract.canonical_digest(contract.workspace_template_for_image(self.workspace_image_reference))
+            except ValueError as exc:
+                raise DaemonBootError("installed workspace image configuration is malformed") from exc
+            if expected != self.workspace_spec_digest:
+                raise DaemonBootError("installed workspace template digest differs")
         if not self.socket_path.is_absolute() or ".." in self.socket_path.parts:
             raise DaemonBootError("execution-host socket path must be absolute and non-traversing")
         for name, value in (
@@ -194,6 +209,8 @@ class DaemonConfig:
                 env.get("STATEPORT_EXECUTION_HOST_STATE_DIR", "/var/lib/stateport/execution-host")
             ),
             grants_dir=Path(grants_raw) if grants_raw else None,
+            workspace_image_reference=env.get("STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE"),
+            workspace_spec_digest=env.get("STATEPORT_EXECUTION_HOST_WORKSPACE_SPEC_DIGEST"),
             socket_group_name=env.get(
                 "STATEPORT_EXECUTION_HOST_SOCKET_GROUP", "stateport-execution-control"
             ),
@@ -593,6 +610,19 @@ class ExecutionHostDaemon:
             raise DaemonBootError(f"state directory {state_dir} is not owned by the daemon uid")
         os.chmod(state_dir, 0o700)
 
+    def _verify_workspace_image_authority(self) -> None:
+        """Validate fixed installed base authority, never a caller-selected grant."""
+        reference = self._config.workspace_image_reference
+        if reference is None:
+            raise GrantRefusal("workspace-image-unavailable", "installed workspace image binding is absent")
+        grant = self._grant_store().assert_live("control-plane-default")
+        expected = contract.canonical_digest(contract.workspace_template_for_image(reference))
+        if (grant["imageReference"] != reference or expected != self._config.workspace_spec_digest
+                or grant["workloadSpecDigests"].get("default-dev") != expected
+                or grant["workloadIds"] != ["default-dev"] or grant["workloadKinds"] != ["workspace"]
+                or (self._config.allowed_client_uid is not None and grant["peerUid"] != self._config.allowed_client_uid)) :
+            raise GrantRefusal("workspace-image-mismatch", "private default grant contradicts the installed workspace template")
+
     def _grants_directory(self) -> Path:
         return self._config.grants_dir or (self._config.state_dir / "grants")
 
@@ -762,6 +792,11 @@ class ExecutionHostDaemon:
             self._assert_terminal_directory()
             grants_dir = self._assert_grants_directory()
             self._grants = GrantStore(grants_dir, clock=self._config.clock)
+            if self._config.workspace_image_reference is not None:
+                binder = getattr(self._engine, "bind_workspace_image_authority", None)
+                if not callable(binder):
+                    raise DaemonBootError("engine cannot bind installed workspace image authority")
+                binder(self._config.workspace_image_reference, self._verify_workspace_image_authority)
             self._ledger = OperationLedger(self._config.state_dir)
             self.recovery_report = reconcile_on_boot(
                 self._ledger, self._engine, at=self._config.clock()
@@ -869,6 +904,12 @@ class ExecutionHostDaemon:
             if session.closing.is_set():
                 return
             session.closing.set()
+            try:
+                # Wake an unattached relay blocked in accept() so bounded
+                # close requests can observe its completion promptly.
+                session.listener.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 session.listener.close()
             except OSError:
@@ -983,6 +1024,7 @@ class ExecutionHostDaemon:
         except (OSError, ValueError):
             return
         finally:
+            cleanup_status = "completed"
             if connection is not None:
                 try:
                     connection.close()
@@ -995,7 +1037,7 @@ class ExecutionHostDaemon:
             try:
                 session.process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired, TimeoutError):
-                pass
+                cleanup_status = "unverified"
             with session.mutex:
                 master_fd, session.master_fd = session.master_fd, -1
                 if master_fd >= 0:
@@ -1010,6 +1052,12 @@ class ExecutionHostDaemon:
             self._unlink_owned_terminal_socket(session)
             with self._terminal_mutex:
                 self._terminal_sessions.pop(session.session_id, None)
+            # Publish completion before touching the workload ledger.  The
+            # close dispatcher holds that workload lock while requesting
+            # cleanup and must be able to wait without a lock inversion.
+            with session.mutex:
+                session.cleanup_status = cleanup_status
+                session.cleanup_complete.set()
             # The session end is the last durable activity of this attach.
             try:
                 self._touch_activity(session.workload_id)
@@ -1046,6 +1094,8 @@ class ExecutionHostDaemon:
             self._retry_cleanup(ledger, entry)
             return
         if entry["state"] in contract.TERMINAL_STATES:
+            if entry["state"] != "removed":
+                ledger.capture_source_command_output(entry, self._engine, at=self._config.clock(), termination_reason=str(entry["state"]))
             return
         # Withdrawn authority terminates or quarantines active work
         # immediately — before any idle/timeout bookkeeping.
@@ -1053,6 +1103,12 @@ class ExecutionHostDaemon:
             return
         if entry["state"] != "running" or not entry.get("startedAt"):
             return
+        if entry["spec"].get("kind") == "agent-run" and "sourceArchive" in entry["spec"]["parameters"]:
+            info = self._safe_inspect(entry["workloadId"])
+            if info.get("present") is True and info.get("running") is False:
+                entry = ledger.capture_source_command_output(entry, self._engine, at=self._config.clock(), termination_reason="exited")
+                self._transition_snapshot(ledger, entry, "exited", at=self._config.clock(), finished_at=self._config.clock(), exit_status=info.get("exitStatus"))
+                return
         if entry["spec"].get("kind") == "workspace":
             # Workspaces are bounded by real inactivity (terminal,
             # exec, attach), never by total lifetime.
@@ -1067,8 +1123,9 @@ class ExecutionHostDaemon:
             return
         workload_id = entry["workloadId"]
         cleanup = "performed"
+        entry = ledger.mark_source_termination(entry, at=self._config.clock(), reason="timed_out")
         try:
-            self._engine.stop(workload_id, timeout=2)
+            self._engine.stop(workload_id, timeout=2, expected_container_id=self._engine_target(entry))
         except EngineError as exc:
             cleanup = f"failed: {exc}"[:200]
         observed = self._safe_inspect(workload_id)
@@ -1095,6 +1152,7 @@ class ExecutionHostDaemon:
                 },
             )
             return
+        entry = ledger.capture_source_command_output(entry, self._engine, at=self._config.clock(), termination_reason="timed_out")
         self._transition_snapshot(
             ledger,
             entry,
@@ -1132,7 +1190,7 @@ class ExecutionHostDaemon:
         self._close_sessions_for(workload_id)
         cleanup = "performed"
         try:
-            self._engine.stop(workload_id, timeout=2)
+            self._engine.stop(workload_id, timeout=2, expected_container_id=self._engine_target(entry))
         except EngineError as exc:
             cleanup = f"failed: {exc}"[:200]
         observed = self._safe_inspect(workload_id)
@@ -1221,7 +1279,7 @@ class ExecutionHostDaemon:
         if is_workspace:
             cleanup_error: str | None = None
             try:
-                self._engine.stop(workload_id, timeout=2)
+                self._engine.stop(workload_id, timeout=2, expected_container_id=self._engine_target(entry))
             except EngineError as exc:
                 cleanup_error = str(exc)[:200]
             residual_evidence = self._residual_evidence(workload_id)
@@ -1239,11 +1297,13 @@ class ExecutionHostDaemon:
             cleanup_complete, cleanup, residual_evidence = self._cleanup_engine_effect(
                 workload_id,
                 snapshot_path=(
-                    str(entry["validatorSnapshotPath"])
-                    if entry.get("validatorSnapshotPath")
+                    str(entry.get("sourceSnapshotPath") or entry["validatorSnapshotPath"])
+                    if entry.get("sourceSnapshotPath") or entry.get("validatorSnapshotPath")
                     else None
                 ),
+                termination_reason="authority-withdrawn",
             )
+        entry = ledger.get(workload_id) or entry
         if not cleanup_complete:
             self._transition_snapshot(
                 ledger,
@@ -1326,7 +1386,7 @@ class ExecutionHostDaemon:
         if target_state == "stopped" and entry["spec"].get("kind") == "workspace":
             error: str | None = None
             try:
-                self._engine.stop(workload_id, timeout=2)
+                self._engine.stop(workload_id, timeout=2, expected_container_id=self._engine_target(entry))
             except EngineError as exc:
                 error = str(exc)[:200]
             residual = self._residual_evidence(workload_id)
@@ -1342,11 +1402,12 @@ class ExecutionHostDaemon:
             complete, cleanup_detail, residual = self._cleanup_engine_effect(
                 workload_id,
                 snapshot_path=(
-                    str(entry["validatorSnapshotPath"])
-                    if entry.get("validatorSnapshotPath")
+                    str(entry.get("sourceSnapshotPath") or entry["validatorSnapshotPath"])
+                    if entry.get("sourceSnapshotPath") or entry.get("validatorSnapshotPath")
                     else None
                 ),
             )
+        entry = ledger.get(workload_id) or entry
         if not complete:
             self._transition_snapshot(
                 ledger,
@@ -1376,6 +1437,7 @@ class ExecutionHostDaemon:
                 "cleanupFinishedAt": None,
                 "cleanupExitStatus": None,
                 "validatorSnapshotPath": None,
+                "sourceSnapshotPath": None,
             },
         )
 
@@ -1578,8 +1640,13 @@ class ExecutionHostDaemon:
                 received_at=received_at,
                 completed_at=self._config.clock(),
             )
-        requires_source_fd = request["operation"] in contract.DEPLOYMENT_ARCHIVE_OPERATIONS
-        if source_fd is not None and (source_fd < 0 or not requires_source_fd):
+        requires_source_fd = request["operation"] in contract.DEPLOYMENT_ARCHIVE_OPERATIONS or (
+            request["operation"] == "createWorkload"
+            and payload["workload"]["kind"] == "agent-run"
+            and "sourceArchive" in payload["workload"]["parameters"]
+        )
+        accepts_seed_fd = request["operation"] == "createWorkload" and "sourceSeed" in payload["workload"]["parameters"]
+        if source_fd is not None and (source_fd < 0 or not (requires_source_fd or accepts_seed_fd)):
             return contract.refusal_receipt(
                 request_digest,
                 request["operationId"],
@@ -1611,6 +1678,8 @@ class ExecutionHostDaemon:
                     payload=payload,
                     active_count=self._active_count_for_grant,
                 )
+                if self._config.workspace_image_reference is not None and grant["grantId"] == "control-plane-default":
+                    self._verify_workspace_image_authority()
             except GrantRefusal as refusal:
                 return contract.refusal_receipt(
                     request_digest,
@@ -1667,6 +1736,13 @@ class ExecutionHostDaemon:
             result, observed, cleanup = self._dispatch(
                 request, payload, grant, source_fd=source_fd
             )
+            workload_id = result.get("workloadId") if isinstance(result, dict) else None
+            if isinstance(workload_id, str):
+                entry = self._ledger_required().get(workload_id)
+                if entry is not None and self._grant_owns_entry(entry, grant):
+                    owner = entry["spec"]["parameters"].get("ownership")
+                    if owner is not None:
+                        result["ownership"] = {"grantId": entry["grantId"], **owner}
         except _Refusal as refusal:
             return finalize(
                 contract.refusal_receipt(
@@ -1761,8 +1837,17 @@ class ExecutionHostDaemon:
     ) -> str | None:
         """One established identity contract for cleanup and explicit controls."""
         labels = info.get("labels")
+        if entry is not None:
+            policy_error = development_seed_identity_error(entry["spec"], info)
+            if policy_error is not None:
+                return policy_error
         if entry is None:
             return "no durable workload owns the container name"
+        if not isinstance(info.get("containerId"), str) or not info["containerId"]:
+            return "observed container ID is unavailable"
+        expected_container_id = entry.get("containerId")
+        if expected_container_id is not None and info.get("containerId") != expected_container_id:
+            return "container ID does not match the durable ledger identity"
         if not isinstance(labels, Mapping):
             return "container has no label mapping"
         if labels.get(MANAGED_LABEL_KEY) != "true":
@@ -1777,7 +1862,7 @@ class ExecutionHostDaemon:
 
     def _assert_owned_container(
         self, entry: Mapping[str, Any], *, allow_absent: bool = False
-    ) -> None:
+    ) -> str | None:
         workload_id = str(entry["workloadId"])
         info = self._safe_inspect(workload_id)
         if info.get("present") is None:
@@ -1789,11 +1874,24 @@ class ExecutionHostDaemon:
         error = self._container_identity_error(workload_id, entry, info)
         if error is not None:
             raise _Refusal("foreign-container", error)
+        return str(info["containerId"])
+
+    def _engine_target(self, entry: Mapping[str, Any] | None) -> str:
+        if entry is None:
+            raise EngineError("no durable workload owns this engine effect")
+        try:
+            return str(self._assert_owned_container(entry))
+        except _Refusal as exc:
+            raise EngineError(exc.detail) from exc
 
     def _cleanup_engine_effect(
-        self, workload_id: str, *, snapshot_path: str | None = None
+        self, workload_id: str, *, snapshot_path: str | None = None,
+        termination_reason: str = "interrupted",
     ) -> tuple[bool, str, dict[str, Any]]:
         """Stop and remove an engine effect, verifying absence rather than calls."""
+        seeded = self._ledger_required().get(workload_id)
+        if seeded is not None and seeded.get("sourceSeedStatus") in {"started", "failed"}:
+            return False, "partial source seed and volume retained for operator review", self._residual_evidence(workload_id)
         initial = self._safe_inspect(workload_id)
         if initial.get("present") is None:
             residual = self._residual_evidence(workload_id)
@@ -1808,12 +1906,23 @@ class ExecutionHostDaemon:
         self._close_sessions_for(workload_id)
         call_errors: list[str] = []
         if initial.get("present") is True:
+            if initial.get("running") is True:
+                current = self._ledger_required().get(workload_id)
+                if current is not None:
+                    self._ledger_required().mark_source_termination(current, at=self._config.clock(), reason=termination_reason)
             try:
-                self._engine.stop(workload_id, timeout=2)
+                self._engine.stop(workload_id, timeout=2, expected_container_id=initial["containerId"])
             except EngineError as exc:
                 call_errors.append(f"stop: {str(exc)[:160]}")
             try:
-                self._engine.remove(workload_id, force=True)
+                current = self._ledger_required().get(workload_id)
+                if current is not None:
+                    reason = termination_reason if initial.get("running") else (str(current["state"]) if current["state"] in contract.TERMINAL_STATES else "exited")
+                    self._ledger_required().capture_source_command_output(current, self._engine, at=self._config.clock(), termination_reason=reason)
+            except LedgerError:
+                return False, "source command output capture failed; stopped container retained", self._residual_evidence(workload_id)
+            try:
+                self._engine.remove(workload_id, force=True, expected_container_id=initial["containerId"])
             except EngineError as exc:
                 call_errors.append(f"remove: {str(exc)[:160]}")
         residual = self._residual_evidence(workload_id)
@@ -1921,6 +2030,59 @@ class ExecutionHostDaemon:
             }
         return {}
 
+    @staticmethod
+    def _workload_inventory_metadata(entry: Mapping[str, Any]) -> dict[str, Any]:
+        """Project sealed ownership and declared limits without host internals.
+
+        Application/run ownership comes from the exact grant-bound sealed spec.
+        Legacy workspaces retain explicit null ownership.  The grant identity is durable daemon truth; the
+        resource values come only from the validated sealed spec admitted for
+        that grant.
+        """
+
+        spec = entry["spec"]
+        resources = spec["resources"]
+        parameters = spec["parameters"]
+        declared_limits: dict[str, Any] = {
+            "memoryMaxBytes": resources["memoryMaxBytes"],
+            "pidsMax": resources["pidsMax"],
+            "timeoutSeconds": spec["timeoutSeconds"],
+            "outputByteBound": spec["outputByteBound"],
+        }
+        if spec["kind"] in {"agent-run", "validator-run"}:
+            declared_limits.update(
+                cpuQuotaPercent=resources["cpuQuotaPercent"],
+                diskMaxBytes=resources["diskMaxBytes"],
+            )
+        elif spec["kind"] == "workspace":
+            declared_limits.update(
+                cpuQuotaPercent=parameters["cpuQuotaPercent"],
+                diskMaxBytes=parameters["diskMaxBytes"],
+            )
+        enforcement = entry.get("resourceEnforcement")
+        return {
+            "ownership": {
+                "grantId": entry.get("grantId"),
+                "applicationId": None,
+                "runId": None,
+                **parameters.get("ownership", {}),
+            },
+            **({"sourceSeed": {"status": entry.get("sourceSeedStatus", "not-started"), "reviewDigest": parameters["sourceSeed"]["reviewDigest"]}} if "sourceSeed" in parameters else {}),
+            "declaredLimits": declared_limits,
+            "resourceEnforcement": (
+                dict(enforcement) if isinstance(enforcement, Mapping) else {}
+            ),
+        }
+
+    @staticmethod
+    def _grant_owns_entry(
+        entry: Mapping[str, Any], grant: Mapping[str, Any] | None
+    ) -> bool:
+        if grant is None or entry.get("grantId") != grant.get("grantId"):
+            return False
+        recorded_digest = entry.get("grantDigest")
+        return recorded_digest in {None, contract.canonical_digest(grant)}
+
     def _observed_for(self, workload_id: str) -> dict[str, Any]:
         observed = self._empty_observed()
         info = self._safe_inspect(workload_id)
@@ -1961,6 +2123,9 @@ class ExecutionHostDaemon:
                 return self._op_deployment(
                     request, payload, grant, source_fd=source_fd
                 )
+        if operation == "createWorkload":
+            with self._workload_lock(payload["workload"]["workloadId"]):
+                return self._op_create(request, payload, grant, source_fd=source_fd)
         handler = {
             "describeCapabilities": self._op_describe,
             "createWorkload": self._op_create,
@@ -1992,7 +2157,27 @@ class ExecutionHostDaemon:
                     with self._terminal_mutex:
                         if self._terminal_sessions.get(session_id) is not session:
                             continue
-                        return handler(request, payload, grant)
+                        result = handler(request, payload, grant)
+                if operation != "closeTerminal":
+                    return result
+                if not session.cleanup_complete.wait(TERMINAL_CLEANUP_TIMEOUT_SECONDS):
+                    raise _Refusal(
+                        "terminal-cleanup-unverified",
+                        "terminal relay cleanup did not complete within the bounded timeout",
+                    )
+                with session.mutex:
+                    cleanup_status = session.cleanup_status
+                if cleanup_status != "completed":
+                    raise _Refusal(
+                        "terminal-cleanup-unverified",
+                        "terminal relay or process cleanup could not be verified",
+                    )
+                result, observed, _cleanup = result
+                return (
+                    {**result, "state": "closed"},
+                    observed,
+                    {"outcome": "performed", "detail": "terminal relay and process cleanup verified"},
+                )
         workload_id = self._operation_workload_id(payload)
         if workload_id is None:
             return handler(request, payload, grant)
@@ -2277,32 +2462,91 @@ class ExecutionHostDaemon:
         request: Mapping[str, Any],
         payload: Mapping[str, Any],
         grant: Mapping[str, Any] | None,
+        *, source_fd: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         ledger = self._ledger_required()
         spec = payload["workload"]
+        if "sourceSeed" in spec["parameters"] and getattr(self._engine, "workspace_source_seed_supported", False) is not True:
+            raise _Refusal("workspace-seed-unavailable", "the engine does not implement verified fresh-volume source seeding")
+        if "sourceArchive" in spec["parameters"] and getattr(self._engine, "agent_source_commands_supported", False) is not True:
+            raise _Refusal("agent-command-unavailable", "the engine does not implement sealed source commands")
         grant = grant or {}
         grant_id = str(grant.get("grantId", request["requester"]["grantId"]))
         budgets = grant.get("budgets", {})
+        grant_digest = contract.canonical_digest(grant) if grant else None
+        existing = ledger.get(str(spec["workloadId"]))
+        seed = spec["parameters"].get("sourceSeed")
+        seed_reusing = seed is not None and existing is not None and existing.get("sourceSeedStatus") == "complete"
+        if seed is not None:
+            try:
+                self._engine.validate_workspace_seed_capability(spec)
+            except EngineError as exc:
+                raise _Refusal("workspace-seed-unavailable", str(exc)) from exc
+            if existing is not None and (existing.get("sourceSeedStatus") in {"started", "failed"} or (seed_reusing and source_fd is not None)):
+                raise _Refusal("workspace-seed-recovery-refused", "only a completed source seed can be recovered, without a new archive")
+            if not seed_reusing and source_fd is None:
+                raise _Refusal("source-descriptor-required", "fresh workspace source initialization requires its exact archive descriptor")
+        recovering_from: str | None = None
         try:
-            # Atomic capacity reservation: the placeholder counts against
-            # every capacity check before the engine call exists, so a
-            # concurrent create can never slip through the same budget.
-            reservation = ledger.reserve(
-                spec,
-                at=self._config.clock(),
-                grant_id=grant_id,
-                grant_epoch=int(grant.get("revocationEpoch", 0)),
-                max_active=contract.MAX_WORKLOADS,
-                max_per_grant=int(budgets.get("maxActiveWorkloads", 256)),
-                grant_digest=(contract.canonical_digest(grant) if grant else None),
-            )
+            if (
+                existing is not None
+                and existing.get("spec", {}).get("kind") == "workspace"
+                and existing.get("state") in {"removed", "interrupted"}
+            ):
+                info = self._safe_inspect(str(spec["workloadId"]))
+                if info.get("present") is None:
+                    raise _Refusal(
+                        "container-identity-unavailable",
+                        "workspace recovery could not verify that the container name is free",
+                    )
+                if info.get("present") is True:
+                    identity_error = self._container_identity_error(
+                        str(spec["workloadId"]), existing, info
+                    )
+                    if identity_error is not None:
+                        raise _Refusal("foreign-container", identity_error)
+                    raise _Refusal(
+                        "container-present",
+                        "workspace recovery requires the retained container to be absent",
+                    )
+                if grant_digest is None:
+                    raise _Refusal(
+                        "grant-identity-mismatch",
+                        "workspace recovery requires an exact durable grant identity",
+                    )
+                recovering_from = str(existing["state"])
+                reservation = ledger.reserve_workspace_recovery(
+                    spec,
+                    at=self._config.clock(),
+                    grant_id=grant_id,
+                    grant_epoch=int(grant.get("revocationEpoch", 0)),
+                    max_active=contract.MAX_WORKLOADS,
+                    max_per_grant=int(budgets.get("maxActiveWorkloads", 256)),
+                    grant_digest=grant_digest,
+                )
+            else:
+                # Atomic capacity reservation: the placeholder counts against
+                # every capacity check before the engine call exists, so a
+                # concurrent create can never slip through the same budget.
+                reservation = ledger.reserve(
+                    spec,
+                    at=self._config.clock(),
+                    grant_id=grant_id,
+                    grant_epoch=int(grant.get("revocationEpoch", 0)),
+                    max_active=contract.MAX_WORKLOADS,
+                    max_per_grant=int(budgets.get("maxActiveWorkloads", 256)),
+                    grant_digest=grant_digest,
+                )
+        except _Refusal:
+            raise
         except LedgerError as exc:
             detail = str(exc)
-            reason = (
-                "duplicate-workload"
-                if "already has a ledger entry" in detail
-                else "workload-limit"
-            )
+            if "capacity" in detail or "budget" in detail:
+                reason = "workload-limit"
+            elif existing is not None and existing.get("state") in {"removed", "interrupted"}:
+                reason = "workspace-recovery-refused"
+            else:
+                reason = "duplicate-workload"
             raise _Refusal(reason, detail) from exc
         try:
             self._assert_activation_authority(reservation, grant)
@@ -2310,7 +2554,7 @@ class ExecutionHostDaemon:
             self._transition_snapshot(
                 ledger,
                 reservation,
-                "cancelled",
+                recovering_from or "cancelled",
                 at=self._config.clock(),
                 finished_at=self._config.clock(),
                 receipt={
@@ -2321,15 +2565,92 @@ class ExecutionHostDaemon:
                 },
             )
             raise
+        if seed is not None:
+            if seed_reusing:
+                try:
+                    self._engine.reconcile_workspace_seed(spec, existing["sourceSeedId"])
+                except EngineError as exc:
+                    self._transition_snapshot(ledger, reservation, recovering_from or "failed", at=self._config.clock(), receipt={"kind": "workspace-seed-recovery-refused", "detail": "retained source identity was not verified; existing volume retained"})
+                    raise _Refusal("workspace-seed-recovery-refused", "retained source volume identity could not be verified") from exc
+            else:
+                seed_snapshot = None
+                seed_effect_attempted = False
+                seed_id = contract.canonical_digest({"operationId": request["operationId"], "specDigest": reservation["specDigest"]}).split(":", 1)[1]
+                reservation = self._transition_snapshot(ledger, reservation, "reserved", at=self._config.clock(), extra={"sourceSeedStatus": "admitting", "sourceSeedId": seed_id})
+                try:
+                    seed_snapshot = materialize_deployment_snapshot(source_fd,
+                        metadata=seed["sourceArchive"], plan={"sourceInventory": seed["sourceInventory"], "overlay": {}},
+                        snapshots_root=self._validator_snapshots_root(), operation_id=request["operationId"],
+                        max_context_bytes=min(spec["parameters"]["diskMaxBytes"], contract.MAX_DEPLOYMENT_CONTEXT_BYTES))
+                    manifest_path = Path(seed_snapshot["root"]) / "seed-manifest.json"
+                    with manifest_path.open("x", encoding="utf-8") as manifest:
+                        manifest.write(json.dumps({"sourceInventory": seed["sourceInventory"]}))
+                        manifest.flush()
+                        os.fchmod(manifest.fileno(), 0o644)
+                        os.fsync(manifest.fileno())
+                    for directory, _dirs, _files in os.walk(seed_snapshot["root"]):
+                        os.chmod(directory, 0o755)
+                    reservation = self._transition_snapshot(ledger, reservation, "reserved", at=self._config.clock(), extra={"sourceSnapshotPath": str(seed_snapshot["root"])})
+                    self._assert_activation_authority(reservation, grant)
+                    reservation = self._transition_snapshot(ledger, reservation, "reserved", at=self._config.clock(), extra={"sourceSeedStatus": "started"})
+                    seed_effect_attempted = True
+                    self._engine.seed_workspace(spec, snapshot_root=str(seed_snapshot["root"]), seed_id=seed_id, timeout=request["timeoutSeconds"])
+                    self._assert_activation_authority(reservation, grant)
+                    reservation = self._transition_snapshot(ledger, reservation, "reserved", at=self._config.clock(), extra={"sourceSeedStatus": "complete"}, receipt={"kind": "workspace-source-seeded", "reviewDigest": seed["reviewDigest"], "archiveDigest": seed["sourceArchive"]["archiveDigest"], "fileCount": len(seed["sourceInventory"]), "persistentVolumeQuota": "unsupported"})
+                    self._engine.finish_workspace_seed(spec, seed_id)
+                    cleanup_error = self._remove_snapshot_path(str(seed_snapshot["root"]))
+                    if cleanup_error:
+                        raise EngineError(cleanup_error)
+                    reservation = self._transition_snapshot(ledger, reservation, "reserved", at=self._config.clock(), extra={"sourceSnapshotPath": None})
+                except (EngineError, DeploymentStagingError, _Refusal, OSError) as exc:
+                    current = ledger.get(spec["workloadId"]) or reservation
+                    retained_snapshot = str(seed_snapshot["root"]) if seed_snapshot else None
+                    if not seed_effect_attempted and retained_snapshot is not None:
+                        cleanup_error = self._remove_snapshot_path(retained_snapshot)
+                        if cleanup_error is None:
+                            retained_snapshot = None
+                    quarantined = seed_effect_attempted or retained_snapshot is not None
+                    detail = "source initialization did not complete; partial volume and source evidence retained" if quarantined else "source admission refused before any volume effect; an exact fresh retry remains possible"
+                    self._transition_snapshot(ledger, current, "failed", at=self._config.clock(), receipt={"kind": "workspace-source-seed-refused", "detail": detail}, extra={"sourceSeedStatus": "failed" if quarantined else "not-started", "sourceSnapshotPath": retained_snapshot})
+                    raise _Refusal("workspace-seed-failed" if quarantined else "workspace-source-admission-refused", detail) from exc
+        snapshot = None
+        execution_spec = spec
+        if "sourceArchive" in spec["parameters"]:
+            parameters = spec["parameters"]
+            try:
+                if source_fd is None:
+                    raise DeploymentStagingError("source-descriptor-required", "agent source descriptor is absent")
+                snapshot = materialize_deployment_snapshot(
+                    source_fd, metadata=parameters["sourceArchive"],
+                    plan={"sourceInventory": parameters["sourceInventory"], "overlay": {}},
+                    snapshots_root=self._validator_snapshots_root(),
+                    operation_id=request["operationId"],
+                    max_context_bytes=min(spec["resources"]["diskMaxBytes"], contract.MAX_DEPLOYMENT_CONTEXT_BYTES),
+                )
+                # Images may run a non-root UID. Only the admitted source tree
+                # is traversable inside its read-only mount; the daemon's
+                # parent staging directory remains private to its own UID.
+                for directory, _subdirectories, _files in os.walk(snapshot["contextRoot"]):
+                    os.chmod(directory, 0o755)
+                execution_spec = {**spec, "parameters": {**parameters, "sourceSnapshotPath": str(snapshot["contextRoot"])}}
+                self._assert_activation_authority(reservation, grant)
+            except (DeploymentStagingError, _Refusal, OSError) as exc:
+                if snapshot is not None:
+                    self._record_post_effect_reconciliation(spec["workloadId"], kind="source-admission-refused", detail=str(exc)[:280], target_state="failed", snapshot_path=str(snapshot["root"]))
+                else:
+                    self._transition_snapshot(ledger, reservation, "failed", at=self._config.clock(), finished_at=self._config.clock(), receipt={"kind": "source-admission-refused", "detail": str(exc)[:280]})
+                raise _Refusal("source-admission-refused", "agent source archive or authority failed exact admission") from exc
         resource_enforcement = self._resource_enforcement(spec)
+        source_snapshot_path = str(snapshot["root"]) if snapshot is not None else None
         try:
-            container_id = self._engine.create(spec, timeout=request["timeoutSeconds"])
+            container_id = self._engine.create(execution_spec, timeout=request["timeoutSeconds"])
         except EngineError as exc:
             self._record_post_effect_reconciliation(
                 spec["workloadId"],
                 kind="create-engine-failure",
                 detail=str(exc),
-                target_state="failed",
+                snapshot_path=source_snapshot_path,
+                target_state=recovering_from or "failed",
             )
             raise _Refusal("engine-failure", str(exc)) from exc
         try:
@@ -2338,28 +2659,46 @@ class ExecutionHostDaemon:
                 at=self._config.clock(),
                 container_id=container_id,
                 expect_version=int(reservation["version"]),
-                extra={"resourceEnforcement": resource_enforcement},
+                extra={"resourceEnforcement": resource_enforcement, **({"sourceSnapshotPath": source_snapshot_path, "sourceArchiveDigest": spec["parameters"]["sourceArchive"]["archiveDigest"]} if snapshot is not None else {})},
             )
         except LedgerError as exc:
             self._record_post_effect_reconciliation(
                 spec["workloadId"],
                 kind="create-cas-conflict",
                 detail=str(exc),
-                target_state="failed",
+                snapshot_path=source_snapshot_path,
+                target_state=recovering_from or "failed",
             )
             raise _Refusal("state-conflict", str(exc)) from exc
         if spec["kind"] == "workspace":
             self._touch_activity(spec["workloadId"])
         observed = self._observed_for(spec["workloadId"])
+        result = {
+            "workloadId": spec["workloadId"],
+            "state": "created",
+            "specDigest": finalized["specDigest"],
+            "resourceEnforcement": resource_enforcement,
+        }
+        if snapshot is not None:
+            result["source"] = {"archiveDigest": snapshot["archiveDigest"], "contextDigest": snapshot["contextDigest"], "files": snapshot["files"], "bytes": snapshot["bytes"], "candidateStorage": "bounded-ephemeral-tmpfs", "durableChangedFiles": False}
+        if seed is not None:
+            result["sourceSeed"] = {"status": "complete", "reviewDigest": seed["reviewDigest"], "baseRevision": spec["parameters"]["baseRevision"], "fileCount": len(seed["sourceInventory"]), "reused": seed_reusing, "persistentVolumeQuota": "unsupported"}
+        if recovering_from is not None:
+            result.update(
+                recovered=True,
+                recoveredFromState=recovering_from,
+            )
         return (
-            {
-                "workloadId": spec["workloadId"],
-                "state": "created",
-                "specDigest": finalized["specDigest"],
-                "resourceEnforcement": resource_enforcement,
-            },
+            result,
             observed,
-            {"outcome": "not-required", "detail": "workload created; removal is an explicit operation"},
+            {
+                "outcome": "not-required",
+                "detail": (
+                    "workspace container recreated; preserved data volume reattached"
+                    if recovering_from is not None
+                    else "workload created; removal is an explicit operation"
+                ),
+            },
         )
 
     def _op_start(
@@ -2370,6 +2709,9 @@ class ExecutionHostDaemon:
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         ledger = self._ledger_required()
         entry = self._entry_required(payload["workloadId"])
+        if "sourceSeed" in entry["spec"]["parameters"] and entry.get("sourceSeedStatus") != "complete":
+            raise _Refusal("workspace-seed-incomplete", "partial source initialization cannot be started or adopted")
+        self._assert_activation_authority(entry, grant)
         startable = {"created"}
         if entry["spec"].get("kind") == "workspace":
             # A stopped workspace restarts against its preserved container
@@ -2379,10 +2721,9 @@ class ExecutionHostDaemon:
             raise _Refusal(
                 "invalid-state", f"workload is {entry['state']}; only a created workload can start"
             )
-        self._assert_activation_authority(entry, grant)
-        self._assert_owned_container(entry)
+        target_id = self._assert_owned_container(entry)
         try:
-            self._engine.start(entry["workloadId"], timeout=request["timeoutSeconds"])
+            self._engine.start(entry["workloadId"], timeout=request["timeoutSeconds"], expected_container_id=target_id)
         except EngineError as exc:
             self._record_post_effect_reconciliation(
                 entry["workloadId"],
@@ -2437,14 +2778,16 @@ class ExecutionHostDaemon:
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         ledger = self._ledger_required()
         entry = self._entry_required(payload["workloadId"])
+        self._assert_activation_authority(entry, grant)
         if entry["state"] in contract.TERMINAL_STATES:
             raise _Refusal("invalid-state", f"workload is already {entry['state']}")
-        self._assert_owned_container(entry)
+        target_id = self._assert_owned_container(entry)
         is_workspace = entry["spec"].get("kind") == "workspace"
         if is_workspace:
             self._close_sessions_for(entry["workloadId"])
+        entry = ledger.mark_source_termination(entry, at=self._config.clock(), reason="stopped")
         try:
-            self._engine.stop(entry["workloadId"], timeout=2)
+            self._engine.stop(entry["workloadId"], timeout=2, expected_container_id=target_id)
         except EngineError as exc:
             raise _Refusal("engine-failure", str(exc)) from exc
         info = self._safe_inspect(entry["workloadId"])
@@ -2463,6 +2806,7 @@ class ExecutionHostDaemon:
         finished_at = self._config.clock()
         exit_status = info.get("exitStatus")
         next_state = "stopped" if is_workspace else "exited"
+        entry = ledger.capture_source_command_output(entry, self._engine, at=self._config.clock(), termination_reason="stopped")
         try:
             self._transition_snapshot(
                 ledger,
@@ -2495,10 +2839,13 @@ class ExecutionHostDaemon:
         grant: Mapping[str, Any] | None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         entry = self._entry_required(payload["workloadId"])
+        self._assert_activation_authority(entry, grant)
         info = self._safe_inspect(entry["workloadId"])
+        container_identity = self._assert_owned_container(entry) if info.get("present") else None
         state = entry["state"]
         if state == "running" and info.get("present") and not info.get("running"):
             finished_at = self._config.clock()
+            entry = self._ledger_required().capture_source_command_output(entry, self._engine, at=finished_at, termination_reason="exited")
             state = "stopped" if entry["spec"].get("kind") == "workspace" else "exited"
             self._transition_snapshot(
                 self._ledger_required(),
@@ -2511,10 +2858,13 @@ class ExecutionHostDaemon:
             entry = self._entry_required(payload["workloadId"])
         return (
             {
+                "containerIdentityDigest": "sha256:" + hashlib.sha256(container_identity.encode()).hexdigest() if container_identity else None,
                 "workloadId": entry["workloadId"],
+                "kind": entry["spec"].get("kind"),
                 "state": state,
                 "exitStatus": entry.get("exitStatus"),
                 "engineStatus": info.get("status") if info.get("present") else "absent",
+                **self._workload_inventory_metadata(entry),
             },
             self._observed_for(entry["workloadId"]),
             {"outcome": "not-required", "detail": "read-only operation"},
@@ -2527,10 +2877,22 @@ class ExecutionHostDaemon:
         grant: Mapping[str, Any] | None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         entry = self._entry_required(payload["workloadId"])
-        self._assert_owned_container(entry)
+        self._assert_activation_authority(entry, grant)
         bound = min(request["outputByteBound"], entry["spec"]["outputByteBound"])
+        if "sourceArchive" in entry["spec"]["parameters"]:
+            if entry.get("sourceCommandOutput") is not None:
+                entry = self._ledger_required().capture_source_command_output(entry, self._engine, at=self._config.clock(), termination_reason="exited")
+            else:
+                info = self._safe_inspect(entry["workloadId"])
+                if info.get("present") is True and info.get("running") is False:
+                    entry = self._ledger_required().capture_source_command_output(entry, self._engine, at=self._config.clock(), termination_reason=str(entry["state"]) if entry["state"] in contract.TERMINAL_STATES else "exited")
+            evidence = entry.get("sourceCommandOutput")
+            if isinstance(evidence, Mapping):
+                output = evidence["output"].encode("utf-8")[:bound].decode("utf-8", "ignore")
+                return ({"workloadId": entry["workloadId"], "state": entry["state"], "output": output, "byteCount": len(output.encode("utf-8")), "truncated": evidence["truncated"] or evidence["byteCount"] > bound, "outputByteBound": bound, "sourceCommand": {key: value for key, value in evidence.items() if key != "output"}}, self._observed_for(entry["workloadId"]), {"outcome": "not-required", "detail": "durable bounded source command output"})
+        target_id = self._assert_owned_container(entry)
         try:
-            logs = self._engine.logs(entry["workloadId"], max_bytes=bound)
+            logs = self._engine.logs(entry["workloadId"], max_bytes=bound, expected_container_id=target_id)
         except EngineError as exc:
             raise _Refusal("engine-failure", str(exc)) from exc
         return (
@@ -2577,6 +2939,7 @@ class ExecutionHostDaemon:
         grant: Mapping[str, Any] | None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         entry = self._entry_required(payload["workloadId"])
+        self._assert_activation_authority(entry, grant)
         if entry["spec"].get("kind") != "workspace":
             raise _Refusal("invalid-state", "terminal attach requires a workspace workload")
         if entry["state"] != "running":
@@ -2596,8 +2959,13 @@ class ExecutionHostDaemon:
             if session_id in self._terminal_sessions:
                 raise _Refusal("duplicate-terminal", "terminal session already exists")
             try:
+                exact_id = self._engine_target(entry)
+                expected_digest = payload.get("expectedContainerIdentityDigest")
+                if expected_digest is not None and expected_digest != "sha256:" + hashlib.sha256(exact_id.encode()).hexdigest():
+                    raise _Refusal("workspace-identity-changed", "workspace container changed after terminal preparation")
                 process, master_fd = self._engine.open_terminal(
                     entry["workloadId"],
+                    expected_container_id=exact_id,
                     columns=payload["columns"],
                     rows=payload["rows"],
                     shell=tuple(entry["spec"]["parameters"].get("shell") or ("/bin/sh",)),
@@ -2750,6 +3118,7 @@ class ExecutionHostDaemon:
         grant: Mapping[str, Any] | None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         entry = self._entry_required(payload["workloadId"])
+        self._assert_activation_authority(entry, grant)
         if entry["spec"].get("kind") != "workspace":
             raise _Refusal("invalid-state", "typed exec requires a workspace workload")
         if entry["state"] != "running":
@@ -2770,6 +3139,7 @@ class ExecutionHostDaemon:
                 payload["argv"],
                 timeout=timeout,
                 max_bytes=bound,
+                expected_container_id=self._engine_target(entry),
             )
         except EngineError as exc:
             raise _Refusal("engine-failure", str(exc)) from exc
@@ -2800,7 +3170,7 @@ class ExecutionHostDaemon:
         workloads: list[dict[str, Any]] = []
         for snapshot in ledger.all():
             workload_id = str(snapshot["workloadId"])
-            if workload_id not in scope:
+            if workload_id not in scope or not self._grant_owns_entry(snapshot, grant):
                 continue
             with self._workload_lock(workload_id):
                 entry = ledger.get(workload_id)
@@ -2835,10 +3205,16 @@ class ExecutionHostDaemon:
                         "imageDigest": info.get("imageDigest"),
                         "createdAt": entry.get("createdAt"),
                         "lastActivityAt": entry.get("lastActivityAt"),
+                        "allowedOperations": sorted(grant["operations"]) if grant is not None else [],
+                        **self._workload_inventory_metadata(entry),
                     }
                 )
         return (
-            {"workloads": sorted(workloads, key=lambda item: item["workloadId"])},
+            {"workloads": sorted(workloads, key=lambda item: item["workloadId"]),
+             "allowedOperations": sorted(grant["operations"]) if grant is not None else [],
+             **({"workspaceProfile": {"imageReference": self._config.workspace_image_reference,
+                                      "workloadSpecDigest": self._config.workspace_spec_digest}}
+                if self._config.workspace_image_reference is not None and grant is not None and grant["grantId"] == "control-plane-default" else {})},
             self._empty_observed(),
             {"outcome": "not-required", "detail": "grant-scoped enumeration from daemon state"},
         )
@@ -2851,6 +3227,7 @@ class ExecutionHostDaemon:
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         ledger = self._ledger_required()
         entry = self._entry_required(payload["workloadId"])
+        self._assert_activation_authority(entry, grant)
         if entry["state"] in contract.TERMINAL_STATES:
             raise _Refusal("invalid-state", f"workload is already {entry['state']}")
         if entry["state"] == "reserved":
@@ -2875,13 +3252,14 @@ class ExecutionHostDaemon:
         self._assert_owned_container(entry, allow_absent=True)
         self._close_sessions_for(entry["workloadId"])
         snapshot_path = (
-            str(entry["validatorSnapshotPath"])
-            if entry.get("validatorSnapshotPath")
+            str(entry.get("sourceSnapshotPath") or entry["validatorSnapshotPath"])
+            if entry.get("sourceSnapshotPath") or entry.get("validatorSnapshotPath")
             else None
         )
         complete, cleanup_detail, residual = self._cleanup_engine_effect(
-            entry["workloadId"], snapshot_path=snapshot_path
+            entry["workloadId"], snapshot_path=snapshot_path, termination_reason="cancelled"
         )
+        entry = ledger.get(entry["workloadId"]) or entry
         if not complete:
             # A terminal cancellation state requires verified process/
             # container absence; otherwise the workload stays supervised.
@@ -2935,7 +3313,7 @@ class ExecutionHostDaemon:
                     "detail": "container absence verified after cancellation",
                     "cleanup": cleanup_detail,
                 },
-                extra={"validatorSnapshotPath": None},
+                extra={"validatorSnapshotPath": None, "sourceSnapshotPath": None},
             )
         except LedgerError as exc:
             self._record_post_effect_reconciliation(
@@ -2960,12 +3338,14 @@ class ExecutionHostDaemon:
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         ledger = self._ledger_required()
         entry = self._entry_required(payload["workloadId"])
+        self._assert_activation_authority(entry, grant)
         is_workspace = entry["spec"].get("kind") == "workspace"
         self._assert_owned_container(entry, allow_absent=True)
-        snapshot_path = str(entry["validatorSnapshotPath"]) if entry.get("validatorSnapshotPath") else None
+        snapshot_path = str(entry.get("sourceSnapshotPath") or entry["validatorSnapshotPath"]) if entry.get("sourceSnapshotPath") or entry.get("validatorSnapshotPath") else None
         complete, cleanup_detail, _residual = self._cleanup_engine_effect(
-            entry["workloadId"], snapshot_path=snapshot_path
+            entry["workloadId"], snapshot_path=snapshot_path, termination_reason="removed_while_running"
         )
+        entry = ledger.get(entry["workloadId"]) or entry
         if not complete:
             self._record_post_effect_reconciliation(
                 entry["workloadId"],
@@ -2981,7 +3361,7 @@ class ExecutionHostDaemon:
                 entry,
                 "removed",
                 at=self._config.clock(),
-                extra={"validatorSnapshotPath": None},
+                extra={"validatorSnapshotPath": None, "sourceSnapshotPath": None},
             )
         except LedgerError as exc:
             self._record_post_effect_reconciliation(
@@ -2990,8 +3370,8 @@ class ExecutionHostDaemon:
                 detail=str(exc),
                 target_state="removed",
                 snapshot_path=(
-                    str(entry["validatorSnapshotPath"])
-                    if entry.get("validatorSnapshotPath")
+                    str(entry.get("sourceSnapshotPath") or entry["validatorSnapshotPath"])
+                    if entry.get("sourceSnapshotPath") or entry.get("validatorSnapshotPath")
                     else None
                 ),
             )
@@ -3185,7 +3565,7 @@ class ExecutionHostDaemon:
             )
             raise
         try:
-            self._engine.start(workload_id, timeout=request["timeoutSeconds"])
+            self._engine.start(workload_id, timeout=request["timeoutSeconds"], expected_container_id=self._engine_target(created))
         except EngineError as exc:
             self._record_post_effect_reconciliation(
                 workload_id,
@@ -3257,7 +3637,7 @@ class ExecutionHostDaemon:
                 time.sleep(0.05)
             if timed_out:
                 try:
-                    self._engine.kill(workload_id)
+                    self._engine.kill(workload_id, expected_container_id=self._engine_target(self._entry_required(workload_id)))
                 except EngineError:
                     pass
                 info = self._safe_inspect(workload_id)
@@ -3276,7 +3656,7 @@ class ExecutionHostDaemon:
                     "validator durable state changed before evidence collection",
                 )
             logs = self._engine.logs(
-                workload_id, max_bytes=spec["outputByteBound"]
+                workload_id, max_bytes=spec["outputByteBound"], expected_container_id=self._engine_target(self._entry_required(workload_id))
             )
         except _Refusal as refusal:
             self._record_post_effect_reconciliation(
@@ -3372,7 +3752,7 @@ class ExecutionHostDaemon:
                     exit_status=exit_status,
                     finished_at=finished_at,
                     receipt=receipt,
-                    extra={"validatorSnapshotPath": None},
+                    extra={"validatorSnapshotPath": None, "sourceSnapshotPath": None},
                 )
         except LedgerError as exc:
             try:
@@ -3439,9 +3819,15 @@ class ExecutionHostDaemon:
                     continue
                 active.discard(workload_id)
                 try:
-                    self._engine.remove(workload_id, force=True)
+                    target_id = self._engine_target(current)
+                    ledger.capture_source_command_output(current, self._engine, at=self._config.clock(), termination_reason=str(current["state"]))
+                    self._engine.remove(workload_id, force=True, expected_container_id=target_id)
+                    if current is not None and current.get("sourceSnapshotPath"):
+                        error = self._remove_snapshot_path(str(current["sourceSnapshotPath"]))
+                        if error:
+                            raise EngineError("source snapshot cleanup failed")
                     removed.append(workload_id)
-                except EngineError as exc:
+                except (EngineError, LedgerError) as exc:
                     failures.append(f"{workload_id}: {exc}"[:200])
         if failures:
             raise _Refusal("engine-failure", "; ".join(failures))

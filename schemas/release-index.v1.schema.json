@@ -223,6 +223,7 @@
                 "serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
                 "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
                 "imageDigest": {"$ref": "#/$defs/digest"},
+                "workspaceImageId": {"const": "stateport-dev-workspace"},
                 "contractVersion": {"type": "integer", "minimum": 1, "maximum": 65535},
                 "clientCompatibility": {"type": "object", "additionalProperties": false, "required": ["minimum", "maximum"], "properties": {"minimum": {"type": "integer", "minimum": 1, "maximum": 65535}, "maximum": {"type": "integer", "minimum": 1, "maximum": 65535}}},
                 "hostDirectory": {"const": "/run/stateport/execution-control"},
@@ -268,6 +269,7 @@
                 "serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
                 "imageId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"},
                 "imageDigest": {"$ref": "#/$defs/digest"},
+                "workspaceImageId": {"const": "stateport-dev-workspace"},
                 "contractVersion": {"type": "integer", "minimum": 1, "maximum": 65535},
                 "clientCompatibility": {"type": "object", "additionalProperties": false, "required": ["minimum", "maximum"], "properties": {"minimum": {"type": "integer", "minimum": 1, "maximum": 65535}, "maximum": {"type": "integer", "minimum": 1, "maximum": 65535}}},
                 "hostDirectory": {"const": "/run/stateport/execution-control"},
@@ -497,19 +499,89 @@
           "type": "array",
           "maxItems": 4,
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "hostPath", "mountPath", "purpose", "sourceOwner", "sourceGroup", "mode", "environmentVariable"],
-            "properties": {
-              "name": {"const": "template-sources"},
-              "hostPath": {"const": "/var/lib/stateport/imports"},
-              "mountPath": {"const": "/imports"},
-              "purpose": {"const": "template-sources"},
-              "sourceOwner": {"const": "installer-client"},
-              "sourceGroup": {"const": "stateport-execution-control"},
-              "mode": {"const": "ro"},
-              "environmentVariable": {"const": "STATEPORT_REPOSITORY_ROOTS"}
-            }
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "hostPath",
+                  "mountPath",
+                  "purpose",
+                  "sourceOwner",
+                  "sourceGroup",
+                  "mode",
+                  "environmentVariable"
+                ],
+                "properties": {
+                  "name": {
+                    "const": "template-sources"
+                  },
+                  "hostPath": {
+                    "const": "/var/lib/stateport/imports"
+                  },
+                  "mountPath": {
+                    "const": "/imports"
+                  },
+                  "purpose": {
+                    "const": "template-sources"
+                  },
+                  "sourceOwner": {
+                    "const": "installer-client"
+                  },
+                  "sourceGroup": {
+                    "const": "stateport-execution-control"
+                  },
+                  "mode": {
+                    "const": "ro"
+                  },
+                  "environmentVariable": {
+                    "const": "STATEPORT_REPOSITORY_ROOTS"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "hostPath",
+                  "mountPath",
+                  "purpose",
+                  "sourceOwner",
+                  "sourceGroup",
+                  "mode",
+                  "environmentVariable"
+                ],
+                "properties": {
+                        "profileId": {"enum": ["stateport.empty-workspace-terminal/v1", "stateport.reviewed-source-workspace-terminal/v1"]},
+                  "name": {
+                    "const": "workspace-authority"
+                  },
+                  "hostPath": {
+                    "const": "/etc/stateport/workspace-authority"
+                  },
+                  "mountPath": {
+                    "const": "/run/stateport-workspace-authority"
+                  },
+                  "purpose": {
+                    "const": "workspace-authority"
+                  },
+                  "sourceOwner": {
+                    "const": "root"
+                  },
+                  "sourceGroup": {
+                    "const": "root"
+                  },
+                  "mode": {
+                    "const": "ro"
+                  },
+                  "environmentVariable": {
+                    "const": "STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY"
+                  }
+                }
+              }
+            ]
           }
         },
         "resources": {

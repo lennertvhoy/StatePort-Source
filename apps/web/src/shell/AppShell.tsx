@@ -32,7 +32,7 @@ import { CommandPalette } from './CommandPalette'
 import type { ShellCommand } from './commands'
 import { useCommandStore, useRegisterCommands } from './commands'
 import { instanceGlyph } from './instanceGlyph'
-import { useApplications, useOperationsPolling, useSavedNavigationSettings, useServiceStatusPolling } from './data'
+import { StartupFocusContext, useApplications, useOperationsPolling, useSavedNavigationSettings, useServiceStatusPolling } from './data'
 import { KeyboardShortcuts } from './KeyboardShortcuts'
 import { useShortcutAction } from './shortcutRegistry'
 import { MobileNavDrawer, Sidebar } from './Sidebar'
@@ -214,14 +214,14 @@ function BuiltInCommands() {
 export function AppShell() {
   useServiceStatusPolling()
   useOperationsPolling()
-  useSavedNavigationSettings()
+  const startupFocus = useSavedNavigationSettings()
 
   const location = useLocation()
   const [searchParams] = useSearchParams()
   const focusActive = location.pathname.includes('/workbench') && searchParams.get('focus') === '1'
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-app text-foreground" data-testid="app-shell">
+    <StartupFocusContext.Provider value={startupFocus}><div className="flex h-dvh overflow-hidden bg-app text-foreground" data-testid="app-shell">
       <ThemeEngine />
       <TitleManager />
       <KeyboardShortcuts />
@@ -243,6 +243,6 @@ export function AppShell() {
       <OperationCenter />
       <ScenarioLab />
       <Toaster />
-    </div>
+    </div></StartupFocusContext.Provider>
   )
 }

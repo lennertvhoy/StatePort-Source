@@ -1,0 +1,109 @@
+From fc010e8b96ca90ee37f9a5bc8f33e0621f4dbe75 Mon Sep 17 00:00:00 2001
+From: Robin Leroy <egg.robin.leroy@gmail.com>
+Date: Wed, 11 Feb 2026 14:17:52 +0100
+Subject: [PATCH] ICU-23319 Fix C4715 in utfiterator.h, treat it as an error in
+ intltest
+
+---
+ .../Build.Windows.ProjectConfiguration.props  |  5 ++--
+ icu4c/source/common/unicode/utfiterator.h     | 30 ++++++++++++-------
+ .../source/test/intltest/utfiteratortest.cpp  | 15 +++++-----
+ 3 files changed, 30 insertions(+), 20 deletions(-)
+
+diff --git a/icu4c/source/allinone/Build.Windows.ProjectConfiguration.props b/icu4c/source/allinone/Build.Windows.ProjectConfiguration.props
+index 89bdae1cda0e..a9303482463a 100644
+--- a/icu4c/source/allinone/Build.Windows.ProjectConfiguration.props
++++ b/icu4c/source/allinone/Build.Windows.ProjectConfiguration.props
+@@ -92,8 +92,9 @@
+       <!-- We always want to treat wchar_t as a "real" C++ type, instead of a typedef. -->
+       <TreatWChar_tAsBuiltInType>true</TreatWChar_tAsBuiltInType>
+       <SuppressStartupBanner>true</SuppressStartupBanner>
+-      <!-- Set the source encoding and runtime encoding to UTF-8 by default. -->
+-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
++      <!-- Set the source encoding and runtime encoding to UTF-8 by default.
++           Treat C4715 (not all control paths return a value) as an error.-->
++      <AdditionalOptions>/utf-8 /we4715 %(AdditionalOptions)</AdditionalOptions>
+       <!-- Enable parallel compilation for faster builds. -->
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+       <!-- Set the C/C++ versions supported. -->
+diff --git a/icu4c/source/common/unicode/utfiterator.h b/icu4c/source/common/unicode/utfiterator.h
+index 7e9fc4ba314d..6e79a4403057 100644
+--- a/icu4c/source/common/unicode/utfiterator.h
++++ b/icu4c/source/common/unicode/utfiterator.h
+@@ -557,9 +557,11 @@ class UTFImpl<
+ public:
+     // Handle ill-formed UTF-8
+     U_FORCE_INLINE static CP32 sub() {
+-        switch (behavior) {
+-            case UTF_BEHAVIOR_NEGATIVE: return U_SENTINEL;
+-            case UTF_BEHAVIOR_FFFD: return 0xfffd;
++        if constexpr (behavior == UTF_BEHAVIOR_NEGATIVE) {
++            return U_SENTINEL;
++        } else {
++            static_assert(behavior == UTF_BEHAVIOR_FFFD);
++            return 0xfffd;
+         }
+     }
+ 
+@@ -736,10 +738,13 @@ class UTFImpl<
+ public:
+     // Handle ill-formed UTF-16: One unpaired surrogate.
+     U_FORCE_INLINE static CP32 sub(CP32 surrogate) {
+-        switch (behavior) {
+-            case UTF_BEHAVIOR_NEGATIVE: return U_SENTINEL;
+-            case UTF_BEHAVIOR_FFFD: return 0xfffd;
+-            case UTF_BEHAVIOR_SURROGATE: return surrogate;
++        if constexpr (behavior == UTF_BEHAVIOR_NEGATIVE) {
++            return U_SENTINEL;
++        } else if constexpr (behavior == UTF_BEHAVIOR_FFFD) {
++            return 0xfffd;
++        } else {
++            static_assert(behavior == UTF_BEHAVIOR_SURROGATE);
++            return surrogate;
+         }
+     }
+ 
+@@ -822,10 +827,13 @@ class UTFImpl<
+ public:
+     // Handle ill-formed UTF-32
+     U_FORCE_INLINE static CP32 sub(bool forSurrogate, CP32 surrogate) {
+-        switch (behavior) {
+-            case UTF_BEHAVIOR_NEGATIVE: return U_SENTINEL;
+-            case UTF_BEHAVIOR_FFFD: return 0xfffd;
+-            case UTF_BEHAVIOR_SURROGATE: return forSurrogate ? surrogate : 0xfffd;
++        if constexpr (behavior == UTF_BEHAVIOR_NEGATIVE) {
++            return U_SENTINEL;
++        } else if constexpr (behavior == UTF_BEHAVIOR_FFFD) {
++            return 0xfffd;
++        } else {
++            static_assert(behavior == UTF_BEHAVIOR_SURROGATE);
++            return forSurrogate ? surrogate : 0xfffd;
+         }
+     }
+ 
+diff --git a/icu4c/source/test/intltest/utfiteratortest.cpp b/icu4c/source/test/intltest/utfiteratortest.cpp
+index dbd9edf143e3..63485a8ad781 100644
+--- a/icu4c/source/test/intltest/utfiteratortest.cpp
++++ b/icu4c/source/test/intltest/utfiteratortest.cpp
+@@ -379,13 +379,14 @@ class UTFIteratorTest : public IntlTest {
+ 
+     template<typename CP32, UTFIllFormedBehavior behavior, typename StringView>
+     CP32 sub(StringView part) {
+-        switch (behavior) {
+-            case UTF_BEHAVIOR_NEGATIVE: return U_SENTINEL;
+-            case UTF_BEHAVIOR_FFFD: return 0xfffd;
+-            case UTF_BEHAVIOR_SURROGATE: {
+-                auto c = part[0];
+-                return U_IS_SURROGATE(c) ? static_cast<char32_t>(c) : 0xfffd;
+-            }
++        if constexpr (behavior == UTF_BEHAVIOR_NEGATIVE) {
++            return U_SENTINEL;
++        } else if constexpr (behavior == UTF_BEHAVIOR_FFFD) {
++            return 0xfffd;
++        } else {
++            static_assert(behavior == UTF_BEHAVIOR_SURROGATE);
++            auto c = part[0];
++            return U_IS_SURROGATE(c) ? static_cast<char32_t>(c) : 0xfffd;
+         }
+     }
+ 

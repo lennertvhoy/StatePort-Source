@@ -349,6 +349,28 @@ class ActivityReceiptStore:
             ),
         )
 
+    @staticmethod
+    def _receipt_from_application_rename(instance_id: str, value: object) -> dict[str, object]:
+        keys = {"formatVersion", "receiptId", "instanceId", "oldName", "newName", "actorId", "actorRole", "createdAt"}
+        if (
+            not isinstance(value, Mapping) or set(value) != keys
+            or value.get("formatVersion") != "stateport.application-rename-receipt/v1"
+            or value.get("instanceId") != instance_id
+            or not isinstance(value.get("receiptId"), str)
+            or not re.fullmatch(r"rename_[a-f0-9]{32}", str(value.get("receiptId")))
+            or value.get("actorRole") not in {"local_user", "platform_operator"}
+        ):
+            raise ActivityReceiptError("catalog rename receipt identity is invalid")
+        for field, maximum in (("oldName", 120), ("newName", 120), ("actorId", 128), ("createdAt", 64)):
+            text = _bounded_text(value.get(field), field, maximum)
+            if text.strip() != text or any(ord(character) < 32 or ord(character) == 127 for character in text):
+                raise ActivityReceiptError("catalog rename receipt text is invalid")
+        return {
+            "receiptId": value["receiptId"], "receiptType": value["formatVersion"],
+            "action": "application.rename", "status": "applied", "createdAt": value["createdAt"],
+            "sourceKind": "application_catalog", "payload": dict(value),
+        }
+
     def refresh(
         self,
         *,
@@ -356,10 +378,15 @@ class ActivityReceiptStore:
         inspection: Mapping[str, object],
         settings_receipts: object,
         application_install_receipt: object = None,
+        application_rename_receipts: object = None,
     ) -> None:
         instance = self._instance_id(instance_id)
         if not isinstance(inspection, Mapping) or not isinstance(settings_receipts, list):
             raise ActivityReceiptError("activity projection source facts are invalid")
+        if application_rename_receipts is None:
+            application_rename_receipts = []
+        if not isinstance(application_rename_receipts, list):
+            raise ActivityReceiptError("catalog rename receipt history is invalid")
         facts = self._attention_facts(inspection)
         now = _now()
         connection = self._connect()
@@ -400,6 +427,8 @@ class ActivityReceiptStore:
             )
             if install_receipt is not None:
                 self._upsert_receipt(connection, instance, install_receipt, now)
+            for receipt in application_rename_receipts:
+                self._upsert_receipt(connection, instance, self._receipt_from_application_rename(instance, receipt), now)
             connection.commit()
         except Exception:
             connection.rollback()

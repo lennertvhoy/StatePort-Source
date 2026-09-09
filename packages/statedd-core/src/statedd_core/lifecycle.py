@@ -1509,11 +1509,25 @@ def _valid_applied_receipt(receipt: Any, instance_root: Path) -> bool:
                 return False
         except LifecycleError:
             return False
+    source_matches = isinstance(target, dict) and target.get("source") == template.get("source")
+    if not source_matches and isinstance(target, dict):
+        relative = template.get("sourcePath")
+        if isinstance(relative, str) and not Path(relative).is_absolute():
+            try:
+                embedded = _confined(instance_root, relative, "receipt embedded source")
+                source_matches = (
+                    isinstance(target.get("source"), dict)
+                    and isinstance(template.get("source"), dict)
+                    and _source_descriptors_match(target["source"], template["source"])
+                    and _source_descriptors_match(target["source"], describe_template_source(embedded))
+                )
+            except LifecycleError:
+                return False
     return (
         isinstance(target, dict)
         and target.get("id") == template.get("id")
         and target.get("version") == template.get("version")
-        and target.get("source") == template.get("source")
+        and source_matches
     )
 
 
@@ -1928,6 +1942,8 @@ def _load_override_inputs(
         lock_path = _confined(instance_root, ".statedd/lock.yaml", "lockfile")
         lock = _read_lock(lock_path)
         source_path = Path(_locked_source(lock)["path"])
+        if not source_path.is_absolute():
+            source_path = _confined(instance_root, source_path.as_posix(), "locked template source")
         template_root = _safe_root_path(source_path, "locked template root")
     else:
         template_root = _safe_root_path(template_path, "template root")
@@ -2055,6 +2071,18 @@ def classify_overrides(
             blocked = True
 
     declared = set(manifest_files)
+    embedded_source_prefix = (
+        template_root.relative_to(instance_root).as_posix() + "/"
+        if template_root != instance_root and template_root.is_relative_to(instance_root)
+        else None
+    )
+    if (
+        lock["template"].get("instanceSchemaVersion") == "statedd.stateport.io/instance/v1alpha1"
+        and "README.md" not in manifest_files
+    ):
+        # Canonical StateSpec requires this instance-owned companion even when
+        # the v2 manifest has no template-owned README asset.
+        declared.add("README.md")
     # Lifecycle receipts are StatePort-owned generated history for both v1 and
     # v2 manifests; they are not unknown instance content.
     declared.add(".statedd/upgrade-receipt.yaml")
@@ -2099,6 +2127,10 @@ def classify_overrides(
         )
         declared.add(path)
     for path in sorted(_instance_paths(instance_root) - declared):
+        if embedded_source_prefix is not None and path.startswith(embedded_source_prefix):
+            # _load_override_inputs already verified this exact source tree
+            # against the lock digest and provenance. It is not instance drift.
+            continue
         if path == ".git" or path.startswith(".git/"):
             # The instance's Git repository is StatePort-owned infrastructure
             # created after materialization; its internals are never template
@@ -2474,8 +2506,11 @@ def plan_upgrade(
     instance_root = _safe_root_path(instance_path, "instance root")
     lock = _read_lock(_confined(instance_root, ".statedd/lock.yaml", "lockfile"))
     current_source = _locked_source(lock)
+    source_path = Path(current_source["path"])
+    if not source_path.is_absolute():
+        source_path = _confined(instance_root, source_path.as_posix(), "locked template source")
     return _plan_upgrade(
-        current_source["path"],
+        source_path,
         instance_root,
         new_template_path,
         migration_set=migration_set,
@@ -2564,6 +2599,66 @@ def _apply_plan_to_stage(
             destination.touch(exist_ok=True)
         else:
             raise LifecycleError(f"unsupported staged upgrade provision for {path}")
+
+
+def _copy_embedded_template(source: Path, destination: Path) -> None:
+    """Copy bounded regular source bytes through no-follow directory handles."""
+    total = 0
+    files = 0
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+    def identity(value: os.stat_result) -> tuple[int, ...]:
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    def copy_directory(source_fd: int, target: Path) -> None:
+        nonlocal total, files
+        target.mkdir(mode=0o700)
+        for name in sorted(os.listdir(source_fd)):
+            before = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                child = os.open(name, flags | os.O_DIRECTORY, dir_fd=source_fd)
+                try:
+                    opened = os.fstat(child)
+                    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                        raise LifecycleError("embedded source directory changed during copy")
+                    copy_directory(child, target / name)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+                files += 1
+                total += before.st_size
+                if before.st_size > 64 * 1024 * 1024 or total > 512 * 1024 * 1024 or files > 32768:
+                    raise LifecycleError("embedded source exceeds snapshot bounds")
+                child = os.open(name, flags, dir_fd=source_fd)
+                try:
+                    opened = os.fstat(child)
+                    if identity(opened) != identity(before):
+                        raise LifecycleError("embedded source file changed during copy")
+                    with (target / name).open("xb") as output:
+                        remaining = before.st_size
+                        while remaining:
+                            block = os.read(child, min(1024 * 1024, remaining))
+                            if not block:
+                                raise LifecycleError("embedded source file shortened during copy")
+                            output.write(block)
+                            remaining -= len(block)
+                        if os.read(child, 1) or identity(os.fstat(child)) != identity(opened):
+                            raise LifecycleError("embedded source file changed during copy")
+                        output.flush()
+                        os.fsync(output.fileno())
+                    (target / name).chmod(stat.S_IMODE(before.st_mode))
+                finally:
+                    os.close(child)
+            else:
+                raise LifecycleError("embedded source must contain only regular files and directories")
+        _fsync_directory(target)
+
+    source_fd = os.open(source, flags | os.O_DIRECTORY)
+    try:
+        copy_directory(source_fd, destination)
+    finally:
+        os.close(source_fd)
 
 
 def apply_upgrade(
@@ -2688,6 +2783,16 @@ def _apply_upgrade_locked(
     previous_lock = _read_lock(
         _safe_target_path(instance_root, ".statedd/lock.yaml", "lockfile")
     )
+    embedded_relative: str | None = None
+    previous_source_path = Path(_locked_source(previous_lock)["path"])
+    if not previous_source_path.is_absolute():
+        previous_source_path = _confined(instance_root, previous_source_path.as_posix(), "locked template source")
+    if previous_source_path != instance_root and previous_source_path.is_relative_to(instance_root):
+        embedded_relative = previous_source_path.relative_to(instance_root).as_posix()
+        descriptor = _read_yaml(instance_root / "instance.yaml", "instance.yaml")
+        descriptor_ref = descriptor.get("spec", {}).get("templateRef", {}).get("path")
+        if not isinstance(descriptor_ref, str) or _confined(instance_root, descriptor_ref, "embedded template reference") != previous_source_path:
+            raise LifecycleError("embedded template reference differs from locked source")
     parent = instance_root.parent
     stage_dir = _upgrade_stage_path(instance_root)
     backup_dir = _upgrade_backup_path(instance_root)
@@ -2709,8 +2814,15 @@ def _apply_upgrade_locked(
         if old_stage_lock.exists():
             old_stage_lock.unlink()
         source_descriptor = target_source if target_source.get("kind") == "git" else None
+        materialization_root = target_root
+        if embedded_relative is not None:
+            materialization_root = _confined(stage_dir, embedded_relative, "staged embedded source")
+            shutil.rmtree(materialization_root)
+            _copy_embedded_template(target_root, materialization_root)
+            if not _source_descriptors_match(describe_template_source(materialization_root), target_source):
+                raise LifecycleError("staged embedded source differs from approved target")
         materialize_instance(
-            target_root,
+            materialization_root,
             stage_dir,
             source_descriptor=source_descriptor,
             allow_fixture=allow_fixture,
@@ -2718,6 +2830,9 @@ def _apply_upgrade_locked(
         )
         staged_lock_path = _safe_target_path(stage_dir, ".statedd/lock.yaml", "staged lockfile")
         staged_lock = _read_lock(staged_lock_path)
+        if embedded_relative is not None:
+            staged_lock["template"]["sourcePath"] = embedded_relative
+            staged_lock["template"]["source"]["checkoutLocation"] = embedded_relative
         active_target_paths = set(_all_manifest_files(target_root, target_manifest))
         prior_retired = [
             dict(entry)
@@ -2783,6 +2898,11 @@ def _apply_upgrade_locked(
                 detail = (result.stdout + result.stderr).strip()
                 raise LifecycleError(f"staged validation failed: {detail}")
 
+        if embedded_relative is not None and (
+            not _source_descriptors_match(describe_template_source(target_root), target_source)
+            or not _source_descriptors_match(describe_template_source(materialization_root), target_source)
+        ):
+            raise LifecycleError("embedded upgrade target changed before promotion")
         os.replace(instance_root, backup_dir)
         _fsync_directory(parent)
         journal["phase"] = "original_moved"

@@ -323,13 +323,18 @@ export function applyAppearanceToWorkspace(settings: GlobalSettings): void {
   workspace.setTheme(settings.appearance.theme)
   workspace.setDensity(settings.appearance.density)
   workspace.setFontScale(settings.appearance.fontScale)
+  workspace.setPanelContrast(settings.appearance.panelContrast)
   workspace.setReducedMotion(settings.appearance.reducedMotion)
+  workspace.setDisableNonessentialAnimation(settings.accessibility.disableNonessentialAnimation)
   workspace.setStrongFocus(settings.appearance.strongerFocusIndicators)
   workspace.setHighContrast(settings.accessibility.highContrast)
+  workspace.setHighContrastBase(settings.appearance.highContrastBase)
 }
 
 /** Apply non-appearance settings to the workspace store after a save. */
 export function applySavedSettingsToWorkspace(settings: GlobalSettings): void {
+  useWorkspaceStore.getState().setDateTimeFormat(settings.general.dateTimeFormat)
+  useWorkspaceStore.getState().setWorkbenchToolOrder(settings.navigation.workbenchToolOrder)
   applyAppearanceToWorkspace(settings)
   const workspace = useWorkspaceStore.getState()
   // The saved default is a default, not a permanent pin: it must not mark the

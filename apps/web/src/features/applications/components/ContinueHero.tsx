@@ -6,7 +6,7 @@
  */
 import { Play } from 'lucide-react'
 
-import type { ApplicationInstance, OperationRecord } from '@/client'
+import type { ApplicationInstance, OperationExecutionRecord } from '@/client'
 import { OperationStateLabel, TimeAgo } from '@/components'
 import { Button } from '@/components/ui/button'
 import { InstanceGlyphTile } from '@/shell/appIcon'
@@ -22,7 +22,7 @@ export function ContinueHero({
   onContinue,
 }: {
   instance: ApplicationInstance
-  liveOperation?: OperationRecord
+  liveOperation?: OperationExecutionRecord
   target: ResumeTarget
   onContinue: () => void
 }) {

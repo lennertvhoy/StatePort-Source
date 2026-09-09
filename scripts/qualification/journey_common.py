@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "infra" / "qualification") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "infra" / "qualification"))
 
-from wsl2_rehearsal import QUALIFICATION_VM_MEMORY_MIB, SSH_PORT, VM, WSL_ROOTFS_IDENTITY  # noqa: E402
+from wsl2_rehearsal import QEMU_ROOTFS_IDENTITY, QUALIFICATION_VM_MEMORY_MIB, SSH_PORT, VM, WSL_ROOTFS_IDENTITY  # noqa: E402
 
 def log(msg: str) -> None:
     print(f"[journey] {msg}", flush=True)
@@ -46,6 +46,10 @@ def load_release_facts(candidate_dir: Path) -> dict[str, object]:
         "installerDigest": signed["artifacts"]["installer"]["digest"],
         "images": {
             image["imageId"]: image["digest"] for image in signed["images"]
+        },
+        "imageReferences": {
+            image["imageId"]: image["reference"] for image in signed["images"]
+            if isinstance(image.get("reference"), str)
         },
         "releaseIndexSha256": "sha256:"
         + hashlib.sha256(index_path.read_bytes()).hexdigest(),
@@ -100,39 +104,117 @@ def _json_object(path: Path, label: str) -> dict[str, object]:
     return document
 
 
+def _validate_simulation_build_receipt(candidate_dir: Path, build_receipt: Path, facts: dict) -> dict:
+    """Check production build observations against signed candidate comparison bytes."""
+    from assemble_release_index import AssemblyError, _load_receipt
+
+    _exact_file(build_receipt, "candidate build receipt")
+    try:
+        receipt = _load_receipt(build_receipt, expected_version=str(facts["version"]))
+    except AssemblyError as exc:
+        raise ValueError("candidate build receipt fails the production receipt contract") from exc
+    if (receipt["identity"]["commit"] != facts["sourceCommit"]
+            or receipt["identity"]["tree"] != facts["sourceTree"]
+            or set(receipt["images"]) != set(facts["images"])):
+        raise ValueError("production build receipt source or image set mismatch")
+    index = _json_object(candidate_dir / "release-index.json", "candidate release index")
+    proof_ref = index["signed"].get("supplyChain", {}).get("doubleBuildComparison")
+    proof_path = candidate_dir / "supply-chain" / "double-build-comparison.json"
+    proof = _json_object(proof_path, "signed double-build comparison")
+    if (not isinstance(proof_ref, dict)
+            or proof_ref.get("uri") != "operator://release/supply-chain/double-build-comparison.json"
+            or proof_ref.get("digest") != _sha256_file(proof_path)
+            or proof_ref.get("size") != proof_path.stat().st_size
+            or proof_ref.get("mediaType") != "application/json"
+            or proof.get("formatVersion") != "stateport.release-double-build-comparison/v1"
+            or not isinstance(proof.get("images"), dict)
+            or set(proof["images"]) != set(facts["images"])):
+        raise ValueError("candidate signed double-build comparison binding mismatch")
+    for image_id, digest in facts["images"].items():
+        image = receipt["images"][image_id]
+        comparison = proof["images"][image_id]
+        builds = image.get("builds")
+        if (image.get("reproducible") is not True
+                or image["acceptedReference"].rsplit("@", 1)[-1] != digest
+                or not isinstance(builds, list) or len(builds) != 2
+                or any(not isinstance(build, dict) for build in builds)
+                or [build.get("ordinal") for build in builds] != [1, 2]
+                or not isinstance(comparison, dict)
+                or comparison.get("formatVersion") != "stateport.double-build-comparison/v1"
+                or comparison.get("imageId") != image_id
+                or comparison.get("reproducible") is not True):
+            raise ValueError("production build reproducibility proof mismatch")
+        for build, name in zip(builds, ("first", "second")):
+            observed = comparison.get(name)
+            if (build.get("pushedDigest") != digest
+                    or not isinstance(observed, dict)
+                    or observed.get("digest") != digest
+                    or not isinstance(build.get("digestFileDigest"), str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", build["digestFileDigest"]) is None
+                    or observed.get("digestObservationDigest") != build["digestFileDigest"]
+                    or not isinstance(build.get("localImageId"), str)
+                    or not build["localImageId"]
+                    or observed.get("localImageId") != build["localImageId"]):
+                raise ValueError("production build observation differs from signed comparison")
+    return dict(receipt)
+
+
 def validate_retained_candidate_inputs(
     candidate_dir: Path,
     vm_dir: Path,
     site_root: Path,
-    archive_root: Path,
+    archive_root: Path | None,
+    *,
+    retained_simulation: bool = False,
+    build_receipt: Path | None = None,
+    native_distro_name: str | None = None,
+    qualification_build_receipt: Path | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """Bind retained-VM inputs to the candidate and its passing full-J1 receipt."""
+    """Bind retained inputs to passing J1; explicitly opted-in simulation is not qualification."""
 
     candidate_dir = _exact_directory(candidate_dir, "candidate directory")
     vm_dir = _exact_directory(vm_dir, "retained VM directory")
     site_root = _exact_directory(site_root, "candidate site root")
-    archive_root = _exact_directory(archive_root, "candidate archive root")
-    _exact_file(vm_dir / "vm.qcow2", "retained VM disk")
+    if native_distro_name is None:
+        archive_root = _exact_directory(archive_root, "candidate archive root")
+        _exact_file(vm_dir / "vm.qcow2", "retained VM disk")
+    elif retained_simulation or not re.fullmatch(r"StatePort-Rehearsal-[A-Za-z0-9._-]{3,64}", native_distro_name):
+        raise ValueError("native follow-on requires a valid non-simulation distro name")
 
     facts = load_release_facts(candidate_dir)
-    qualification_path = candidate_dir / "qualification-receipt.json"
-    qualification = _json_object(qualification_path, "candidate qualification receipt")
-    required_qualification = {
-        "candidateSourceCommit": facts["sourceCommit"],
-        "candidateSourceTree": facts["sourceTree"],
-        "releaseIndexSha256": facts["releaseIndexSha256"],
-        "signedPayloadDigest": facts["signedPayloadDigest"],
-    }
-    if any(qualification.get(key) != value for key, value in required_qualification.items()):
-        raise ValueError("candidate qualification identity does not match the release index")
-    build_receipt_path = Path(str(qualification.get("buildReceipt") or ""))
-    if not build_receipt_path.is_absolute():
-        raise ValueError("candidate build receipt path must be absolute")
-    _exact_file(build_receipt_path, "candidate build receipt")
-    if qualification.get("buildReceiptSha256") != _sha256_file(build_receipt_path):
-        raise ValueError("candidate build receipt digest mismatch")
+    production_build = None
+    qualification_evidence = {}
+    if build_receipt is not None:
+        if not retained_simulation:
+            raise ValueError("explicit build receipt is supported only for retained simulation")
+        build_receipt_path = _exact_file(build_receipt, "candidate build receipt")
+        production_build = _validate_simulation_build_receipt(candidate_dir, build_receipt_path, facts)
+    else:
+        qualification_path = candidate_dir / "qualification-receipt.json"
+        qualification = _json_object(qualification_path, "candidate qualification receipt")
+        required_qualification = {
+            "candidateSourceCommit": facts["sourceCommit"],
+            "candidateSourceTree": facts["sourceTree"],
+            "releaseIndexSha256": facts["releaseIndexSha256"],
+            "signedPayloadDigest": facts["signedPayloadDigest"],
+        }
+        if any(qualification.get(key) != value for key, value in required_qualification.items()):
+            raise ValueError("candidate qualification identity does not match the release index")
+        recorded_build_receipt = Path(str(qualification.get("buildReceipt") or ""))
+        build_receipt_path = qualification_build_receipt or recorded_build_receipt
+        if qualification_build_receipt is not None and native_distro_name is None:
+            raise ValueError("qualification build receipt override requires native follow-on")
+        if qualification_build_receipt is None and not build_receipt_path.is_absolute():
+            raise ValueError("candidate build receipt path must be absolute")
+        _exact_file(build_receipt_path, "candidate build receipt")
+        if qualification.get("buildReceiptSha256") != _sha256_file(build_receipt_path):
+            raise ValueError("candidate build receipt digest mismatch")
+        qualification_evidence = {
+            "candidateQualificationReceipt": str(qualification_path),
+            "candidateQualificationReceiptSha256": _sha256_file(qualification_path),
+        }
 
-    full_j1_path = vm_dir.parent / "receipt.json"
+    full_j1_path = vm_dir / "receipt.json" if native_distro_name else vm_dir.parent / "receipt.json"
     full_j1 = _json_object(full_j1_path, "retained full-J1 receipt")
     if full_j1.get("result") != "passed" or full_j1.get("version") != facts["version"]:
         raise ValueError("retained full-J1 receipt is not a pass for this candidate version")
@@ -142,16 +224,53 @@ def validate_retained_candidate_inputs(
     if (
         binding.get("releaseIndexDigest") != facts["releaseIndexSha256"]
         or binding.get("signedPayloadDigest") != facts["signedPayloadDigest"]
+        or binding.get("images") != facts["images"]
     ):
         raise ValueError("retained full-J1 receipt identity does not match the candidate")
     baseline = full_j1.get("rehearsalBaseline")
-    if (
+    if retained_simulation:
+        if (
+            full_j1.get("evidenceClass") != "simulation_only"
+            or full_j1.get("mode") != "j1"
+            or "diagnostic" in full_j1
+            or not isinstance(baseline, dict)
+            or baseline.get("evidenceClass") != "simulation_only"
+            or baseline.get("substrate") != "qemu-wsl-identity-simulation"
+            or baseline.get("rootfsIdentity") != QEMU_ROOTFS_IDENTITY
+            or baseline.get("identityShims") != [
+                "wsl_kernel_identity_only", "windows_interop_identity_only"
+            ]
+        ):
+            raise ValueError("retained simulation requires an explicit pinned QEMU full-J1 receipt")
+        site_transport = full_j1.get("siteTransport")
+        registry_transport = full_j1.get("guestRegistryTransport")
+        if (
+            not isinstance(site_transport, dict)
+            or site_transport.get("mode") != "guest-local-staged-pages"
+            or site_transport.get("guestLocalServer") is not True
+            or not isinstance(registry_transport, dict)
+            or registry_transport.get("mode") != "digest-only-prepublication-mirror"
+            or registry_transport.get("digestOnly") is not True
+            or registry_transport.get("guestLocalMirror") is not True
+            or registry_transport.get("retainedArchiveTransport") is not True
+        ):
+            raise ValueError("retained simulation requires explicit staged site and archive transport")
+    elif (
         full_j1.get("evidenceClass") != "owner_path_qualification"
         or not isinstance(baseline, dict)
         or baseline.get("substrate") != "native-wsl2"
         or baseline.get("rootfsIdentity") != WSL_ROOTFS_IDENTITY
+        or baseline.get("distroName") != native_distro_name
+        or not isinstance(baseline.get("windowsIdentity"), str)
     ):
-        raise ValueError("retained full-J1 receipt is not genuine native WSL2 owner-path evidence")
+        raise ValueError("retained full-J1 receipt is not genuine native WSL2 owner-path evidence for this distro")
+    if native_distro_name is not None:
+        if (not isinstance(baseline.get("machineId"), str)
+                or re.fullmatch(r"[0-9a-fA-F]{32}", baseline["machineId"]) is None
+                or not isinstance(baseline.get("windowsIdentity"), str)
+                or not baseline["windowsIdentity"].strip()
+                or baseline.get("distroName") != native_distro_name):
+            raise ValueError("native J1 receipt has incomplete identity binding")
     phases = full_j1.get("phases")
     required_phases = {
         "bootstrap-fetch",
@@ -163,6 +282,11 @@ def validate_retained_candidate_inputs(
         "install-rerun",
         "guest-runtime-smoke",
     }
+    if retained_simulation:
+        required_phases.remove("public-transport-boundary")
+        required_phases.update({"guest-swap", "install-services", "install-rerun-services"})
+        if binding.get("images") != facts["images"]:
+            raise ValueError("retained simulation service-smoke image binding mismatch")
     if (
         not isinstance(phases, dict)
         or set(phases) != required_phases
@@ -232,15 +356,18 @@ def validate_retained_candidate_inputs(
 
     images = facts.get("images")
     bound_archives = binding.get("archives")
-    if not isinstance(images, dict) or not isinstance(bound_archives, dict):
-        raise ValueError("candidate or full-J1 image binding is missing")
-    if set(images) != set(bound_archives):
-        raise ValueError("retained full-J1 image set does not match the candidate")
-    observed_names = {path.name.removesuffix(".oci.tar") for path in archive_root.glob("*.oci.tar")}
-    if observed_names != set(images):
-        raise ValueError("candidate archive root does not contain exactly the signed image set")
+    if not isinstance(images, dict):
+        raise ValueError("candidate image binding is missing")
+    if native_distro_name is None:
+        if not isinstance(bound_archives, dict) or set(images) != set(bound_archives):
+            raise ValueError("candidate or full-J1 image binding is missing")
+        observed_names = {path.name.removesuffix(".oci.tar") for path in archive_root.glob("*.oci.tar")}
+        if observed_names != set(images):
+            raise ValueError("candidate archive root does not contain exactly the signed image set")
     archive_digests: dict[str, str] = {}
     for image_id, manifest_digest in sorted(images.items()):
+        if native_distro_name is not None:
+            continue
         archive_binding = bound_archives.get(image_id)
         if (
             not isinstance(archive_binding, dict)
@@ -251,17 +378,37 @@ def validate_retained_candidate_inputs(
         archive_digest = _sha256_file(archive)
         if archive_binding.get("archiveDigest") != archive_digest:
             raise ValueError(f"full-J1 archive digest mismatch for {image_id}")
+        if production_build is not None:
+            authority = production_build["images"][image_id].get("releaseAuthority")
+            if (not isinstance(authority, dict)
+                    or authority.get("kind") != "retained-oci-archive"
+                    or authority.get("manifestDigest") != manifest_digest
+                    or authority.get("digest") != archive_digest
+                    or authority.get("sizeBytes") != archive.stat().st_size):
+                raise ValueError("production build archive authority does not match retained J1")
         archive_digests[str(image_id)] = archive_digest
 
     return facts, {
-        "candidateQualificationReceipt": str(qualification_path),
-        "candidateQualificationReceiptSha256": _sha256_file(qualification_path),
+        **({
+            "evidenceClass": "simulation_only",
+            "lane": "retained-installed-simulation",
+            "admissibleForQualification": False,
+            "freshInstallEvidence": False,
+            "rehearsalBaseline": baseline,
+            "siteTransport": site_transport,
+            "guestRegistryTransport": registry_transport,
+        } if retained_simulation else {}),
+        **qualification_evidence,
         "buildReceipt": str(build_receipt_path),
         "buildReceiptSha256": _sha256_file(build_receipt_path),
         "fullJ1Receipt": str(full_j1_path),
         "fullJ1ReceiptSha256": _sha256_file(full_j1_path),
+        **({"nativeIdentity": {
+            "machineId": baseline["machineId"],
+            "windowsIdentity": baseline["windowsIdentity"],
+        }} if native_distro_name is not None else {}),
         "siteRoot": str(site_root),
-        "archiveRoot": str(archive_root),
+        "archiveRoot": str(archive_root) if archive_root is not None else None,
         "bootstrapPath": str(candidate_bootstrap),
         "bootstrapDigest": bootstrap_digest,
         "installerPath": str(candidate_installer),
@@ -275,6 +422,9 @@ def validate_retained_candidate_inputs(
             else {}
         ),
         "archiveDigests": archive_digests,
+        "rehearsalBaseline": baseline,
+        **({"bootstrapUrl": binding["bootstrapUrl"]}
+           if isinstance(binding.get("bootstrapUrl"), str) else {}),
     }
 
 
@@ -364,6 +514,39 @@ def control_user_env() -> str:
         "XDG_STATE_HOME=/var/lib/stateport-control/.local/state "
         "XDG_RUNTIME_DIR=/run/user/$uid \"$@\"; }"
     )
+
+
+def transport_artifact(vm: VM, source: str | Path, destination: str, *,
+                       public_url: str | None = None,
+                       expected_digest: str | None = None) -> None:
+    """Move a candidate artifact into a guest using its qualified transport.
+
+    Retained QEMU journeys use the reviewed host-side copy. Native public
+    journeys must fetch anonymously from the candidate URL; accepting a local
+    path there would silently turn native proof into staged-host proof.
+    """
+    if getattr(vm, "native_wsl", False):
+        if not public_url or not expected_digest:
+            raise ValueError("native artifact transport requires public URL and digest")
+        fetch = getattr(vm, "fetch_public_artifact", None)
+        if fetch is None:
+            raise ValueError("native guest does not provide public artifact transport")
+        fetch(public_url, destination, expected_digest)
+        return
+    vm.scp_in(str(source), destination)
+
+
+def candidate_artifact_urls(version: str, bootstrap_url: str) -> tuple[str, str]:
+    """Return the exact bootstrap and sibling installer URLs for a candidate."""
+    if not re.fullmatch(r"https://[^\s]+", bootstrap_url):
+        raise ValueError("candidate bootstrap URL must use HTTPS")
+    if bootstrap_url.endswith("/bootstrap.sh"):
+        root = bootstrap_url.removesuffix("/bootstrap.sh")
+    elif bootstrap_url == "https://lennertvhoy.github.io/StatePort-Site/download/install.sh":
+        root = f"https://lennertvhoy.github.io/StatePort-Site/download/{version}"
+    else:
+        raise ValueError("candidate bootstrap URL is not a supported Site artifact")
+    return bootstrap_url, root + "/stateport-installer"
 
 
 def restart_service(vm: VM, unit: str) -> None:
@@ -487,6 +670,33 @@ def boot_retained_vm(
         except Exception as cleanup_error:  # noqa: BLE001 - preserve the boot failure
             log(f"retained VM cleanup after boot failure also failed: {cleanup_error}")
         raise
+    return vm
+
+
+def boot_native_follow_on(work_dir: Path, *, site_root: Path, distro_name: str,
+                         expected_identity: dict[str, str],
+                         expected_baseline: dict[str, object]) -> VM:
+    """Attach J2/J4 to the exact native distro proven by that run's J1 receipt."""
+    from wsl2_rehearsal import NativeWSL
+    work_dir = _exact_directory(work_dir, "native qualification work directory")
+    site_root = _exact_directory(site_root, "candidate site root")
+    if (not isinstance(expected_identity, dict)
+            or set(expected_identity) != {"machineId", "windowsIdentity"}
+            or not isinstance(expected_identity.get("machineId"), str)
+            or re.fullmatch(r"[0-9a-fA-F]{32}", expected_identity["machineId"]) is None
+            or not isinstance(expected_identity.get("windowsIdentity"), str)
+            or not expected_identity["windowsIdentity"].strip()
+            or not isinstance(expected_baseline, dict)
+            or expected_baseline.get("distroName") != distro_name
+            or any(expected_baseline.get(key) != value for key, value in expected_identity.items())):
+        raise ValueError("native follow-on identity binding is incomplete")
+    vm = NativeWSL(work_dir, site_root, None, distro_name=distro_name,
+                   phase_gates=True, public_transport=True, attach_existing=True)
+    vm.expected_native_identity = expected_identity
+    vm.expected_native_baseline = expected_baseline
+    vm.phase_gate("journey-boot")
+    vm.prepare(reuse=True)
+    vm.boot()
     return vm
 
 

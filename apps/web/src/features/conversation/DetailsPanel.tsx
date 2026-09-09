@@ -14,6 +14,7 @@ import { CopyButton, Disclosure, SectionHeader, StatusDot, TimeAgo } from '@/com
 import { applicationDestinationAvailable } from '@/features/application-experience/registry'
 import { sendToBridge } from '@/features/bridge/bridgeStore'
 import { useCurrentInstance } from '@/shell/currentInstance'
+import { channelDeliveryPresentation, conversationDeliveryPresentation } from './deliveryPresentation'
 
 // ── Small building blocks ────────────────────────────────────────────────────
 
@@ -24,19 +25,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
       <span className="min-w-0 text-right text-xs text-foreground">{children}</span>
     </div>
   )
-}
-
-function deliveryPresentation(state: Conversation['deliveryState']): { state: 'success' | 'neutral' | 'attention' | 'danger'; label: string } {
-  switch (state) {
-    case 'delivered':
-      return { state: 'success', label: 'Delivered' }
-    case 'pending':
-      return { state: 'attention', label: 'Pending' }
-    case 'failed':
-      return { state: 'danger', label: 'Delivery failed' }
-    default:
-      return { state: 'neutral', label: 'Not configured' }
-  }
 }
 
 export interface DetailsPanelProps {
@@ -84,8 +72,9 @@ export function DetailsPanel({ instanceId, conversation, messages, pinnedIds, on
     }
   }, [instanceId, conversation, hasCapability])
 
-  const delivery = deliveryPresentation(conversation?.deliveryState ?? 'not_configured')
-  const channelWord = conversation?.channel === 'telegram' ? 'Telegram' : 'Web'
+  const delivery = conversationDeliveryPresentation(conversation)
+  const web = channelDeliveryPresentation(conversation, 'web')
+  const telegram = channelDeliveryPresentation(conversation, 'telegram')
   const pinnedMessages = messages.filter((m) => pinnedIds.includes(m.id))
 
   return (
@@ -93,13 +82,13 @@ export function DetailsPanel({ instanceId, conversation, messages, pinnedIds, on
       <section>
         <SectionHeader title="Channels" />
         <Row label="Web">
-          <StatusDot state="success" label="Connected" />
+          <StatusDot state={web.state} label={web.label} />
         </Row>
         <Row label="Telegram">
-          <StatusDot state="neutral" label="Not configured" />
+          <StatusDot state={telegram.state} label={telegram.label} />
         </Row>
         <Row label="Delivery">
-          <StatusDot state={delivery.state} label={`${channelWord} · ${delivery.label}`} />
+          <StatusDot state={delivery.state} label={delivery.label} />
         </Row>
       </section>
 

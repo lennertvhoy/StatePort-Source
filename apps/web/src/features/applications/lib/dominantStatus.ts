@@ -10,13 +10,21 @@
  *   blocked → degraded (health or capability) → offline → live operation →
  *   quiet (`Idle` on the dashboard, `Ready` on the overview).
  */
-import { Circle, CircleX, Loader2, ShieldQuestion, TriangleAlert } from 'lucide-react'
+import { Circle, CircleX, Clock, ShieldQuestion, TriangleAlert } from 'lucide-react'
 
 import type { ApplicationInstance, OperationRecord } from '@/client'
 import type { SemanticPresentation } from '@/semantic'
 import { CONDITION_PRESENTATIONS, instanceHealthPresentation } from '@/semantic'
 
-export const LIVE_OP_STATES = ['preparing', 'queued', 'running', 'validating', 'paused', 'awaiting_approval']
+/** Backend operation states that remain actionable before a terminal outcome. */
+export const LIVE_OP_STATES = [
+  'draft', 'proposed', 'preparing', 'prepared', 'awaiting_approval', 'approved',
+  'queued', 'running', 'cancelling', 'paused', 'interrupted', 'validating',
+]
+
+export function isLiveOperationState(state: string | undefined): boolean {
+  return state !== undefined && LIVE_OP_STATES.includes(state)
+}
 
 export interface DominantStatusInput {
   instance: ApplicationInstance
@@ -37,7 +45,7 @@ export interface DominantStatus {
 const FAILED_OPERATION: SemanticPresentation = { state: 'danger', label: 'Operation failed', icon: CircleX }
 const AWAITING_APPROVAL: SemanticPresentation = { state: 'waiting', label: 'Awaiting approval', icon: ShieldQuestion }
 const NEEDS_ATTENTION: SemanticPresentation = { state: 'attention', label: 'Needs attention', icon: TriangleAlert }
-const RUNNING_OPERATION: SemanticPresentation = { state: 'waiting', label: 'Running an operation', icon: Loader2, spin: true }
+const ACTIVE_OPERATION: SemanticPresentation = { state: 'waiting', label: 'Active operation', icon: Clock }
 const IDLE: SemanticPresentation = { state: 'neutral', label: 'Idle', icon: Circle }
 const DATA_UNAVAILABLE: SemanticPresentation = { state: 'blocked', label: 'Data unavailable', icon: CircleX }
 const DATA_STALE: SemanticPresentation = { state: 'attention', label: 'Showing last known data', icon: TriangleAlert }
@@ -52,8 +60,9 @@ export function dominantInstanceStatus(
 ): DominantStatus {
   const quiet = opts?.quiet ?? 'idle'
   const dataState = opts?.dataState ?? 'fresh'
-  const failedOps = operations.filter((o) => o.state === 'failed').length
-  const liveOps = operations.filter((o) => LIVE_OP_STATES.includes(o.state)).length
+  const instanceOperations = operations.filter((o) => o.instanceId === instance.id)
+  const failedOps = instanceOperations.filter((o) => o.state === 'failed').length
+  const liveOps = instanceOperations.filter((o) => isLiveOperationState(o.state)).length
   const unacknowledged = instance.attention.filter((a) => !a.acknowledged).length
   const backupDue = instance.recovery.state === 'due'
 
@@ -74,7 +83,7 @@ export function dominantInstanceStatus(
     return { presentation: instanceHealthPresentation('degraded'), others }
   }
   if (instance.health === 'offline') return { presentation: instanceHealthPresentation('offline'), others }
-  if (liveOps > 0) return { presentation: RUNNING_OPERATION, others: others.filter((o) => o !== 'operation in progress') }
+  if (liveOps > 0) return { presentation: ACTIVE_OPERATION, others: others.filter((o) => o !== 'operation in progress') }
   if (dataState === 'unavailable') return { presentation: DATA_UNAVAILABLE, others }
   if (dataState === 'stale') return { presentation: DATA_STALE, others }
   if (quiet === 'ready') return { presentation: instanceHealthPresentation('ready'), others }

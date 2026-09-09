@@ -376,6 +376,10 @@ def test_native_wsl_captures_stock_baseline_before_guest_mutation(tmp_path: Path
         commands.append((vm.exec_user, command))
         if command.startswith("set -eu;for package in podman netavark"):
             return subprocess.CompletedProcess([], 0, _stock_baseline_output(), "")
+        if command.startswith("powershell.exe -NoProfile"):
+            return subprocess.CompletedProcess([], 0, "Microsoft Windows 11|10.0|26200\n", "")
+        if command == "cat /etc/machine-id":
+            return subprocess.CompletedProcess([], 0, "a" * 32 + "\n", "")
         return subprocess.CompletedProcess([], 0, "", "")
 
     vm._wsl = fake_wsl  # type: ignore[method-assign]
@@ -384,8 +388,10 @@ def test_native_wsl_captures_stock_baseline_before_guest_mutation(tmp_path: Path
 
     assert commands[0][0] == "root"
     assert commands[0][1].startswith("set -eu;for package in podman netavark")
-    assert "useradd" in commands[1][1]
-    assert commands[2][0] == "rehearsal"
+    assert any("useradd" in command for _, command in commands)
+    assert all("linger" not in command for _, command in commands)
+    assert all("/etc/wsl.conf" not in command for _, command in commands)
+    assert any(user == "rehearsal" for user, _ in commands)
     assert vm.rehearsal_baseline is not None
     assert vm.rehearsal_baseline["evidenceClass"] == "owner_path_qualification"
     assert vm.rehearsal_baseline["substrate"] == "native-wsl2"
@@ -425,6 +431,31 @@ def test_phase0_receipt_binds_index_archives_and_bootstrap() -> None:
     changed["binding"]["bootstrapDigest"] = "sha256:" + "6" * 64
     with pytest.raises(ValueError, match="phase-0 receipt"):
         rehearsal.validate_phase0_receipt(changed, expected)
+
+
+def test_public_phase0_binding_does_not_require_staged_archives(tmp_path: Path) -> None:
+    site_root = tmp_path / "site" / "download" / "0.1.0-alpha.test"
+    site_root.mkdir(parents=True)
+    (site_root.parent / "install.sh").write_text("bootstrap", encoding="utf-8")
+    (site_root / "release-index.json").write_text(
+        json.dumps({
+            "signed": {
+                "release": {"version": "0.1.0-alpha.test"},
+                "images": [{"imageId": "stateport-web", "digest": "sha256:" + "a" * 64}],
+                "targets": [],
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    binding = rehearsal.phase0_binding(
+        site_root.parent.parent,
+        "0.1.0-alpha.test",
+        None,
+    )
+
+    assert binding["images"] == {"stateport-web": "sha256:" + "a" * 64}
+    assert "archives" not in binding
 
 
 def test_local_public_refuses_changed_bootstrap_before_signature_or_vm(tmp_path, monkeypatch):
@@ -750,31 +781,76 @@ def test_full_journey_needs_no_separate_phase0_but_rejects_stale_receipt(
         rehearsal.main()
 
 @pytest.mark.parametrize('missing_binary', [False, True])
-def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatch, missing_binary):
+@pytest.mark.parametrize('sandbox_result', [
+    'passed', 'failed', 'incomplete', 'missing_parent', 'missing_version',
+    'wrong_runtime', 'invalid_version', 'non_object',
+])
+def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatch, missing_binary, sandbox_result):
     from qualification import journey_common
     observed = dict(executableInstalled=not missing_binary, configured=False, connected=False,
                     authenticationStatus='unverified', requestStatus='unverified', telemetryStatus='unavailable')
     requests = []
-    class Client:
-        def __init__(self, *_): pass
-        def handshake(self): pass
-        def request(self, method, path):
+    sandbox_calls = []
+    class Guest:
+        payload = {}
+        def ssh(self, command, **_):
+            import shlex
+            if command.startswith('sudo runuser '):
+                sandbox_calls.append(command)
+                assert 'stateport-control' in command
+                assert 'podman exec --user 65532:65532 ' + 'a' * 64 in command
+                assert 'provider_sandbox_probe' not in command  # actual payload, no guest checkout
+                result = {'result': 'passed', 'insideWrite': 'passed', 'outsideWrite': 'refused',
+                          'symlinkEscape': 'refused', 'networkSocket': 'refused',
+                          'childProcess': 'passed', 'namespaces': 'isolated',
+                          'authentication': 'not attempted', 'runtime': 'web',
+                          'parentNetworkSocket': 'permitted',
+                          'providerVersion': 'codex-cli 0.146.0+stateport.2'}
+                if sandbox_result == 'incomplete':
+                    result.pop('outsideWrite')
+                elif sandbox_result == 'missing_parent':
+                    result.pop('parentNetworkSocket')
+                elif sandbox_result == 'missing_version':
+                    result.pop('providerVersion')
+                elif sandbox_result == 'wrong_runtime':
+                    result['runtime'] = 'workspace'
+                elif sandbox_result == 'invalid_version':
+                    result['providerVersion'] = 'unknown'
+                elif sandbox_result == 'non_object':
+                    result = []
+                return subprocess.CompletedProcess([], int(sandbox_result == 'failed'), json.dumps(result), 'sandbox refused')
+            if command == 'cat /tmp/journey-resp.json':
+                return subprocess.CompletedProcess([], 0, json.dumps({'ok': True, 'result': self.payload}), '')
+            argv = shlex.split(command)
+            assert argv[0] == 'curl'
+            method = argv[argv.index('-X') + 1]
+            path = argv[-1].removeprefix('http://127.0.0.1:8080')
             requests.append((method, path))
-            if path == '/v1/execution-host':
-                return {'executionHost': {'status': 'available', 'grantBound': True}}
-            assert path == '/v1/provider/status'
-            return {'result': observed}
-    monkeypatch.setattr(journey_common, 'GuestJsonClient', Client)
+            assert method == 'GET'
+            if path == '/session':
+                self.payload = {'csrfToken': 'fixture-session'}
+            elif path == '/v1/execution-host':
+                self.payload = {'executionHost': {'status': 'available', 'grantBound': True}}
+            else:
+                assert path == '/v1/provider/status'
+                self.payload = observed
+            return subprocess.CompletedProcess([], 0, '200', '')
+    guest = Guest()
     monkeypatch.setattr(journey_common, 'discover_services', lambda _: {'stateport-web': {'port': 8080}})
     monkeypatch.setattr(journey_common, 'wait_service_healthy', lambda *a, **k: None)
-    monkeypatch.setattr(journey_common, 'verify_installed_image_digests', lambda *a: {'mismatches': {}})
+    monkeypatch.setattr(journey_common, 'verify_installed_image_digests', lambda *a: {
+        'mismatches': {}, 'containers': {'stateport-web': {'containerId': 'a' * 64}}})
     binding = {'images': {}, 'providerRuntimeRequired': True}
     if missing_binary:
         with pytest.raises(ValueError, match='provider observations'):
-            rehearsal.installed_service_smoke(object(), binding)
+            rehearsal.installed_service_smoke(guest, binding)
+    elif sandbox_result == 'passed':
+        assert rehearsal.installed_service_smoke(guest, binding)['providerFreshObservations'] == observed
     else:
-        assert rehearsal.installed_service_smoke(object(), binding)['providerFreshObservations'] == observed
-    assert requests == [('GET', '/v1/execution-host'), ('GET', '/v1/provider/status')]
+        with pytest.raises(ValueError, match='provider sandbox'):
+            rehearsal.installed_service_smoke(guest, binding)
+    assert len(sandbox_calls) == (0 if missing_binary else 1)
+    assert requests == [('GET', '/session'), ('GET', '/v1/execution-host'), ('GET', '/v1/provider/status')]
 
 
 def _image_identity_fixture(*, units=None, live=None, unit_exit=0, live_exit=0):
@@ -857,3 +933,281 @@ def test_candidate_must_include_every_control_image_before_guest_access():
     with pytest.raises(ValueError, match='every control-service image'):
         common.verify_installed_image_digests(vm, expected)
     assert vm.commands == []
+
+
+@pytest.mark.parametrize("answers", [["install-packages", "install-exact"], ["install"]])
+def test_install_driver_answers_split_prompts_over_real_pipe(tmp_path: Path, monkeypatch, answers) -> None:
+    vm = rehearsal.VM(tmp_path / "vm", tmp_path / "site", tmp_path / "archives")
+    prompts = {
+        "install-packages": "Type install-packages to authorize this exact authenticated package plan:",
+        "install-exact": "Type install-exact to authorize this exact plan:",
+        "install": "Type install:",
+    }
+    program = "import sys,time\n"
+    for answer in answers:
+        prompt = prompts[answer]
+        program += (f"sys.stdout.write({prompt[:9]!r}); sys.stdout.flush(); time.sleep(.02)\n"
+                    f"sys.stdout.write({prompt[9:]!r}); sys.stdout.flush()\n"
+                    f"assert sys.stdin.readline().strip() == {answer!r}\n")
+    program += "print('installed-result')\n"
+    monkeypatch.setattr(vm, "_install_argv", lambda _: [sys.executable, "-c", program])
+    result = vm.ssh_install("unused", confirmations=answers, timeout=5)
+    assert result.returncode == 0
+    assert "installed-result" in result.stdout
+
+
+@pytest.mark.parametrize("program,expected", [
+    ("raise SystemExit(7)", 7),
+    ("print('premature success')", RuntimeError),
+    ("import time; print('waiting',flush=True); time.sleep(20)", subprocess.TimeoutExpired),
+])
+def test_install_driver_preserves_failures_and_bounds_wait(tmp_path: Path, monkeypatch, program, expected) -> None:
+    vm = rehearsal.VM(tmp_path / "vm", tmp_path / "site", tmp_path / "archives")
+    monkeypatch.setattr(vm, "_install_argv", lambda _: [sys.executable, "-c", program])
+    if isinstance(expected, int):
+        assert vm.ssh_install("unused", confirmations=["install"], timeout=2).returncode == expected
+    else:
+        with pytest.raises(expected):
+            vm.ssh_install("unused", confirmations=["install"], timeout=.2)
+
+
+def test_native_install_transport_uses_exact_wsl_distro_and_user(tmp_path: Path) -> None:
+    import shlex
+    native = rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", tmp_path / "archives",
+                                 distro_name="StatePort-Rehearsal-installer")
+    native.exec_user = "rehearsal"
+    command = "printf '%s' 'literal $HOME; $(false)'"
+    argv = native._install_argv(command)
+    assert argv[:6] == ["wsl.exe", "--distribution", native.distro_name, "--user", "rehearsal", "--"]
+    assert argv[6:8] == ["script", "-qefc"]
+    assert shlex.split(argv[8]) == ["sh", "-lc", command]
+    assert argv[9] == "/dev/null"
+    assert "ssh" not in argv
+
+
+def test_journey_artifact_transport_selects_native_public_fetch(tmp_path: Path) -> None:
+    from qualification import journey_common
+
+    class Native:
+        native_wsl = True
+
+        def __init__(self):
+            self.calls = []
+
+        def fetch_public_artifact(self, url, destination, digest):
+            self.calls.append((url, destination, digest))
+
+        def scp_in(self, *_):
+            raise AssertionError("native transport must not copy a host path")
+
+    native = Native()
+    digest = "sha256:" + "a" * 64
+    journey_common.transport_artifact(
+        native, tmp_path / "installer", "/tmp/stateport-installer",
+        public_url="https://example.invalid/download/stateport-installer",
+        expected_digest=digest,
+    )
+    assert native.calls == [
+        ("https://example.invalid/download/stateport-installer",
+         "/tmp/stateport-installer", digest)
+    ]
+
+
+def test_journey_artifact_transport_retains_qemu_local_copy(tmp_path: Path) -> None:
+    from qualification import journey_common
+
+    class Guest:
+        native_wsl = False
+
+        def __init__(self):
+            self.calls = []
+
+        def scp_in(self, source, destination):
+            self.calls.append((source, destination))
+
+    guest = Guest()
+    source = tmp_path / "bootstrap"
+    source.write_text("bytes")
+    journey_common.transport_artifact(guest, source, "/tmp/stateport-bootstrap")
+    assert guest.calls == [(str(source), "/tmp/stateport-bootstrap")]
+
+
+def test_native_attach_refuses_missing_distro(monkeypatch, tmp_path: Path) -> None:
+    native = rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                                 distro_name="StatePort-Rehearsal-missing",
+                                 attach_existing=True)
+    monkeypatch.setattr(rehearsal.os, "name", "nt")
+    native._wsl = lambda *args, **kwargs: subprocess.CompletedProcess([], 0, "Other\n", "")
+    with pytest.raises(SystemExit, match="distro is not registered"):
+        native.prepare(reuse=True)
+
+
+def test_native_attach_never_imports_rootfs(monkeypatch, tmp_path: Path) -> None:
+    native = rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                                 distro_name="StatePort-Rehearsal-existing",
+                                 attach_existing=True)
+    monkeypatch.setattr(rehearsal.os, "name", "nt")
+    calls = []
+    def fake_wsl(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess([], 0, "StatePort-Rehearsal-existing\n", "")
+    native._wsl = fake_wsl
+    native.prepare(reuse=True)
+    assert not any("--import" in args for args in calls)
+
+
+def test_native_constructor_accepts_candidate_bootstrap_url(tmp_path: Path) -> None:
+    url = "https://example.invalid/download/0.1.0-alpha.17/bootstrap.sh"
+    native = rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                                 distro_name="StatePort-Rehearsal-url",
+                                 bootstrap_url=url)
+    assert native.bootstrap_url == url
+
+
+@pytest.mark.parametrize("identity", [
+    None, {}, {"machineId": "a" * 32},
+    {"windowsIdentity": "Windows|10|1"},
+    {"machineId": "", "windowsIdentity": "Windows|10|1"},
+    {"machineId": "b" * 31, "windowsIdentity": "Windows|10|1"},
+    {"machineId": "a" * 32, "windowsIdentity": ""},
+])
+def test_native_attach_refuses_incomplete_identity_before_guest_call(identity, tmp_path: Path) -> None:
+    from qualification.journey_common import boot_native_follow_on
+    work, site = tmp_path / "native", tmp_path / "site"
+    work.mkdir(); site.mkdir()
+    with pytest.raises(ValueError, match="identity binding"):
+        boot_native_follow_on(work, site_root=site,
+                             distro_name="StatePort-Rehearsal-identity",
+                             expected_identity=identity,
+                             expected_baseline={"distroName": "StatePort-Rehearsal-identity"})
+
+
+def test_native_attach_preserves_exact_j1_baseline_on_success(monkeypatch, tmp_path: Path) -> None:
+    baseline = {"schema": "stateport.rehearsal-baseline/v1", "distroName": "StatePort-Rehearsal-preserve",
+                "machineId": "a" * 32, "windowsIdentity": "Windows|10|26200"}
+    native = rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                                 distro_name=baseline["distroName"], attach_existing=True)
+    native.expected_native_baseline = dict(baseline)
+    native.expected_native_identity = {"machineId": baseline["machineId"], "windowsIdentity": baseline["windowsIdentity"]}
+    monkeypatch.setattr(rehearsal.os, "name", "nt")
+    native._wsl = lambda args, **kwargs: subprocess.CompletedProcess([], 0,
+        ("StatePort-Rehearsal-preserve Running 2\n" if "--verbose" in args
+         else "StatePort-Rehearsal-preserve\n"), "")
+    native.prepare(reuse=True)
+    native._capture_rehearsal_baseline = lambda: (_ for _ in ()).throw(AssertionError("recaptured baseline"))
+    native.ssh = lambda command, **kwargs: subprocess.CompletedProcess([], 0,
+        ("a" * 32 + "\n") if command == "cat /etc/machine-id" else "Windows|10|26200\n", "")
+    native.boot()
+    assert native.rehearsal_baseline == baseline
+
+
+@pytest.mark.parametrize("identity", [None, {}, {"machineId": "a" * 32, "windowsIdentity": 123}])
+def test_direct_native_boot_refuses_missing_identity_without_guest_calls(tmp_path, identity):
+    native = rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                                 distro_name="StatePort-Rehearsal-no-identity", attach_existing=True)
+    native.expected_native_identity = identity
+    native._wsl = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("guest touched"))
+    with pytest.raises(SystemExit, match="identity binding"):
+        native.boot()
+
+
+def test_native_attach_refuses_conflicting_retained_baseline_before_guest_calls(tmp_path):
+    from qualification.journey_common import boot_native_follow_on
+    work, site = tmp_path / "work", tmp_path / "site"
+    work.mkdir(); site.mkdir()
+    with pytest.raises(ValueError, match="identity binding"):
+        boot_native_follow_on(work, site_root=site, distro_name="StatePort-Rehearsal-conflict",
+            expected_identity={"machineId": "a" * 32, "windowsIdentity": "Windows|10|26200"},
+            expected_baseline={"distroName": "StatePort-Rehearsal-conflict",
+                               "machineId": "b" * 32, "windowsIdentity": "Windows|10|26200"})
+
+
+def test_candidate_artifact_urls_bind_default_and_versioned_paths() -> None:
+    from qualification.journey_common import candidate_artifact_urls
+    assert candidate_artifact_urls("0.1.0-alpha.17", "https://lennertvhoy.github.io/StatePort-Site/download/install.sh") == (
+        "https://lennertvhoy.github.io/StatePort-Site/download/install.sh",
+        "https://lennertvhoy.github.io/StatePort-Site/download/0.1.0-alpha.17/stateport-installer",
+    )
+    assert candidate_artifact_urls("0.1.0-alpha.17", "https://example.invalid/download/0.1.0-alpha.17/bootstrap.sh")[1].endswith("/stateport-installer")
+    with pytest.raises(ValueError, match="HTTPS"):
+        candidate_artifact_urls("0.1.0-alpha.17", "http://example.invalid/bootstrap.sh")
+
+
+def test_native_workspace_browser_never_starts_local_registry() -> None:
+    from qualification import run_journey_j2
+    class NativeGuest:
+        native_wsl = True
+        def __init__(self): self.commands = []
+        def ssh(self, command, **kwargs):
+            self.commands.append(command)
+            raise AssertionError("native path attempted local registry SSH probe")
+    guest = NativeGuest()
+    run_journey_j2._ensure_qualification_registry(guest)
+    assert guest.commands == []
+
+
+def test_native_browser_uses_exact_signed_namespace_and_shipped_podman():
+    from qualification import run_journey_j2 as driver
+    digest = "sha256:" + "a" * 64
+    reference = "ghcr.io/another-owner/fresh-release/path/browser@" + digest
+    class Guest:
+        native_wsl = True
+        public_image_references = {"stateport-playwright": reference}
+        commands = []
+        def ssh(self, command, **kwargs):
+            self.commands.append(command)
+            return subprocess.CompletedProcess([], 0, "pull complete\n" + digest + "\n", "")
+    guest = Guest()
+    image, native = driver._qualification_browser_transport(guest, digest)
+    assert (image, native) == (reference, True)
+    driver._verify_qualification_browser_image(guest, image, digest, native)
+    assert len(guest.commands) == 1
+    assert reference in guest.commands[0] and "--tls-verify=true" in guest.commands[0]
+    assert "skopeo" not in guest.commands[0] and "127.0.0.1:5443" not in guest.commands[0]
+    assert "--tls-verify=false" not in guest.commands[0]
+
+
+@pytest.mark.parametrize("prefix", ["ghcr.io.evil/user/image", "ghcr.io/user/../image", "ghcr.io/user//image", "localhost/image"])
+def test_native_browser_refuses_unbound_registry_reference(prefix):
+    from qualification import run_journey_j2 as driver
+    digest = "sha256:" + "a" * 64
+    guest = type("Guest", (), {"native_wsl": True, "public_image_references": {
+        "stateport-playwright": prefix + "@" + digest}})()
+    with pytest.raises(AssertionError):
+        driver._qualification_browser_transport(guest, digest)
+
+
+def test_browser_simulation_retains_existing_mirror_and_native_refuses_digest_drift():
+    from qualification import run_journey_j2 as driver
+    digest = "sha256:" + "a" * 64
+    guest = type("Guest", (), {"native_wsl": False})()
+    assert driver._qualification_browser_transport(guest, digest) == (
+        "127.0.0.1:5443/stateport-alpha/stateport-playwright@" + digest, False)
+    guest.native_wsl = True
+    guest.public_image_references = {"stateport-playwright": "ghcr.io/user/browser@sha256:" + "b" * 64}
+    with pytest.raises(AssertionError, match="digest"):
+        driver._qualification_browser_transport(guest, digest)
+
+
+def test_native_attach_rejects_changed_identity(monkeypatch, tmp_path: Path) -> None:
+    native = rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                                 distro_name="StatePort-Rehearsal-identity",
+                                 attach_existing=True)
+    native.expected_native_identity = {"machineId": "a" * 32,
+                                       "windowsIdentity": "old"}
+    native.expected_native_baseline = {"machineId": "a" * 32,
+                                      "windowsIdentity": "old",
+                                      "distroName": native.distro_name}
+    monkeypatch.setattr(native, "_wsl", lambda args, **kwargs:
+                        subprocess.CompletedProcess([], 0,
+                            "StatePort-Rehearsal-identity Running 2\n" if "--verbose" in args else "StatePort-Rehearsal-identity\n", ""))
+    monkeypatch.setattr(rehearsal.os, "name", "nt")
+    native.prepare(reuse=True)
+    native._capture_rehearsal_baseline = lambda: {"schema": "stateport.rehearsal-baseline/v1"}
+    def ssh(command, **kwargs):
+        if command == "cat /etc/machine-id":
+            return subprocess.CompletedProcess([], 0, "b" * 32 + "\n", "")
+        return subprocess.CompletedProcess([], 0, "Windows|10|26200\n", "")
+    native.ssh = ssh
+    with pytest.raises(SystemExit, match="identity differs"):
+        native.boot()

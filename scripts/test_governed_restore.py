@@ -730,7 +730,8 @@ def test_operator_http_restore_uses_same_plan_approval_and_receipt_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = _app(tmp_path, monkeypatch)
-    _instance(app)
+    source = _instance(app)
+    source_before = _digest_tree(source)
     backup = app.backup("restore-source")
     product_root = service_product_fixture(tmp_path, ROOT)
     with socket.socket() as probe:
@@ -794,6 +795,18 @@ def test_operator_http_restore_uses_same_plan_approval_and_receipt_contract(
             csrf,
             {"planDigest": plan["planDigest"]},
         )
+        archive = Path(backup["archive"])
+        original_archive = archive.read_bytes()
+        try:
+            archive.write_bytes(original_archive + b"stale-browser-backup-probe")
+            with pytest.raises(HTTPError) as stale:
+                post("/v1/instances/restore-source/recovery/restore/apply", cookie, csrf,
+                     {"planDigest": plan["planDigest"], "approvalDigest": approval["approvalDigest"]})
+            assert stale.value.code == 400
+            assert not (app.layout.instances_root / "restore-http").exists()
+            assert _digest_tree(source) == source_before
+        finally:
+            archive.write_bytes(original_archive)
         receipt = post(
             "/v1/instances/restore-source/recovery/restore/apply",
             cookie,
@@ -813,6 +826,222 @@ def test_operator_http_restore_uses_same_plan_approval_and_receipt_contract(
         ) as response:
             status = json.loads(response.read())["result"]
         assert status["restore"]["latestReceiptId"] == receipt["receiptId"]
+        assert _digest_tree(source) == source_before
+        assert post("/v1/instances/restore-source/recovery/restore/apply", cookie, csrf,
+                    {"planDigest": plan["planDigest"], "approvalDigest": approval["approvalDigest"]}) == receipt
+        receipt_file = app._restore_artifact_path("receipts", plan["planDigest"])
+        receipt_before = receipt_file.read_bytes()
+        app.service_stop()
+        cookie, csrf = start("platform_operator")
+        with urlopen(Request(f"{base}/v1/instances/restore-source/recovery", headers={"Cookie": cookie})) as response:
+            reopened = json.loads(response.read())["result"]
+        assert reopened["restore"]["latestReceiptId"] == receipt["receiptId"]
+        assert receipt_file.read_bytes() == receipt_before
+        assert app.catalog.get("restore-http")["instanceId"] == "restore-http"
+        assert _digest_tree(source) == source_before
+
         assert tmp_path.as_posix() not in json.dumps(status, sort_keys=True)
     finally:
         app.service_stop()
+
+
+@pytest.mark.parametrize("upgrade_first", [False, True])
+def test_installed_study_restore_preserves_valid_contract_and_trusted_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upgrade_first: bool,
+) -> None:
+    from stateport_portable_execution import PortableExecutionService
+
+    app = _app(tmp_path, monkeypatch)
+    execution = PortableExecutionService(app, ROOT)
+    template = ROOT / "fixtures/apps/studystate-sample"
+    template_before = _digest_tree(template)
+    execution.install_fixture_instance("studystate.sample", "restore-source")
+    source = app.layout.instances_root / "restore-source"
+    if upgrade_first:
+        from statedd_core import plan_upgrade, approve_upgrade_plan, apply_upgrade
+        target = template / "revisions/v0002"
+        entry = app.catalog.get("restore-source")
+        upgrade = plan_upgrade(source, target)
+        decision = approve_upgrade_plan(upgrade, approved_by="operator", reason="test restore after upgrade")
+        apply_upgrade(source, target, plan=upgrade, approval=decision, allow_fixture=True)
+        observed = source.stat()
+        app.catalog.rebind_replaced_directory(entry, {
+            **entry["filesystem"], "device": observed.st_dev, "inode": observed.st_ino,
+        })
+    assert app._validate_managed_instance(source).ok
+    source_before = _digest_tree(source)
+    plan, approval = _planned(app)
+    receipt = app.apply_restore(
+        "restore-source", plan_digest=plan["planDigest"],
+        approval_digest=approval["approvalDigest"],
+    )
+    restored = app.layout.instances_root / "restore-result"
+    assert receipt["result"]["validation"]["valid"] is True
+    assert app._entry("restore-result")[0]["applicationId"] == "studystate.sample"
+    assert execution._validated_portable_application_id(restored) == "studystate.sample"
+    assert yaml.safe_load((restored / "instance.yaml").read_text())["metadata"]["id"] == "restore-result"
+    state = app.inspect("restore-result")["packageState"]
+    prepared = execution.prepare("restore-result", "studystate.sample.start-activity/v1", "synthetic", {
+        "activityId": "evidence-practice", "expectedPlanDigest": state["planDigest"],
+    })
+    run = prepared["run"]
+    execution.approve_run(run["runId"])
+    execution.execute(run["runId"])
+    execution.approve_proposal(run["runId"])
+    applied = execution.apply_proposal(run["runId"])
+    assert applied["run"]["status"] == "applied"
+    restarted = PersistentApp(app.layout)
+    assert restarted.inspect("restore-result")["packageState"]["activities"][0]["state"] == "in_progress"
+    assert _digest_tree(source) == source_before
+    assert _digest_tree(template) == template_before
+
+
+def test_study_restore_refuses_changed_application_binding(tmp_path, monkeypatch):
+    from stateport_portable_execution import PortableExecutionService
+
+    app = _app(tmp_path, monkeypatch)
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "restore-source")
+    plan, approval = _planned(app)
+    catalog = app.catalog._canonical()
+    metadata = dict(catalog.get("restore-source").metadata)
+    metadata["applicationId"] = "unrelated-application"
+    catalog.update_metadata("restore-source", metadata)
+    with pytest.raises(AppError, match="source binding changed"):
+        app.apply_restore("restore-source", plan_digest=plan["planDigest"], approval_digest=approval["approvalDigest"])
+    assert not (app.layout.instances_root / "restore-result").exists()
+
+
+def test_study_portable_identity_requires_unique_verified_source(tmp_path, monkeypatch):
+    from stateport_portable_execution import PortableExecutionError, PortableExecutionService
+
+    app = _app(tmp_path, monkeypatch)
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "restore-source")
+    root = app.layout.instances_root / "restore-source"
+    applications = execution.applications()
+    study = next(item for item in applications if item["applicationId"] == "studystate.sample")
+    monkeypatch.setattr(execution, "applications", lambda: [study, {**study, "applicationId": "ambiguous"}])
+    with pytest.raises(PortableExecutionError, match="ambiguous"):
+        execution._validated_portable_application_id(root)
+    monkeypatch.setattr(execution, "applications", lambda: [])
+    assert execution._validated_portable_application_id(root) == "unknown"
+    monkeypatch.setattr(execution, "applications", lambda: applications)
+    embedded = root / ".statedd/template-source/AGENTS.md"
+    embedded.write_text(embedded.read_text() + "\nchanged embedded source\n")
+    with pytest.raises(PortableExecutionError, match="StateSpec validation"):
+        execution._validated_portable_application_id(root)
+    with pytest.raises(PortableExecutionError, match="StateSpec validation"):
+        execution.action_list("restore-source")
+
+
+def test_study_backup_restores_with_registered_source_unavailable(tmp_path, monkeypatch):
+    import shutil
+    from stateport_portable_execution import PortableExecutionService
+
+    app = _app(tmp_path, monkeypatch)
+    registry = tmp_path / "isolated-registry"
+    template = registry / "fixtures/apps/studystate-sample"
+    shutil.copytree(ROOT / "fixtures/apps/studystate-sample", template)
+    execution = PortableExecutionService(app, registry)
+    execution.install_fixture_instance("studystate.sample", "restore-source")
+    plan, approval = _planned(app)
+    template.rename(tmp_path / "unavailable-registered-source")
+    receipt = app.apply_restore("restore-source", plan_digest=plan["planDigest"], approval_digest=approval["approvalDigest"])
+    assert receipt["result"]["validation"]["valid"] is True
+    assert app._entry("restore-result")[0]["applicationId"] == "studystate.sample"
+    assert app._validate_managed_instance(app.layout.instances_root / "restore-result").ok
+
+
+def test_study_relative_lock_source_is_instance_bound(tmp_path, monkeypatch):
+    from statedd_core.lifecycle import LifecycleError, classify_overrides
+    from stateport_portable_execution import PortableExecutionService
+
+    app = _app(tmp_path, monkeypatch)
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "restore-source")
+    root = app.layout.instances_root / "restore-source"
+    monkeypatch.chdir(tmp_path)
+    assert classify_overrides(root)
+    lock = root / ".statedd/lock.yaml"
+    original = lock.read_text()
+    lock.write_text(original.replace('.statedd/template-source', '../outside'))
+    with pytest.raises(LifecycleError):
+        classify_overrides(root)
+    lock.write_text(original)
+    embedded = root / ".statedd/template-source"
+    moved = root / ".statedd/original-template-source"
+    embedded.rename(moved)
+    embedded.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(LifecycleError):
+        classify_overrides(root)
+
+
+def test_embedded_upgrade_copy_failure_preserves_original(tmp_path, monkeypatch):
+    import statedd_core.lifecycle as lifecycle
+    from stateport_portable_execution import PortableExecutionService
+
+    app = _app(tmp_path, monkeypatch)
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "restore-source")
+    root = app.layout.instances_root / "restore-source"
+    before = _digest_tree(root)
+    target = ROOT / "fixtures/apps/studystate-sample/revisions/v0002"
+    target_before = _digest_tree(target)
+    plan = lifecycle.plan_upgrade(root, target)
+    approval = lifecycle.approve_upgrade_plan(plan, approved_by="operator", reason="test")
+    copy_source = lifecycle._copy_embedded_template
+
+    def fail_after_copy(source, destination):
+        copy_source(source, destination)
+        raise lifecycle.LifecycleError("injected embedded copy interruption")
+
+    monkeypatch.setattr(lifecycle, "_copy_embedded_template", fail_after_copy)
+    with pytest.raises(lifecycle.LifecycleError, match="injected embedded copy"):
+        lifecycle.apply_upgrade(root, target, plan=plan, approval=approval, allow_fixture=True)
+    assert _digest_tree(root) == before
+    assert _digest_tree(target) == target_before
+    assert app._validate_managed_instance(root).ok
+
+
+def test_lifecycle_materialization_preserves_instance_readme(tmp_path, monkeypatch):
+    from stateport_portable_execution import PortableExecutionService
+
+    app = _app(tmp_path, monkeypatch)
+    execution = PortableExecutionService(app, ROOT)
+    root = app.layout.instances_root / "readme-owner"
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("# Operator notes\nKeep this exact document.\n")
+    execution._materialize_revision_instance(
+        ROOT / "fixtures/apps/studystate-sample/revisions/v0001", root,
+        "readme-owner", "Owner README", "studystate.sample", "stateport.fixture.studystate-sample",
+    )
+    assert (root / "README.md").read_text() == "# Operator notes\nKeep this exact document.\n"
+    assert app._validate_managed_instance(root).ok
+
+
+def test_portable_canonical_lock_preserves_only_verified_embedded_source(tmp_path, monkeypatch):
+    from stateport_portable_execution import PortableExecutionService
+    from stateport_portable_execution.portability import PortabilityError, _portable_document_projection
+    from statedd_core.yaml import parse_yaml_text
+
+    app = _app(tmp_path, monkeypatch)
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "restore-source")
+    root = app.layout.instances_root / "restore-source"
+    lock = root / ".statedd/lock.yaml"
+    first = _portable_document_projection(lock)
+    assert first == _portable_document_projection(lock)
+    assert str(tmp_path).encode() not in first
+    projected = parse_yaml_text(first.decode())
+    assert projected["template"]["sourcePath"] == ".statedd/template-source"
+    assert projected["template"]["source"]["checkoutLocation"] == ".statedd/template-source"
+    original = lock.read_text()
+    lock.write_text(original.replace('.statedd/template-source', '../outside'))
+    with pytest.raises(PortabilityError, match="not confined"):
+        _portable_document_projection(lock)
+    lock.write_text(original)
+    source = root / ".statedd/template-source/AGENTS.md"
+    source.write_text(source.read_text() + "\nchanged\n")
+    with pytest.raises(PortabilityError, match="StateSpec validation"):
+        _portable_document_projection(lock)

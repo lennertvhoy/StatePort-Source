@@ -1,0 +1,1240 @@
+--- a/codex-rs/Cargo.toml
++++ b/codex-rs/Cargo.toml
+@@ -130,7 +130,7 @@
+ resolver = "2"
+ 
+ [workspace.package]
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ # Track the edition for all workspace crates in one place. Individual
+ # crates can still override this value, but keeping it here means new
+ # crates created with `cargo new -w ...` automatically inherit the 2024
+@@ -304,7 +304,7 @@
+ crypto_box = { version = "0.9.1", features = ["seal"] }
+ crossterm = "0.28.1"
+ ctor = "0.6.3"
+-deno_core_icudata = "0.77.0"
++deno_core_icudata = "=0.78.0"
+ derive_more = "2"
+ diffy = "0.4.2"
+ dirs = "6"
+@@ -462,7 +462,7 @@
+ url = "2"
+ urlencoding = "2.1"
+ uuid = "1"
+-v8 = "=149.2.0"
++v8 = "=152.2.0"
+ vt100 = "0.16.2"
+ walkdir = "2.5.0"
+ webbrowser = "1.0"
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -394,7 +394,7 @@
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1837,7 +1837,7 @@
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1849,7 +1849,7 @@
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1864,7 +1864,7 @@
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1884,7 +1884,7 @@
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -1905,7 +1905,7 @@
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "ansi-to-tui",
+  "ratatui",
+@@ -1914,7 +1914,7 @@
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -1950,7 +1950,7 @@
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2047,7 +2047,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2074,7 +2074,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol",
+@@ -2095,7 +2095,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2124,7 +2124,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2146,7 +2146,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2188,7 +2188,7 @@
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2208,7 +2208,7 @@
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2228,7 +2228,7 @@
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -2237,7 +2237,7 @@
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2252,7 +2252,7 @@
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2272,7 +2272,7 @@
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2281,7 +2281,7 @@
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2290,7 +2290,7 @@
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2311,7 +2311,7 @@
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2392,7 +2392,7 @@
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2404,7 +2404,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2429,7 +2429,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2460,7 +2460,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2475,7 +2475,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2484,7 +2484,7 @@
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2503,7 +2503,7 @@
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2525,7 +2525,7 @@
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+  "pretty_assertions",
+@@ -2537,11 +2537,11 @@
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2589,7 +2589,7 @@
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2611,7 +2611,7 @@
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2624,7 +2624,7 @@
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -2632,7 +2632,7 @@
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2762,7 +2762,7 @@
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -2784,7 +2784,7 @@
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2837,7 +2837,7 @@
+ 
+ [[package]]
+ name = "codex-core-skills"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -2871,7 +2871,7 @@
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2917,7 +2917,7 @@
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2971,7 +2971,7 @@
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -2986,7 +2986,7 @@
+ 
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-exec-server",
+  "codex-http-client",
+@@ -2994,7 +2994,7 @@
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3012,7 +3012,7 @@
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3021,7 +3021,7 @@
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-config",
+  "codex-context-fragments",
+@@ -3037,7 +3037,7 @@
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3049,7 +3049,7 @@
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3077,7 +3077,7 @@
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-otel",
+  "codex-protocol",
+@@ -3090,7 +3090,7 @@
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-login",
+@@ -3104,7 +3104,7 @@
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3120,7 +3120,7 @@
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3132,7 +3132,7 @@
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3143,7 +3143,7 @@
+ 
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3156,7 +3156,7 @@
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3181,7 +3181,7 @@
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3204,7 +3204,7 @@
+ 
+ [[package]]
+ name = "codex-guardian"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3213,7 +3213,7 @@
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3224,7 +3224,7 @@
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3247,7 +3247,7 @@
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3278,7 +3278,7 @@
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3305,7 +3305,7 @@
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3315,7 +3315,7 @@
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "keyring",
+  "tracing",
+@@ -3323,7 +3323,7 @@
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3348,7 +3348,7 @@
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -3362,7 +3362,7 @@
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3404,7 +3404,7 @@
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3441,7 +3441,7 @@
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-config",
+  "codex-connectors",
+@@ -3467,7 +3467,7 @@
+ 
+ [[package]]
+ name = "codex-mcp-server"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -3503,7 +3503,7 @@
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3524,7 +3524,7 @@
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -3534,7 +3534,7 @@
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3571,7 +3571,7 @@
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -3585,7 +3585,7 @@
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-agent-identity",
+  "codex-api",
+@@ -3608,7 +3608,7 @@
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-api",
+  "codex-protocol",
+@@ -3624,7 +3624,7 @@
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "chrono",
+  "codex-collaboration-mode-templates",
+@@ -3644,7 +3644,7 @@
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3682,7 +3682,7 @@
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -3702,7 +3702,7 @@
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "chrono",
+  "codex-api",
+@@ -3733,7 +3733,7 @@
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-config",
+  "codex-protocol",
+@@ -3746,7 +3746,7 @@
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3754,7 +3754,7 @@
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-context-fragments",
+@@ -3768,7 +3768,7 @@
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -3810,7 +3810,7 @@
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3821,7 +3821,7 @@
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3838,7 +3838,7 @@
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -3880,7 +3880,7 @@
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3906,7 +3906,7 @@
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -3922,7 +3922,7 @@
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-network-proxy",
+@@ -3946,7 +3946,7 @@
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -3967,7 +3967,7 @@
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3988,7 +3988,7 @@
+ 
+ [[package]]
+ name = "codex-shell-escalation"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4008,7 +4008,7 @@
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -4019,7 +4019,7 @@
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-core-skills",
+  "codex-exec-server",
+@@ -4045,7 +4045,7 @@
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4071,7 +4071,7 @@
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4083,7 +4083,7 @@
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4091,7 +4091,7 @@
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4099,7 +4099,7 @@
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4110,7 +4110,7 @@
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "chrono",
+  "codex-app-server-protocol",
+@@ -4138,7 +4138,7 @@
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-code-mode",
+  "codex-connectors",
+@@ -4163,7 +4163,7 @@
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -4274,7 +4274,7 @@
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "async-io",
+  "pretty_assertions",
+@@ -4286,7 +4286,7 @@
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -4300,14 +4300,14 @@
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "lru 0.16.3",
+  "sha1 0.10.6",
+@@ -4316,7 +4316,7 @@
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -4325,7 +4325,7 @@
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -4337,15 +4337,15 @@
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -4355,7 +4355,7 @@
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -4368,7 +4368,7 @@
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -4377,7 +4377,7 @@
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -4387,7 +4387,7 @@
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -4396,7 +4396,7 @@
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -4406,7 +4406,7 @@
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -4422,7 +4422,7 @@
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -4436,7 +4436,7 @@
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "filedescriptor",
+@@ -4452,7 +4452,7 @@
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -4462,14 +4462,14 @@
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -4478,7 +4478,7 @@
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -4488,14 +4488,14 @@
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -4505,14 +4505,14 @@
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -4520,7 +4520,7 @@
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -4541,7 +4541,7 @@
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -4557,7 +4557,7 @@
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4808,7 +4808,7 @@
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -5357,9 +5357,9 @@
+ 
+ [[package]]
+ name = "deno_core_icudata"
+-version = "0.77.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a9efff8990a82c1ae664292507e1a5c6749ddd2312898cdf9cd7cb1fd4bc64c6"
++version = "0.78.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b963d2d79672b4c379e4511acccd27bb35b4c1b32a93f596d52ff14a064293bc"
+ 
+ [[package]]
+ name = "der"
+@@ -8996,7 +8996,7 @@
+ 
+ [[package]]
+ name = "mcp_test_support"
+-version = "0.146.0+stateport.2"
++version = "0.146.0+stateport.3"
+ dependencies = [
+  "anyhow",
+  "codex-login",
+@@ -14219,9 +14219,9 @@
+ 
+ [[package]]
+ name = "v8"
+-version = "149.2.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "46dccf61a364b61bbaac70a8ba64a1a1006e87123b7d62eaeec999a3ba31ecdb"
++version = "152.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a10fe1a92da5c32c7c7f838ce36c0ccfcfd5edf0865b58bdde820aa64cea9888"
+ dependencies = [
+  "bindgen",
+  "bitflags 2.10.0",
+--- a/codex-rs/code-mode/src/v8_init.rs
++++ b/codex-rs/code-mode/src/v8_init.rs
+@@ -40,7 +40,7 @@
+ }
+ 
+ fn initialize_v8_with_mode(jit_mode: V8JitMode) -> Result<V8Initialization, String> {
+-    v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
++    v8::icu::set_common_data_78(deno_core_icudata::ICU_DATA)
+         .map_err(|error_code| format!("failed to initialize ICU data: {error_code}"))?;
+     match jit_mode {
+         V8JitMode::Enabled => {}

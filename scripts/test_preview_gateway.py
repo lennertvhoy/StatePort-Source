@@ -530,7 +530,7 @@ def test_preview_route_rewrite_and_revoke(harness: WebHarness, echo: EchoFixture
         # revision and its new upstream in one locked, receipted write.
         status, payload = harness.post(
             f"/v1/preview-routes/{route_id}/rewrite",
-            {"revisionDigest": REVISION_B, "upstreamPort": second.port},
+            {"revisionDigest": REVISION_B, "upstreamPort": second.port, "expectedRouteDigest": route["routeDigest"]},
         )
         assert status == 200, payload
         rewritten = payload["result"]
@@ -548,7 +548,7 @@ def test_preview_route_rewrite_and_revoke(harness: WebHarness, echo: EchoFixture
 
         # Revocation refuses typed and is receipted.
         status, payload = harness.post(
-            f"/v1/preview-routes/{route_id}/revoke", {"reason": "rollback complete"}
+            f"/v1/preview-routes/{route_id}/revoke", {"reason": "rollback complete", "expectedRouteDigest": rewritten["routeDigest"]}
         )
         assert status == 200
         assert payload["result"]["revokedAt"] is not None
@@ -576,3 +576,33 @@ def test_preview_upstream_unavailable_is_typed(harness: WebHarness) -> None:
     status, payload = harness.get(f"/preview/{CAPSULE}/web/echo")
     assert status == 502
     assert payload["error"]["code"] == "preview_upstream_unavailable"
+
+
+def test_stale_preview_operator_rewrite_and_revoke_preserve_new_binding(harness: WebHarness, echo: EchoFixture) -> None:
+    route = _register(harness, echo.port)
+    route_id = route["routeId"]
+    rewrite_url = f"/v1/preview-routes/{route_id}/rewrite"
+    revoke_url = f"/v1/preview-routes/{route_id}/revoke"
+    status, payload = harness.post(rewrite_url, {"revisionDigest": REVISION_B, "upstreamPort": echo.port, "expectedRouteDigest": route["routeDigest"]})
+    assert status == 200
+    current = payload["result"]
+    root = harness.server.layout.state_root / "preview-gateway"
+    before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*.json")}
+    for url, body in [(rewrite_url, {"revisionDigest": REVISION_A, "upstreamPort": echo.port, "expectedRouteDigest": route["routeDigest"]}), (revoke_url, {"reason": "stale screen", "expectedRouteDigest": route["routeDigest"]})]:
+        status, payload = harness.post(url, body)
+        assert status == 409
+        assert payload["error"]["code"] == "preview_route_conflict"
+        assert {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*.json")} == before
+    # Reopen the durable registry; the stale requests produced no mutation receipts.
+    reopened = PreviewRouteRegistry(root)
+    assert reopened.get(route_id)["routeDigest"] == current["routeDigest"]
+    assert len(reopened.receipts(route_id)) == 2
+    assert current["previewPath"] == "/preview/capsule%3Ademo-classdd%3A001/web/"
+    status, _ = harness.get(current["previewPath"] + "echo")
+    assert status == 200
+    status, payload = harness.post(revoke_url, {"reason": "reviewed current binding", "expectedRouteDigest": current["routeDigest"]})
+    assert status == 200
+    assert payload["result"]["previewPath"] is None
+    assert PreviewRouteRegistry(root).get(route_id)["status"] == "revoked"
+    status, _ = harness.get(current["previewPath"] + "echo")
+    assert status == 409

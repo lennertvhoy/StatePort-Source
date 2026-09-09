@@ -40,7 +40,25 @@ afterEach(() => {
 })
 
 describe('ImportRepositoryDrawer', () => {
-  it('creates a detected ProjectState template as an isolated managed application', async () => {
+  it('keeps public acquisition refusal separate from explicit import approval', async () => {
+    const user = userEvent.setup()
+    const client = getClient()
+    vi.spyOn(client.repositoryImport, 'listLocalCandidates').mockResolvedValue([])
+    const inspect = vi.spyOn(client.repositoryImport, 'inspectPublic').mockRejectedValue(new Error('Exact public commit unavailable'))
+    const install = vi.spyOn(client.repositoryImport, 'installTemplate')
+    const register = vi.spyOn(client.repositoryImport, 'register')
+    renderDrawer()
+    await user.type(await screen.findByLabelText('Public HTTPS repository'), 'https://example.com/template')
+    await user.type(screen.getByLabelText('Exact Git commit'), 'c'.repeat(40))
+    await user.click(screen.getByRole('button', { name: 'Fetch and inspect' }))
+    expect(await screen.findByText('Exact public commit unavailable')).toBeTruthy()
+    expect(inspect).toHaveBeenCalledWith('https://example.com/template', 'c'.repeat(40))
+    expect(install).not.toHaveBeenCalled()
+    expect(register).not.toHaveBeenCalled()
+    expect((screen.getByLabelText('Exact Git commit') as HTMLInputElement).value).toBe('c'.repeat(40))
+  })
+
+  it.each(['local', 'public'])('creates a detected %s ProjectState template as an isolated managed application', async (sourceKind) => {
     const user = userEvent.setup()
     const client = getClient()
     const existing = (await client.applications.list()).find((instance) =>
@@ -51,7 +69,7 @@ describe('ImportRepositoryDrawer', () => {
     expect(existingReceipt).toBeTruthy()
     const instanceId = 'template-projectstate-e2e'
     const receiptId = 'template-import-projectstate-e2e'
-    vi.spyOn(client.repositoryImport, 'inspect').mockResolvedValue({
+    vi.spyOn(client.repositoryImport, sourceKind === 'public' ? 'inspectPublic' : 'inspect').mockResolvedValue({
       candidateId: 'cand_photography',
       source: 'ProjectState_Template',
       inspectionDigest: `sha256:${'d'.repeat(64)}`,
@@ -90,13 +108,20 @@ describe('ImportRepositoryDrawer', () => {
     })
     renderDrawer()
 
-    await user.click(await screen.findByTestId('import-candidate-photography-portfolio'))
+    if (sourceKind === 'public') {
+      await user.type(await screen.findByLabelText('Public HTTPS repository'), 'https://example.com/template')
+      await user.type(screen.getByLabelText('Exact Git commit'), 'c'.repeat(40))
+      await user.click(screen.getByRole('button', { name: 'Fetch and inspect' }))
+    } else {
+      await user.click(await screen.findByTestId('import-candidate-photography-portfolio'))
+    }
     const review = await screen.findByTestId('import-review')
     expect(within(review).getByTestId('template-adapter-match').textContent).toContain('ProjectState')
     expect(within(review).getByTestId('template-adapter-match').textContent).toContain(
       'uncommitted files are excluded',
     )
     expect(screen.getByTestId('import-register').textContent).toBe('Create isolated copy')
+    expect(install).not.toHaveBeenCalled()
     await user.click(
       screen.getByRole('checkbox', {
         name: /approve creation of an isolated copy of the exact inspected template/i,

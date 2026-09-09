@@ -1,5 +1,5 @@
 /**
- * Import a local repository (catalog): discover allowlisted candidates,
+ * Import a repository (catalog): discover allowlisted candidates,
  * inspect one read-only, review its exact identity and findings, then
  * create an isolated managed copy for supported templates, or register an
  * ordinary repository in place with an explicit approval bound to the
@@ -22,6 +22,7 @@ import { applicationDestinationAvailable } from '@/features/application-experien
 
 type Stage =
   | { kind: 'loading' }
+  | { kind: 'fetching' }
   | { kind: 'error'; error: ClientError }
   | { kind: 'candidates'; candidates: RepositoryCandidate[] }
   | { kind: 'inspecting'; candidate: RepositoryCandidate }
@@ -40,8 +41,11 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
   const navigate = useNavigate()
   const [stage, setStage] = useState<Stage>({ kind: 'loading' })
   const [name, setName] = useState('')
+  const [publicUrl, setPublicUrl] = useState('')
+  const [revision, setRevision] = useState('')
   const [approved, setApproved] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const requestRef = useRef(0)
   const candidatesRef = useRef<RepositoryCandidate[]>([])
 
   const [nonce, setNonce] = useState(0)
@@ -91,6 +95,29 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
         kind: 'candidates',
         candidates: candidatesRef.current.length > 0 ? candidatesRef.current : [candidate],
       })
+    }
+  }
+
+  const inspectPublic = async () => {
+    const request = ++requestRef.current
+    setStage({ kind: 'fetching' })
+    setActionError(null)
+    try {
+      const inspection = await getClient().repositoryImport.inspectPublic(publicUrl.trim(), revision.trim())
+      if (request !== requestRef.current) return
+      if (!inspection.candidateId) throw new ClientError('validation', 'No reviewed source identity was returned')
+      const candidate = {
+        candidateId: inspection.candidateId,
+        displayName: inspection.template?.displayName || 'Public template',
+        relativeLocation: inspection.source,
+      }
+      setName(candidate.displayName)
+      setApproved(false)
+      setStage({ kind: 'review', candidate, inspection })
+    } catch (error) {
+      if (request !== requestRef.current) return
+      setActionError(error instanceof Error ? error.message : 'Public repository inspection failed')
+      setStage({ kind: 'candidates', candidates: candidatesRef.current })
     }
   }
 
@@ -166,7 +193,10 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
   }
 
   const close = (next: boolean) => {
-    if (!next) setStage({ kind: 'loading' })
+    if (!next) {
+      requestRef.current += 1
+      setStage({ kind: 'loading' })
+    }
     onOpenChange(next)
   }
 
@@ -174,8 +204,8 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
     <Drawer
       open={open}
       onOpenChange={close}
-      title="Import a local repository"
-      description="Discovery is limited to operator-allowlisted roots. Inspection is read-only — no repository code is executed."
+      title="Import a repository"
+      description="Inspect a public template at its exact commit or a repository from an approved local folder. Review its identity before importing; repository code is never executed."
       footer={
         stage.kind === 'review' ? (
           <Button onClick={() => void importRepository()} disabled={!approved} data-testid="import-register">
@@ -199,11 +229,13 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
         ) : undefined
       }
     >
-      {stage.kind === 'loading' || stage.kind === 'inspecting' || stage.kind === 'registering' ? (
+      {stage.kind === 'loading' || stage.kind === 'fetching' || stage.kind === 'inspecting' || stage.kind === 'registering' ? (
         <div className="flex items-center gap-2 py-6 text-sm text-foreground-secondary">
           <Spinner className="size-4" />
           {stage.kind === 'loading'
             ? 'Discovering allowlisted repositories…'
+            : stage.kind === 'fetching'
+              ? 'Fetching the exact public commit for review…'
             : stage.kind === 'inspecting'
               ? 'Inspecting read-only…'
               : 'Registering with exact approval…'}
@@ -221,7 +253,18 @@ export function ImportRepositoryDrawer({ open, onOpenChange }: { open: boolean; 
       {stage.kind === 'candidates' ? (
         <div className="flex flex-col gap-2" data-testid="import-candidates">
           {actionError ? <InlineNotice tone="danger">{actionError}</InlineNotice> : null}
-          <InlineNotice tone="informational" title="Prepare a template source">
+          <div className="flex flex-col gap-3 rounded-md border border-border p-3">
+            <h3 className="text-sm font-medium">Import a public Git template</h3>
+            <p className="text-xs text-foreground-secondary">Fetch a public HTTPS repository at its full commit identity, then review the template before creating an application. No sign-in, repository scripts, redirects, or submodules are used.</p>
+            <label className="flex flex-col gap-1 text-sm">Public HTTPS repository
+              <input className="rounded-sm border border-input bg-surface px-2 py-1.5" value={publicUrl} onChange={(event) => setPublicUrl(event.target.value)} placeholder="https://github.com/owner/template" autoComplete="off" maxLength={2048} />
+            </label>
+            <label className="flex flex-col gap-1 text-sm">Exact Git commit
+              <input className="rounded-sm border border-input bg-surface px-2 py-1.5 font-mono" value={revision} onChange={(event) => setRevision(event.target.value)} placeholder="40-character commit SHA" autoComplete="off" spellCheck={false} maxLength={40} />
+            </label>
+            <Button variant="outline" disabled={!publicUrl.trim().startsWith('https://') || !/^[0-9a-f]{40}$/.test(revision.trim())} onClick={() => void inspectPublic()}>Fetch and inspect</Button>
+          </div>
+          <InlineNotice tone="informational" title="Import from a local source folder">
             For an installed StatePort, place a Git checkout of ProjectState, StudyState, or another supported
             template in <code>/var/lib/stateport/imports</code> inside Ubuntu, then refresh this list. Use the
             installer user to copy the checkout, including its <code>.git</code> directory. StatePort reads this

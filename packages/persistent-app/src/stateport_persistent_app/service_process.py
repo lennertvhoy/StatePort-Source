@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from urllib.parse import parse_qs, unquote, urlsplit
-from typing import Mapping
+from typing import Any, Mapping
 
 import yaml
 
@@ -430,8 +430,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         for key, value in (extra or {}).items():
             self.send_header(key, value)
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # A browser may cancel a navigation after the operation has already
+            # completed. The response is no longer deliverable, and retrying an
+            # error response would misclassify the completed operation as 400.
+            self.close_connection = True
 
     def _error(self, status: int, message: str, code: str = "request_failed") -> None:
         request_id = self.headers.get("X-Request-ID") or f"req-{uuid.uuid4().hex[:16]}"
@@ -628,6 +634,7 @@ class Handler(BaseHTTPRequestHandler):
         output_stop = threading.Event()
         explicit_end = False
         protocol_failure = False
+        transport_detached = False
 
         try:
             self.server.register_terminal_socket(self.connection)
@@ -704,7 +711,7 @@ class Handler(BaseHTTPRequestHandler):
                     writer.close(1000, "operator_closed")
                     break
                 if frame.opcode == 0x8:
-                    writer.close(1000, "transport_detached")
+                    transport_detached = True
                     break
                 if frame.opcode == 0x9:
                     writer.send(0xA, frame.payload)
@@ -724,16 +731,24 @@ class Handler(BaseHTTPRequestHandler):
             writer.close(1008, "terminal_access_refused")
         finally:
             output_stop.set()
+            cleanup_confirmed = True
             if connection is not None and not explicit_end:
                 try:
                     from stateport_terminal_broker import GatewayFrame
 
-                    connection["gateway"].handle_frame(
+                    cleanup_result = connection["gateway"].handle_frame(
                         connection["handshake"], session_id=connection["session"].session_id,
                         frame=GatewayFrame("close" if protocol_failure else "disconnect"),
                     )
+                    receipt = cleanup_result[1] if isinstance(cleanup_result, tuple) else cleanup_result
+                    cleanup_confirmed = getattr(receipt, "cleanup", None) in {"terminated", "not_required"}
                 except Exception:  # noqa: BLE001 - session may already have exited or broker may be closing
-                    pass
+                    cleanup_confirmed = False
+            if transport_detached:
+                writer.close(
+                    1000 if cleanup_confirmed else 1011,
+                    "transport_detached" if cleanup_confirmed else "terminal_cleanup_unverified",
+                )
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -1050,6 +1065,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/status":
                 self._send(200, {"ok": True, "result": {**self.server.source_app().product_status(), "actor": self.server.actor_projection()}})
                 return
+            if path == "/v1/operations":
+                from .operations import operation_projection
+                self._send(200, {"ok": True, "result": operation_projection(app, self._execution(app))})
+                return
             if path == "/v1/instances":
                 self._send(200, {"ok": True, "result": {"instances": app.instance_list_public()}})
                 return
@@ -1085,6 +1104,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/v1/execution/engines":
                 self._send(200, {"ok": True, "result": {"engines": self._execution(app).engines()}})
+                return
+            parts = [unquote(part) for part in path.split("/") if part]
+            if len(parts) == 5 and parts[:3] == ["v1", "execution-host", "workspaces"] and parts[4] == "authority":
+                if self.server.actor_role != "platform_operator":
+                    raise PermissionError("platform operator authorization is required")
+                self.server.require_actor_permission("platform.authority.mutate")
+                self._send(200, {"ok": True, "result": self.server.execution_host.workspace_authority(parts[3])})
+                return
+            if len(parts) == 6 and parts[:3] == ["v1", "execution-host", "workspaces"] and parts[4:] == ["terminal", "target"]:
+                with self.server._terminal_mutex:
+                    target = self.server._terminal_binding_locked(parts[3], workspace_only=True)[5]
+                    self._send(200, {"ok": True, "result": {"target": target.to_dict()}})
                 return
             if path == "/v1/execution-host":
                 self._send(200, {"ok": True, "result": {"executionHost": self.server.execution_host.status()}})
@@ -1377,16 +1408,16 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body(maximum_bytes=ConversationAttachmentStore.MAX_BYTES * 2 if attachment_upload else 64 * 1024)
             if path in {"/v1/provider/configure", "/v1/provider/verify", "/v1/provider/disconnect"}:
                 platform_surface.require_platform_operator(self.server)
-                self._strict_body(body, {"model"} if path.endswith("/configure") else set())
+                self._strict_body(body, ({"model", "providerId"} if "providerId" in body else {"model"}) if path.endswith("/configure") else set())
                 self._send(200, {"ok": True, "result": self.server.provider_action(path.rsplit("/", 1)[1], body)})
                 return
             if path == "/v1/repository-import/inspect":
                 self._mutation_security("repository inspection")
-                self._strict_body(body, {"candidateId"} if "candidateId" in body else {"url"})
+                self._strict_body(body, {"candidateId"} if "candidateId" in body else {"url", "revision"})
                 if "candidateId" in body:
                     result = self.server.repository_inspector.inspect_candidate(body["candidateId"])
                 else:
-                    result = self.server.repository_inspector.inspect_public_url(body["url"])
+                    result = self.server.repository_inspector.inspect_public_url(body["url"], body["revision"])
                 self._send(200, {"ok": True, "result": result})
                 return
             if path == "/v1/template-import/plan":
@@ -1522,6 +1553,8 @@ class Handler(BaseHTTPRequestHandler):
                 template = inspection.get("template")
                 if isinstance(template, dict) and isinstance(template.get("validation"), dict) and template["validation"].get("status") == "failed":
                     raise RepositoryImportError("template_contract_invalid", "The template contract failed validation; correct it before importing")
+                if inspection.get("sourceKind") == "public_https":
+                    raise RepositoryImportError("repository_registration_refused", "public templates require the reviewed managed-copy import flow")
                 source_identity = inspection.get("sourceIdentity")
                 if not isinstance(source_identity, dict):
                     raise RepositoryImportError("repository_identity_missing", "repository identity is unavailable")
@@ -1686,6 +1719,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._send(200, {"ok": True, "result": result})
                 return
+            if len(parts) == 6 and parts[:3] == ["v1", "execution-host", "workspaces"] and parts[4:] == ["authority", "prepare"]:
+                self._mutation_security("workspace authority request preparation")
+                if self.server.actor_role != "platform_operator":
+                    raise PermissionError("platform operator authorization is required")
+                self.server.require_actor_permission("platform.authority.mutate")
+                self._strict_body(body, {"profileDigest", "sourceMode", "grantExpiresAt"})
+                result = self.server.execution_host.prepare_workspace_authority(parts[3], profile_digest=body["profileDigest"], source_mode=body["sourceMode"], grant_expires_at=body["grantExpiresAt"])
+                self._send(200, {"ok": True, "result": result})
+                return
+            if len(parts) == 6 and parts[:3] == ["v1", "execution-host", "workspaces"] and parts[4:] == ["terminal", "prepare"]:
+                self._mutation_security("workspace terminal")
+                self._strict_body(body, {"expectedInstanceId", "expectedTargetId", "columns", "rows"})
+                if body["expectedInstanceId"] != parts[3]:
+                    raise PermissionError("workspace terminal instance identity changed")
+                result = self.server.prepare_terminal(parts[3], columns=body["columns"], rows=body["rows"], workspace_only=True, expected_target_id=body["expectedTargetId"])
+                self._send(200, {"ok": True, "result": result})
+                return
             if len(parts) == 5 and parts[:2] == ["v1", "instances"] and parts[3:] == ["terminal", "prepare"]:
                 self._mutation_security("terminal")
                 self._strict_body(body, {"expectedInstanceId", "columns", "rows"})
@@ -1826,6 +1876,20 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 else:
                     self._error(404, "restore operation not found", "not_found")
+                    return
+                self._send(200, {"ok": True, "result": result})
+                return
+            if len(parts) == 4 and parts[:2] == ["v1", "instances"] and parts[3] == "rename":
+                from stateport_persistent_app.app import ApplicationRenameError
+                self._mutation_security("application rename")
+                self._strict_body(body, {"name", "expectedName"})
+                try:
+                    result = self.server.source_app().rename_instance(
+                        parts[2], name=body["name"], expected_name=body["expectedName"],
+                        actor_id=self.server.actor_id, actor_role=self.server.actor_role,
+                    )
+                except ApplicationRenameError as exc:
+                    self._error({"rename_conflict": 409, "rename_invalid": 400, "rename_forbidden": 403}.get(exc.code, 409), str(exc), exc.code)
                     return
                 self._send(200, {"ok": True, "result": result})
                 return
@@ -2421,17 +2485,18 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 registry = _preview_registry(self.server)
                 if operation == "revoke":
-                    self._strict_body(body, {"reason"})
+                    self._strict_body(body, {"reason", "expectedRouteDigest"})
                     result = _preview_mutation_result(
-                        registry.revoke(parts[2], reason=body.get("reason"), actor=self.server.actor_id)
+                        registry.revoke(parts[2], reason=body.get("reason"), expected_route_digest=body.get("expectedRouteDigest"), actor=self.server.actor_id)
                     )
                 else:
-                    self._strict_body(body, {"revisionDigest", "upstreamPort"})
+                    self._strict_body(body, {"revisionDigest", "upstreamPort", "expectedRouteDigest"})
                     result = _preview_mutation_result(
                         registry.rewrite(
                             parts[2],
                             revision_digest=body.get("revisionDigest"),
                             upstream_port=body.get("upstreamPort"),
+                            expected_route_digest=body.get("expectedRouteDigest"),
                             actor=self.server.actor_id,
                         )
                     )
@@ -2439,9 +2504,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/v1/execution-host/workloads":
                 self._mutation_security("execution host create")
-                self._strict_body(body, set())
+                self._strict_body(body, ({"instanceId", "sourceReviewDigest"} if "sourceReviewDigest" in body else {"instanceId"}) if body else set())
                 result = self.server.record_execution_host_result(
-                    self.server.execution_host.create_default()
+                    self.server.create_application_workspace(body["instanceId"], source_review_digest=body.get("sourceReviewDigest")) if body else self.server.execution_host.create_default()
                 )
                 self._send(200, {"ok": True, "result": result})
                 return
@@ -2673,7 +2738,7 @@ class AppServer(ThreadingHTTPServer):
         ]
         self.log = open(layout.logs_root / "service.log", "a", encoding="utf-8")
         self.execution = PortableExecutionService(self.app, product_root)
-        self.execution_host = ExecutionHostProxy()
+        self.execution_host = ExecutionHostProxy(catalog_entry=self.workspace_catalog_entry, catalog_entries=lambda: self.source_app().catalog.list(), instance_runs=self.execution.history)
         self.repository_inspector = RepositoryInspector(RepositorySourcePolicy(layout))
         self.context_lifecycle = ContextLifecycleService(
             policy_path=(product_root / "config" / "context-lifecycle.v1.yaml").resolve(),
@@ -2725,7 +2790,7 @@ class AppServer(ThreadingHTTPServer):
         self.provider_setup = ProviderSetup(layout.config_root, layout.state_root)
         self._assistant_processor: object = None
         self._provider_execution_allowed = os.environ.get("STATEPORT_RELEASE_PROFILE", "").strip().lower() != "validation"
-        if self._provider_execution_allowed and not self.provider_setup.disabled_path.exists() and (self.provider_setup.profile_path.exists() or os.environ.get("STATEPORT_ASSISTANT_PROCESSOR_ENABLED", "").strip().lower() in {"1", "true", "yes"}):
+        if self._provider_execution_allowed and self.provider_setup.startup_allowed() and (self.provider_setup.profile_path.exists() or os.environ.get("STATEPORT_ASSISTANT_PROCESSOR_ENABLED", "").strip().lower() in {"1", "true", "yes"}):
             from stateport_persistent_app.assistant_processor import AssistantProcessor
             self._assistant_processor = AssistantProcessor(
                 self.conversations,
@@ -2752,7 +2817,7 @@ class AppServer(ThreadingHTTPServer):
         self._assistant_processor = None
 
     def provider_action(self, action, body):
-        from .provider_router import ProviderRouter
+        from .provider_router import ProviderRouter, PROVIDERS
         from .assistant_processor import AssistantProcessor
         with self.provider_setup.lock:
             if not self._provider_execution_allowed and action in {"configure", "verify"}:
@@ -2765,6 +2830,9 @@ class AppServer(ThreadingHTTPServer):
                 return result
             # Validate before interrupting active work.
             model = body.get("model")
+            provider_id = body["providerId"] if "providerId" in body else self.provider_setup.selected_provider()
+            if not isinstance(provider_id, str) or provider_id not in PROVIDERS:
+                raise ValueError("provider identity is invalid")
             if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}", model):
                 raise ValueError("provider configuration is invalid")
             candidate = None
@@ -2774,10 +2842,14 @@ class AppServer(ThreadingHTTPServer):
                 # the next service restart.
                 self.provider_setup.disconnect()
                 self._stop_provider_processor()
-                ProviderRouter.configure_codex(
-                    self.provider_setup.profile_path,
+                ProviderRouter.configure(
+                    self.provider_setup.profile_path, provider_id=provider_id,
                     model_identifier=model, time_seconds=30, steps=2,
                 )
+                self.provider_setup.probe(provider_id)
+                if provider_id == 'opencode':
+                    self.provider_setup.authentication = self.provider_setup.request = "unverified"
+                    return self.provider_setup.status()
                 candidate = AssistantProcessor(
                     self.conversations,
                     router=ProviderRouter(self.provider_setup.profile_path),
@@ -2871,6 +2943,7 @@ class AppServer(ThreadingHTTPServer):
             inspection=inspection,
             settings_receipts=receipts if isinstance(receipts, list) else [],
             application_install_receipt=app.application_install_receipt(instance_id),
+            application_rename_receipts=app.application_rename_receipts(instance_id),
         )
         for receipt in self.execution.closure_receipts(instance_id):
             self.activity_receipts.record_receipt(
@@ -2914,6 +2987,9 @@ class AppServer(ThreadingHTTPServer):
             instance_id=_EXECUTION_HOST_RECEIPT_SCOPE,
             receipt=projected,
         )
+        owned_instance = projected.get("instanceId")
+        if isinstance(owned_instance, str) and owned_instance != _EXECUTION_HOST_RECEIPT_SCOPE:
+            self.activity_receipts.record_receipt(instance_id=owned_instance, receipt=projected)
         response = dict(result)
         response["receipt"] = projected
         return response
@@ -3249,6 +3325,34 @@ class AppServer(ThreadingHTTPServer):
     def _experience_policy_digest(self) -> str:
         path = self.product_root / "config" / "application-experience-policy.yaml"
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _remember_application_workspace(self, instance_id: str, binding: Mapping[str, Any]) -> None:
+        """Remember isolation selection, never authority; removal cannot enable host PTY."""
+        entry = self.workspace_catalog_entry(instance_id)
+        owner = binding["workload"]["parameters"]["ownership"]
+        marker = {"workloadId": binding["workload"]["workloadId"], "catalogIdentityDigest": owner["catalogIdentityDigest"]}
+        if (entry.get("metadata") or {}).get("executionWorkspaceBinding") != marker:
+            self.source_app().catalog.update(instance_id, executionWorkspaceBinding=marker)
+
+    def create_application_workspace(self, instance_id: Any, *, source_review_digest: Any = None) -> dict[str, Any]:
+        iid = self.execution_host._validate_workload_id(instance_id)
+        binding = self.execution_host.application_binding(iid, operation="createWorkload")
+        if binding is None:
+            raise ExecutionHostProxyError("workspace_authority_missing", "An operator must provision exact application workspace authority")
+        self._remember_application_workspace(iid, binding)
+        return self.execution_host.create_application(iid, source_review_digest=source_review_digest)
+
+    def workspace_catalog_entry(self, instance_id: str) -> Mapping[str, Any]:
+        """Resolve a live catalog incarnation before using operator authority."""
+        entry = self.source_app().catalog.get(instance_id)
+        root = Path(str(entry.get("path", "")))
+        identity = entry.get("filesystem")
+        if entry.get("pathState") != "present" or entry.get("status") != "active" or not isinstance(identity, Mapping) or not root.is_absolute():
+            raise PermissionError("application catalog entry is unavailable")
+        info = root.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (identity.get("device"), identity.get("inode")):
+            raise PermissionError("application filesystem identity changed")
+        return entry
 
     def ensure_instance_capability_grant(self, instance_id: str) -> dict[str, object]:
         """Bind effective capability policy to one catalog identity.
@@ -4403,7 +4507,7 @@ class AppServer(ThreadingHTTPServer):
         if cached is not None:
             cached[1].close()
 
-    def _terminal_binding_locked(self, instance_id: str) -> tuple[str, object, object, Path, str, object]:
+    def _terminal_binding_locked(self, instance_id: str, *, workspace_only: bool = False) -> tuple[str, object, object, Path, str, object]:
         from stateport_terminal_broker import (
             AuthenticatedTerminalGateway,
             TerminalCapabilities,
@@ -4411,6 +4515,25 @@ class AppServer(ThreadingHTTPServer):
             TerminalSessionBroker,
             TerminalTarget,
         )
+
+        if workspace_only:
+            if self.actor_role != "platform_operator":
+                self._drop_terminal_broker(instance_id)
+                raise PermissionError("platform operator authorization is required")
+            self.require_actor_permission("platform.authority.mutate")
+        if "application.terminal.use" not in self.experience_policy.permissions_for(self.actor_role):
+            self._drop_terminal_broker(instance_id)
+            raise PermissionError("actor is not permitted to use application terminals")
+
+        # Authenticate untrusted workspace transport before catalog/root reads,
+        # durable isolation markers, target/session creation or PTY effects.
+        try:
+            application_workspace = self.execution_host.application_client(instance_id)
+            if workspace_only and application_workspace is not None and self.execution_host._bindings_format == "stateport.application-workspace-bindings/v2" and "status" not in application_workspace[0]["grant"]["operations"]:
+                raise ExecutionHostProxyError("workspace_operation_not_granted", "Workspace status permission is required")
+        except ExecutionHostProxyError as exc:
+            self._drop_terminal_broker(instance_id)
+            raise PermissionError("application workspace authority is unavailable; operator approval is required") from exc
 
         app = self.source_app()
         try:
@@ -4435,18 +4558,24 @@ class AppServer(ThreadingHTTPServer):
             self._drop_terminal_broker(instance_id)
             raise PermissionError("cataloged project path is not present with a verified identity")
         application_id = str(entry.get("applicationId", ""))
-        experience = self.application_experience(application_id, instance_id)
-        if experience is None:
-            self._drop_terminal_broker(instance_id)
-            raise PermissionError("application experience is unavailable")
-        statuses = {
-            str(item.get("id")): str(item.get("status"))
-            for item in experience.get("capabilities", [])
-            if isinstance(item, dict)
-        }
-        if not all(statuses.get(item) in {"available", "degraded"} for item in ("workbench", "terminal")):
-            self._drop_terminal_broker(instance_id)
-            raise PermissionError("application does not have an effective terminal Workbench")
+        if workspace_only:
+            if self.actor_role != "platform_operator":
+                self._drop_terminal_broker(instance_id)
+                raise PermissionError("platform operator authorization is required")
+            self.require_actor_permission("platform.authority.mutate")
+        else:
+            experience = self.application_experience(application_id, instance_id)
+            if experience is None:
+                self._drop_terminal_broker(instance_id)
+                raise PermissionError("application experience is unavailable")
+            statuses = {
+                str(item.get("id")): str(item.get("status"))
+                for item in experience.get("capabilities", [])
+                if isinstance(item, dict)
+            }
+            if not all(statuses.get(item) in {"available", "degraded"} for item in ("workbench", "terminal")):
+                self._drop_terminal_broker(instance_id)
+                raise PermissionError("application does not have an effective terminal Workbench")
         if "application.terminal.use" not in self.experience_policy.permissions_for(self.actor_role):
             self._drop_terminal_broker(instance_id)
             raise PermissionError("actor is not permitted to use application terminals")
@@ -4467,7 +4596,29 @@ class AppServer(ThreadingHTTPServer):
         ):
             self._drop_terminal_broker(instance_id)
             raise PermissionError("cataloged project filesystem identity changed")
-        cache_identity = f"{application_id}:{root.as_posix()}:{root_info.st_dev}:{root_info.st_ino}"
+        incarnation = ""
+        if workspace_only:
+            if application_workspace is None:
+                self._drop_terminal_broker(instance_id)
+                raise PermissionError("an exact application workspace binding is required")
+            binding, execution_client = application_workspace
+            try:
+                observed = execution_client.status(binding["workload"]["workloadId"])["result"]
+                owner = binding["workload"]["parameters"]["ownership"]
+                expected_owner = {"grantId": binding["grantId"], "applicationId": None, "runId": None, **owner}
+                incarnation = observed.get("containerIdentityDigest", "")
+                if observed.get("workloadId") != binding["workload"]["workloadId"] or observed.get("kind") != "workspace" or observed.get("state") != "running" or observed.get("engineStatus") != "running" or observed.get("ownership") != expected_owner or not isinstance(incarnation, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", incarnation):
+                    raise ValueError("workspace must be running with exact owner and container identity")
+            except Exception as exc:
+                self._drop_terminal_broker(instance_id)
+                raise PermissionError("workspace terminal authority or running identity is unavailable") from exc
+        if application_workspace is None and (entry.get("metadata") or {}).get("executionWorkspaceBinding"):
+            self._drop_terminal_broker(instance_id)
+            raise PermissionError("application workspace authority was removed; host terminal fallback is refused")
+        if application_workspace is not None:
+            self._remember_application_workspace(instance_id, application_workspace[0])
+        workspace_digest = hashlib.sha256(json.dumps(application_workspace[0], sort_keys=True).encode()).hexdigest() if application_workspace else "local"
+        cache_identity = f"{application_id}:{root.as_posix()}:{root_info.st_dev}:{root_info.st_ino}:{workspace_digest}:{'platform' if workspace_only else 'application'}:{incarnation}"
         cached = self.terminal_brokers.get(instance_id)
         if cached is not None and secrets.compare_digest(cached[0], cache_identity):
             return cached
@@ -4475,6 +4626,15 @@ class AppServer(ThreadingHTTPServer):
             cached[1].close()
 
         opaque = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()[:32]
+        if application_workspace is not None:
+            from stateport_terminal_broker.execution_host_gateway import ExecutionHostTerminalGateway
+            binding, execution_client = application_workspace
+            target = TerminalTarget(f"terminal.workspace.{opaque}", "capsule", "Application workspace terminal", "available", TerminalCapabilities("capsule", True, True, True, False, False, True))
+            profile_id = f"terminal.profile.{opaque}"
+            gateway = ExecutionHostTerminalGateway(execution_client, expected_container_identity_digest=incarnation if workspace_only else None, require_container_identity=workspace_only, workspace_id=binding["workload"]["workloadId"], instance_id=instance_id, profile_id=profile_id, target=target, allowed_origins=(f"http://127.0.0.1:{self.server_address[1]}",))
+            value = (cache_identity, gateway, gateway, Path("/workspace"), profile_id, target)
+            self.terminal_brokers[instance_id] = value
+            return value
         target = TerminalTarget(
             f"terminal.local.{opaque}",
             "local_pty",
@@ -4514,13 +4674,15 @@ class AppServer(ThreadingHTTPServer):
             if float(self.terminal_tickets[digest]["expiresMonotonic"]) <= now:
                 self.terminal_tickets.pop(digest, None)
 
-    def prepare_terminal(self, instance_id: str, *, columns: object, rows: object) -> dict[str, object]:
+    def prepare_terminal(self, instance_id: str, *, columns: object, rows: object, workspace_only: bool = False, expected_target_id: object = None) -> dict[str, object]:
         from stateport_terminal_broker import GatewayActor, TerminalBrokerError
 
         columns, rows = self._terminal_dimensions(columns, rows)
         origin = f"http://127.0.0.1:{self.server_address[1]}"
         with self._terminal_mutex:
-            cache_identity, broker, gateway, root, profile_id, target = self._terminal_binding_locked(instance_id)
+            cache_identity, broker, gateway, root, profile_id, target = self._terminal_binding_locked(instance_id, workspace_only=workspace_only)
+            if workspace_only and (not isinstance(expected_target_id, str) or not secrets.compare_digest(expected_target_id, target.target_id)):
+                raise PermissionError("workspace terminal target changed; review the running workspace again")
             broker.sweep_expired()
             self._cleanup_terminal_tickets_locked()
             if any(ticket["instanceId"] == instance_id for ticket in self.terminal_tickets.values()):
@@ -4528,7 +4690,9 @@ class AppServer(ThreadingHTTPServer):
             if len(self.terminal_tickets) >= 256:
                 raise TerminalBrokerError("terminal ticket capacity is exhausted")
             actor = GatewayActor(self.actor_id, frozenset({instance_id}), "operator_session")
-            sessions = broker.list_sessions(actor_id=self.actor_id, instance_id=instance_id, origin=origin)
+            sessions = (broker.list_sessions(actor, instance_id=instance_id, origin=origin)
+                        if target.target_class == "capsule"
+                        else broker.list_sessions(actor_id=self.actor_id, instance_id=instance_id, origin=origin))
             if any(session.connected for session in sessions):
                 raise TerminalBrokerError("the selected application already has a connected terminal")
             disconnected = [session for session in sessions if not session.connected]
@@ -4552,6 +4716,7 @@ class AppServer(ThreadingHTTPServer):
             digest = hashlib.sha256(token.value.encode("ascii")).hexdigest()
             self.terminal_tickets[digest] = {
                 "cacheIdentity": cache_identity,
+                "workspaceOnly": workspace_only,
                 "instanceId": instance_id,
                 "sessionId": token.session_id,
                 "purpose": token.purpose,
@@ -4592,7 +4757,7 @@ class AppServer(ThreadingHTTPServer):
             if not all(exact):
                 raise TerminalAccessDenied()
             instance_id = str(ticket["instanceId"])
-            cache_identity, _broker, gateway, root, _profile_id, _target = self._terminal_binding_locked(instance_id)
+            cache_identity, _broker, gateway, root, _profile_id, _target = self._terminal_binding_locked(instance_id, workspace_only=ticket.get("workspaceOnly") is True)
             if not secrets.compare_digest(cache_identity, str(ticket["cacheIdentity"])):
                 raise TerminalAccessDenied()
             actor = GatewayActor(self.actor_id, frozenset({instance_id}), "operator_session")

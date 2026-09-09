@@ -1,0 +1,17 @@
+{
+  "upstreamVersion": "0.146.0",
+  "version": "0.146.0+stateport.2",
+  "sourceCommit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+  "sourceUrl": "https://codeload.github.com/openai/codex/tar.gz/e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+  "sourceSha256": "0b789281dc96d60f05c28ddaabc3108a7c3e2f99a9be6cae68bb1c03d5db01c6",
+  "patchSha256": "dc4ee7aee992888499e8b08db4cc14652e0d39e7eabd2d710b507d22ddad41e8",
+  "upstreamCargoLockSha256": "828175f2781fe6c83e3396194f1b00d7fab6b2a27017ea0daa896456c4079d77",
+  "rustVersion": "1.95.0",
+  "status": "preparation-only; not yet wired into release images",
+  "dependencyPatchSha256": "f35a2a16e1b541b139464b8791ae006c3295a2f7d18c86953fd01be8fdb07fcb",
+  "dependencyCargoLockSha256": "602f42a0472cde3903e288be2fd56b69b50d7f458f0371f29320a77f97e6f1c5",
+  "dependencyUpdates": {
+    "gix": "0.83.0",
+    "openssl": "0.10.80"
+  }
+}

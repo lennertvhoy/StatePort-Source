@@ -50,6 +50,17 @@ for relative in (
 from stateport_persistent_app import LocalLayout, PersistentApp  # noqa: E402
 from stateport_persistent_app.service_process import AppServer  # noqa: E402
 from stateport_terminal_broker import broker as terminal_broker_module  # noqa: E402
+from stateport_terminal_broker import (
+    ExecutionHostTerminalGateway,
+    GatewayActor,
+    GatewayFrame,
+    GatewayHandshake,
+    TerminalCapabilities,
+    TerminalSession,
+    TerminalTarget,
+)
+from stateport_terminal_broker.execution_host_gateway import _Session  # noqa: E402
+from stateport_terminal_broker.broker import TerminalBrokerError  # noqa: E402
 from service_test_product import service_product_fixture  # noqa: E402
 
 
@@ -170,6 +181,108 @@ def _prepare(
             return response.status, json.loads(response.read())
     except HTTPError as error:
         return error.code, json.loads(error.read())
+
+
+def test_capsule_fresh_prepare_refuses_while_disconnect_cleanup_is_in_flight(tmp_path: Path) -> None:
+    """A fresh capsule ticket must wait for the prior daemon close to finish."""
+
+    class BlockingExecutionHost:
+        def __init__(self) -> None:
+            self.cleanup_started = threading.Event()
+            self.release_cleanup = threading.Event()
+            self.closed: list[str] = []
+
+        def close_terminal(self, session_id: str) -> dict[str, object]:
+            self.cleanup_started.set()
+            assert self.release_cleanup.wait(timeout=2), "cleanup release was not observed"
+            self.closed.append(session_id)
+            return {"result": {"sessionId": session_id, "state": "closed"}}
+
+    client = BlockingExecutionHost()
+    target = TerminalTarget(
+        "terminal_target_race",
+        "capsule",
+        "Workspace container",
+        "available",
+        TerminalCapabilities("capsule", True, True, True, False, False, True),
+    )
+    gateway = ExecutionHostTerminalGateway(
+        client,
+        workspace_id="workspace_race",
+        instance_id="instance_race",
+        profile_id="terminal.profile.race",
+        target=target,
+        allowed_origins=("http://127.0.0.1:4100",),
+    )
+    actor = GatewayActor("operator.race", frozenset({"instance_race"}), "operator_session")
+    handshake = GatewayHandshake(actor, "instance_race", "http://127.0.0.1:4100", "/v1/terminal/socket", "first_frame")
+    session = TerminalSession(
+        "terminal.session_race",
+        target.target_id,
+        "capsule",
+        actor.actor_id,
+        "instance_race",
+        "connected",
+        "2026-09-08T00:00:00Z",
+        "2026-09-08T01:00:00Z",
+        "2026-09-08T00:00:00Z",
+        "sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+        True,
+    )
+    local_socket, peer_socket = socket.socketpair()
+    live = _Session(
+        session=session,
+        origin="http://127.0.0.1:4100",
+        connection=local_socket,
+        executor_pid=1,
+        created_at=time.time(),
+        expires_at=time.time() + 60,
+        last_activity=time.time(),
+    )
+    gateway._sessions[session.session_id] = live
+    disconnect_result: list[object] = []
+
+    def disconnect() -> None:
+        disconnect_result.append(
+            gateway.handle_frame(
+                handshake,
+                session_id=session.session_id,
+                frame=GatewayFrame("disconnect"),
+            )
+        )
+
+    thread = threading.Thread(target=disconnect)
+    thread.start()
+    try:
+        assert client.cleanup_started.wait(timeout=1), "disconnect did not reach execution-host cleanup"
+        assert gateway.list_sessions(actor, instance_id="instance_race", origin="http://127.0.0.1:4100") == ()
+        with pytest.raises(TerminalBrokerError, match="already has a connected terminal"):
+            gateway.prepare(
+                actor,
+                profile_id="terminal.profile.race",
+                instance_id="instance_race",
+                selected_root=Path("/workspace"),
+                origin="http://127.0.0.1:4100",
+            )
+        client.release_cleanup.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive(), "disconnect cleanup did not complete"
+        assert len(disconnect_result) == 1
+        assert client.closed == [session.session_id]
+        fresh = gateway.prepare(
+            actor,
+            profile_id="terminal.profile.race",
+            instance_id="instance_race",
+            selected_root=Path("/workspace"),
+            origin="http://127.0.0.1:4100",
+        )
+        assert fresh.purpose == "create"
+    finally:
+        client.release_cleanup.set()
+        thread.join(timeout=2)
+        peer_socket.close()
+        gateway.close()
 
 
 class RawWebSocket:
@@ -320,6 +433,112 @@ def _wait_for(predicate: object, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.02)
     return bool(predicate())
+
+
+@pytest.mark.parametrize(
+    ("cleanup_error", "expected_close"),
+    [(False, (1000, "transport_detached")), (True, (1011, "terminal_cleanup_unverified"))],
+)
+def test_loopback_close_ack_follows_gateway_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_error: bool,
+    expected_close: tuple[int, str],
+) -> None:
+    """A normal WebSocket close is acknowledged only after disconnect cleanup."""
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    layout = LocalLayout.from_environment()
+    layout.initialize()
+    app = PersistentApp(layout)
+    app.setup_init()
+    project = layout.instances_root / "dev-one"
+    head = _project_fixture(project, "dev-one")
+    app.catalog.register(
+        project,
+        instance_id="dev-one",
+        name="dev-one",
+        source={
+            "templateId": APPLICATION_ID,
+            "resolvedCommit": head,
+            "resolvedTree": "tree-dev-one",
+            "manifestDigest": "sha256:" + hashlib.sha256(b"dev-one").hexdigest(),
+        },
+    )
+    port = _free_port()
+    server = AppServer(
+        ("127.0.0.1", port),
+        layout,
+        service_product_fixture(tmp_path, ROOT) / "apps" / "web",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    websocket: RawWebSocket | None = None
+    ack_received = threading.Event()
+    ack_before_release: list[bool] = []
+    close_payloads: list[bytes] = []
+    try:
+        origin = f"http://127.0.0.1:{port}"
+        with urlopen(f"{origin}/session") as response:
+            session = json.loads(response.read())["result"]
+            cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+        service = {"origin": origin, "port": port, "cookie": cookie, "csrf": session["csrfToken"]}
+        status, payload = _prepare(service)
+        assert status == 200
+        ticket = payload["result"]
+        websocket = RawWebSocket.open(service)
+        websocket.send_json(_authentication(ticket, "dev-one"))
+        assert websocket.receive()[0] == 0x1
+        gateway = server.terminal_brokers["dev-one"][2]
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+        original_handle_frame = gateway.handle_frame
+
+        def blocked_cleanup(*args: object, **kwargs: object) -> object:
+            frame = kwargs.get("frame")
+            if getattr(frame, "frame_type", None) == "disconnect":
+                cleanup_started.set()
+                assert release_cleanup.wait(timeout=2), "cleanup release was not observed"
+                if cleanup_error:
+                    raise RuntimeError("simulated cleanup failure")
+            return original_handle_frame(*args, **kwargs)
+
+        gateway.handle_frame = blocked_cleanup  # type: ignore[method-assign]
+
+        def receive_ack() -> None:
+            try:
+                while True:
+                    opcode, payload = websocket.receive()
+                    if opcode == 0x8:
+                        ack_before_release.append(not release_cleanup.is_set())
+                        close_payloads.append(payload)
+                        return
+            finally:
+                ack_received.set()
+
+        receiver = threading.Thread(target=receive_ack)
+        receiver.start()
+        websocket.send(0x8)
+        assert cleanup_started.wait(timeout=1), "disconnect did not reach gateway cleanup"
+        assert not ack_received.wait(timeout=0.2), "close acknowledgement preceded gateway cleanup"
+        release_cleanup.set()
+        assert ack_received.wait(timeout=2), "close acknowledgement was not sent after cleanup"
+        receiver.join(timeout=1)
+        assert ack_before_release == [False]
+        assert len(close_payloads) == 1
+        payload = close_payloads[0]
+        assert len(payload) >= 2
+        assert (struct.unpack("!H", payload[:2])[0], payload[2:].decode("utf-8")) == expected_close
+    finally:
+        if websocket is not None:
+            websocket.close()
+        if "release_cleanup" in locals():
+            release_cleanup.set()
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
 
 
 def test_real_project_root_terminal_io_resize_disconnect_reconnect_and_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

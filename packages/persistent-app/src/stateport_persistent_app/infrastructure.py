@@ -513,6 +513,116 @@ class LocalLibvirtAdapter:
             raise InfrastructureError("unsupported_repository", "the Nix repository lacks the supported flake/Makefile workflow")
         self.target = InfrastructureTarget()
 
+    @staticmethod
+    def repository_binding(path: str, filesystem: Mapping[str, Any]) -> str:
+        if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(filesystem, Mapping):
+            raise InfrastructureError("operation_binding_unavailable", "stored repository ownership is unavailable")
+        if any(type(filesystem.get(key)) is not int for key in ("device", "inode")):
+            raise InfrastructureError("operation_binding_unavailable", "stored repository filesystem identity is unavailable")
+        return _digest({"path": path, "device": filesystem["device"], "inode": filesystem["inode"]})
+
+    @classmethod
+    def current_repository_binding(cls, path: str, filesystem: Mapping[str, Any]) -> str:
+        expected = cls.repository_binding(path, filesystem)
+        parts = Path(path).parts
+        if Path(path).as_posix() != path or '..' in parts:
+            raise InfrastructureError("operation_binding_unavailable", "stored repository path is not canonical")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        descriptor = None
+        try:
+            # Walk the stored absolute path without following substituted symlink
+            # ancestors. Only directory metadata is read: no Git/source/runtime probe.
+            descriptor = os.open('/', flags)
+            for component in parts[1:]:
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            metadata = os.fstat(descriptor)
+            actual = cls.repository_binding(path, {"device": metadata.st_dev, "inode": metadata.st_ino})
+            if actual != expected:
+                raise InfrastructureError("operation_binding_changed", "the registered repository directory identity changed; stored operation ownership cannot be confirmed")
+            return expected
+        except OSError as exc:
+            raise InfrastructureError("operation_binding_unavailable", "the registered repository directory is missing, inaccessible, or reached through a symlink; stored operation ownership cannot be confirmed") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    @classmethod
+    def stored_operations(cls, *, state_root: Path, instance_id: str, repository_binding: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        # Reuse durable plan/run/receipt validators without constructing the live
+        # adapter: its constructor inspects the source tree, and inspect probes VMs.
+        reader = object.__new__(cls)
+        reader.state_root = state_root
+        reader.instance_id = _safe_id(instance_id, "instance_id")
+        reader._clock = _now
+        for directory in (state_root, reader._plans, reader._approvals, reader._runs):
+            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                raise InfrastructureError("operation_store_unavailable", "stored infrastructure operations require inspection")
+        if not reader._plans.exists():
+            if reader._runs.exists() and any(reader._runs.glob("*.json")):
+                raise InfrastructureError("operation_store_unavailable", "stored infrastructure runs have no plans; inspection is required")
+            return [], []
+        result = []
+        errors = []
+        expected_run_names = set()
+        for path in sorted(reader._plans.glob('*.json')):
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_RUN_RECORD_BYTES:
+                    raise InfrastructureError("plan_invalid", "stored infrastructure plan is unsafe or oversized")
+                plan = reader._load_plan('sha256:' + path.stem, require_unexpired=False)
+                if (plan.get('formatVersion') != 'stateport.infrastructure-plan/v1'
+                        or not isinstance(plan.get('operation'), str) or plan['operation'] not in OPERATIONS
+                        or type(plan.get('approvalRequired')) is not bool
+                        or plan.get('target') != InfrastructureTarget().to_dict()):
+                    raise InfrastructureError("plan_invalid", "stored infrastructure plan metadata is invalid")
+                expected_run_names.add(reader._run_id(plan['planDigest'], plan['operation']) + '.json')
+                binding = plan.get('repositoryBinding')
+                if binding is None:
+                    raise InfrastructureError("operation_binding_unavailable", "legacy infrastructure plans lack an exact repository binding; their ownership cannot be confirmed")
+                if plan.get('instanceId') != instance_id or binding != repository_binding:
+                    raise InfrastructureError("operation_binding_changed", "stored infrastructure plans belong to a different repository binding")
+                reader._validate_timestamp(plan.get('createdAt'), 'plan timestamp')
+                run = reader._load_run_for_plan(plan)
+                operation = 'health_check' if plan['operation'] == 'health' else plan['operation']
+                row = {'id': plan['planDigest'], 'instanceId': instance_id, 'operation': operation,
+                       'title': operation.replace('_', ' ') + ' plan', 'createdAt': plan['createdAt'],
+                       'updatedAt': plan['createdAt'], 'state': 'prepared'}
+                if run is not None:
+                    row['state'] = run['state']
+                    row['updatedAt'] = run.get('endedAt', run['startedAt'])
+                    if run.get('receipt'):
+                        row['receiptId'] = run['receipt']['receiptId']
+                    if run.get('error'):
+                        row['error'] = 'Infrastructure execution failed: ' + run['error']['code'] + '. Open its receipt for details.'
+                else:
+                    expiry = reader._validate_timestamp(plan.get('expiresAt'), 'plan expiry')
+                    if expiry <= reader._clock():
+                        row['state'] = 'blocked'
+                        row['error'] = 'This stored plan expired. Prepare and review a new plan before execution.'
+                    elif plan.get('approvalRequired') is True:
+                        row['state'] = 'awaiting_approval'
+                        approval_path = reader._approvals / (path.stem + '.json')
+                        if os.path.lexists(approval_path):
+                            try:
+                                approval = reader._load_approval(plan['planDigest'])
+                                row['state'] = 'approved'
+                                row['updatedAt'] = approval['approvedAt']
+                            except InfrastructureError as exc:
+                                if exc.code != 'approval_expired':
+                                    raise
+                                row['state'] = 'blocked'
+                                row['error'] = 'The stored approval expired. Prepare and review a new plan.'
+                result.append(row)
+            except (InfrastructureError, OSError) as exc:
+                errors.append({"instanceId": instance_id,
+                               "code": exc.code if isinstance(exc, InfrastructureError) else "operation_store_unavailable",
+                               "message": str(exc) if isinstance(exc, InfrastructureError) else "A stored infrastructure operation could not be read."})
+        if reader._runs.exists() and any(path.name not in expected_run_names for path in reader._runs.glob('*.json')):
+            errors.append({"instanceId": instance_id, "code": "operation_store_unavailable",
+                           "message": "Stored infrastructure runs have no matching valid plan; inspection is required."})
+        return result, errors
+
     @property
     def _plans(self) -> Path:
         return self.state_root / "plans"
@@ -979,7 +1089,21 @@ class LocalLibvirtAdapter:
             result["command"] = self._redacted_command(result["command"])
         return result
 
+    def _assert_plan_repository_binding(self, plan: Mapping[str, Any]) -> None:
+        binding = plan.get("repositoryBinding")
+        if not isinstance(binding, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", binding) is None:
+            raise InfrastructureError("plan_stale", "this legacy plan lacks an exact repository binding; prepare and review a fresh plan before approval or execution")
+        try:
+            metadata = self.repository_root.stat(follow_symlinks=False)
+            current = self.current_repository_binding(self.repository_root.as_posix(),
+                {"device": metadata.st_dev, "inode": metadata.st_ino})
+        except (InfrastructureError, OSError) as exc:
+            raise InfrastructureError("plan_stale", "the repository directory identity cannot be confirmed; prepare and review a fresh plan") from exc
+        if current != binding:
+            raise InfrastructureError("plan_stale", "the repository directory binding changed; prepare and review a fresh plan")
+
     def _assert_plan_target_current(self, plan: Mapping[str, Any]) -> None:
+        self._assert_plan_repository_binding(plan)
         planned_stateport = plan.get("stateport")
         current_stateport = self.stateport_identity()
         if planned_stateport != (current_stateport.to_dict() if current_stateport else None):
@@ -1671,7 +1795,9 @@ class LocalLibvirtAdapter:
         stateport = self.stateport_identity()
         domain = self._domain_observation()
         durable_grant = self._active_grant_for(operation)
+        metadata = self.repository_root.stat()
         payload: dict[str, Any] = {
+            "repositoryBinding": self.repository_binding(self.repository_root.as_posix(), {"device": metadata.st_dev, "inode": metadata.st_ino}),
             "formatVersion": "stateport.infrastructure-plan/v1",
             "instanceId": self.instance_id,
             "operation": operation,
@@ -1814,6 +1940,7 @@ class LocalLibvirtAdapter:
 
     def approve(self, plan_digest: str, actor_id: str) -> dict[str, Any]:
         plan = self._load_plan(plan_digest)
+        self._assert_plan_repository_binding(plan)
         if plan.get("approvalRequired") is not True:
             raise InfrastructureError("approval_not_required", "this operation is already covered by the active local daily-driver grant")
         if actor_id != "local-user":
@@ -1911,6 +2038,7 @@ class LocalLibvirtAdapter:
             # reservation.  A lost-response replay remains inspectable after
             # those clocks or observed identities have moved.
             self._load_plan(plan_digest, require_unexpired=True)
+            self._assert_plan_repository_binding(plan)
             if operation in MUTATING_OPERATIONS:
                 durable_grant = self._active_grant_for(operation)
                 approval = (

@@ -46,9 +46,11 @@ function OperationRow({ record }: { record: OperationRecord }) {
   const receiptBaseRoute = useApplicationReceiptBaseRoute(record.instanceId)
   const upsertOperation = useSessionStore((s) => s.upsertOperation)
   const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const act = async (action: 'pause' | 'cancel') => {
     setBusy(true)
+    setActionError(null)
     try {
       const updated =
         action === 'pause'
@@ -56,14 +58,24 @@ function OperationRow({ record }: { record: OperationRecord }) {
           : await getClient().operations.cancel(record.id)
       upsertOperation(updated)
     } catch {
-      // The next poll reconciles; the action stays honest by not pretending.
+      setActionError(
+        `${action === 'cancel' ? 'Cancellation' : 'Pause'} could not be confirmed. Check the current operation state before retrying.`,
+      )
     } finally {
       setBusy(false)
     }
   }
 
+  if (record.kind === 'infrastructure_observation') {
+    return <li className="border-b border-border px-1 py-3" data-testid="operation-observation">
+      <p className="text-sm font-medium">{record.title}</p>
+      <p className="text-xs text-foreground-secondary">{appName ?? record.instanceId}</p>
+      <p role="alert" className="text-xs text-status-danger">{record.observationError}</p>
+    </li>
+  }
+
   return (
-    <li className="flex flex-col gap-1.5 border-b border-border px-1 py-3 last:border-b-0" data-testid="operation-row">
+    <li className="flex flex-col gap-1.5 border-b border-border px-1 py-3 last:border-b-0" data-testid="operation-row" data-operation-id={record.id}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-foreground">{record.title}</p>
@@ -85,7 +97,7 @@ function OperationRow({ record }: { record: OperationRecord }) {
               Pause
             </Button>
           ) : null}
-          {record.canCancel && ['running', 'queued', 'preparing', 'validating', 'paused'].includes(record.state) ? (
+          {record.canCancel ? (
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act('cancel')}>
               <CircleStop aria-hidden="true" />
               Cancel
@@ -98,6 +110,7 @@ function OperationRow({ record }: { record: OperationRecord }) {
           ) : null}
         </span>
       </div>
+      {actionError ? <p role="alert" className="text-xs text-status-danger">{actionError}</p> : null}
       {record.error ? <p className="text-xs text-status-danger">{record.error}</p> : null}
       {record.log.length > 0 ? (
         <Disclosure title={`Details · ${record.log.length} log lines`}>

@@ -44,7 +44,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import ctypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import errno
 import fcntl
@@ -80,6 +80,7 @@ from .contract import (
     load_release_index_file,
     parse_last_line_json,
     render_stable_host_quadlet_bundle,
+    signed_workspace_image,
     revision_contract_digest,
     validate_contract_document,
     verify_release_index,
@@ -116,6 +117,16 @@ DAEMON_UNIT = "stateport-execution-host.service"
 ENGINE_SOCKET_UNIT = "podman.socket"
 PLAN_SCHEMA = "stateport.execution-host-provisioning/v2"
 _CLIENT_USER_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
+
+
+def _managed_container_name(content: str) -> str:
+    values = [line.split("=", 1)[1].strip() for line in content.splitlines()
+              if "=" in line and line.split("=", 1)[0].strip() == "ContainerName"]
+    if len(values) != 1 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", values[0]) is None:
+        raise ReleaseContractError("managed container unit requires one safe explicit ContainerName")
+    return values[0]
+
+
 CLIENT_IDENTITY_FILE = ".stateport-control-client"
 RECEIPT_SCHEMA = "stateport.execution-host-provisioning-receipt/v1"
 HEALTH_GRANT_ID = "provisioning-health-probe"
@@ -179,75 +190,21 @@ _DEFAULT_DEPLOYMENT_SCOPE = {
 
 
 def _default_workspace_spec() -> dict[str, Any]:
-    """Return the canonical default developer workspace declaration.
-
-    This is the ONE workload the default grant binds.  The GUI's real
-    workload path creates exactly this workspace; anything else requires a
-    per-workload grant extension issued by an operator authority.
-    """
-    return {
-        "formatVersion": "stateport.workspace-spec/v1",
-        "workspaceId": DEFAULT_WORKSPACE_ID,
-        "imageDigest": DEFAULT_WORKSPACE_IMAGE.rsplit("@", 1)[1],
-        "workspacePath": "/workspace",
-        "shell": ["/bin/sh"],
-        "resources": {
-            "memoryMaxBytes": 256 * 1024 * 1024,
-            "cpuQuotaPercent": 100,
-            "pidsMax": 128,
-            "diskMaxBytes": 256 * 1024 * 1024,
-        },
-        "networkProfile": {"mode": "disabled", "allowlist": []},
-        "cacheVolumes": [],
-        "lifecyclePolicy": {
-            "idleTimeoutSeconds": 3600,
-            "stopAfterIdle": True,
-            "preserveDataOnRemove": True,
-        },
-    }
+    from execution_host.daemon_contract import workspace_descriptor_for_image
+    return workspace_descriptor_for_image(DEFAULT_WORKSPACE_IMAGE)
 
 
 def _default_workspace_spec_digest() -> str:
-    """Canonical digest of the WorkspaceSpec document itself (no imports)."""
     return canonical_digest(_default_workspace_spec())
 
 
+def workspace_template_for_image(image_reference: str) -> dict[str, Any]:
+    from execution_host.daemon_contract import workspace_template_for_image as normalize_template
+    return normalize_template(image_reference)
+
+
 def _default_sealed_workload() -> dict[str, Any]:
-    """Render the sealed daemon workload for the default grant.
-
-    The shape matches ``execution_host.daemon_contract.validate_workload_spec``
-    normalization exactly (the sealed workspace translation of the canonical
-    WorkspaceSpec).  This module deliberately does not import runtime-contracts:
-    the provisioner wheel carries only stateport_release and execution_host.
-    """
-    from execution_host import daemon_contract  # noqa: PLC0415
-
-    parameters: dict[str, Any] = {
-        "workspaceId": DEFAULT_WORKSPACE_ID,
-        "workspaceSpecDigest": _default_workspace_spec_digest(),
-        "volumeName": f"stateport-workspace-{DEFAULT_WORKSPACE_ID}",
-        "stopAfterIdle": True,
-        "shell": ["/bin/sh"],
-        "networkMode": "none",
-        "cacheVolumes": [],
-        "cpuQuotaPercent": 100,
-        "diskMaxBytes": 256 * 1024 * 1024,
-        "workSeconds": 0,
-        "emitBytes": 0,
-    }
-    workload = {
-        "kind": "workspace",
-        "workloadId": DEFAULT_WORKSPACE_ID,
-        "image": {"reference": DEFAULT_WORKSPACE_IMAGE},
-        "parameters": parameters,
-        "timeoutSeconds": 3600,
-        "outputByteBound": 65536,
-        "resources": {
-            "memoryMaxBytes": 256 * 1024 * 1024,
-            "pidsMax": 128,
-        },
-    }
-    return daemon_contract.validate_workload_spec(workload)
+    return workspace_template_for_image(DEFAULT_WORKSPACE_IMAGE)
 
 
 def default_sealed_workspace_workload() -> dict[str, Any]:
@@ -288,6 +245,7 @@ def _default_grant_document(
     issued_at: str,
     expires_at: str,
     revocation_epoch: int,
+    workspace_template: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Render a schema-valid default execution-host authority grant.
 
@@ -300,10 +258,12 @@ def _default_grant_document(
     """
     from execution_host import daemon_contract  # noqa: PLC0415
 
-    workload = default_sealed_workspace_workload()
+    workload = default_sealed_workspace_workload() if workspace_template is None else dict(workspace_template)
+    if workspace_template is not None and workload != workspace_template_for_image(image_reference):
+        raise ReleaseContractError("dynamic default grant template contradicts its image")
     workload_id = str(workload["workloadId"])
     sealed_digest = daemon_contract.canonical_digest(workload)
-    if sealed_digest != DEFAULT_WORKSPACE_SPEC_DIGEST:
+    if workspace_template is None and sealed_digest != DEFAULT_WORKSPACE_SPEC_DIGEST:
         raise ReleaseContractError(
             "default workspace sealed digest drifted from the signed contract"
         )
@@ -342,6 +302,17 @@ STABLE_EXECUTION_MODES = (
 )
 DEFAULT_NOLOGIN_SHELL = "/usr/sbin/nologin"
 DEFAULT_RECEIPT_DIRECTORY = "/var/lib/stateport-provisioning/receipts"
+WORKSPACE_PUBLIC_DIR = "/etc/stateport/workspace-authority"
+WORKSPACE_CONTEXT_PATH = "/etc/stateport/workspace-issuer-context.json"
+WORKSPACE_PUBLIC_CONTEXT = WORKSPACE_PUBLIC_DIR + "/issuer.json"
+WORKSPACE_BINDINGS_PATH = WORKSPACE_PUBLIC_DIR + "/bindings.json"
+WORKSPACE_CONTEXT_FORMAT = "stateport.workspace-issuer-context/v1"
+WORKSPACE_PUBLIC_FORMAT = "stateport.workspace-issuer-public/v1"
+WORKSPACE_PROFILE_ID = "stateport.empty-workspace/v1"
+WORKSPACE_TERMINAL_CONTEXT_FORMAT = "stateport.workspace-issuer-context/v2"
+WORKSPACE_TERMINAL_PUBLIC_FORMAT = "stateport.workspace-issuer-public/v2"
+WORKSPACE_SOURCE_CONTEXT_FORMAT = "stateport.workspace-issuer-context/v3"
+WORKSPACE_SOURCE_PUBLIC_FORMAT = "stateport.workspace-issuer-public/v3"
 ROOT_HELPER_PATH = "/usr/local/libexec/stateport-execution-host-provision"
 ROOT_MODULE_ROOT = "/usr/local/lib/stateport/provisioning"
 ROOT_COSIGN_PATH = "/usr/local/lib/stateport/tools/cosign"
@@ -677,6 +648,8 @@ def render_provisioning_plan(
     if target.get("executionHostMode") not in STABLE_EXECUTION_MODES:
         raise ReleaseContractError("target has no stable execution host to provision")
     contract = target["executionContract"]
+    workspace_image = signed_workspace_image(target, images)
+    workspace_template = workspace_template_for_image(str(workspace_image["reference"])) if workspace_image is not None else None
     control_uid = _contract_numeric_identity(contract, "allowedClientUid", CONTROL_UID)
     control_gid = _contract_numeric_identity(contract, "allowedClientGid", CONTROL_GID)
     allowed_client = str(contract["allowedClientUser"])
@@ -772,11 +745,24 @@ def render_provisioning_plan(
         for relative in sorted(control_plane_materialization):
             content = control_plane_materialization[relative]
             parts = PurePosixPath(relative).parts
-            if len(parts) < 4 or parts[0] != "accepted" or parts[2] != CONTROL_USER:
+            # Refuse before rendering, as well as at the anchored FD executor.
+            # The path component is a digest format, not independent proof that
+            # caller-supplied materialization bytes were signed by the publisher.
+            if (
+                str(PurePosixPath(relative)) != relative
+                or len(parts) != 4
+                or parts[0] != "accepted"
+                or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None
+                or parts[2] != CONTROL_USER
+                or "\\" in relative
+                or re.fullmatch(r"[a-z0-9][a-z0-9_.@-]{0,127}\.(?:container|network)", parts[3]) is None
+            ):
                 raise ReleaseContractError(
-                    "control-plane materialization carries a non-control artifact path"
+                    "control-plane materialization carries a noncanonical artifact path"
                 )
-            file_name = "/".join(parts[3:])
+            file_name = parts[3]
+            if file_name.endswith(".container"):
+                _managed_container_name(content.decode("utf-8"))
             writes.append(
                 {
                     "path": f"{CONTROL_QUADLET_DIR}/{file_name}",
@@ -869,7 +855,17 @@ def render_provisioning_plan(
             "mode": "ro",
             "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
         }
-        if template_mounts != [expected_template_mount]:
+        expected_workspace_mount = {
+            "name": "workspace-authority", "hostPath": WORKSPACE_PUBLIC_DIR,
+            "mountPath": "/run/stateport-workspace-authority", "purpose": "workspace-authority",
+            "sourceOwner": "root", "sourceGroup": "root", "mode": "ro",
+            "environmentVariable": "STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY",
+        }
+        if template_mounts not in (
+            [expected_template_mount], [expected_template_mount, expected_workspace_mount],
+            [expected_template_mount, {**expected_workspace_mount, "profileId": "stateport.empty-workspace-terminal/v1"}],
+            [expected_template_mount, {**expected_workspace_mount, "profileId": "stateport.reviewed-source-workspace-terminal/v1"}],
+        ):
             raise ReleaseContractError("installed template-source mount contract is malformed")
         directories.extend(
             [
@@ -1043,7 +1039,8 @@ def render_provisioning_plan(
             "grant": _default_grant_document(
                 peer_uid=control_uid,
                 grant_id=DEFAULT_GRANT_ID,
-                image_reference=DEFAULT_WORKSPACE_IMAGE,
+                image_reference=str(workspace_image["reference"]) if workspace_image is not None else DEFAULT_WORKSPACE_IMAGE,
+                workspace_template=workspace_template,
                 base_revision=None,
                 budgets=contract.get("defaultBudgets") or _DEFAULT_GRANT_BUDGETS,
                 operations=_DEFAULT_GRANT_OPERATIONS,
@@ -1109,6 +1106,8 @@ def render_provisioning_plan(
             "commands": [],
         },
     ]
+    if any("Environment=STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY=" in write.get("content", "") for write in writes):
+        steps.insert(-1, {"step": "publish-workspace-issuer-context", "commands": []})
     # The decorative control account is ALWAYS provisioned: it is the peer
     # identity the control-plane containers run as.  A bound real client
     # (the operator CLI) is additionally confined and identity-filed, never a
@@ -1130,6 +1129,8 @@ def render_provisioning_plan(
             ]
     plan: dict[str, Any] = {
         "schema": PLAN_SCHEMA,
+        **({"workspaceImage": {key: workspace_image[key] for key in ("imageId", "reference", "digest")},
+            "workspaceTemplate": workspace_template} if workspace_image is not None else {}),
         "releaseId": str(target["releaseId"]),
         "targetId": str(target["targetId"]),
         "topologyDigest": str(target["topologyDigest"]),
@@ -1485,6 +1486,8 @@ def _read_regular_file(
     *,
     step: str,
     absent_ok: bool = False,
+    maximum_bytes: int | None = None,
+    expected_filesystem_id: str | None = None,
 ) -> tuple[bytes, os.stat_result | None]:
     parts = _host_parts(absolute)
     if not parts:
@@ -1502,15 +1505,23 @@ def _read_regular_file(
             raise StepFailed(step, f"path is not a regular file: {absolute}")
         descriptor = os.open(
             name,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
             dir_fd=chain.fds[-1],
         )
         try:
             opened_stat = os.fstat(descriptor)
+            if expected_filesystem_id is not None:
+                observed_id = f"statvfs:{os.fstatvfs(descriptor).f_fsid:016x}"
+                if re.fullmatch(r"statvfs:[0-9a-f]{16}", expected_filesystem_id) is None or expected_filesystem_id != observed_id:
+                    raise StepFailed(step, "regular file filesystem identity changed")
             if not _same_inode(namespace_stat, opened_stat):
                 raise StepFailed(step, f"regular file was swapped while opening: {absolute}")
+            if maximum_bytes is not None and opened_stat.st_size > maximum_bytes:
+                raise StepFailed(step, "bounded metadata is oversized")
             with os.fdopen(os.dup(descriptor), "rb") as handle:
-                content = handle.read()
+                content = handle.read() if maximum_bytes is None else handle.read(maximum_bytes + 1)
+            if maximum_bytes is not None and len(content) > maximum_bytes:
+                raise StepFailed(step, "bounded metadata grew while reading")
             if _stat_fingerprint(os.fstat(descriptor)) != _stat_fingerprint(opened_stat):
                 raise StepFailed(step, f"regular file changed while reading: {absolute}")
             after = os.stat(name, dir_fd=chain.fds[-1], follow_symlinks=False)
@@ -2080,6 +2091,8 @@ class _Apply:
     image_observed: str | None = None
     health: dict[str, Any] | None = None
     grant_digest: str | None = None
+    workspace_web_unit: dict[str, Any] | None = None
+    workspace_context_digest: str | None = None
 
 
 def _trusted_argv(argv: Sequence[str]) -> list[str]:
@@ -2975,6 +2988,397 @@ def _step_quadlets(ctx: _Apply) -> dict[str, Any]:
     return {"step": step, "result": "applied", "commands": [argv], "detail": ""}
 
 
+def _workspace_json(layout: HostLayout, path: str, *, uid: int, private: bool = False) -> tuple[dict[str, Any], str]:
+    raw, info = _read_regular_file(layout, path, step="workspace-authority", maximum_bytes=1024 * 1024)
+    if info is None or info.st_uid != uid or info.st_gid != uid or info.st_nlink != 1 or info.st_mode & (0o077 if private else 0o022) or len(raw) > 1024 * 1024:
+        raise ProvisioningRefusal("workspace authority file ownership, mode, or size is invalid")
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise ProvisioningRefusal("workspace authority metadata is unreadable") from exc
+    if not isinstance(value, dict):
+        raise ProvisioningRefusal("workspace authority metadata is not an object")
+    return value, canonical_digest(value)
+
+
+def _workspace_operator(accounts: Accounts) -> dict[str, Any]:
+    # Sudo supplies this numeric tuple. A caller-chosen client-user override is
+    # not evidence of authenticated OS approval for an individual workspace.
+    if os.environ.get("STATEPORT_CONTROL_CLIENT_USER"):
+        raise ProvisioningRefusal("workspace issuance refuses a client identity override")
+    user = os.environ.get("SUDO_USER", "")
+    try:
+        uid, gid = int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"])
+    except (KeyError, ValueError) as exc:
+        raise ProvisioningRefusal("workspace issuance requires an authenticated sudo operator") from exc
+    account = accounts.user(user)
+    if account is None or uid <= 0 or uid in {CONTROL_UID, EXEC_UID} or gid <= 0 or (account.uid, account.gid) != (uid, gid):
+        raise ProvisioningRefusal("workspace sudo operator identity is contradictory or unsupported")
+    return {"user": user, "uid": uid, "gid": gid}
+
+
+def _prepare_workspace_publication(ctx: _Apply) -> None:
+    from execution_host.application_workspaces import TRANSPORT_FORMAT, validate_binding_transport
+    step = "install-control-plane-units"
+    root_uid, root_gid = _resolve_owner(ctx, "root:root", step=step)
+    _ensure_directory_converged(ctx, WORKSPACE_PUBLIC_DIR, mode=0o755, uid=root_uid, gid=root_gid, step=step)
+    raw, info = _read_regular_file(ctx.layout, WORKSPACE_BINDINGS_PATH, step=step, absent_ok=True)
+    if info is None:
+        _write_file_converged(ctx, WORKSPACE_BINDINGS_PATH,
+            (json.dumps({"formatVersion": TRANSPORT_FORMAT, "bindings": []}) + "\n").encode(),
+            mode=0o644, uid=root_uid, gid=root_gid, step=step)
+    else:
+        if info.st_uid != root_uid or info.st_gid != root_gid or info.st_mode & 0o022 or info.st_nlink != 1:
+            raise StepFailed(step, "workspace bindings are not root-owned immutable publication")
+        validate_binding_transport(json.loads(raw))
+
+
+def _workspace_unit_fields(text: str) -> dict[str, str]:
+    def exact(prefix: str) -> str:
+        values = [line[len(prefix):] for line in text.splitlines() if line.startswith(prefix)]
+        if len(values) != 1 or not values[0] or any(char in values[0] for char in "\r\n\x00"):
+            raise ProvisioningRefusal("accepted web unit is not exactly bound")
+        return values[0]
+    if exact("Label=io.stateport.service.id=") != "stateport-web" or exact("Label=io.stateport.profile=") != "accepted":
+        raise ProvisioningRefusal("workspace issuance requires the accepted web unit")
+    volumes = [line[len("Volume="):-len(":/var/lib/stateport:rw,U")] for line in text.splitlines()
+               if line.startswith("Volume=") and line.endswith(":/var/lib/stateport:rw,U")]
+    if len(volumes) != 1 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", volumes[0]) is None:
+        raise ProvisioningRefusal("accepted product-data volume identity is unsupported")
+    return {"containerName": exact("ContainerName="), "imageReference": exact("Image="),
+            "volumeName": volumes[0], "signedPayloadDigest": exact("Label=io.stateport.release.signed-payload="),
+            "releaseId": exact("Label=io.stateport.release.id=")}
+
+
+def _workspace_volume(ctx: _Apply, unit: Mapping[str, Any]) -> dict[str, Any]:
+    step = "workspace-authority"
+    image = _run(ctx, _as_user(ctx, CONTROL_USER, ["podman", "container", "inspect", "--format", "{{.ImageName}}", unit["containerName"]]), step=step, timeout=30)
+    mounts = _run(ctx, _as_user(ctx, CONTROL_USER, ["podman", "container", "inspect", "--format", "{{json .Mounts}}", unit["containerName"]]), step=step, timeout=30)
+    volume = _run(ctx, _as_user(ctx, CONTROL_USER, ["podman", "volume", "inspect", "--format",
+        '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Mountpoint":{{json .Mountpoint}},"Options":{{json .Options}}}', unit["volumeName"]]), step=step, timeout=30)
+    if any(item.returncode != 0 or len(item.stdout) > 1024 * 1024 for item in (image, mounts, volume)) or image.stdout.strip() != unit["imageReference"]:
+        raise ProvisioningRefusal("accepted web runtime or data volume could not be verified")
+    try:
+        mount_rows, value = json.loads(mounts.stdout), json.loads(volume.stdout)
+        matching = [item for item in mount_rows if item.get("Destination") == "/var/lib/stateport"]
+        if (len(matching) != 1 or matching[0].get("Type") != "volume" or matching[0].get("Name") != unit["volumeName"]
+                or matching[0].get("RW") is not True or matching[0].get("Source") != value["Mountpoint"]
+                or value["Name"] != unit["volumeName"] or value["Driver"] != "local" or value.get("Options") not in ({}, None)):
+            raise ValueError("unbound volume")
+        mountpoint = value["Mountpoint"]
+        if not isinstance(mountpoint, str) or not mountpoint.startswith(CONTROL_HOME + "/"):
+            raise ValueError("unsupported volume root")
+        with _open_directory_chain(ctx.layout, mountpoint, step=step) as chain:
+            info = os.fstat(chain.fds[-1])
+            if info.st_uid != CONTROL_UID or info.st_mode & 0o022:
+                raise ValueError("volume owner or mode")
+            chain.verify(step=step)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProvisioningRefusal("accepted volume identity is unsupported or changed") from exc
+    return {"name": unit["volumeName"], "mountpoint": mountpoint, "device": info.st_dev, "inode": info.st_ino}
+
+
+def _workspace_template_from_unit(unit_text: str) -> dict[str, Any]:
+    values = {}
+    for key in ("STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE", "STATEPORT_EXECUTION_HOST_WORKSPACE_SPEC_DIGEST"):
+        found = [line.split("=", 2)[2] for line in unit_text.splitlines() if line.startswith("Environment=" + key + "=")]
+        if len(found) > 1:
+            raise ProvisioningRefusal("installed workspace image binding is duplicated")
+        values[key] = found[0] if found else None
+    reference, digest = values.values()
+    if reference is None and digest is None:
+        return default_sealed_workspace_workload()
+    try:
+        template = workspace_template_for_image(reference)
+    except (TypeError, ValueError) as exc:
+        raise ProvisioningRefusal("installed workspace image binding is malformed") from exc
+    if canonical_digest(template) != digest:
+        raise ProvisioningRefusal("installed workspace template digest differs")
+    return template
+
+
+def _workspace_selected_profile(unit_text: str) -> dict[str, Any] | None:
+    """Only the exact signed unit selector enables the distinct terminal policy."""
+    from execution_host.application_workspaces import TERMINAL_PROFILE_ID, SOURCE_PROFILE_ID, terminal_authority_profile, source_authority_profile
+    selectors = [line.split("=", 2)[2] for line in unit_text.splitlines()
+                 if line.startswith("Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=")]
+    if not selectors:
+        return None
+    if selectors == [SOURCE_PROFILE_ID]:
+        return source_authority_profile(_workspace_template_from_unit(unit_text))
+    if selectors != [TERMINAL_PROFILE_ID]:
+        raise ProvisioningRefusal("workspace issuer profile selection is unsupported")
+    return terminal_authority_profile(_workspace_template_from_unit(unit_text))
+
+
+def _step_workspace_context(ctx: _Apply) -> dict[str, Any]:
+    step = "publish-workspace-issuer-context"
+    unit = ctx.workspace_web_unit
+    if unit is None:
+        raise StepFailed(step, "accepted workspace issuer publication has no verified web unit")
+    operator = _workspace_operator(ctx.accounts)
+    root_uid, root_gid = _resolve_owner(ctx, "root:root", step=step)
+    content, info = _read_regular_file(ctx.layout, unit["path"], step=step)
+    if info is None or info.st_uid != CONTROL_UID or canonical_digest(content.decode()) != unit["contentDigest"]:
+        raise StepFailed(step, "accepted web unit changed after trusted publication")
+    fields = _workspace_unit_fields(unit["content"])
+    if fields["signedPayloadDigest"] != ctx.signed_payload_digest:
+        raise StepFailed(step, "accepted web unit differs from verified release")
+    volume = _workspace_volume(ctx, fields)
+    grant, _ = _workspace_json(ctx.layout, GRANTS_DIR + "/" + DEFAULT_GRANT_ID + ".json", uid=EXEC_UID, private=True)
+    from execution_host import daemon_contract
+    grant = daemon_contract.validate_grant_document(grant)
+    if daemon_contract.canonical_digest(grant) != ctx.grant_digest:
+        raise StepFailed(step, "default grant changed after trusted publication")
+    code_identity = _workspace_code_identity(ctx.layout)
+    authority_profile = _workspace_selected_profile(unit["content"])
+    template = _workspace_template_from_unit(unit["content"])
+    if grant["imageReference"] != template["image"]["reference"] or grant["workloadSpecDigests"].get(DEFAULT_WORKSPACE_ID) != canonical_digest(template):
+        raise StepFailed(step, "private default grant and installed workspace template differ")
+    context = {"formatVersion": WORKSPACE_CONTEXT_FORMAT, "codeIdentity": code_identity, "planDigest": ctx.plan["planDigest"],
+        "signedPayloadDigest": ctx.signed_payload_digest, "releaseId": fields["releaseId"],
+        "controlUid": CONTROL_UID, "executionUid": EXEC_UID, "operator": operator,
+        "webUnit": {"path": unit["path"], "contentDigest": unit["contentDigest"], **fields}, "volume": volume,
+        "profileDigest": canonical_digest(template), "defaultGrantDigest": ctx.grant_digest,
+        "grantExpiresAtLimit": grant["expiresAt"]}
+    if authority_profile is not None:
+        context.update(formatVersion=(WORKSPACE_SOURCE_CONTEXT_FORMAT if authority_profile["sourceMode"] == "reviewed-commit" else WORKSPACE_TERMINAL_CONTEXT_FORMAT),
+                       authorityProfile=authority_profile, profileDigest=canonical_digest(authority_profile))
+    context["contextDigest"] = canonical_digest(context)
+    old, old_info = _read_regular_file(ctx.layout, WORKSPACE_CONTEXT_PATH, step=step, absent_ok=True)
+    if old_info is not None and (old_info.st_uid != root_uid or json.loads(old) != context):
+        raise StepFailed(step, "existing workspace issuer context differs; trusted reprovision reconciliation is required")
+    public = {"formatVersion": WORKSPACE_PUBLIC_FORMAT, "issuerContextDigest": context["contextDigest"],
+        "profileId": WORKSPACE_PROFILE_ID, "profileDigest": canonical_digest(template),
+        "sourceMode": "empty", "profile": template,
+        "grantExpiresAtLimit": grant["expiresAt"], "operator": operator}
+    if authority_profile is not None:
+        public.update(formatVersion=(WORKSPACE_SOURCE_PUBLIC_FORMAT if authority_profile["sourceMode"] == "reviewed-commit" else WORKSPACE_TERMINAL_PUBLIC_FORMAT), profileId=authority_profile["profileId"],
+                      profileDigest=context["profileDigest"], profile=authority_profile, sourceMode=authority_profile["sourceMode"])
+    _write_file_converged(ctx, WORKSPACE_CONTEXT_PATH, (json.dumps(context, sort_keys=True) + "\n").encode(),
+        mode=0o600, uid=root_uid, gid=root_gid, step=step)
+    _write_file_converged(ctx, WORKSPACE_PUBLIC_CONTEXT, (json.dumps(public, sort_keys=True) + "\n").encode(),
+        mode=0o644, uid=root_uid, gid=root_gid, step=step)
+    ctx.workspace_context_digest = context["contextDigest"]
+    return {"step": step, "result": "applied", "commands": [], "detail": "Exact fresh workspace issuer context published"}
+
+
+def _workspace_code_identity(layout: HostLayout) -> dict[str, str]:
+    result = {}
+    for label, path in (("helperDigest", ROOT_HELPER_PATH), ("moduleManifestDigest", "/etc/stateport/execution-host-provisioning.manifest")):
+        raw, info = _read_regular_file(layout, path, step="workspace-authority", maximum_bytes=1024 * 1024)
+        if info is None or info.st_uid != 0 or info.st_gid != 0 or info.st_nlink != 1 or info.st_mode & 0o022:
+            raise ProvisioningRefusal("workspace issuer code identity is not trusted")
+        result[label] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return result
+
+
+def _workspace_catalog(ctx: _Apply, volume: Mapping[str, Any], request: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    from execution_host.application_workspaces import catalog_identity
+    catalog_path = volume["mountpoint"] + "/data/stateport/catalog/instances.json"
+    document, document_digest = _workspace_json(ctx.layout, catalog_path, uid=CONTROL_UID, private=True)
+    if (set(document) != {"formatVersion", "root", "entries"} or document.get("formatVersion") != "stateport.instance-catalog/v1"
+            or document.get("root") != {"path": "/var/lib/stateport/data/stateport/instances"}
+            or not isinstance(document.get("entries"), list)
+            or any(not isinstance(row, dict) or not isinstance(row.get("instanceId"), str) for row in document["entries"])
+            or [row["instanceId"] for row in document["entries"]] != sorted({row["instanceId"] for row in document["entries"]})):
+        raise ProvisioningRefusal("installed managed catalog format is unavailable")
+    matches = [row for row in document["entries"] if isinstance(row, dict) and row.get("instanceId") == request["instanceId"]]
+    if len(matches) != 1:
+        raise ProvisioningRefusal("requested instance is not uniquely present in the installed managed catalog")
+    row = matches[0]
+    relative = row.get("path")
+    metadata = row.get("metadata")
+    filesystem = row.get("filesystem")
+    if (row.get("status") != "active" or row.get("pathState") != "present"
+            or not isinstance(metadata, dict) or not isinstance(filesystem, dict)
+            or set(filesystem) != {"device", "inode", "kind"} or filesystem.get("kind") != "directory"
+            or any(type(filesystem.get(key)) is not int or filesystem[key] < 0 for key in ("device", "inode"))
+            or not isinstance(relative, str) or not relative or relative == "." or "\x00" in relative or PurePosixPath(relative).is_absolute()
+            or PurePosixPath(relative).as_posix() != relative or ".." in PurePosixPath(relative).parts):
+        raise ProvisioningRefusal("installed catalog incarnation is unsafe or unavailable")
+    root = volume["mountpoint"] + "/data/stateport/instances/" + relative
+    with _open_directory_chain(ctx.layout, root, step="workspace-authority") as chain:
+        info = os.fstat(chain.fds[-1])
+        stable_id = metadata.get("filesystemId")
+        if stable_id is not None:
+            identity_matches = (
+                isinstance(stable_id, str) and re.fullmatch(r"statvfs:[0-9a-f]{16}", stable_id) is not None
+                and stable_id == f"statvfs:{os.fstatvfs(chain.fds[-1]).f_fsid:016x}"
+                and info.st_ino == filesystem["inode"]
+            )
+        else:
+            identity_matches = (info.st_dev, info.st_ino) == (filesystem["device"], filesystem["inode"])
+        if info.st_uid != CONTROL_UID or info.st_mode & 0o022 or not identity_matches:
+            raise ProvisioningRefusal("installed catalog filesystem identity does not match the exact volume directory")
+        chain.verify(step="workspace-authority")
+    if metadata.get("managedIncarnation") is not None:
+        marker_path = root + "/.stateport/managed-incarnation.json"
+        managed = metadata["managedIncarnation"]
+        marker_binding = managed.get("markerFilesystem") if isinstance(managed, dict) else None
+        if not isinstance(marker_binding, dict) or any(
+            type(marker_binding.get(key)) is not int or marker_binding[key] < 0 for key in ("device", "inode")
+        ):
+            raise ProvisioningRefusal("managed instance incarnation binding is invalid")
+        marker_fsid = marker_binding.get("filesystemId")
+        if marker_fsid is not None and not isinstance(marker_fsid, str):
+            raise ProvisioningRefusal("managed instance filesystem identity is invalid")
+        raw, marker_info = _read_regular_file(ctx.layout, marker_path, step="workspace-authority", maximum_bytes=4096,
+                                              expected_filesystem_id=marker_fsid)
+        marker = json.loads(raw)
+        if (marker_info is None or marker_info.st_uid != CONTROL_UID or marker_info.st_nlink != 1
+                or marker_info.st_mode & 0o077 or not isinstance(marker, dict)
+                or set(marker) != {"formatVersion", "instanceId", "incarnationId", "createdAt"}
+                or marker.get("formatVersion") != "stateport.managed-incarnation/v1"
+                or marker.get("instanceId") != request["instanceId"]
+                or not isinstance(marker.get("incarnationId"), str) or re.fullmatch(r"[0-9a-f]{64}", marker["incarnationId"]) is None):
+            raise ProvisioningRefusal("managed instance incarnation marker is invalid")
+        expected_marker = {"formatVersion": "stateport.managed-incarnation/v1",
+            "markerPath": ".stateport/managed-incarnation.json", "markerDigest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "markerFilesystem": {"device": marker_info.st_dev, "inode": marker_info.st_ino, "kind": "regular_file"}}
+        if marker_fsid is not None:
+            expected_marker["markerFilesystem"]["filesystemId"] = marker_fsid
+            # The descriptor read checked the stable filesystem ID, so compare
+            # the retained mount-local number only for legacy records.
+            expected_marker["markerFilesystem"]["device"] = marker_binding.get("device")
+        if expected_marker != metadata["managedIncarnation"]:
+            raise ProvisioningRefusal("managed instance incarnation changed")
+    # The raw catalog stores application identity under metadata. The runtime
+    # projection used by catalog_identity promotes it to top level.
+    entry = {"instanceId": row["instanceId"], "applicationId": metadata.get("applicationId", "studydd"),
+             "filesystem": filesystem, "metadata": metadata}
+    if entry["applicationId"] != request["applicationId"] or catalog_identity(entry) != request["catalogIdentityDigest"]:
+        raise ProvisioningRefusal("reviewed application catalog identity changed")
+    entry["path"] = root
+    return entry, document_digest
+
+
+def workspace_authority_workload(request: Mapping[str, Any], *, template: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    from execution_host.application_workspaces import workspace_authority_workload_spec
+    return workspace_authority_workload_spec(request, template if template is not None else default_sealed_workspace_workload())
+
+
+def _workspace_context_profile(context: Mapping[str, Any], unit_text: str) -> dict[str, Any] | None:
+    selected = _workspace_selected_profile(unit_text)
+    if selected is None:
+        if context.get("formatVersion") != WORKSPACE_CONTEXT_FORMAT or context.get("authorityProfile") is not None or context.get("profileDigest") != canonical_digest(_workspace_template_from_unit(unit_text)):
+            raise ProvisioningRefusal("legacy workspace profile cannot acquire terminal authority")
+    elif (context.get("formatVersion") != (WORKSPACE_SOURCE_CONTEXT_FORMAT if selected["sourceMode"] == "reviewed-commit" else WORKSPACE_TERMINAL_CONTEXT_FORMAT)
+          or context.get("authorityProfile") != selected or context.get("profileDigest") != canonical_digest(selected)):
+        raise ProvisioningRefusal("workspace terminal profile differs from the independently installed policy")
+    return selected
+
+
+def _workspace_issuance_context(request: Mapping[str, Any], operator: Mapping[str, Any], *,
+                               accounts: Accounts, runner: Runner, layout: HostLayout) -> tuple[_Apply, dict[str, Any], dict[str, Any], str]:
+    context, _ = _workspace_json(layout, WORKSPACE_CONTEXT_PATH, uid=0, private=True)
+    digest = context.get("contextDigest")
+    if context.get("codeIdentity") != _workspace_code_identity(layout):
+        raise ProvisioningRefusal("workspace issuer code changed; trusted reprovision is required")
+    if (context.get("formatVersion") not in {WORKSPACE_CONTEXT_FORMAT, WORKSPACE_TERMINAL_CONTEXT_FORMAT, WORKSPACE_SOURCE_CONTEXT_FORMAT} or digest != canonical_digest({key: value for key, value in context.items() if key != "contextDigest"})
+            or digest != request["issuerContextDigest"] or context.get("operator") != dict(operator)
+            or context.get("controlUid") != CONTROL_UID or context.get("executionUid") != EXEC_UID
+            or request["profileDigest"] != context.get("profileDigest")):
+        raise ProvisioningRefusal("workspace issuer context is absent, stale, or differs from reviewed authority")
+    for name, uid, home in ((CONTROL_USER, CONTROL_UID, CONTROL_HOME), (EXEC_USER, EXEC_UID, EXEC_HOME)):
+        account = accounts.user(name)
+        if account is None or (account.uid, account.gid, account.home) != (uid, uid, home):
+            raise ProvisioningRefusal("installed workspace service identity changed")
+    ctx = _Apply(plan={}, signed_payload_digest=context["signedPayloadDigest"], runner=runner,
+                 accounts=accounts, layout=layout, rootless_group_probe=lambda *_a: False, steps=[])
+    unit = context.get("webUnit")
+    if not isinstance(unit, dict) or not str(unit.get("path", "")).startswith(CONTROL_QUADLET_DIR + "/"):
+        raise ProvisioningRefusal("workspace issuer unit binding is unsupported")
+    content, info = _read_regular_file(layout, unit["path"], step="workspace-authority", maximum_bytes=1024 * 1024)
+    if info is None or info.st_uid != CONTROL_UID or info.st_gid != CONTROL_GID or info.st_mode & 0o022 or info.st_nlink != 1 or canonical_digest(content.decode()) != unit.get("contentDigest"):
+        raise ProvisioningRefusal("accepted unit changed; trusted workspace issuer reprovision is required")
+    _workspace_context_profile(context, content.decode())
+    fields = _workspace_unit_fields(content.decode())
+    if any(unit.get(key) != value for key, value in fields.items()):
+        raise ProvisioningRefusal("accepted unit identity contradicts the issuer context")
+    volume = _workspace_volume(ctx, fields)
+    if volume != context.get("volume"):
+        raise ProvisioningRefusal("accepted data volume changed; trusted workspace issuer reprovision is required")
+    grant, _ = _workspace_json(layout, GRANTS_DIR + "/" + DEFAULT_GRANT_ID + ".json", uid=EXEC_UID, private=True)
+    from execution_host import daemon_contract
+    from execution_host.grants import GrantStore
+    grant = daemon_contract.validate_grant_document(grant)
+    if daemon_contract.canonical_digest(grant) != context.get("defaultGrantDigest") or grant["expiresAt"] != context.get("grantExpiresAtLimit"):
+        raise ProvisioningRefusal("installed default authority changed; workspace issuer reprovision is required")
+    template = _workspace_template_from_unit(content.decode())
+    if grant["imageReference"] != template["image"]["reference"] or grant["workloadSpecDigests"].get(DEFAULT_WORKSPACE_ID) != canonical_digest(template):
+        raise ProvisioningRefusal("private default grant and installed template differ")
+    GrantStore(layout.resolve(GRANTS_DIR), clock=_utc_now).assert_live(DEFAULT_GRANT_ID, expected_digest=context["defaultGrantDigest"])
+    if request["grantExpiresAt"] > grant["expiresAt"]:
+        raise ProvisioningRefusal("requested grant expiry exceeds the installed authority policy")
+    entry, catalog_digest = _workspace_catalog(ctx, volume, request)
+    if request.get("formatVersion") == "stateport.workspace-authority-request/v2":
+        from execution_host.workspace_source import verify_source_commit
+        # Resolve only the independently located installed catalog directory.
+        # Repository code, Git configuration and hooks are never run as root.
+        with _open_directory_chain(layout, entry["path"], step="workspace-authority") as chain:
+            info = os.fstat(chain.fds[-1])
+            expected = entry["filesystem"]
+            if (info.st_dev, info.st_ino) != (expected["device"], expected["inode"]):
+                raise ProvisioningRefusal("reviewed source directory identity changed")
+            verify_source_commit(chain.fds[-1], request["source"], owner_uid=CONTROL_UID)
+            chain.verify(step="workspace-authority")
+    return ctx, context, grant, catalog_digest
+
+
+def _workspace_authority_grant(request: Mapping[str, Any], default_grant: Mapping[str, Any], *,
+                               authority_profile: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Use the verified default subset or separately reviewed fixed terminal policy."""
+    from execution_host import daemon_contract
+    template = workspace_template_for_image(str(default_grant["imageReference"]))
+    if default_grant["workloadSpecDigests"].get(DEFAULT_WORKSPACE_ID) != canonical_digest(template):
+        raise ProvisioningRefusal("default authority does not bind the known workspace template")
+    workload = workspace_authority_workload(request, template=template)
+    operations = [operation for operation in default_grant["operations"] if operation in {
+        "createWorkload", "start", "stop", "status", "logs", "cancel", "removeWorkload",
+        "openTerminal", "resizeTerminal", "signalTerminal", "closeTerminal", "execWorkload", "listWorkloads"}]
+    if authority_profile is not None:
+        from execution_host.application_workspaces import SOURCE_REQUEST_FORMAT, terminal_authority_profile, source_authority_profile
+        expected = (source_authority_profile(template) if request.get("formatVersion") == SOURCE_REQUEST_FORMAT else terminal_authority_profile(template))
+        if authority_profile != expected or request["profileDigest"] != canonical_digest(expected):
+            raise ProvisioningRefusal("workspace terminal grant requires the exact independently installed profile")
+        operations = list(expected["operations"])
+    grant = {"formatVersion": "stateport.execution-host-grant/v2", "grantId": "workspace-grant-" + request["requestDigest"][7:39],
+        "peerUid": CONTROL_UID, "operations": operations, "workloadIds": [workload["workloadId"]],
+        "workloadKinds": ["workspace"], "workloadSpecDigests": {workload["workloadId"]: daemon_contract.canonical_digest(workload)},
+        "imageReference": workload["image"]["reference"], "baseRevision": workload["parameters"].get("baseRevision"),
+        "issuedAt": request["createdAt"], "expiresAt": request["grantExpiresAt"],
+        "revocationEpoch": default_grant["revocationEpoch"], "budgets": dict(default_grant["budgets"])}
+    return daemon_contract.validate_grant_document(grant)
+
+
+def issue_workspace_from_operator(request_raw: Any, *, reviewed_digest: str) -> dict[str, Any]:
+    from execution_host import daemon_contract
+    from execution_host.application_workspaces import TRANSPORT_FORMAT, validate_workspace_authority_request, issue_workspace_authority
+    if os.geteuid() != 0 or os.environ.get("STATEPORT_ROOT_HELPER") != "1":
+        raise ProvisioningRefusal("workspace authority must be issued through the trusted root helper")
+    request = validate_workspace_authority_request(request_raw)
+    if request["requestDigest"] != reviewed_digest:
+        raise ProvisioningRefusal("request does not match the digest approved by the OS operator")
+    accounts, runner, layout = SystemAccounts(), SubprocessRunner(), HostLayout()
+    operator = _workspace_operator(accounts)
+    _ctx, context, default_grant, catalog_digest = _workspace_issuance_context(request, operator, accounts=accounts, runner=runner, layout=layout)
+    template = workspace_template_for_image(str(default_grant["imageReference"]))
+    if default_grant["workloadSpecDigests"].get(DEFAULT_WORKSPACE_ID) != canonical_digest(template):
+        raise ProvisioningRefusal("default authority does not bind the known workspace template")
+    workload = workspace_authority_workload(request, template=template)
+    grant = _workspace_authority_grant(request, default_grant, authority_profile=context.get("authorityProfile"))
+    binding = {"grantId": grant["grantId"], "authorityGrantDigest": daemon_contract.canonical_digest(grant), "workload": workload}
+    def verify_current() -> None:
+        _new_ctx, observed, observed_grant, observed_catalog = _workspace_issuance_context(request, operator, accounts=accounts, runner=runner, layout=layout)
+        if observed != context or observed_grant != default_grant or observed_catalog != catalog_digest:
+            raise ProvisioningRefusal("workspace issuer or catalog changed during reviewed publication")
+    return issue_workspace_authority(request, grant=grant, binding=binding, context_digest=context["contextDigest"],
+        operator=operator, grants_dir=layout.resolve(GRANTS_DIR), bindings_path=layout.resolve(WORKSPACE_BINDINGS_PATH),
+        receipt_dir=layout.resolve(WORKSPACE_PUBLIC_DIR + "/receipts"), verify_current=verify_current, clock=_utc_now,
+        binding_format=TRANSPORT_FORMAT, authority_profile=context.get("authorityProfile"))
+
+
 def _step_control_units(ctx: _Apply) -> dict[str, Any]:
     """Install the accepted control-plane units into the control user's root."""
     step = "install-control-plane-units"
@@ -3038,6 +3442,10 @@ def _step_control_units(ctx: _Apply) -> dict[str, Any]:
                     f'Environment="{var_name}={escaped}"\n' + marker,
                     1,
                 )
+        if "Environment=STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY=" in unit_text:
+            _prepare_workspace_publication(ctx)
+            ctx.workspace_web_unit = {"path": str(spec["path"]), "contentDigest": canonical_digest(unit_text),
+                                      "content": unit_text}
         content = unit_text.encode("utf-8")
         uid, gid = _resolve_owner(ctx, f"{CONTROL_USER}:{CONTROL_USER}", step=step)
         written = (
@@ -3660,6 +4068,17 @@ def _verify_user_environment(ctx: _Apply, user_name: str, *, step: str) -> None:
 
 
 def _step_image(ctx: _Apply) -> dict[str, Any]:
+    result = _pull_execution_image(ctx)
+    if ctx.plan.get("workspaceImage") is not None:
+        workspace_ctx = replace(ctx, plan={**ctx.plan, "image": ctx.plan["workspaceImage"]})
+        workspace_result = _pull_execution_image(workspace_ctx)
+        result["commands"] = [*result["commands"], *workspace_result["commands"]]
+        result["detail"] = "Execution host and signed workspace images verified in execution-user store"
+        result["workspaceImage"] = {**ctx.plan["workspaceImage"], "observedDigest": workspace_ctx.image_observed}
+    return result
+
+
+def _pull_execution_image(ctx: _Apply) -> dict[str, Any]:
     step = "pull-execution-host-image"
     image = ctx.plan["image"]
     reference = str(image["reference"])
@@ -4024,6 +4443,27 @@ def _step_daemon(ctx: _Apply) -> dict[str, Any]:
     return _step_unit(ctx, DAEMON_UNIT, step="start-execution-host-daemon")
 
 
+def _refuse_workspace_image_migration(ctx: _Apply) -> None:
+    if ctx.plan.get("workspaceTemplate") is None:
+        return
+    expected = ctx.plan["workspaceTemplate"]
+    grant_path = GRANTS_DIR + "/" + DEFAULT_GRANT_ID + ".json"
+    if os.path.lexists(ctx.layout.resolve(grant_path)):
+        account = ctx.accounts.user(EXEC_USER)
+        expected_uid = account.uid if account is not None else int(ctx.plan["executionUid"])
+        grant, _ = _workspace_json(ctx.layout, grant_path, uid=expected_uid, private=True)
+        if (grant.get("imageReference") != expected["image"]["reference"]
+                or grant.get("workloadSpecDigests", {}).get(DEFAULT_WORKSPACE_ID) != canonical_digest(expected)):
+            raise ProvisioningRefusal("existing default image binding requires an explicit migration; fresh provisioning refused")
+    unit_path = QUADLET_DIR + "/stateport-execution-host.container"
+    if os.path.lexists(ctx.layout.resolve(unit_path)):
+        raw, _ = _read_regular_file(ctx.layout, unit_path, step="workspace-image-preflight")
+        text = raw.decode("utf-8")
+        if ("Environment=STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE=" not in text
+                or _workspace_template_from_unit(text) != expected):
+            raise ProvisioningRefusal("existing daemon unit has no matching fresh workspace binding; migration refused")
+
+
 def _step_grant(ctx: _Apply) -> dict[str, Any]:
     """Write the provisioned control-plane grant into the daemon-owned store.
 
@@ -4035,6 +4475,7 @@ def _step_grant(ctx: _Apply) -> dict[str, Any]:
     daemon, so the grant write only ever ADDS an exact document.
     """
     step = "provision-execution-host-grant"
+    _refuse_workspace_image_migration(ctx)
     spec = ctx.plan["steps"]
     grant_spec = next(
         (entry["grant"] for entry in spec if entry["step"] == step), None
@@ -4286,6 +4727,7 @@ _STEP_HANDLERS: dict[str, Callable[[_Apply], dict[str, Any]]] = {
     "start-execution-host-daemon": _step_daemon,
     "provision-execution-host-grant": _step_grant,
     "start-control-plane-units": _step_control_start,
+    "publish-workspace-issuer-context": _step_workspace_context,
     "verify-protocol-health": _step_health,
 }
 
@@ -4965,6 +5407,31 @@ def _build_receipt(
         "refusal": None,
         "probes": [],
     }
+    managed_resources: list[dict[str, Any]] = []
+    if failed is None:
+        seen_paths: set[str] = set()
+        for write in plan.get("writes", ()):
+            path = str(write.get("path", ""))
+            if not path.endswith((".container", ".network")):
+                continue
+            owner = str(write.get("owner", ""))
+            if owner not in {f"{CONTROL_USER}:{CONTROL_USER}", f"{EXEC_USER}:{EXEC_USER}"}:
+                raise ProvisioningRefusal("provisioning receipt encountered an unexpected unit owner")
+            expected_root = CONTROL_QUADLET_DIR if owner.startswith(CONTROL_USER + ":") else QUADLET_DIR
+            if path in seen_paths or str(PurePosixPath(path).parent) != expected_root:
+                raise ProvisioningRefusal("provisioning receipt encountered a duplicate or foreign unit path")
+            seen_paths.add(path)
+            content = str(write.get("content", ""))
+            entry: dict[str, Any] = {
+                "kind": path.rsplit(".", 1)[-1],
+                "path": path,
+                "owner": owner,
+                "uid": int(plan["controlUid"] if owner.startswith(CONTROL_USER + ":") else plan["executionUid"]),
+                "contentDigest": str(write["contentDigest"]),
+            }
+            if path.endswith(".container"):
+                entry["containerName"] = _managed_container_name(content)
+            managed_resources.append(entry)
     receipt: dict[str, Any] = {
         "schema": RECEIPT_SCHEMA,
         "receiptId": f"exec_host_provision_{secrets.token_hex(16)}",
@@ -5022,6 +5489,15 @@ def _build_receipt(
         "finishedAt": _timestamp(finished),
         "result": "failed" if failed is not None else "succeeded",
     }
+    if failed is None:
+        receipt["managedResources"] = {
+            "units": managed_resources,
+            "dataVolumesPreserved": True,
+            "providerAuthenticationPreserved": True,
+            "preservationScope": "provisioning-only",
+        }
+    if ctx.workspace_context_digest is not None and failed is None:
+        receipt["workspaceIssuerContextDigest"] = ctx.workspace_context_digest
     if ctx.grant_digest is not None and failed is None:
         receipt["controlGrant"] = {
             "grantFormatVersion": "stateport.execution-host-grant/v2",
@@ -5029,8 +5505,8 @@ def _build_receipt(
             "peerUid": int(plan["controlUid"]),
             "workloadId": DEFAULT_WORKSPACE_ID,
             "workloadKind": "workspace",
-            "workloadSpecDigest": DEFAULT_WORKSPACE_SPEC_DIGEST,
-            "imageReference": DEFAULT_WORKSPACE_IMAGE,
+            "workloadSpecDigest": canonical_digest(plan["workspaceTemplate"]) if plan.get("workspaceTemplate") is not None else DEFAULT_WORKSPACE_SPEC_DIGEST,
+            "imageReference": plan["workspaceImage"]["reference"] if plan.get("workspaceImage") is not None else DEFAULT_WORKSPACE_IMAGE,
             "deploymentScope": dict(_DEFAULT_DEPLOYMENT_SCOPE),
             "grantDigest": ctx.grant_digest,
         }
@@ -5174,16 +5650,19 @@ def _unlink_receipt_sidecar(target: _ReceiptTarget, path: str, observed: os.stat
         chain.verify(step="record-provisioning-receipt")
 
 
-def _archive_failed_receipt(
-    target: _ReceiptTarget, observed: os.stat_result, started: datetime
+def _archive_previous_receipt(
+    target: _ReceiptTarget, observed: os.stat_result, started: datetime,
+    *, disposition: str,
 ) -> None:
-    """Move a failed same-plan receipt aside so the identical rerun can retry.
+    """Preserve a same-plan receipt before freshly observing the installation.
 
     The archived evidence is preserved under a unique create-only name; the
-    fixed receipt path is freed for the retry.  Only a schema-valid receipt
-    that proves THIS plan digest and did not succeed healthy is archived —
-    foreign or malformed evidence keeps the original refusal.
+    fixed receipt path is freed for a newly observed result. An earlier success
+    cannot prove services, files or protocol health still exist after removal,
+    restart or drift. Foreign or malformed evidence keeps the original refusal.
     """
+    if disposition not in {"failed", "superseded"}:
+        raise ProvisioningRefusal("invalid provisioning receipt archival disposition")
     parts = _host_parts(target.path)
     parent = "/" + "/".join(parts[:-1]) if len(parts) > 1 else "/"
     stamp = started.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -5193,13 +5672,8 @@ def _archive_failed_receipt(
         current = os.stat(parts[-1], dir_fd=chain.fds[-1], follow_symlinks=False)
         if not _same_inode(current, observed):
             raise ProvisioningRefusal("provisioning receipt inode changed during archival")
-        archive_name = f"{parts[-1]}.failed-{stamp}-{secrets.token_hex(4)}"
-        os.rename(
-            parts[-1],
-            archive_name,
-            src_dir_fd=chain.fds[-1],
-            dst_dir_fd=chain.fds[-1],
-        )
+        archive_name = f"{parts[-1]}.{disposition}-{stamp}-{secrets.token_hex(4)}"
+        _renameat2(chain.fds[-1], parts[-1], archive_name, _RENAME_NOREPLACE)
         os.fsync(chain.fds[-1])
         chain.verify(step="record-provisioning-receipt")
 
@@ -5248,14 +5722,10 @@ def _prepare_receipt(target: _ReceiptTarget, plan: Mapping[str, Any], started: d
         absent_ok=True,
     )
     if existing is not None:
-        # Rerun convergence: an existing receipt is never overwritten. When it
-        # is schema-valid, proves this exact plan digest, succeeded, and shows
-        # a healthy protocol peer, the transaction it records still stands and
-        # the rerun adopts it instead of failing.  A schema-valid receipt for
-        # this exact plan that did NOT succeed healthy records a failed
-        # transaction: it is archived aside (evidence preserved) and the
-        # identical rerun retries.  Any other existing receipt keeps the
-        # original refusal.
+        # Receipts record past observations. Reuse the existing convergent
+        # provisioning steps to restore missing runtime and recheck identity
+        # and health; never short-circuit that work on a historical success.
+        # Preserve the prior bytes before publishing the newly observed result.
         try:
             existing_receipt = json.loads((_content or b"").decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -5264,20 +5734,17 @@ def _prepare_receipt(target: _ReceiptTarget, plan: Mapping[str, Any], started: d
             isinstance(existing_receipt, dict)
             and existing_receipt.get("schema") == RECEIPT_SCHEMA
             and existing_receipt.get("planDigest") == str(plan["planDigest"])
-            and existing_receipt.get("result") == "succeeded"
-            and isinstance(existing_receipt.get("health"), dict)
-            and existing_receipt["health"].get("healthy") is True
         ):
             validate_contract_document(existing_receipt, expected_schema=RECEIPT_SCHEMA)
-            _adopt_pending_intent(target, str(plan["planDigest"]))
-            raise ProvisioningConverged(existing_receipt)
-        if (
-            isinstance(existing_receipt, dict)
-            and existing_receipt.get("schema") == RECEIPT_SCHEMA
-            and existing_receipt.get("planDigest") == str(plan["planDigest"])
-        ):
-            validate_contract_document(existing_receipt, expected_schema=RECEIPT_SCHEMA)
-            _archive_failed_receipt(target, existing, started)
+            was_healthy = (
+                existing_receipt.get("result") == "succeeded"
+                and isinstance(existing_receipt.get("health"), dict)
+                and existing_receipt["health"].get("healthy") is True
+            )
+            _archive_previous_receipt(
+                target, existing, started,
+                disposition="superseded" if was_healthy else "failed",
+            )
             _adopt_pending_intent(target, str(plan["planDigest"]))
         else:
             raise ProvisioningRefusal(
@@ -5480,6 +5947,7 @@ def apply_verified_plan(
             for step in plan["steps"]
         ],
     )
+    _refuse_workspace_image_migration(ctx)
     by_name = {entry["step"]: entry for entry in ctx.steps}
     failed: Exception | None = None
     intent_bytes: bytes | None = _prepare_receipt(receipt_target, plan, started)
@@ -5698,6 +6166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
+    issue = subcommands.add_parser("issue-workspace", help="issue one exact reviewed workspace under its installed policy through authenticated sudo; no browser write authority")
+    issue.add_argument("--request-digest", required=True)
     emit = subcommands.add_parser(
         "emit-plan", help="render the inspectable provisioning plan (no privilege)"
     )
@@ -5737,6 +6207,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     probe.add_argument("--expected-contract-version", type=int, default=None)
     args = parser.parse_args(argv)
+    if args.command == "issue-workspace":
+        try:
+            raw = sys.stdin.buffer.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ProvisioningRefusal("workspace authority request exceeds its byte bound")
+            request_raw = json.loads(raw)
+            if (not isinstance(request_raw, dict)
+                    or (request_raw.get("formatVersion") != "stateport.workspace-authority-request/v2" and len(raw) > 65536)):
+                raise ProvisioningRefusal("workspace authority request exceeds its versioned byte bound")
+            result = issue_workspace_from_operator(request_raw, reviewed_digest=args.request_digest)
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        except Exception as exc:
+            # Never echo request bytes, subprocess output, or host paths.
+            print("workspace authority issuance refused: " + type(exc).__name__, file=sys.stderr)
+            return 77
+
     try:
         if args.command == "health-probe":
             expected_mode = (

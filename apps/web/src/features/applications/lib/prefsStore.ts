@@ -6,7 +6,7 @@
  * - pinned application order (the pin *flag* itself is domain data and lives
  *   in the client boundary via `applications.setPinned`; this is the user's
  *   manual ordering of pinned rows),
- * - the All-applications sort preference,
+ * - the All-applications sort override and manual unpinned order,
  * - first-run onboarding strip dismissal,
  * - optimistic overlays for package state the client boundary cannot mutate
  *   yet (checklist item toggles, study goal edits). These overlays are
@@ -21,12 +21,14 @@ import { persist } from 'zustand/middleware'
 
 export const APPLICATIONS_PREFS_STORAGE_KEY = 'stateport.applications.v1'
 
-export type ApplicationsSort = 'recent' | 'name' | 'package'
+export type ApplicationsSort = 'recent' | 'name' | 'package' | 'manual'
 
 interface ApplicationsPrefsState {
   /** Pinned instance ids in user order (ascending = first). */
   pinnedOrder: string[]
-  sort: ApplicationsSort
+  unpinnedOrder: string[]
+  /** null follows the saved global default; legacy stored choices stay explicit. */
+  sort: ApplicationsSort | null
   onboardingDismissed: boolean
   /** Optimistic checklist toggles: `${instanceId}:${itemId}` → done. */
   checklistDoneOverrides: Record<string, boolean>
@@ -40,7 +42,9 @@ interface ApplicationsPrefsState {
   movePinned(id: string, toIndex: number): void
   /** Ensure the order list matches the currently pinned set (append new, drop unpinned). */
   reconcilePinned(pinnedIds: string[]): string[]
-  setSort(sort: ApplicationsSort): void
+  moveUnpinned(id: string, toIndex: number): void
+  reconcileUnpinned(instanceIds: string[]): void
+  setSort(sort: ApplicationsSort | null): void
   dismissOnboarding(): void
   setChecklistDone(instanceId: string, itemId: string, done: boolean): void
   setStudyGoal(instanceId: string, goal: string): void
@@ -56,7 +60,8 @@ export const useApplicationsPrefs = create<ApplicationsPrefsState>()(
   persist(
     (set, get) => ({
       pinnedOrder: [],
-      sort: 'recent',
+      unpinnedOrder: [],
+      sort: null,
       onboardingDismissed: false,
       checklistDoneOverrides: {},
       studyGoalOverrides: {},
@@ -81,6 +86,20 @@ export const useApplicationsPrefs = create<ApplicationsPrefsState>()(
           set({ pinnedOrder: next })
         }
         return next
+      },
+      moveUnpinned: (id, toIndex) => set((s) => {
+        const from = s.unpinnedOrder.indexOf(id)
+        if (from === -1 || toIndex < 0 || toIndex >= s.unpinnedOrder.length) return s
+        const next = [...s.unpinnedOrder]
+        next.splice(from, 1)
+        next.splice(toIndex, 0, id)
+        return { unpinnedOrder: next }
+      }),
+      reconcileUnpinned: (instanceIds) => {
+        const current = get().unpinnedOrder
+        const kept = current.filter((id) => instanceIds.includes(id))
+        const next = [...kept, ...instanceIds.filter((id) => !kept.includes(id))]
+        if (next.length !== current.length || next.some((id, i) => id !== current[i])) set({ unpinnedOrder: next })
       },
       setSort: (sort) => set({ sort }),
       dismissOnboarding: () => set({ onboardingDismissed: true }),

@@ -18,6 +18,7 @@ import type { Approval } from '@/client'
 import { getClient, resetClientForTests, useScenarioStore } from '@/client'
 import { buildSeed } from '@/client/mock/seed'
 import { useBridgeStore } from '@/features/bridge/bridgeStore'
+import { useSessionStore } from '@/state'
 
 import ApprovalsPage from '../ApprovalsPage'
 
@@ -36,6 +37,7 @@ function renderApprovals(initial = '/approvals') {
 beforeEach(() => {
   resetClientForTests()
   useBridgeStore.getState().clear()
+  useSessionStore.setState({ operationsMutationCount: 0 })
 })
 
 afterEach(() => {
@@ -43,6 +45,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   useScenarioStore.getState().setActive(null)
   resetClientForTests()
+  useSessionStore.setState({ operationsMutationCount: 0 })
 })
 
 describe('ApprovalsPage', () => {
@@ -80,6 +83,7 @@ describe('ApprovalsPage', () => {
     const link = within(result).getByTestId('receipt-link')
     expect(link.textContent).toBe('View receipt')
     expect(link.getAttribute('href')).toMatch(/#?\/app\/[^/]+\/workbench\/receipts\/rcpt_\d+/)
+    expect(useSessionStore.getState().operationsMutationCount).toBe(0)
   })
 
   it('uses the native receipt routes when the approved application has no Workbench', async () => {

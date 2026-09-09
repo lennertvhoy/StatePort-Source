@@ -11,7 +11,7 @@ import { ArrowLeft, Globe, RefreshCw, Route as RouteIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { ClientError, getClient, type PreviewRoute, type PreviewRouteIndex } from '@/client'
+import { ClientError, getClient, type PreviewRoute, type PreviewRouteIndex, type PreviewRouteMutation } from '@/client'
 import {
   CopyButton,
   EmptyState,
@@ -30,7 +30,7 @@ type ReadStatus =
 type Mutation =
   | { kind: 'idle' }
   | { kind: 'working'; what: string }
-  | { kind: 'done'; message: string }
+  | { kind: 'done'; message: string; receipt: PreviewRouteMutation['receipt'] }
   | { kind: 'failed'; error: unknown }
 
 function statusSemantic(status: PreviewRoute['status']): 'success' | 'neutral' | 'blocked' {
@@ -78,7 +78,7 @@ function RegisterForm({
     Number(upstreamPort) >= 1 &&
     Number(upstreamPort) <= 65535 &&
     /^\d+$/.test(ttlSeconds) &&
-    Number(ttlSeconds) >= 1
+    Number(ttlSeconds) >= 1 && Number(ttlSeconds) <= 2592000
 
   if (!open) {
     return (
@@ -155,14 +155,15 @@ function RouteRow({
 }: {
   route: PreviewRoute
   mutation: Mutation
-  onRevoke: (routeId: string, reason: string) => void
-  onRewrite: (routeId: string, revisionDigest: string, upstreamPort: number) => void
+  onRevoke: (routeId: string, reason: string, expectedRouteDigest: string) => void
+  onRewrite: (routeId: string, revisionDigest: string, upstreamPort: number, expectedRouteDigest: string) => void
 }) {
   const [revoking, setRevoking] = useState(false)
   const [reason, setReason] = useState('')
   const [rewriting, setRewriting] = useState(false)
   const [newDigest, setNewDigest] = useState('')
   const [newPort, setNewPort] = useState('')
+  const [reviewedDigest, setReviewedDigest] = useState(route.routeDigest)
   const busy = mutation.kind === 'working'
   const disabled = route.status !== 'active'
 
@@ -179,6 +180,12 @@ function RouteRow({
       </td>
       <td className="px-3 py-3 font-mono text-xs text-foreground-secondary">
         {route.upstream.host}:{route.upstream.port}
+        {route.status === 'active' && route.previewPath ? (
+          <div className="mt-1 flex items-center gap-1">
+            <a href={route.previewPath} target="_blank" rel="noopener noreferrer" className="underline">Open preview</a>
+            <CopyButton text={route.previewPath} label={`Copy preview path for ${route.routeId}`} />
+          </div>
+        ) : null}
       </td>
       <td className="px-3 py-3">
         <StatusBadge state={statusSemantic(route.status)} label={route.status} />
@@ -199,7 +206,7 @@ function RouteRow({
                 size="sm"
                 disabled={busy || !reason.trim() || disabled}
                 onClick={() => {
-                  onRevoke(route.routeId, reason.trim())
+                  onRevoke(route.routeId, reason.trim(), reviewedDigest)
                   setRevoking(false)
                   setReason('')
                 }}
@@ -231,9 +238,9 @@ function RouteRow({
             <div className="flex gap-1">
               <Button
                 size="sm"
-                disabled={busy || !/^sha256:[0-9a-f]{64}$/.test(newDigest.trim()) || !/^\d+$/.test(newPort) || disabled}
+                disabled={busy || !/^sha256:[0-9a-f]{64}$/.test(newDigest.trim()) || !/^\d+$/.test(newPort) || Number(newPort) < 1 || Number(newPort) > 65535 || disabled}
                 onClick={() => {
-                  onRewrite(route.routeId, newDigest.trim(), Number(newPort))
+                  onRewrite(route.routeId, newDigest.trim(), Number(newPort), reviewedDigest)
                   setRewriting(false)
                   setNewDigest('')
                   setNewPort('')
@@ -249,10 +256,10 @@ function RouteRow({
           </div>
         ) : (
           <div className="flex justify-end gap-1">
-            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => setRewriting(true)} data-testid={`preview-route-rewrite-start-${route.routeId}`}>
+            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => { setReviewedDigest(route.routeDigest); setRewriting(true) }} data-testid={`preview-route-rewrite-start-${route.routeId}`}>
               Rewrite…
             </Button>
-            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => setRevoking(true)} data-testid={`preview-route-revoke-start-${route.routeId}`}>
+            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => { setReviewedDigest(route.routeDigest); setRevoking(true) }} data-testid={`preview-route-revoke-start-${route.routeId}`}>
               Revoke…
             </Button>
           </div>
@@ -296,11 +303,11 @@ export default function PreviewRoutesPage() {
     setNonce((value) => value + 1)
   }
 
-  const withRefresh = async (what: string, fn: () => Promise<unknown>, done: string) => {
+  const withRefresh = async (what: string, fn: () => Promise<PreviewRouteMutation>, done: string) => {
     setMutation({ kind: 'working', what })
     try {
-      await fn()
-      setMutation({ kind: 'done', message: done })
+      const result = await fn()
+      setMutation({ kind: 'done', message: done, receipt: result.receipt })
       setNonce((value) => value + 1)
     } catch (error) {
       setMutation({ kind: 'failed', error })
@@ -349,13 +356,19 @@ export default function PreviewRoutesPage() {
         {mutation.kind === 'done' ? (
           <InlineNotice tone="informational" title="Preview route action completed">
             {mutation.message}
+            <details className="mt-2" data-testid="preview-route-receipt">
+              <summary>View receipt · {mutation.receipt.event}</summary>
+              <p>{mutation.receipt.actor} · {mutation.receipt.createdAt}</p>
+              <p className="font-mono text-xs">{mutation.receipt.receiptId}</p>
+              <CopyButton text={JSON.stringify(mutation.receipt, null, 2)} label="Copy preview receipt" />
+            </details>
           </InlineNotice>
         ) : null}
         {mutation.kind === 'failed' ? (
           <ErrorState
             title="The preview route action was refused"
             error={mutation.error}
-            preservedNote="The registry records every refusal; no route binding was changed by a refused request."
+            preservedNote="The operation did not return verified completion. Refresh the registry before retrying; interrupted writes may require recovery."
           />
         ) : null}
 
@@ -407,17 +420,17 @@ export default function PreviewRoutesPage() {
                       key={route.routeId}
                       route={route}
                       mutation={mutation}
-                      onRevoke={(routeId, reason) =>
+                      onRevoke={(routeId, reason, expectedRouteDigest) =>
                         void withRefresh(
                           'revoke',
-                          () => client.previewRoutes.revoke(routeId, { reason }),
+                          () => client.previewRoutes.revoke(routeId, { reason, expectedRouteDigest }),
                           `Route ${routeId} revoked.`,
                         )
                       }
-                      onRewrite={(routeId, revisionDigest, upstreamPort) =>
+                      onRewrite={(routeId, revisionDigest, upstreamPort, expectedRouteDigest) =>
                         void withRefresh(
                           'rewrite',
-                          () => client.previewRoutes.rewrite(routeId, { revisionDigest, upstreamPort }),
+                          () => client.previewRoutes.rewrite(routeId, { revisionDigest, upstreamPort, expectedRouteDigest }),
                           `Route ${routeId} atomically rewritten.`,
                         )
                       }

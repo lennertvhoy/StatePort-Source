@@ -4,10 +4,10 @@ The daemon owns every container argument: argv is built only from fixed
 templates plus typed, validated spec fields, then re-asserted against an
 allowlist before execution (hardening rules reused from
 ``packages/container-runner``: digest-pinned images, no privilege, no host
-namespaces, no mounts, bounded resources).  The single exception is the
-sealed ``validator-run`` kind, whose argv carries exactly one read-only
-bind of the immutable staging tree at ``/validator`` and is re-asserted
-against that exact shape.  The engine never touches a control-plane
+namespaces, no mounts, bounded resources).  The mount exception is a
+sealed validator or source-backed agent command, whose argv carries exactly
+one read-only bind of its immutable staging tree and is re-asserted against
+that exact shape. Agent candidates remain on a bounded noexec tmpfs.  The engine never touches a control-plane
 socket; only the execution user's own rootless socket (or the default
 rootless CLI) is used.
 """
@@ -26,9 +26,9 @@ import struct
 import subprocess
 import termios
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, Callable
 
-from .daemon_contract import MAX_OUTPUT_BYTES, MAX_REQUEST_TIMEOUT_SECONDS
+from .daemon_contract import MAX_OUTPUT_BYTES, MAX_REQUEST_TIMEOUT_SECONDS, DEVELOPMENT_SEED_POLICY, DEVELOPMENT_SEED_IMAGE, SIGNED_DEVELOPMENT_SEED_POLICY
 
 
 MANAGED_LABEL_KEY = "io.stateport.execution.managed"
@@ -79,6 +79,83 @@ _WORKLOAD_TEMPLATE = (
     'echo "stateport-workload-complete id=$STATEPORT_WORKLOAD_ID"'
 )
 
+# Explicit known helper runtime; arbitrary workspace images cannot acquire this capability.
+WORKSPACE_SEED_IMAGE = "docker.io/library/python:3.13-alpine3.23@sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76"
+_WORKSPACE_SEED_SCRIPT = """import hashlib,json,os,pathlib,shutil,stat
+def digest(path):
+ value=hashlib.sha256()
+ with path.open('rb') as stream:
+  while block:=stream.read(1024*1024): value.update(block)
+ return 'sha256:'+value.hexdigest()
+source=pathlib.Path('/seed-input/context')
+target=pathlib.Path('/workspace')
+manifest=json.loads(pathlib.Path('/seed-input/seed-manifest.json').read_text())
+assert not list(target.iterdir()), 'seed target is not empty'
+expected={row['path']:row for row in manifest['sourceInventory']}
+seen=set()
+for path in source.rglob('*'):
+ info=path.lstat()
+ assert not stat.S_ISLNK(info.st_mode), 'source symlink'
+ if stat.S_ISDIR(info.st_mode): continue
+ assert stat.S_ISREG(info.st_mode), 'source is not regular'
+ relative=path.relative_to(source).as_posix()
+ assert relative in expected, 'unapproved source file'
+ row=expected[relative]
+ assert digest(path)==row['contentDigest'], 'source digest mismatch'
+ destination=target/relative
+ destination.parent.mkdir(parents=True,exist_ok=True)
+ with destination.open('xb') as output, path.open('rb') as original:
+  shutil.copyfileobj(original,output,1024*1024)
+  output.flush()
+  os.fchmod(output.fileno(),0o755 if row['mode']=='100755' else 0o644)
+  os.fsync(output.fileno())
+ assert digest(destination)==row['contentDigest'], 'seed verification failed'
+ seen.add(relative)
+assert seen==set(expected), 'seed inventory incomplete'
+for directory in [p for p in target.rglob('*') if p.is_dir()]+[target]:
+ fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+ os.fsync(fd)
+ os.close(fd)
+print('stateport-workspace-seed-verified',flush=True)
+"""
+
+_DEVELOPMENT_SEED_SCRIPT = _WORKSPACE_SEED_SCRIPT.replace(
+    "assert not list(target.iterdir()), 'seed target is not empty'",
+    "assert os.getuid()==10001 and os.getgid()==10001, 'seed user differs'\n"
+    "target_info=target.lstat()\n"
+    "assert stat.S_ISDIR(target_info.st_mode) and target_info.st_uid==10001 and target_info.st_gid==10001, 'seed target owner differs'\n"
+    "assert not (target_info.st_mode & 0o022), 'seed target is writable by others'\n"
+    "assert not list(target.iterdir()), 'seed target is not empty'",
+)
+
+
+def _image_repository(reference: str) -> str:
+    repository = reference.split("@", 1)[0]
+    if repository.rfind(":") > repository.rfind("/"):
+        repository = repository.rsplit(":", 1)[0]
+    return repository
+
+
+def development_seed_identity_error(spec: Mapping[str, Any], info: Mapping[str, Any]) -> str | None:
+    if spec.get("parameters", {}).get("sourceSeed", {}).get("helperPolicy") == SIGNED_DEVELOPMENT_SEED_POLICY and info.get("workspaceImageVerified") is not True:
+        return "signed workspace base authority was not verified"
+    if spec.get("parameters", {}).get("sourceSeed", {}).get("helperPolicy") in {DEVELOPMENT_SEED_POLICY, SIGNED_DEVELOPMENT_SEED_POLICY}:
+        if info.get("rootless") is not True or info.get("user") != "10001:10001" or info.get("usernsMode") != "host":
+            return "development seed workload user or rootless namespace differs"
+    return None
+
+
+def _workspace_seed_helper(spec: Mapping[str, Any]) -> tuple[str, str, str | None]:
+    seed = spec["parameters"].get("sourceSeed", {})
+    if "helperPolicy" in seed:
+        if seed["helperPolicy"] not in {DEVELOPMENT_SEED_POLICY, SIGNED_DEVELOPMENT_SEED_POLICY} or (seed["helperPolicy"] == DEVELOPMENT_SEED_POLICY and spec["image"]["reference"] != DEVELOPMENT_SEED_IMAGE):
+            raise EngineError("workspace seed helper policy/image differs")
+        return "/usr/bin/python3", _DEVELOPMENT_SEED_SCRIPT, "10001:10001"
+    if spec["image"]["reference"] != WORKSPACE_SEED_IMAGE:
+        raise EngineError("workspace source seeding requires the explicitly supported pinned Python helper image")
+    return "/usr/local/bin/python3", _WORKSPACE_SEED_SCRIPT, None
+
+
 # Fixed allowlist for the constructed create argv (flag position 0 is the
 # podman binary itself).  Anything outside this set fails closed.
 _ALLOWED_CREATE_FLAGS = frozenset(
@@ -102,8 +179,8 @@ _ALLOWED_CREATE_FLAGS = frozenset(
         "--quiet",
         "--workdir",
         "--volume",
-        # --mount is only ever produced by the sealed validator argv, which
-        # re-asserts it against the exact read-only staging shape; the generic
+        # --mount is only produced by sealed validator/source-agent argv, which
+        # re-assert it against the exact read-only staging shape; the generic
         # hardening below keeps forbidding it for every other kind.
         "--mount",
     }
@@ -127,6 +204,8 @@ def cache_volume_name(workspace_id: str, volume_id: str) -> str:
 def build_create_argv(spec: Mapping[str, Any]) -> list[str]:
     """Build the hardened create argv from a validated sealed spec."""
 
+    if spec["kind"] == "agent-run" and "command" in spec["parameters"]:
+        return build_agent_source_create_argv(spec)
     if spec["kind"] == "validator-run":
         return build_validator_create_argv(spec)
     name = container_name(spec["workloadId"])
@@ -217,19 +296,144 @@ def build_create_argv(spec: Mapping[str, Any]) -> list[str]:
     )
     for key in sorted(env):
         argv.extend(["--env", f"{key}={env[key]}"])
-    argv.extend([spec["image"]["reference"], "-c", _WORKLOAD_TEMPLATE])
-    assert_create_argv_hardened(argv)
+    if spec["parameters"].get("sourceSeed", {}).get("helperPolicy") in {DEVELOPMENT_SEED_POLICY, SIGNED_DEVELOPMENT_SEED_POLICY}:
+        _workspace_seed_helper(spec)
+        argv.extend(["--user", "10001:10001", "--userns", "host", "--label", "io.stateport.execution.seed-policy=" + spec["parameters"]["sourceSeed"]["helperPolicy"]])
+        argv.extend([spec["image"]["reference"], "-c", _WORKLOAD_TEMPLATE])
+        assert_development_seed_argv_hardened(argv)
+    else:
+        argv.extend([spec["image"]["reference"], "-c", _WORKLOAD_TEMPLATE])
+        assert_create_argv_hardened(argv)
     return argv
+
+
+def _create_runtime_options(argv: Sequence[str], *, additional_flags: frozenset[str] = frozenset()) -> list[str]:
+    """Parse Podman options before the pinned image; payload flags are data."""
+    text = list(argv)
+    if not text or text[0] != "create":
+        raise EngineError("constructed argv must begin with create")
+    index = 1
+    while index < len(text):
+        item = text[index]
+        if not item.startswith("--"):
+            if re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", item) is None:
+                raise EngineError("constructed argv must use a digest-pinned image")
+            return text[:index]
+        if item not in _ALLOWED_CREATE_FLAGS and item not in additional_flags:
+            raise EngineError(f"constructed argv carries an unapproved flag: {item}")
+        if item in {"--read-only", "--quiet"}:
+            index += 1
+        else:
+            if index + 1 >= len(text) or text[index + 1].startswith("--"):
+                raise EngineError(f"constructed argv flag is missing a value: {item}")
+            index += 2
+    raise EngineError("constructed argv has no pinned image")
+
+
+_AGENT_SOURCE_TEMPLATE = (
+    "set -eu; "
+    "mkdir /tmp/workspace; "
+    "cp -R /agent-input/. /tmp/workspace/; "
+    "chmod -R u+rwX /tmp/workspace; "
+    "cd /tmp/workspace; "
+    'exec "$@" 2>&1'
+)
+
+
+def build_agent_source_create_argv(spec: Mapping[str, Any]) -> list[str]:
+    """Seed a private bounded candidate and execute the exact sealed argv.
+
+    Only exit and logs survive. The tmpfs remains noexec; this diagnostic
+    path does not promise durable edits or execution of generated binaries.
+    """
+    parameters = spec["parameters"]
+    source = parameters.get("sourceSnapshotPath")
+    if (
+        not isinstance(source, str)
+        or not source.startswith("/")
+        or source == "/"
+        or os.path.normpath(source) != source
+        or any(value in source for value in (",", "\x00", "\\"))
+    ):
+        raise EngineError("agent source snapshot must be a safe daemon-owned absolute path")
+    command = parameters["command"]
+    if (
+        not isinstance(command, list)
+        or not command
+        or any(not isinstance(value, str) or "\x00" in value for value in command)
+        or not command[0].startswith("/")
+    ):
+        raise EngineError("agent source command must be absolute argv")
+    digest = "sha256:" + hashlib.sha256(
+        json.dumps(command, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    if parameters.get("commandDigest") != digest:
+        raise EngineError("agent source command digest differs")
+    # Reuse the existing bounded agent runtime, replacing only its fixed
+    # supervisor payload and adding one exact read-only daemon snapshot.
+    legacy = dict(spec)
+    legacy["parameters"] = {
+        key: value for key, value in parameters.items()
+        if key not in {"command", "commandDigest", "sourceInventory", "sourceArchive", "sourceSnapshotPath"}
+    }
+    argv = build_create_argv(legacy)
+    image_index = len(_create_runtime_options(argv))
+    argv[image_index:] = [spec["image"]["reference"], "-c", _AGENT_SOURCE_TEMPLATE, "stateport-agent-source", *command]
+    argv[image_index:image_index] = ["--mount", f"type=bind,src={source},dst=/agent-input,readonly,relabel=private"]
+    assert_agent_source_argv_hardened(argv, source=source)
+    return argv
+
+
+def assert_agent_source_argv_hardened(argv: Sequence[str], *, source: str) -> None:
+    text = _create_runtime_options(argv)
+    expected = f"type=bind,src={source},dst=/agent-input,readonly,relabel=private"
+    mounts = [text[index + 1] for index, item in enumerate(text) if item == "--mount"]
+    if mounts != [expected] or "--volume" in text:
+        raise EngineError("agent source argv requires exactly its sealed read-only source mount")
+    without_mount = list(argv)
+    position = without_mount.index("--mount")
+    del without_mount[position:position + 2]
+    assert_create_argv_hardened(without_mount)
+    if text.count("--network") != 1 or text[text.index("--network") + 1] != "none":
+        raise EngineError("agent source argv must disable network")
+    for flag, expected_value in (("--cap-drop", "ALL"), ("--security-opt", "no-new-privileges")):
+        if text.count(flag) != 1 or text[text.index(flag) + 1] != expected_value:
+            raise EngineError("agent source argv must preserve privilege restrictions")
+    temporary = [text[index + 1] for index, item in enumerate(text) if item == "--tmpfs"]
+    if (
+        text.count("--read-only") != 1
+        or len(temporary) != 1
+        or re.fullmatch(r"/tmp:rw,noexec,nosuid,nodev,size=[1-9][0-9]*", temporary[0]) is None
+    ):
+        raise EngineError("agent source argv must retain its bounded noexec candidate filesystem")
+
+
+def assert_development_seed_argv_hardened(argv: Sequence[str]) -> None:
+    """Only the fixed policy may select the execution user's rootless namespace."""
+    text = _create_runtime_options(argv, additional_flags=frozenset({"--user", "--userns"}))
+    stripped = list(argv)
+    for flag, value in (("--user", "10001:10001"), ("--userns", "host")):
+        if text.count(flag) != 1 or text[text.index(flag) + 1] != value:
+            raise EngineError("development seed workload user/namespace differs")
+        index = stripped.index(flag)
+        del stripped[index:index + 2]
+    policies = [text[index + 1] for index, item in enumerate(text) if item == "--label" and text[index + 1].startswith("io.stateport.execution.seed-policy=")]
+    allowed = {"io.stateport.execution.seed-policy=" + item for item in (DEVELOPMENT_SEED_POLICY, SIGNED_DEVELOPMENT_SEED_POLICY)}
+    if len(policies) != 1 or policies[0] not in allowed:
+        raise EngineError("development seed workload policy differs")
+    if policies[0].endswith("=" + DEVELOPMENT_SEED_POLICY) and argv[len(text)] != DEVELOPMENT_SEED_IMAGE:
+        raise EngineError("development seed workload image differs")
+    assert_create_argv_hardened(stripped)
 
 
 def assert_create_argv_hardened(argv: Sequence[str]) -> None:
     """Re-assert the constructed argv against the fixed flag allowlist."""
 
-    flags = {item for item in argv if item.startswith("--")}
+    text = _create_runtime_options(argv)
+    flags = {item for item in text if item.startswith("--")}
     unknown = flags - _ALLOWED_CREATE_FLAGS
     if unknown:
         raise EngineError(f"constructed argv carries unapproved flags: {sorted(unknown)}")
-    text = list(argv)
     for forbidden in ("--privileged", "--device", "--mount", "--cap-add", "--userns"):
         if forbidden in text:
             raise EngineError(f"constructed argv carries a forbidden flag: {forbidden}")
@@ -317,11 +521,11 @@ def build_validator_create_argv(spec: Mapping[str, Any]) -> list[str]:
 def assert_validator_argv_hardened(argv: Sequence[str], *, staging: str) -> None:
     """Fail-closed re-assertion of the sealed validator argv."""
 
-    flags = {item for item in argv if item.startswith("--")}
+    text = _create_runtime_options(argv)
+    flags = {item for item in text if item.startswith("--")}
     unknown = flags - _ALLOWED_CREATE_FLAGS
     if unknown:
         raise EngineError(f"constructed validator argv carries unapproved flags: {sorted(unknown)}")
-    text = list(argv)
     for forbidden in ("--privileged", "--device", "--cap-add", "--userns", "--env", "--volume"):
         if forbidden in text:
             raise EngineError(f"constructed validator argv carries a forbidden flag: {forbidden}")
@@ -341,6 +545,8 @@ def assert_validator_argv_hardened(argv: Sequence[str], *, staging: str) -> None
 class PodmanCliEngine:
     """Rootless Podman over the CLI, optionally against the owned socket."""
 
+    agent_source_commands_supported = True
+
     def __init__(
         self,
         *,
@@ -355,6 +561,8 @@ class PodmanCliEngine:
                     f"engine socket {socket_path!r} is a control-plane or relative path; refused"
                 )
             socket_path = normalized
+        self._workspace_image_reference: str | None = None
+        self._workspace_image_authority: Callable[[], None] | None = None
         self._binary = binary
         self._socket_path = socket_path
         self._runner = runner
@@ -468,6 +676,8 @@ class PodmanCliEngine:
                 },
             )
         ]
+        if "sourceSeed" in parameters:
+            claims[0][1]["io.stateport.execution.volume.seed-review"] = parameters["sourceSeed"]["reviewDigest"]
         for cache in parameters["cacheVolumes"]:
             claims.append(
                 (
@@ -502,7 +712,148 @@ class PodmanCliEngine:
             }
         }
 
+    workspace_source_seed_supported = True
+
+    def bind_workspace_image_authority(self, reference: str, verify: Callable[[], None]) -> None:
+        """Daemon-owned startup wiring, never populated from a client request."""
+        self._workspace_image_reference = reference
+        self._workspace_image_authority = verify
+
+    def _verify_workspace_image_authority(self, reference: str) -> None:
+        if self._workspace_image_authority is None or reference != self._workspace_image_reference:
+            raise EngineError("signed workspace image binding is unavailable or differs")
+        try:
+            self._workspace_image_authority()
+        except Exception as exc:
+            raise EngineError("signed workspace base authority is unavailable") from exc
+
+    def _require_rootless(self) -> None:
+        observed = self._require_ok(self._run(["info", "--format", "{{.Host.Security.Rootless}}"]), "workspace seed rootless admission")
+        if observed.strip() != "true":
+            raise EngineError("development seed requires independently observed rootless engine")
+
+    def validate_workspace_seed_capability(self, spec: Mapping[str, Any]) -> None:
+        _workspace_seed_helper(spec)
+        if spec["parameters"].get("sourceSeed", {}).get("helperPolicy") == SIGNED_DEVELOPMENT_SEED_POLICY:
+            self._verify_workspace_image_authority(spec["image"]["reference"])
+        if "helperPolicy" in spec["parameters"].get("sourceSeed", {}):
+            self._require_rootless()
+
+    def verify_workspace_seed_volume(self, spec: Mapping[str, Any], seed_id: str) -> None:
+        name, labels = self._workspace_volume_claims(spec)[0]
+        self._assert_volume(name, {**labels, "io.stateport.execution.volume.seed": seed_id,
+            "io.stateport.execution.volume.seed-review": spec["parameters"]["sourceSeed"]["reviewDigest"]})
+
+    def seed_workspace(self, spec: Mapping[str, Any], *, snapshot_root: str, seed_id: str, timeout: int) -> None:
+        """Initialize a newly reserved volume once; partial effects are retained."""
+        self.validate_workspace_seed_capability(spec)
+        if not re.fullmatch(r"[a-f0-9]{64}", seed_id):
+            raise EngineError("workspace seed reservation identity is invalid")
+        if not snapshot_root.startswith("/") or any(c in snapshot_root for c in (",", "\\", "\x00")) or os.path.normpath(snapshot_root) != snapshot_root:
+            raise EngineError("workspace seed snapshot path is invalid")
+        name, labels = self._workspace_volume_claims(spec)[0]
+        if self._inspect_volume(name) is not None:
+            raise EngineError("workspace seed refuses any pre-existing volume")
+        labels = {**labels, "io.stateport.execution.volume.seed": seed_id,
+                  "io.stateport.execution.volume.seed-review": spec["parameters"]["sourceSeed"]["reviewDigest"]}
+        self._ensure_volume(name, labels)
+        interpreter, script, user = _workspace_seed_helper(spec)
+        helper_name = "stateport-seed-" + spec["workloadId"]
+        command = ["create", "--name", helper_name, "--label", "io.stateport.execution.seed=" + seed_id,
+            "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--pids-limit", str(spec["resources"]["pidsMax"]), "--memory", str(spec["resources"]["memoryMaxBytes"]),
+            "--cpus", str(spec["parameters"]["cpuQuotaPercent"] / 100), "--timeout", str(min(timeout, 120)),
+            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16777216", "--pull", "never",
+            "--mount", "type=bind,src=" + snapshot_root + ",dst=/seed-input,ro",
+            "--volume", name + ":/workspace:rw", "--entrypoint", interpreter,
+            *(["--user", user, "--userns", "host"] if user else []),
+            spec["image"]["reference"], "-c", script]
+        helper_id = self._require_ok(self._run(command, timeout=timeout), "workspace seed helper create").strip()
+        if not re.fullmatch(r"[a-f0-9]{64}", helper_id):
+            raise EngineError("workspace seed helper identity unavailable; effect retained")
+        inspection = self._require_ok(self._run(["inspect", "--format", "{{json .}}", helper_id], timeout=timeout), "workspace seed helper admission inspection")
+        try:
+            self._assert_seed_helper_configuration(json.loads(inspection), spec, helper_id=helper_id, seed_id=seed_id, snapshot_root=snapshot_root, timeout=timeout)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise EngineError("workspace seed helper configuration changed before start; retained") from exc
+        if spec["parameters"].get("sourceSeed", {}).get("helperPolicy") == SIGNED_DEVELOPMENT_SEED_POLICY:
+            self._verify_workspace_image_authority(spec["image"]["reference"])
+        result = self._run(["start", "--attach", helper_id], timeout=timeout)
+        if result.returncode != 0 or result.stdout.strip() != "stateport-workspace-seed-verified":
+            raise EngineError("workspace seed helper failed; partial volume and helper retained")
+        self.verify_workspace_seed_volume(spec, seed_id)
+
+    @staticmethod
+    def _assert_seed_helper_configuration(info: Mapping[str, Any], spec: Mapping[str, Any], *, helper_id: str, seed_id: str, snapshot_root: str, timeout: int) -> None:
+        host = info["HostConfig"]
+        config = info["Config"]
+        expected_image = spec["image"]["reference"]
+        # The legacy helper retains its original image-derived execution contract.
+        if "helperPolicy" in spec["parameters"].get("sourceSeed", {}):
+            interpreter, script, user = _workspace_seed_helper(spec)
+            if development_seed_identity_error(spec, {"rootless": True, "workspaceImageVerified": True, "user": config.get("User"), "usernsMode": host.get("UsernsMode")}) is not None:
+                raise ValueError("seed helper user or namespace differs")
+        else:
+            interpreter, script = "/usr/local/bin/python3", _WORKSPACE_SEED_SCRIPT
+        if info["Id"] != helper_id or config["Labels"].get("io.stateport.execution.seed") != seed_id or info.get("ImageDigest") != expected_image.rsplit("@", 1)[1]:
+            raise ValueError("seed helper identity differs")
+        if _image_repository(config["Image"]) != _image_repository(expected_image) or config["Entrypoint"] != [interpreter] or config["Cmd"] != ["-c", script]:
+            raise ValueError("seed helper command differs")
+        if info["State"]["Running"] is not False or config["Timeout"] != min(timeout, 120):
+            raise ValueError("seed helper lifecycle differs")
+        if host["Privileged"] is not False or host["ReadonlyRootfs"] is not True or host["NetworkMode"] != "none" or host["PidMode"] != "private" or host["IpcMode"] == "host" or host["CapAdd"] or host["Devices"] or host["PortBindings"] or set(host["SecurityOpt"]) != {"no-new-privileges"}:
+            raise ValueError("seed helper isolation differs")
+        required_drops = {"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID", "CAP_KILL", "CAP_NET_BIND_SERVICE", "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID", "CAP_SYS_CHROOT"}
+        if not required_drops.issubset(set(host["CapDrop"])):
+            raise ValueError("seed helper capability drops differ")
+        if info.get("EffectiveCaps") not in (None, []) or info.get("BoundingCaps") not in (None, []):
+            raise ValueError("seed helper has unexpected capabilities")
+        if host["Memory"] != spec["resources"]["memoryMaxBytes"] or host["PidsLimit"] != spec["resources"]["pidsMax"] or host["NanoCpus"] != spec["parameters"]["cpuQuotaPercent"] * 10_000_000:
+            raise ValueError("seed helper resource limits differ")
+        tmpfs = host["Tmpfs"]
+        if set(tmpfs) != {"/tmp"} or not {"rw", "noexec", "nosuid", "nodev", "size=16777216"}.issubset(set(tmpfs["/tmp"].split(","))):
+            raise ValueError("seed helper tmpfs differs")
+        mounts = info["Mounts"]
+        if len(mounts) != 2:
+            raise ValueError("seed helper has unexpected mounts")
+        by_target = {mount["Destination"]: mount for mount in mounts}
+        if set(by_target) != {"/seed-input", "/workspace"}:
+            raise ValueError("seed helper mount destinations differ")
+        source = by_target["/seed-input"]
+        target = by_target["/workspace"]
+        if source["Type"] != "bind" or source["Source"] != snapshot_root or source["RW"] is not False or target["Type"] != "volume" or target["Name"] != spec["parameters"]["volumeName"] or target["RW"] is not True:
+            raise ValueError("seed helper mount authority differs")
+
+    def reconcile_workspace_seed(self, spec: Mapping[str, Any], seed_id: str) -> None:
+        """A completed seed may leave only its exact stopped helper after a crash."""
+        self.verify_workspace_seed_volume(spec, seed_id)
+        present = self._run(["container", "exists", "stateport-seed-" + spec["workloadId"]])
+        if present.returncode == 1:
+            return
+        if present.returncode != 0:
+            raise EngineError("completed seed helper presence is unverifiable; retained")
+        self.finish_workspace_seed(spec, seed_id)
+
+    def finish_workspace_seed(self, spec: Mapping[str, Any], seed_id: str) -> None:
+        value = self._require_ok(self._run(["inspect", "--format", "{{json .}}", "stateport-seed-" + spec["workloadId"]]), "workspace seed helper inspection")
+        try:
+            info = json.loads(value)
+            helper_id = info["Id"]
+            if "helperPolicy" in spec["parameters"].get("sourceSeed", {}):
+                self.validate_workspace_seed_capability(spec)
+                interpreter, script, user = _workspace_seed_helper(spec)
+                if (info["Config"].get("User") != user or info["HostConfig"].get("UsernsMode") != "host"
+                        or info["Config"].get("Entrypoint") != [interpreter] or info["Config"].get("Cmd") != ["-c", script]):
+                    raise ValueError("seed helper policy changed")
+            if info["Config"]["Labels"].get("io.stateport.execution.seed") != seed_id or info.get("ImageDigest") != spec["image"]["reference"].rsplit("@", 1)[1] or _image_repository(info["Config"]["Image"]) != _image_repository(spec["image"]["reference"]) or info["State"]["Running"] is not False or not re.fullmatch(r"[a-f0-9]{64}", helper_id):
+                raise ValueError("identity mismatch")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise EngineError("workspace seed helper identity changed; effect retained") from exc
+        self._require_ok(self._run(["rm", helper_id]), "completed workspace seed helper removal")
+
     def create(self, spec: Mapping[str, Any], *, timeout: int | None = None) -> str:
+        if "helperPolicy" in spec["parameters"].get("sourceSeed", {}):
+            self.validate_workspace_seed_capability(spec)
         if spec["kind"] == "workspace":
             for name, labels in self._workspace_volume_claims(spec):
                 self._ensure_volume(name, labels)
@@ -511,22 +862,30 @@ class PodmanCliEngine:
             self._run(argv, timeout=timeout or MAX_REQUEST_TIMEOUT_SECONDS), "workload create"
         )
 
-    def start(self, workload_id: str, *, timeout: int | None = None) -> None:
+    @staticmethod
+    def _control_target(workload_id: str, expected_container_id: str | None) -> str:
+        if expected_container_id is None:
+            return container_name(workload_id)
+        if not isinstance(expected_container_id, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_container_id):
+            raise EngineError("immutable container target must be an exact full ID")
+        return expected_container_id
+
+    def start(self, workload_id: str, *, timeout: int | None = None, expected_container_id: str | None = None) -> None:
         self._require_ok(
             self._run(
-                ["start", container_name(workload_id)],
+                ["start", self._control_target(workload_id, expected_container_id)],
                 timeout=timeout or MAX_REQUEST_TIMEOUT_SECONDS,
             ),
             "workload start",
         )
 
-    def stop(self, workload_id: str, *, timeout: int = 2) -> None:
-        completed = self._run(["stop", "--time", str(timeout), container_name(workload_id)])
+    def stop(self, workload_id: str, *, timeout: int = 2, expected_container_id: str | None = None) -> None:
+        completed = self._run(["stop", "--time", str(timeout), self._control_target(workload_id, expected_container_id)])
         if completed.returncode != 0 and "no such container" not in completed.stderr.lower():
             raise EngineError(f"workload stop failed: {completed.stderr.strip()[:300]}")
 
-    def kill(self, workload_id: str) -> None:
-        completed = self._run(["kill", container_name(workload_id)])
+    def kill(self, workload_id: str, *, expected_container_id: str | None = None) -> None:
+        completed = self._run(["kill", self._control_target(workload_id, expected_container_id)])
         if completed.returncode != 0 and "no such container" not in completed.stderr.lower():
             raise EngineError(f"workload kill failed: {completed.stderr.strip()[:300]}")
 
@@ -534,6 +893,7 @@ class PodmanCliEngine:
         self,
         workload_id: str,
         *,
+        expected_container_id: str | None = None,
         columns: int,
         rows: int,
         shell: Sequence[str] = ("/bin/sh",),
@@ -563,7 +923,7 @@ class PodmanCliEngine:
                     "--tty",
                     "--env",
                     "TERM=xterm-256color",
-                    container_name(workload_id),
+                    self._control_target(workload_id, expected_container_id),
                     *shell,
                 ],
                 env=self._env(),
@@ -599,13 +959,14 @@ class PodmanCliEngine:
         *,
         timeout: int,
         max_bytes: int,
+        expected_container_id: str | None = None,
     ) -> dict[str, Any]:
         """Run one typed argv inside a running workspace; no shell joining."""
 
         if not argv or len(argv) > 32 or any(not isinstance(item, str) or "\x00" in item for item in argv):
             raise EngineError("exec argv is outside policy")
         completed = self._run(
-            ["exec", container_name(workload_id), *argv],
+            ["exec", self._control_target(workload_id, expected_container_id), *argv],
             timeout=timeout,
         )
         data = (completed.stdout + completed.stderr).encode("utf-8", "replace")
@@ -619,11 +980,11 @@ class PodmanCliEngine:
             "truncated": len(data) > max_bytes,
         }
 
-    def remove(self, workload_id: str, *, force: bool = True) -> None:
+    def remove(self, workload_id: str, *, force: bool = True, expected_container_id: str | None = None) -> None:
         args = ["rm"]
         if force:
             args.append("--force")
-        args.append(container_name(workload_id))
+        args.append(self._control_target(workload_id, expected_container_id))
         completed = self._run(args)
         if completed.returncode != 0 and "no such container" not in completed.stderr.lower():
             raise EngineError(f"workload remove failed: {completed.stderr.strip()[:300]}")
@@ -645,8 +1006,26 @@ class PodmanCliEngine:
             raise EngineError("engine inspect returned malformed JSON") from exc
         state = raw.get("State", {}) if isinstance(raw, Mapping) else {}
         config = raw.get("Config", {}) if isinstance(raw, Mapping) else {}
+        rootless = None
+        workspace_image_verified = None
+        policy = (config.get("Labels") or {}).get("io.stateport.execution.seed-policy")
+        if policy in {DEVELOPMENT_SEED_POLICY, SIGNED_DEVELOPMENT_SEED_POLICY}:
+            if policy == SIGNED_DEVELOPMENT_SEED_POLICY:
+                expected_reference = self._workspace_image_reference
+                if (expected_reference is None or raw.get("ImageDigest") != expected_reference.rsplit("@", 1)[1]
+                        or _image_repository(str(config.get("Image"))) != _image_repository(expected_reference)):
+                    raise EngineError("observed signed workspace image differs from installed binding")
+                self._verify_workspace_image_authority(expected_reference)
+                workspace_image_verified = True
+            self._require_rootless()
+            rootless = True
         return {
+            "rootless": rootless,
+            "workspaceImageVerified": workspace_image_verified,
+            "user": config.get("User"),
+            "usernsMode": (raw.get("HostConfig") or {}).get("UsernsMode"),
             "present": True,
+            "containerId": raw.get("Id") or None,
             "status": str(state.get("Status", "unknown")),
             "running": bool(state.get("Running", False)),
             "exitStatus": state.get("ExitCode") if "ExitCode" in state else None,
@@ -657,7 +1036,7 @@ class PodmanCliEngine:
             "labels": dict(config.get("Labels") or {}),
         }
 
-    def logs(self, workload_id: str, *, max_bytes: int) -> dict[str, Any]:
+    def logs(self, workload_id: str, *, max_bytes: int, expected_container_id: str | None = None) -> dict[str, Any]:
         """Drain CLI pipes with a bounded prefix, never capture the whole log.
 
         Continue draining without retaining overflow so a natural nonzero exit
@@ -669,7 +1048,7 @@ class PodmanCliEngine:
         deadline = time.monotonic() + min(30, MAX_REQUEST_TIMEOUT_SECONDS)
         try:
             process = subprocess.Popen(
-                [self._binary, "logs", container_name(workload_id)],
+                [self._binary, "logs", self._control_target(workload_id, expected_container_id)],
                 env=self._env(), stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
@@ -746,6 +1125,7 @@ class PodmanCliEngine:
             managed.append(
                 {
                     "workloadId": workload,
+                    "containerId": entry.get("Id") or entry.get("ID") or None,
                     "state": str(entry.get("State", "unknown")),
                     "labels": labels,
                 }

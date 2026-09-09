@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -307,4 +307,77 @@ it('clears stale restore truth when post-failure status cannot be reloaded', asy
   expect(await screen.findByText('Unavailable')).toBeTruthy()
   expect(screen.queryByText('Approved')).toBeNull()
   expect(screen.getByText('Restore transaction failed.')).toBeTruthy()
+})
+
+
+it('isolates delayed recovery status and destination drafts when switching instances', async () => {
+  let completeOld!: (response: Response) => void
+  const oldResponse = new Promise<Response>((resolve) => { completeOld = resolve })
+  const secondStatus = { ...status, sourceInstanceId: 'source-two', latest: { ...status.latest,
+    instanceId: 'source-two', backupReceipt: { receiptId: 'backup-aaaaaaaaaaaaaaaaaaaaaaaa' } } }
+  const fake = makeFakeFetch([
+    ['GET', '/v1/instances/source-one/recovery', () => oldResponse],
+    ['GET', '/v1/instances/source-two/recovery', jsonResponse({ ok: true, result: secondStatus })],
+  ])
+  vi.stubGlobal('fetch', fake.fetchFn)
+  const user = userEvent.setup()
+  const view = render(<RecoveryRestorePanel instanceId="source-one" onRestored={vi.fn()} />)
+  await user.clear(screen.getByTestId('restore-destination-id'))
+  await user.type(screen.getByTestId('restore-destination-id'), 'old-destination')
+  view.rerender(<RecoveryRestorePanel instanceId="source-two" onRestored={vi.fn()} />)
+  expect(await screen.findByText(secondStatus.latest.backupReceipt.receiptId)).toBeTruthy()
+  await act(async () => { completeOld(jsonResponse({ ok: true, result: status })); await oldResponse })
+  expect(screen.queryByText(backup.receiptId)).toBeNull()
+  expect((screen.getByTestId('restore-destination-id') as HTMLInputElement).value).toBe('source-two-restored')
+})
+
+it('does not carry a reviewed approval or confirmation dialog to another instance', async () => {
+  const secondStatus = { ...status, sourceInstanceId: 'source-two', latest: { ...status.latest, instanceId: 'source-two' } }
+  const fake = makeFakeFetch([
+    ['GET', '/v1/instances/source-one/recovery', jsonResponse({ ok: true, result: status })],
+    ['GET', '/v1/instances/source-two/recovery', jsonResponse({ ok: true, result: secondStatus })],
+    ['POST', '/v1/instances/source-one/recovery/restore/plan', jsonResponse({ ok: true, result: plan })],
+    ['POST', '/v1/instances/source-one/recovery/restore/approve', jsonResponse({ ok: true, result: approval })],
+  ])
+  vi.stubGlobal('fetch', fake.fetchFn)
+  const user = userEvent.setup()
+  const view = render(<RecoveryRestorePanel instanceId="source-one" onRestored={vi.fn()} />)
+  await screen.findByText(backup.receiptId)
+  await user.click(screen.getByTestId('restore-plan-action'))
+  await user.click(await screen.findByTestId('restore-approve-action'))
+  await user.click(await screen.findByTestId('restore-apply-action'))
+  expect(await screen.findByTestId('confirm-action')).toBeTruthy()
+  view.rerender(<RecoveryRestorePanel instanceId="source-two" onRestored={vi.fn()} />)
+  await waitFor(() => expect(screen.queryByTestId('confirm-action')).toBeNull())
+  expect(screen.queryByText(plan.planDigest)).toBeNull()
+  expect(screen.queryByText(approval.approvalDigest)).toBeNull()
+  expect(fake.callsTo('/recovery/restore/apply')).toHaveLength(0)
+})
+
+it('does not notify the new instance when an earlier apply completes after navigation', async () => {
+  let completeApply!: (response: Response) => void
+  const delayed = new Promise<Response>((resolve) => { completeApply = resolve })
+  const secondStatus = { ...status, sourceInstanceId: 'source-two', latest: { ...status.latest, instanceId: 'source-two' } }
+  const fake = makeFakeFetch([
+    ['GET', '/v1/instances/source-one/recovery', jsonResponse({ ok: true, result: status })],
+    ['GET', '/v1/instances/source-two/recovery', jsonResponse({ ok: true, result: secondStatus })],
+    ['POST', '/v1/instances/source-one/recovery/restore/plan', jsonResponse({ ok: true, result: plan })],
+    ['POST', '/v1/instances/source-one/recovery/restore/approve', jsonResponse({ ok: true, result: approval })],
+    ['POST', '/v1/instances/source-one/recovery/restore/apply', () => delayed],
+  ])
+  vi.stubGlobal('fetch', fake.fetchFn)
+  const user = userEvent.setup()
+  const onRestored = vi.fn()
+  const view = render(<RecoveryRestorePanel instanceId="source-one" onRestored={onRestored} />)
+  await screen.findByText(backup.receiptId)
+  await user.click(screen.getByTestId('restore-plan-action'))
+  await user.click(await screen.findByTestId('restore-approve-action'))
+  await user.click(await screen.findByTestId('restore-apply-action'))
+  await user.click(await screen.findByTestId('confirm-action'))
+  await waitFor(() => expect(fake.callsTo('/recovery/restore/apply')).toHaveLength(1))
+  view.rerender(<RecoveryRestorePanel instanceId="source-two" onRestored={onRestored} />)
+  await act(async () => { completeApply(jsonResponse({ ok: true, result: receipt })); await delayed })
+  expect(onRestored).not.toHaveBeenCalled()
+  expect(useSessionStore.getState().toasts).toEqual([])
+  expect(screen.queryByText(receipt.receiptId)).toBeNull()
 })

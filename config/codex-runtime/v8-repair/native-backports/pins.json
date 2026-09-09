@@ -1,0 +1,62 @@
+{
+  "formatVersion": "stateport.native-source-backports/v1",
+  "status": "source preparation only; compilation and regressions not run",
+  "consumerInputs": {
+    "codex-rs/Cargo.toml": "eb83225430a9197573bd0270622d5e1dda1b707059214ad87a797fc8ca2742b5",
+    "codex-rs/Cargo.lock": "cafc018dcd8aac94188fd6d610b9fa20e1ec0d4ea77c3e5733d22223844c395e",
+    "codex-rs/code-mode/src/v8_init.rs": "d05e7276aa39045ada53530b739f81f8615f01e7a61dac4529b1d1d3cd73f20b"
+  },
+  "packages": [
+    {
+      "name": "libsqlite3-sys",
+      "version": "0.37.0",
+      "crateFile": "libsqlite3-sys-0.37.0.crate",
+      "crateUrl": "https://static.crates.io/crates/libsqlite3-sys/libsqlite3-sys-0.37.0.crate",
+      "crateSha256": "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1",
+      "crateBytes": 5295554,
+      "sourcePath": "sqlite3/sqlite3.c",
+      "beforeSha256": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+      "afterSha256": "9ec354c3cf15d4564a3c6e06e425cd5f2bf4687e0fdf16dafd46af4adc4a550a",
+      "patchFile": "libsqlite3-sys.patch",
+      "patchSha256": "a947ac3b63738818fed265ca7e015e00011d5b3c6e42cb208ff36c381c41218a",
+      "patchWorkingDirectory": ".",
+      "upstreamFix": "https://sqlite.org/src/info/061febcf41ca4872a0f407951e1507209daca7895122b909a7806c60b6e200c4",
+      "cves": [
+        "CVE-2026-11822",
+        "CVE-2026-11824"
+      ]
+    },
+    {
+      "name": "lzma-sys",
+      "version": "0.1.20",
+      "crateFile": "lzma-sys-0.1.20.crate",
+      "crateUrl": "https://static.crates.io/crates/lzma-sys/lzma-sys-0.1.20.crate",
+      "crateSha256": "5fda04ab3764e6cde78b9974eec4f779acaba7c4e84b36eca3cf77c581b85d27",
+      "crateBytes": 760045,
+      "sourcePath": "xz-5.2/src/liblzma/common/index.c",
+      "beforeSha256": "c6e05bad497341838304ac552bc59c34a7c5c946499d7ab737a93d7930bd30a4",
+      "afterSha256": "eeac50eb50fbce6694ac58edd7eeb6056008e034c00fdce890af172017c1c07f",
+      "patchFile": "lzma-sys.patch",
+      "patchSha256": "56e36b7c038ecd050b84b25053a7158e39c3e5465de054009786cdb92f4f82d8",
+      "patchWorkingDirectory": "xz-5.2",
+      "upstreamFix": "https://github.com/tukaani-project/xz/commit/4343f5e7ceab1d3eee1b5e29bfa2340fb2d4ac54",
+      "cves": [
+        "CVE-2026-34743"
+      ]
+    }
+  ],
+  "regressionInputs": [
+    {
+      "file": "sqlite-upstream-regression.test",
+      "url": "https://sqlite.org/src/raw/ext/fts5/test/fts5corruptA.test?ci=061febcf41ca4872a0f407951e1507209daca7895122b909a7806c60b6e200c4",
+      "sha256": "1424e78f0af3994735b86c75ace69006b6fb649dcb3d20c138af2aa88ce0a67d",
+      "bytes": 1949
+    },
+    {
+      "file": "xz-upstream-regression.patch",
+      "url": "https://github.com/tukaani-project/xz/commit/a3ea8832bec11128597c454f5d14d05ef6010e3f.patch",
+      "sha256": "62b7e68062df5e78baf1450c46c874236515c7bd13ed3aa7feeb935d96f3edca",
+      "bytes": 1878
+    }
+  ]
+}

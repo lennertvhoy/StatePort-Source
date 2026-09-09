@@ -3562,10 +3562,22 @@ def test_provider_home_is_persistent_only_in_accepted_profile_and_outside_data_v
         assert b"UserNS=keep-id:uid=65532,gid=65532" in content
         if "-accepted-" in path:
             assert b"Volume=" + host_path + b":/var/lib/stateport-provider/codex:rw\n" in content
-            assert b"codex:rw,U" not in content
+            provider_mounts = [line for line in content.decode().splitlines()
+                               if line.startswith(("Volume=", "Tmpfs=")) and "stateport-provider/codex" in line]
+            assert provider_mounts == ["Volume=" + host_path.decode() + ":/var/lib/stateport-provider/codex:rw"]
         else:
             assert host_path not in content
-            assert b"Tmpfs=/var/lib/stateport-provider/codex:rw,noexec,nosuid,nodev,size=67108864,mode=0700,uid=65532,gid=65532" in content
+            provider_mounts = [line for line in content.decode().splitlines()
+                               if line.startswith(("Volume=", "Tmpfs=")) and "stateport-provider/codex" in line]
+            assert provider_mounts == [
+                "Tmpfs=/var/lib/stateport-provider/codex:rw,noexec,nosuid,nodev,notmpcopyup,mode=0700,size=67108864,U"
+            ]
+            # This exact option set passed a real rootless Podman6.1 image
+            # smoke with UID/GID 65532 and mode 0700 assertions. U sets mount
+            # ownership; accepted host credential storage must never use U.
+            options = provider_mounts[0].split(":", 1)[1].split(",")
+            assert not any(option.startswith(("uid=", "gid=")) for option in options)
+            assert "tmpcopyup" not in options
     # The existing snapshot/export generation exclusively consumes these data
     # volumes. Provider storage adds no volume or validation snapshot binding.
     assert service["writableVolumes"] == volumes_before
@@ -5689,3 +5701,31 @@ def test_internal_cli_emitter_parser_pairs_share_the_i3_helper() -> None:
         text = source.read_text(encoding="utf-8")
         assert "parse_last_line_json" in text, f"{source} must use the shared I3 helper"
         assert hand_rolled not in text, f"{source} re-introduced a hand-rolled last-line parse"
+
+
+@pytest.mark.parametrize('profile_id', [None, 'stateport.empty-workspace-terminal/v1', 'stateport.reviewed-source-workspace-terminal/v1'])
+def test_signed_workspace_profile_selection_is_explicit_and_read_only(profile_id):
+    value = _stable_execution_index()
+    service = value['signed']['targets'][0]['services'][0]
+    workspace = {'name': 'workspace-authority', 'hostPath': '/etc/stateport/workspace-authority',
+                 'mountPath': '/run/stateport-workspace-authority', 'purpose': 'workspace-authority',
+                 'sourceOwner': 'root', 'sourceGroup': 'root', 'mode': 'ro',
+                 'environmentVariable': 'STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY'}
+    if profile_id is not None:
+        workspace['profileId'] = profile_id
+    service['readOnlyHostMounts'] = [
+        {'name': 'template-sources', 'hostPath': '/var/lib/stateport/imports', 'mountPath': '/imports',
+         'purpose': 'template-sources', 'sourceOwner': 'installer-client', 'sourceGroup': 'stateport-execution-control',
+         'mode': 'ro', 'environmentVariable': 'STATEPORT_REPOSITORY_ROOTS'}, workspace]
+    _refresh_index_topology(value)
+    verified = verify_release_index(value, policy=_policy(), verifier=_EphemeralTestVerifier())
+    units = render_quadlet_bundle(verified.target, verified.index.document['signed']['images'])
+    web = [content.decode() for path, content in units.items() if 'stateport-web' in Path(path).name and path.endswith('.container.in')]
+    assert web and all('Volume=/etc/stateport/workspace-authority:/run/stateport-workspace-authority:ro' in unit for unit in web)
+    for unit in web:
+        selectors = [line for line in unit.splitlines() if line.startswith('Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=')]
+        assert selectors == ([] if profile_id is None else ['Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=' + profile_id])
+    service['readOnlyHostMounts'][1]['profileId'] = 'stateport.browser-selected-source/v1'
+    _refresh_index_topology(value)
+    with pytest.raises(ReleaseContractError):
+        verify_release_index(value, policy=_policy(), verifier=_EphemeralTestVerifier())

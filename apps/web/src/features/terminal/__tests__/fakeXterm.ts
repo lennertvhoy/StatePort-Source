@@ -6,7 +6,19 @@
 export class FakeTerminal {
   static instances: FakeTerminal[] = []
   written: string[] = []
+  element = document.createElement('div')
+  rows = 24
+  joiners = new Map<number, (text: string) => [number, number][]>()
+  private joinerSequence = 0
+  registerCharacterJoiner(handler: (text: string) => [number, number][]): number {
+    const id = ++this.joinerSequence
+    this.joiners.set(id, handler)
+    return id
+  }
+  deregisterCharacterJoiner(id: number): void { this.joiners.delete(id) }
+  refresh(): void {}
   options: Record<string, unknown>
+  readonly creationOptions: Record<string, unknown>
   dataHandler: ((data: string) => void) | null = null
   resizeHandler: ((size: { cols: number; rows: number }) => void) | null = null
   bellHandler: (() => void) | null = null
@@ -21,6 +33,7 @@ export class FakeTerminal {
 
   constructor(options: Record<string, unknown>) {
     this.options = options
+    this.creationOptions = { ...options }
     FakeTerminal.instances.push(this)
   }
   open(): void {}

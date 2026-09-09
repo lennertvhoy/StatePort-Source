@@ -1,0 +1,11 @@
+--- a/sqlite3/sqlite3.c
++++ b/sqlite3/sqlite3.c
+@@ -248157,7 +248157,7 @@
+ static Fts5Data *fts5LeafRead(Fts5Index *p, i64 iRowid){
+   Fts5Data *pRet = fts5DataRead(p, iRowid);
+   if( pRet ){
+-    if( pRet->nn<4 || pRet->szLeaf>pRet->nn ){
++    if( pRet->szLeaf<4 || pRet->szLeaf>pRet->nn ){
+       FTS5_CORRUPT_ROWID(p, iRowid);
+       fts5DataRelease(pRet);
+       pRet = 0;

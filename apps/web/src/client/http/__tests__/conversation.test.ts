@@ -705,3 +705,36 @@ describe('HttpConversationClient — transcript lifecycle receipts', () => {
     })
   })
 })
+
+
+it.each([
+  ['absent', undefined, 'unknown'],
+  ['empty', [], 'unknown'],
+  ['active', [{ channel: 'web', status: 'active' }], 'unknown'],
+  ['unknown', [{ channel: 'web', state: 'new_status' }], 'unknown'],
+  ['wrong channel', [{ channel: 'telegram', state: 'delivered' }], 'unknown'],
+  ['missing channel', [{ state: 'delivered' }], 'unknown'],
+  ['conflicting fields', [{ channel: 'web', state: 'delivered', status: 'failed' }], 'unknown'],
+  ['duplicate bindings', [{ channel: 'web', state: 'delivered' }, { channel: 'web', state: 'delivered' }], 'unknown'],
+  ['explicit delivered', [{ channel: 'web', status: 'delivered' }], 'delivered'],
+  ['agreeing fields', [{ channel: 'web', state: 'delivered', status: 'delivered' }], 'delivered'],
+  ['explicit pending', [{ channel: 'web', state: 'pending' }], 'pending'],
+  ['explicit failed', [{ channel: 'web', state: 'failed' }], 'failed'],
+  ['explicit unconfigured', [{ channel: 'web', status: 'unconfigured' }], 'not_configured'],
+  ['explicit not configured', [{ channel: 'web', status: 'not_configured' }], 'not_configured'],
+])('delivery mapping: %s preserves only explicit matching source facts', async (_label, channelBindings, expected) => {
+  const payload = { ...presentation([boundMessage({ id: 'm1', kind: 'user_message', text: 'Keep transcript' })]), channelBindings }
+  const fake = makeFakeFetch([['GET', '/v1/instances/ins_1/conversation', jsonResponse({ ok: true, result: payload })]])
+  const client = new HttpConversationClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+  const conversation = await client.get('ins_1')
+  expect(conversation.deliveryState).toBe(expected)
+  expect(conversation.messages[0].content).toBe('Keep transcript')
+})
+
+it('uses the thread channel instead of preferring an unrelated web binding', async () => {
+  const payload = presentation([])
+  payload.thread.channel = 'telegram'
+  payload.channelBindings = [{ channel: 'web', state: 'delivered' }, { channel: 'telegram', state: 'pending' }]
+  const fake = makeFakeFetch([['GET', '/v1/instances/ins_1/conversation', jsonResponse({ ok: true, result: payload })]])
+  expect((await new HttpConversationClient(new HttpTransport({ fetchFn: fake.fetchFn })).get('ins_1')).deliveryState).toBe('pending')
+})

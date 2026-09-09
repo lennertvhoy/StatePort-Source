@@ -100,6 +100,7 @@ class FakeExecutionHost:
         self.regular_socket_path = False
         self.foreign_peer = False
         self.close_after_echo = False
+        self.close_receipt_mode = "closed"
 
     @property
     def socket_path(self) -> Path:
@@ -248,7 +249,11 @@ class FakeExecutionHost:
             (self._sessions_dir / f"{session_id}.sock").unlink()
         except FileNotFoundError:
             pass
-        return {"result": {"sessionId": session_id, "state": "closing"}}
+        if self.close_receipt_mode == "missing":
+            return {}
+        returned_session = "other-session" if self.close_receipt_mode == "mismatched" else session_id
+        state = "closing" if self.close_receipt_mode == "closing" else "closed"
+        return {"result": {"sessionId": returned_session, "state": state}}
 
 
 def _target() -> TerminalTarget:
@@ -500,6 +505,27 @@ def test_disconnect_cleans_up_at_the_execution_host(short_root: Path):
     # The terminal is gone: further frames meet the uniform refusal.
     with pytest.raises(TerminalAccessDenied):
         gateway.handle_frame(handshake, session_id=session.session_id, frame=GatewayFrame("input", b"x"))
+    gateway.close()
+
+
+@pytest.mark.parametrize("close_receipt_mode", ["closing", "missing", "mismatched"])
+def test_close_requires_a_verified_execution_host_receipt(
+    short_root: Path, close_receipt_mode: str
+):
+    fake = FakeExecutionHost(short_root)
+    fake.close_receipt_mode = close_receipt_mode
+    gateway = _gateway(fake)
+    actor = _actor()
+    session, _receipt, handshake = _prepare_and_accept(gateway, actor)
+
+    exit_value, receipt = gateway.handle_frame(
+        handshake, session_id=session.session_id, frame=GatewayFrame("close")
+    )
+
+    assert exit_value.cleanup == "unverified"
+    assert receipt.cleanup == "unverified"
+    assert receipt.outcome == "cleanup_failed"
+    assert fake.closed == [session.session_id]
     gateway.close()
 
 
@@ -784,3 +810,9 @@ def test_exec_cmd_removes_only_the_optional_leading_separator(
     assert alpha4_runtime.exec_cmd(args) == 0
     assert client.argv == ["printf", "--", "literal"]
     assert capsys.readouterr().out == "ok\n"
+
+
+@pytest.mark.parametrize('digest', [None, '', 'sha256:short', 'SHA256:' + 'a' * 64])
+def test_platform_gateway_requires_exact_reviewed_container_digest(digest):
+    with pytest.raises(ValueError, match='exact workspace container identity'):
+        _gateway(None, require_container_identity=True, expected_container_identity_digest=digest)

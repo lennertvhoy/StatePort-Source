@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "python-dependency-policy.v1.json"
@@ -78,6 +80,49 @@ def _roots(path: Path) -> dict[str, str]:
     return packages
 
 
+def _native_codex_consumer(root: Path, relative: str, dockerfile: str) -> None:
+    """The shipped native provider is npm-integrity governed, never a PyPI extra."""
+    if "codex" not in dockerfile:
+        return
+    try:
+        provider = yaml.safe_load((root / "config/provider-runtime-inputs.yaml").read_text())["codex"]
+        npm = provider["npm"]
+        package = _json(root / npm["packageJson"])
+        lock = _json(root / npm["packageLock"])["packages"]
+        version = provider["version"]
+        identity = "stateport-" + Path(relative).parent.name
+        if (
+            provider["package"] != "@openai/codex"
+            or identity not in provider["verification"]["installedOnlyIn"]
+            or relative != "apps/web/Dockerfile"
+            or package["dependencies"] != {"@openai/codex": version}
+            or lock[""]["dependencies"] != package["dependencies"]
+        ):
+            raise ValueError("undeclared provider consumer")
+        for name, suffix, integrity in (
+            ("node_modules/@openai/codex", "", npm["packageIntegrity"]),
+            ("node_modules/@openai/codex-linux-x64", "-linux-x64", npm["linuxAmd64Integrity"]),
+        ):
+            entry = lock[name]
+            if (
+                not re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", integrity)
+                or entry["integrity"] != integrity
+                or entry["version"] != version + suffix
+                or entry["resolved"] != f"https://registry.npmjs.org/@openai/codex/-/codex-{version}{suffix}.tgz"
+            ):
+                raise ValueError("native provider integrity mismatch")
+        required = (
+            "COPY config/codex-runtime/package.json config/codex-runtime/package-lock.json ./",
+            "npm ci --ignore-scripts --omit=dev --audit=false --fund=false",
+            "cp node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex /out/codex",
+            f'/out/codex --version | grep -Fx "codex-cli {version}"',
+        )
+        if not all(value in dockerfile for value in required):
+            raise ValueError("native provider is not imported and verified from its locked package")
+    except (KeyError, TypeError, ValueError, OSError, yaml.YAMLError) as exc:
+        raise PythonDependencyPolicyError(f"{relative} has an undeclared or unverified native provider") from exc
+
+
 def validate(root: Path = ROOT) -> dict[str, int]:
     policy = _json(root / "config" / "python-dependency-policy.v1.json")
     if set(policy) != {"schema", "runtime", "development", "providers"} or policy["schema"] != "stateport.python-dependency-policy/v1":
@@ -109,11 +154,16 @@ def validate(root: Path = ROOT) -> dict[str, int]:
             raise PythonDependencyPolicyError(f"{relative} does not copy the exact runtime lock")
         if "--require-hashes" not in dockerfile:
             raise PythonDependencyPolicyError(f"{relative} does not enforce dependency hashes")
-        if "|| true" in dockerfile or "pip install --no-cache-dir openai" in dockerfile or "codex-cli" in dockerfile:
+        install_text = dockerfile.replace("\\\n", " ")
+        obsolete_python_provider = re.search(
+            r"\bpip3?\b[^;&|\n]*\binstall\b[^;&|\n]*\bcodex[-_.]cli\b", install_text
+        )
+        if "|| true" in dockerfile or "pip install --no-cache-dir openai" in dockerfile or obsolete_python_provider:
             raise PythonDependencyPolicyError(f"{relative} contains a best-effort or undeclared provider install")
         for line in dockerfile.splitlines():
             if "pip install" in line and "--require-hashes" not in line:
                 raise PythonDependencyPolicyError(f"{relative} contains an unhashed pip install")
+        _native_codex_consumer(root, str(relative), dockerfile)
     licenses = _json(root / "config" / "python-dependency-licenses.v1.json")
     if licenses.get("schema") != "stateport.python-dependency-licenses/v1" or licenses.get("reviewStatus") != "metadata_inventory_not_legal_advice":
         raise PythonDependencyPolicyError("Python license inventory boundary is invalid")

@@ -8,7 +8,7 @@
  * - Discard rolls the draft (and the live preview) back to the last saved
  *   settings.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { GlobalSettings } from '@/client'
 import { getClient } from '@/client'
@@ -74,12 +74,11 @@ export function useGlobalSettings(): GlobalSettingsController {
 
   // Live preview: when the draft changes after load, push the appearance
   // slice into the workspace store so theme/density/font-scale apply now.
-  const previewedRef = useRef<GlobalSettings | null>(null)
   useEffect(() => {
-    if (!draft || previewedRef.current === draft) return
-    previewedRef.current = draft
-    applyAppearanceToWorkspace(draft)
-  }, [draft])
+    if (draft) applyAppearanceToWorkspace(draft)
+    // A save may finish while a newer draft is being edited. Reapply that
+    // draft after the saved-settings mirrors so its live preview stays visible.
+  }, [draft, saved])
 
   const set = useCallback(
     (...entries: readonly (readonly [string, unknown])[]) => {
@@ -97,7 +96,9 @@ export function useGlobalSettings(): GlobalSettingsController {
     try {
       const result = await getClient().globalSettings.update(current)
       setSaved(result)
-      setDraft(result)
+      // Inputs remain editable during the request. Only replace the submitted
+      // draft; newer edits must remain dirty for the next explicit save.
+      setDraft((latest) => latest === current ? result : latest)
       applySavedSettingsToWorkspace(result)
       pushToast({ kind: 'success', title: 'Settings saved' })
     } catch (err) {
