@@ -54,6 +54,7 @@ export interface OrchestrationActions {
   prepareSlice: (input: { objective: string; mode: OrchestrationMode }) => Promise<void>
   setLocalStage: (stage: OrchestrationStage | null) => void
   approve: () => Promise<void>
+  discard: () => Promise<void>
   runSlice: () => Promise<void>
   stop: () => Promise<void>
   submitReview: (input: { accepted: boolean; notes?: string }) => Promise<void>
@@ -73,6 +74,16 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
   const [busy, setBusy] = useState(false)
   const [nonce, setNonce] = useState(0)
   const runRef = useRef<AbortController | null>(null)
+  const activeInstanceIdRef = useRef(instanceId)
+  const mountedRef = useRef(true)
+  activeInstanceIdRef.current = instanceId
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
 
@@ -130,7 +141,7 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
   const approve = useCallback(async () => {
     if (!session) return
     await withBusy(async () => {
-      const next = await getClient().orchestration.approve(session.id)
+      const next = await getClient().orchestration.approve(session.id, session.revision)
       setSession(next)
       setLocalStage(null)
     })
@@ -144,7 +155,7 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
     setRun({ running: true, logs: [], startedAt: new Date().toISOString() })
     setSession((prev) => (prev ? { ...prev, state: 'running' } : prev))
     try {
-      const stream = getClient().orchestration.run(session.id)
+      const stream = getClient().orchestration.run(session.id, session.revision)
       for await (const event of stream) {
         if (controller.signal.aborted) break
         if (event.type === 'log') {
@@ -191,11 +202,28 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
     })
   }, [session, withBusy])
 
+  const discard = useCallback(async () => {
+    if (!session || run.running || (session.state !== 'prepared' && session.state !== 'approved')) return
+    const operationInstanceId = instanceId
+    await withBusy(async () => {
+      try {
+        await getClient().orchestration.discard(session.id, session.revision)
+      } catch (error) {
+        if (!mountedRef.current || activeInstanceIdRef.current !== operationInstanceId) return
+        throw error
+      }
+      if (!mountedRef.current || activeInstanceIdRef.current !== operationInstanceId) return
+      setSession(null)
+      setLocalStage(null)
+      setRun({ running: false, logs: [] })
+    })
+  }, [session, run.running, instanceId, withBusy])
+
   const submitReview = useCallback(
     async (input: { accepted: boolean; notes?: string }) => {
       if (!session) return
       await withBusy(async () => {
-        const next = await getClient().orchestration.submitReview(session.id, input)
+        const next = await getClient().orchestration.submitReview(session.id, input, session.revision)
         setSession(next)
         setLocalStage(null)
       })
@@ -206,7 +234,7 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
   const close = useCallback(async () => {
     if (!session) return
     await withBusy(async () => {
-      await getClient().orchestration.close(session.id)
+      await getClient().orchestration.close(session.id, session.revision)
       const current = await getClient().orchestration.getCurrent(instanceId)
       setSession(current)
       setLocalStage(null)
@@ -233,6 +261,7 @@ export function useOrchestration(instanceId: string): OrchestrationState & Orche
     prepareSlice,
     setLocalStage,
     approve,
+    discard,
     runSlice,
     stop,
     submitReview,

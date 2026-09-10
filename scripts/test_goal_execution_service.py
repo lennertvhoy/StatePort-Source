@@ -425,6 +425,166 @@ def test_restart_stops_in_flight_goal_instead_of_resuming(tmp_path: Path) -> Non
     assert stat.S_IMODE((record_root / "project-one" / "current.json").stat().st_mode) == 0o600
 
 
+def test_http_controlled_backend_failure_persists_and_recovers_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A controlled fake-backend refusal survives HTTP and coordinator restart."""
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    project = _repository(app.layout.instances_root / "development-one")
+    _register(app, project, "development-one", "stateport.development-reference")
+    record_root = (app.layout.state_root / "goal-execution").resolve()
+    product_root = service_product_fixture(tmp_path, ROOT)
+    server = AppServer(("127.0.0.1", 0), app.layout, product_root / "apps" / "web")
+    # Explicit test-only injection: this is a controlled fake-backend outcome,
+    # not provider or container execution.
+    coordinator = GoalExecutionCoordinator(record_root=record_root, allow_synthetic_backend=True)
+    server.goal_execution = coordinator
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+    )
+    thread.start()
+    port = int(server.server_address[1])
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/session") as response:
+            session = json.loads(response.read())["result"]
+            cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+
+        def get(path: str) -> dict[str, object]:
+            request = Request(f"http://127.0.0.1:{port}{path}", headers={"Cookie": cookie})
+            with urlopen(request) as response:
+                return json.loads(response.read())["result"]
+
+        def post(path: str, body: dict[str, object]) -> dict[str, object]:
+            request = Request(
+                f"http://127.0.0.1:{port}{path}",
+                data=json.dumps(body).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Cookie": cookie,
+                    "Origin": f"http://127.0.0.1:{port}",
+                    "X-StatePort-CSRF": session["csrfToken"],
+                },
+                method="POST",
+            )
+            with urlopen(request) as response:
+                return json.loads(response.read())["result"]
+
+        initial = get("/v1/instances/development-one/goal-execution")
+        proposal = post(
+            "/v1/instances/development-one/goal-execution/prepare",
+            {
+                "expectedInstanceId": "development-one",
+                "expectedRevision": initial["revision"],
+                "expectedBaseCommit": initial["currentIdentity"]["baseCommit"],
+                "mode": "assisted",
+                "intent": "Prepare one controlled backend failure.",
+            },
+        )
+        approved = post(
+            "/v1/instances/development-one/goal-execution/approve",
+            {
+                "expectedInstanceId": "development-one",
+                "expectedRevision": proposal["revision"],
+                "expectedPlanDigest": proposal["slice"]["planDigest"],
+            },
+        )
+
+        def controlled_failure(*_args: object, **_kwargs: object) -> None:
+            raise GovernanceRefusal(
+                "controlled_backend_failure",
+                "controlled fake backend stopped",
+            )
+
+        monkeypatch.setattr(coordinator, "_execute_fake", controlled_failure)
+        with pytest.raises(HTTPError) as failure:
+            post(
+                "/v1/instances/development-one/goal-execution/execute",
+                {
+                    "expectedInstanceId": "development-one",
+                    "expectedRevision": approved["revision"],
+                    "expectedPlanDigest": approved["slice"]["planDigest"],
+                },
+            )
+        assert failure.value.code == 409
+        assert json.loads(failure.value.read())["error"]["code"] == "controlled_backend_failure"
+
+        stopped = get("/v1/instances/development-one/goal-execution")
+        assert stopped["state"] == "stopped"
+        assert stopped["stop"]["code"] == "controlled_backend_failure"
+        assert stopped["stop"]["stateBeforeStop"] == "executing"
+        assert stopped["executionResult"] is None
+        assert stopped["receipt"] is None
+        assert stopped["revision"] == approved["revision"] + 1
+        record = json.loads((record_root / "development-one" / "current.json").read_text(encoding="utf-8"))
+        assert record["state"] == "stopped"
+        assert record["stop"]["code"] == "controlled_backend_failure"
+        assert record["executionResult"] is None
+        assert record["receipt"] is None
+        assert record["revision"] == approved["revision"] + 1
+
+        restarted = GoalExecutionCoordinator(record_root=record_root, allow_synthetic_backend=True)
+        restarted_view = restarted.inspect("development-one")
+        assert restarted_view["state"] == "stopped"
+        assert restarted_view["stop"]["code"] == "controlled_backend_failure"
+        # Replacing the service coordinator models a process restart and also
+        # removes the controlled failure injection for the fresh slice.
+        server.goal_execution = restarted
+
+        recovered = get("/v1/instances/development-one/goal-execution")
+        next_proposal = post(
+            "/v1/instances/development-one/goal-execution/prepare",
+            {
+                "expectedInstanceId": "development-one",
+                "expectedRevision": recovered["revision"],
+                "expectedBaseCommit": recovered["currentIdentity"]["baseCommit"],
+                "mode": "assisted",
+                "intent": "Prepare a fresh provider-free inspection.",
+            },
+        )
+        assert next_proposal["state"] == "proposal_ready"
+        with pytest.raises(HTTPError) as implicit_approval:
+            post(
+                "/v1/instances/development-one/goal-execution/execute",
+                {
+                    "expectedInstanceId": "development-one",
+                    "expectedRevision": next_proposal["revision"],
+                    "expectedPlanDigest": next_proposal["slice"]["planDigest"],
+                },
+            )
+        assert implicit_approval.value.code == 409
+        assert json.loads(implicit_approval.value.read())["error"]["code"] == "unapproved_item"
+
+        next_approval = post(
+            "/v1/instances/development-one/goal-execution/approve",
+            {
+                "expectedInstanceId": "development-one",
+                "expectedRevision": next_proposal["revision"],
+                "expectedPlanDigest": next_proposal["slice"]["planDigest"],
+            },
+        )
+        executed = post(
+            "/v1/instances/development-one/goal-execution/execute",
+            {
+                "expectedInstanceId": "development-one",
+                "expectedRevision": next_approval["revision"],
+                "expectedPlanDigest": next_approval["slice"]["planDigest"],
+            },
+        )
+        assert executed["state"] == "awaiting_independent_review"
+        assert executed["providerExecution"] is False
+        assert executed["executionResult"] is not None
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 def test_service_view_preserves_terminal_stop_when_repository_is_dirty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

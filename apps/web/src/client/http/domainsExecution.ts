@@ -368,6 +368,7 @@ export class HttpContextClient implements ContextClient {
 
 export class HttpOrchestrationClient implements OrchestrationClient {
   readonly canStop = false
+  readonly canDiscard = true
   readonly canRejectReview = false
   /** sessionId → instanceId (from the last projection or transition). */
   private owners = new Map<string, string>()
@@ -417,6 +418,17 @@ export class HttpOrchestrationClient implements OrchestrationClient {
     return view
   }
 
+  private async readDisplayedView(instanceId: string, expectedRevision?: number) {
+    if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new ClientError('validation', 'The displayed slice has no exact revision. Reload before acting on it.')
+    }
+    const current = await this.readView(instanceId)
+    if (current.revision !== expectedRevision) {
+      throw new ClientError('validation', 'The slice changed after it was displayed. Reload and review its current state.')
+    }
+    return current
+  }
+
   private requireTransitionIdentity(
     value: string | undefined,
     label: string,
@@ -457,6 +469,9 @@ export class HttpOrchestrationClient implements OrchestrationClient {
     instanceId: string,
     input: { objective: string; mode: OrchestrationSession['mode'] },
   ): Promise<OrchestrationSession> {
+    if (input.mode === 'off') {
+      throw new ClientError('validation', 'Use Discard slice to turn off an unstarted slice with its exact revision.')
+    }
     const current = await this.readView(instanceId)
     return this.transitionSession(instanceId, endpoints.goalExecutionPrepare(instanceId), {
       expectedInstanceId: instanceId,
@@ -467,14 +482,38 @@ export class HttpOrchestrationClient implements OrchestrationClient {
     })
   }
 
-  async approve(sessionId: string): Promise<OrchestrationSession> {
+  async approve(sessionId: string, expectedRevision?: number): Promise<OrchestrationSession> {
     const instanceId = this.resolveOwner(sessionId)
-    const current = await this.readView(instanceId)
+    const current = await this.readDisplayedView(instanceId, expectedRevision)
     return this.transitionSession(instanceId, endpoints.goalExecutionApprove(instanceId), {
       expectedInstanceId: instanceId,
       expectedRevision: current.revision,
       expectedPlanDigest: this.requireTransitionIdentity(current.planDigest, 'plan digest'),
     })
+  }
+
+  async discard(sessionId: string, expectedRevision?: number): Promise<void> {
+    const instanceId = this.resolveOwner(sessionId)
+    const current = await this.readDisplayedView(instanceId, expectedRevision)
+    if (current.goalState !== 'proposal_ready' && current.goalState !== 'approved') {
+      throw new ClientError('validation', 'Only a prepared or approved slice can be discarded. Reload its current state.')
+    }
+    const payload = await this.transport.request(endpoints.goalExecutionPrepare(instanceId), {
+      method: 'POST',
+      body: {
+        expectedInstanceId: instanceId,
+        expectedRevision: current.revision,
+        expectedBaseCommit: this.requireTransitionIdentity(current.baseCommit, 'base commit'),
+        mode: 'off',
+        intent: 'Discard the unstarted slice and release its approval.',
+      },
+      schema: unknownPayload,
+    })
+    const view = this.mapView(payload, instanceId)
+    if (view.goalState !== 'off' || view.session !== null) {
+      throw new ClientError('validation', 'The service did not confirm that the slice was discarded. Reload its current state.')
+    }
+    this.owners.delete(sessionId)
   }
 
   /**
@@ -483,10 +522,10 @@ export class HttpOrchestrationClient implements OrchestrationClient {
    * transition: running → final state → receipt (when the projection carries
    * one); it never invents log lines.
    */
-  async *run(sessionId: string): AsyncIterable<PlanProgressEvent> {
+  async *run(sessionId: string, expectedRevision?: number): AsyncIterable<PlanProgressEvent> {
     const instanceId = this.resolveOwner(sessionId)
     const planKey = sessionId
-    const current = await this.readView(instanceId)
+    const current = await this.readDisplayedView(instanceId, expectedRevision)
     yield { type: 'state', planId: planKey, state: 'running' }
     const payload = await this.transport.request(endpoints.goalExecutionExecute(instanceId), {
       method: 'POST',
@@ -507,7 +546,7 @@ export class HttpOrchestrationClient implements OrchestrationClient {
     yield { type: 'state', planId: planKey, state: session.state }
   }
 
-  async submitReview(sessionId: string, input: { accepted: boolean; notes?: string }): Promise<OrchestrationSession> {
+  async submitReview(sessionId: string, input: { accepted: boolean; notes?: string }, expectedRevision?: number): Promise<OrchestrationSession> {
     const instanceId = this.resolveOwner(sessionId)
     if (!input.accepted) {
       throw unavailable(
@@ -515,7 +554,7 @@ export class HttpOrchestrationClient implements OrchestrationClient {
         'The current backend independently validates this provider-free slice and exposes no operator rejection transition.',
       )
     }
-    const current = await this.readView(instanceId)
+    const current = await this.readDisplayedView(instanceId, expectedRevision)
     return this.transitionSession(instanceId, endpoints.goalExecutionReview(instanceId), {
       expectedInstanceId: instanceId,
       expectedRevision: current.revision,
@@ -526,9 +565,9 @@ export class HttpOrchestrationClient implements OrchestrationClient {
     })
   }
 
-  async close(sessionId: string): Promise<{ session: OrchestrationSession; receipt: Receipt }> {
+  async close(sessionId: string, expectedRevision?: number): Promise<{ session: OrchestrationSession; receipt: Receipt }> {
     const instanceId = this.resolveOwner(sessionId)
-    const current = await this.readView(instanceId)
+    const current = await this.readDisplayedView(instanceId, expectedRevision)
     const payload = await this.transport.request(endpoints.goalExecutionClose(instanceId), {
       method: 'POST',
       body: {

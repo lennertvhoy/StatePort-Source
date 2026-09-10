@@ -3081,6 +3081,7 @@ export class MockClient implements StatePortClient {
 
   orchestration: StatePortClient['orchestration'] = {
     canStop: true,
+    canDiscard: true,
     canRejectReview: true,
     getCurrent: async (instanceId) => {
       await this.lat()
@@ -3094,7 +3095,8 @@ export class MockClient implements StatePortClient {
         })
       }
       const extras = this.refreshExtras()
-      return this.db.orchestration[instanceId] ?? extras.orchestration[instanceId] ?? null
+      const session = this.db.orchestration[instanceId] ?? extras.orchestration[instanceId] ?? null
+      return session?.mode === 'off' ? null : session
     },
 
     getView: async (instanceId) => {
@@ -3177,6 +3179,21 @@ export class MockClient implements StatePortClient {
       session.updatedAt = nowIso()
       this.persist()
       return session
+    },
+
+    discard: async (sessionId) => {
+      await this.lat()
+      this.guard()
+      const session = this.requireOrchestration(sessionId)
+      if (session.state !== 'prepared' && session.state !== 'approved') {
+        throw new ClientError('validation', 'Only a prepared or approved slice can be discarded. Reload its current state.')
+      }
+      session.mode = 'off'
+      session.state = 'cancelled'
+      session.stage = 'enter_objective'
+      session.updatedAt = nowIso()
+      this.db.orchestration[session.instanceId] = session
+      this.persist()
     },
 
     run: (sessionId) => this.runOrchestrationImpl(sessionId),

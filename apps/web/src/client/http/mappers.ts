@@ -3293,6 +3293,7 @@ const goalExecutionWire = z.object({
   instanceId: z.string().min(1),
   applicationId: z.string().min(1).optional(),
   state: z.string(),
+  stop: z.object({ code: z.string().min(1), message: z.string().min(1) }).nullish(),
   mode: z.string().optional(),
   revision: z.number().int().nonnegative().optional(),
   recordedAt: isoTimestamp.optional(),
@@ -3409,7 +3410,7 @@ const GOAL_STAGE_MAP: Record<GoalState, { stage: OrchestrationStage; state: Oper
   },
   independently_reviewed: { stage: 'close', state: 'validated', active: true },
   closed: { stage: 'receipt', state: 'validated', active: false },
-  stopped: { stage: 'run', state: 'cancelled', active: false },
+  stopped: { stage: 'run', state: 'failed', active: false },
 }
 
 export interface GoalExecutionView {
@@ -3513,12 +3514,13 @@ export function mapGoalExecution(
         ? `Independent review: ${wire.review.disposition.replaceAll('_', ' ')}.`
         : undefined)
   const session: OrchestrationSession = {
+    revision: wire.revision,
     id: `orch_${wire.instanceId}`,
     instanceId: wire.instanceId,
     objective: wire.objective ?? wire.selectedItem?.objective ?? '',
     mode,
     stage: mapped.stage,
-    state: mapped.state,
+    state: goalState === 'stopped' && wire.stop?.code === 'service_restart' ? 'interrupted' : mapped.state,
     baseIdentity: {
       name: wire.baseIdentity?.name ?? 'repository',
       branch: wire.baseIdentity?.branch ?? 'main',
@@ -3552,12 +3554,15 @@ export function mapGoalExecution(
     implementer: wire.implementer ?? wire.delegation?.implementerActor ?? 'stateport',
     reviewer: wire.reviewer ?? wire.review?.reviewerActor ?? wire.delegation?.reviewerActor ?? 'independent',
     resultSummary,
+    stop: goalState === 'stopped'
+      ? wire.stop ?? { code: 'goal_stopped', message: 'The governed run stopped before completion.' }
+      : undefined,
     receiptId: wire.receiptId ?? wire.receipt?.receiptId,
     createdAt,
     updatedAt: wire.updatedAt ?? wire.recordedAt ?? createdAt,
   }
   return {
-    session: mapped.active || goalState === 'closed' ? session : null,
+    session: mapped.active || goalState === 'closed' || goalState === 'stopped' ? session : null,
     instanceId: wire.instanceId,
     applicationId: wire.applicationId,
     goalState,

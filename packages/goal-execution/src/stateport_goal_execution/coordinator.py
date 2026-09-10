@@ -39,7 +39,12 @@ from .contracts import (
     canonical_digest,
 )
 from .review_isolation import verify_review_workspace
-from .service import GoalExecutionSession, GovernanceRefusal, InstanceApprovalLeaseRegistry
+from .service import (
+    GoalExecutionSession,
+    GoalExecutionState,
+    GovernanceRefusal,
+    InstanceApprovalLeaseRegistry,
+)
 
 
 VIEW_FORMAT = "stateport.goal-execution-view/v1"
@@ -674,8 +679,24 @@ class GoalExecutionCoordinator:
                 else:
                     result = self._execute_fake(instance_id, instance_root, session, commit, tree)
                 self._transition(instance_id, session, lambda: session.record_execution(result))
-            except GovernanceRefusal:
-                raise
+            except GovernanceRefusal as exc:
+                # Once execution has begun, a backend refusal must become a
+                # durable terminal stop so the approval lease cannot remain
+                # held behind an in-memory ``executing`` session. Preserve
+                # the original refusal code and message in the stop record.
+                if exc.terminal and session.state is GoalExecutionState.STOPPED:
+                    # ``_transition`` already persisted terminal refusals
+                    # raised by record_execution. Do not write a duplicate
+                    # stopped projection or advance the durable revision a
+                    # second time.
+                    raise
+                self._stop_and_persist(
+                    instance_id,
+                    session,
+                    code=exc.code,
+                    message=str(exc),
+                    cause=exc,
+                )
             except Exception as exc:
                 try:
                     current = _git_identity(instance_root)
@@ -764,7 +785,7 @@ class GoalExecutionCoordinator:
 
             op_result = backend.start(run_spec, staging_root, environment={}, event_sink=event_sink)
 
-            if op_result.status in ("failed", "cancelled"):
+            if op_result.status != "completed":
                 raise GovernanceRefusal(
                     "opencode_execution_failed",
                     f"OpenCode run {op_result.status}: {op_result.failure_classification or 'unknown'}",

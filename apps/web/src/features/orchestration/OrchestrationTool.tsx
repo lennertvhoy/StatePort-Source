@@ -83,9 +83,11 @@ export default function OrchestrationTool() {
   const isMobile = useIsMobile()
 
   const orch = useOrchestration(instanceId)
-  const { canStop, canRejectReview } = getClient().orchestration
+  const { canStop, canRejectReview, canDiscard } = getClient().orchestration
   const { session, status, reload } = orch
   const [stopConfirm, setStopConfirm] = useState(false)
+  const [discardConfirm, setDiscardConfirm] = useState(false)
+  const [discardError, setDiscardError] = useState<string | null>(null)
   const stagePanelRef = useRef<HTMLDivElement | null>(null)
 
   // Capability facts come from the shell context; when the tool renders
@@ -117,6 +119,25 @@ export default function OrchestrationTool() {
   // A running record is never enough to invent a Stop transition: the action
   // renders only when the selected adapter explicitly supports it.
   const sliceRunning = orch.run.running || session?.state === 'running'
+  const canDiscardSession = Boolean(
+    canDiscard &&
+      session &&
+      (session.state === 'prepared' || session.state === 'approved') &&
+      !orch.busy &&
+      !sliceRunning,
+  )
+
+  const discard = async () => {
+    setDiscardError(null)
+    try {
+      await orch.discard()
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      setDiscardError(
+        `Discard could not be confirmed: ${detail} Refresh the current state before trying again.`,
+      )
+    }
+  }
 
   // Stage transitions are announced via aria-live (text changes announce).
   const announcement = session
@@ -233,6 +254,18 @@ export default function OrchestrationTool() {
               <Square aria-hidden="true" />
               Stop
             </Button>
+          ) : canDiscardSession ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setDiscardError(null)
+                setDiscardConfirm(true)
+              }}
+              data-testid="orchestration-discard"
+            >
+              Discard slice
+            </Button>
           ) : null
         }
       />
@@ -253,6 +286,27 @@ export default function OrchestrationTool() {
             <InlineNotice tone="informational" title="Stop is unavailable">
               The connected service has no stop transition for an in-flight slice. This view will report the
               exact result when the bounded request returns.
+            </InlineNotice>
+          ) : null}
+
+          {discardError ? (
+            <InlineNotice
+              tone="danger"
+              title="Could not confirm discard"
+              action={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setDiscardError(null)
+                    reload()
+                  }}
+                >
+                  Refresh state
+                </Button>
+              }
+            >
+              {discardError}
             </InlineNotice>
           ) : null}
 
@@ -306,6 +360,18 @@ export default function OrchestrationTool() {
         confirmLabel="Stop after current step"
         destructive
         onConfirm={() => orch.stop()}
+      />
+      <ConfirmDialog
+        open={canDiscardSession && discardConfirm}
+        onOpenChange={setDiscardConfirm}
+        title="Discard prepared slice?"
+        description="This abandons the prepared or approved slice before execution."
+        target={session?.objective}
+        effect="Release this slice and return to a fresh objective. Nothing runs, closes, or creates a receipt."
+        reversibility="This cannot resume the discarded approval. Prepare and review a new slice if you still want to proceed."
+        confirmLabel="Discard slice"
+        destructive
+        onConfirm={discard}
       />
     </div>
   )
@@ -911,6 +977,9 @@ function ReviewStagePanel({
 function RunStagePanel({ session, orch }: { session: OrchestrationSession; orch: ReturnType<typeof useOrchestration> }) {
   const [error, setError] = useState<string | null>(null)
   const running = orch.run.running
+  const stopCopy = getClient().orchestration.canStop
+    ? 'Stop is available — it halts after the current step.'
+    : 'This service cannot stop a running slice from this view.'
 
   const run = async () => {
     setError(null)
@@ -932,15 +1001,27 @@ function RunStagePanel({ session, orch }: { session: OrchestrationSession; orch:
               Run the approved slice
             </Button>
           ) : null}
-          {orch.run.error ? (
+          {orch.run.error && session.state === 'approved' && !running ? (
             <Button size="sm" variant="outline" onClick={() => void run()} data-orchestration-primary data-testid="orchestration-run-retry">
               <Play aria-hidden="true" />
               Retry run
             </Button>
           ) : null}
+          {session.stop && !running ? (
+            <Button size="sm" variant="outline" onClick={orch.startNewSlice} data-orchestration-primary data-testid="orchestration-new-objective">
+              Prepare a new slice
+            </Button>
+          ) : null}
         </>
       }
     >
+      {session.stop ? (
+        <div data-testid="orchestration-terminal-stop">
+          <InlineNotice tone="danger" title="Run stopped">
+            {session.stop.message} Prepare a new slice and review its approval before running again.
+          </InlineNotice>
+        </div>
+      ) : null}
       {session.state === 'approved' && !running && orch.run.logs.length === 0 ? (
         <p className="text-xs text-foreground-secondary">
           The slice runs once — {modeMeta(session.mode).id === 'advisory' ? 'inspection only, nothing is written' : 'inside its approved scope and budget'} — then stops and waits for your review.
@@ -952,7 +1033,7 @@ function RunStagePanel({ session, orch }: { session: OrchestrationSession; orch:
           <OperationStateLabel state="running" />
           <p className="mt-1 text-xs text-foreground-secondary">
             The slice is running ({session.budget.usedOperations}/{session.budget.maxOperations} steps used).
-            Stop is always available — it halts after the current step.
+            {' '}{stopCopy}
           </p>
         </div>
       ) : null}
@@ -975,7 +1056,7 @@ function RunStagePanel({ session, orch }: { session: OrchestrationSession; orch:
             {orch.run.logs.join('\n')}
           </pre>
           <p className="mt-1 text-xs text-foreground-secondary">
-            Stop is always available — it halts after the current step.
+            {stopCopy}
           </p>
         </div>
       ) : null}

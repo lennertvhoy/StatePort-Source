@@ -4,9 +4,9 @@
  * before the slice is prepared and paged), the always-visible safety facts,
  * the ONE blocked state, the stop control, and a close that stops everything.
  */
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { act, cleanup, render, renderHook, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
 import { getClient, resetClientForTests, resetMockState, useScenarioStore } from '@/client'
@@ -14,6 +14,7 @@ import type { ScenarioId } from '@/client'
 import { INSTANCE_IDS } from '@/client/mock/seed'
 
 import OrchestrationTool from '../OrchestrationTool'
+import { useOrchestration } from '../useOrchestration'
 
 const NIXOS = INSTANCE_IDS.nixosInfra
 const CTO = INSTANCE_IDS.ctoPilot
@@ -33,6 +34,19 @@ function setScenario(id: ScenarioId | null) {
   useScenarioStore.getState().setActive(id)
 }
 
+async function deferredOrchestrationViews() {
+  setScenario('orchestration_approved')
+  const adapter = getClient().orchestration
+  const original = await adapter.getView(NIXOS)
+  const read = vi.spyOn(adapter, 'getView').mockImplementation(async (instanceId) => ({
+    ...original,
+    session: original.session
+      ? { ...original.session, id: `orch_${instanceId}`, instanceId }
+      : null,
+  }))
+  return { adapter, read, original }
+}
+
 beforeEach(() => {
   resetClientForTests()
   resetMockState()
@@ -41,11 +55,239 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   setScenario(null)
   resetClientForTests()
 })
 
 describe('OrchestrationTool — stage-gated controls', () => {
+  it('does not clear the replacement instance after a deferred discard succeeds', async () => {
+    const { adapter } = await deferredOrchestrationViews()
+    let resolveDiscard!: () => void
+    const discard = vi.spyOn(adapter, 'discard').mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveDiscard = resolve
+      }),
+    )
+    const rendered = renderHook(({ instanceId }: { instanceId: string }) => useOrchestration(instanceId), {
+      initialProps: { instanceId: NIXOS as string },
+    })
+    await waitFor(() => expect(rendered.result.current.session?.instanceId).toBe(NIXOS))
+
+    let pending!: Promise<void>
+    await act(async () => {
+      pending = rendered.result.current.discard()
+    })
+    expect(discard).toHaveBeenCalledTimes(1)
+    expect(discard.mock.calls[0]?.[0]).toBe(`orch_${NIXOS}`)
+
+    rendered.rerender({ instanceId: CTO })
+    await waitFor(() => expect(rendered.result.current.session?.instanceId).toBe(CTO))
+    await act(async () => {
+      resolveDiscard()
+      await pending
+    })
+
+    expect(rendered.result.current.session?.instanceId).toBe(CTO)
+    expect(rendered.result.current.session?.id).toBe(`orch_${CTO}`)
+    rendered.unmount()
+  })
+
+  it('does not propagate a deferred old-instance discard failure after switching', async () => {
+    const { adapter } = await deferredOrchestrationViews()
+    let rejectDiscard!: (error: Error) => void
+    const discard = vi.spyOn(adapter, 'discard').mockImplementation(
+      () => new Promise<void>((_resolve, reject) => {
+        rejectDiscard = reject
+      }),
+    )
+    const rendered = renderHook(({ instanceId }: { instanceId: string }) => useOrchestration(instanceId), {
+      initialProps: { instanceId: NIXOS as string },
+    })
+    await waitFor(() => expect(rendered.result.current.session?.instanceId).toBe(NIXOS))
+
+    let pending!: Promise<void>
+    await act(async () => {
+      pending = rendered.result.current.discard()
+    })
+    expect(discard).toHaveBeenCalledTimes(1)
+    rendered.rerender({ instanceId: CTO })
+    await waitFor(() => expect(rendered.result.current.session?.instanceId).toBe(CTO))
+    await act(async () => {
+      rejectDiscard(new Error('old instance approval changed'))
+      await expect(pending).resolves.toBeUndefined()
+    })
+
+    expect(rendered.result.current.session?.instanceId).toBe(CTO)
+    expect(rendered.result.current.busy).toBe(false)
+    rendered.unmount()
+  })
+
+  it('rethrows a discard failure for the same instance and retains its session', async () => {
+    const { adapter } = await deferredOrchestrationViews()
+    let rejectDiscard!: (error: Error) => void
+    vi.spyOn(adapter, 'discard').mockImplementation(
+      () => new Promise<void>((_resolve, reject) => {
+        rejectDiscard = reject
+      }),
+    )
+    const rendered = renderHook(() => useOrchestration(NIXOS))
+    await waitFor(() => expect(rendered.result.current.session?.instanceId).toBe(NIXOS))
+
+    let pending!: Promise<void>
+    await act(async () => {
+      pending = rendered.result.current.discard()
+    })
+    await act(async () => {
+      rejectDiscard(new Error('same instance approval changed'))
+      await expect(pending).rejects.toThrow('same instance approval changed')
+    })
+
+    expect(rendered.result.current.session?.instanceId).toBe(NIXOS)
+    expect(rendered.result.current.busy).toBe(false)
+    rendered.unmount()
+  })
+
+  it('does not update an unmounted hook after a deferred discard succeeds', async () => {
+    const { adapter } = await deferredOrchestrationViews()
+    let resolveDiscard!: () => void
+    vi.spyOn(adapter, 'discard').mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveDiscard = resolve
+      }),
+    )
+    const rendered = renderHook(() => useOrchestration(NIXOS))
+    await waitFor(() => expect(rendered.result.current.session?.instanceId).toBe(NIXOS))
+    let pending!: Promise<void>
+    await act(async () => {
+      pending = rendered.result.current.discard()
+    })
+    rendered.unmount()
+    await act(async () => {
+      resolveDiscard()
+      await pending
+    })
+  })
+
+  it('rereads a stopped run after execution fails and does not retry its consumed approval', async () => {
+    const user = userEvent.setup()
+    setScenario('orchestration_approved')
+    const adapter = getClient().orchestration
+    const view = await adapter.getView(NIXOS)
+    const approved = view.session
+    const stop = { code: 'opencode_execution_failed', message: 'The provider run failed.' }
+    vi.spyOn(adapter, 'getView').mockResolvedValue(view)
+    vi.spyOn(adapter, 'getCurrent').mockResolvedValue({
+      ...approved!, stage: 'run', state: 'failed', stop,
+    })
+    const run = vi.spyOn(adapter, 'run').mockImplementation(async function* (id) {
+      yield { type: 'state', planId: id, state: 'running' }
+      throw new Error(stop.message)
+    })
+    renderTool()
+    await user.click(await screen.findByTestId('orchestration-run'))
+    expect((await screen.findByTestId('orchestration-terminal-stop')).textContent).toContain(stop.message)
+    expect(screen.queryByTestId('orchestration-run')).toBeNull()
+    expect(screen.queryByTestId('orchestration-run-retry')).toBeNull()
+    expect(screen.queryByTestId('orchestration-close')).toBeNull()
+    expect(screen.getByTestId('orchestration-new-objective')).toBeTruthy()
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('confirms and discards a prepared slice, while cancel leaves it untouched', async () => {
+    const user = userEvent.setup()
+    const adapter = getClient().orchestration
+    const discard = vi.spyOn(adapter, 'discard')
+    renderTool()
+
+    await user.type(await screen.findByTestId('orchestration-objective'), 'Review one bounded slice')
+    await user.click(screen.getByTestId('orchestration-prepare'))
+    expect(await screen.findByTestId('orchestration-discard')).toBeTruthy()
+
+    await user.click(screen.getByTestId('orchestration-discard'))
+    const dialog = await screen.findByTestId('confirm-dialog')
+    expect(within(dialog).getByText(/abandon.*before execution/i)).toBeTruthy()
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByTestId('orchestration-discard')).toBeTruthy()
+    expect(discard).not.toHaveBeenCalled()
+
+    await user.click(screen.getByTestId('orchestration-discard'))
+    await user.click(within(await screen.findByTestId('confirm-dialog')).getByTestId('confirm-action'))
+    expect(await screen.findByText('No orchestration session')).toBeTruthy()
+    expect(discard).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('orchestration-run')).toBeNull()
+    expect(await adapter.getCurrent(NIXOS)).toBeNull()
+  }, 15_000)
+
+  it('discards an approved slice only through the explicit confirmation', async () => {
+    const user = userEvent.setup()
+    const adapter = getClient().orchestration
+    const discard = vi.spyOn(adapter, 'discard')
+    setScenario('orchestration_approved')
+    renderTool()
+
+    expect(await screen.findByTestId('orchestration-run')).toBeTruthy()
+    await user.click(screen.getByTestId('orchestration-discard'))
+    expect(await screen.findByTestId('confirm-dialog')).toBeTruthy()
+    await user.click(screen.getByTestId('confirm-action'))
+    expect(await screen.findByText('No orchestration session')).toBeTruthy()
+    expect(discard).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('orchestration-run')).toBeNull()
+  })
+
+  it('retains a prepared or approved slice and shows an actionable refusal', async () => {
+    const user = userEvent.setup()
+    const adapter = getClient().orchestration
+    vi.spyOn(adapter, 'discard').mockRejectedValue(new Error('approval lease changed'))
+    setScenario('orchestration_approved')
+    renderTool()
+
+    await user.click(await screen.findByTestId('orchestration-discard'))
+    await user.click(screen.getByTestId('confirm-action'))
+    expect(await screen.findByText(/Discard could not be confirmed:/i)).toBeTruthy()
+    expect(screen.getByText(/approval lease changed/)).toBeTruthy()
+    expect(screen.getByText(/refresh the current state before trying again/i)).toBeTruthy()
+    expect(screen.getByTestId('orchestration-run')).toBeTruthy()
+    expect(screen.getByTestId('orchestration-discard')).toBeTruthy()
+  })
+
+  it('does not expose discard while a slice is running', async () => {
+    setScenario('orchestration_running')
+    renderTool()
+
+    expect(await screen.findByTestId('orchestration-stop')).toBeTruthy()
+    expect(screen.queryByTestId('orchestration-discard')).toBeNull()
+  })
+
+  it('keeps a terminal failure visible after reload and starts recovery without executing', async () => {
+    const user = userEvent.setup()
+    setScenario('orchestration_approved')
+    const adapter = getClient().orchestration
+    const view = await adapter.getView(NIXOS)
+    expect(view.session).not.toBeNull()
+    const stop = { code: 'opencode_execution_failed', message: 'The provider run failed.' }
+    vi.spyOn(adapter, 'getView').mockResolvedValue({
+      ...view,
+      session: { ...view.session!, stage: 'run', state: 'failed', stop },
+    })
+    const prepare = vi.spyOn(adapter, 'prepareSlice')
+    const approve = vi.spyOn(adapter, 'approve')
+    const run = vi.spyOn(adapter, 'run')
+    const rendered = renderTool()
+    expect((await screen.findByTestId('orchestration-terminal-stop')).textContent).toContain(stop.message)
+    rendered.unmount()
+    renderTool()
+    expect((await screen.findByTestId('orchestration-terminal-stop')).textContent).toContain(stop.message)
+    expect(screen.queryByTestId('orchestration-run')).toBeNull()
+    expect(screen.queryByTestId('orchestration-run-retry')).toBeNull()
+    expect(screen.queryByTestId('orchestration-close')).toBeNull()
+    await user.click(screen.getByTestId('orchestration-new-objective'))
+    expect(await screen.findByTestId('orchestration-objective')).toBeTruthy()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(approve).not.toHaveBeenCalled()
+    expect(run).not.toHaveBeenCalled()
+  })
+
   it('hides approve before a slice is prepared and paged to the gate', async () => {
     const user = userEvent.setup()
     renderTool()
@@ -217,6 +459,8 @@ describe('OrchestrationTool — stop + degraded capability', () => {
     expect(screen.queryByTestId('orchestration-stop-header')).toBeNull()
     expect(screen.queryByTestId('orchestration-stop-sticky')).toBeNull()
     expect(screen.getByText(/connected service has no stop transition/i)).toBeTruthy()
+    expect(screen.queryByText(/Stop is always available/i)).toBeNull()
+    expect(screen.getByText(/cannot stop a running slice from this view/i)).toBeTruthy()
   })
 
   it('hides mock-only reviewer rejection while preserving exact acceptance', async () => {

@@ -1212,6 +1212,8 @@ export interface OrchestrationBudget {
 }
 
 export interface OrchestrationSession {
+  /** Durable revision of the displayed slice, required for HTTP transition authority. */
+  revision?: number
   id: string
   instanceId: string
   objective: string
@@ -1225,6 +1227,8 @@ export interface OrchestrationSession {
   implementer: string
   reviewer: string
   resultSummary?: string
+  /** Durable terminal stop, retained even when no successful result exists. */
+  stop?: { code: string; message: string }
   receiptId?: string
   createdAt: string
   updatedAt: string

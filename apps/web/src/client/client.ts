@@ -392,6 +392,8 @@ export interface InfrastructureClient {
 export interface OrchestrationClient {
   /** Whether an in-flight slice can be stopped through the connected service. */
   readonly canStop: boolean
+  /** Whether a prepared or approved slice can be discarded before execution. */
+  readonly canDiscard: boolean
   /** Whether independent review can reject/send back a result. */
   readonly canRejectReview: boolean
   getCurrent(instanceId: string): Promise<OrchestrationSession | null>
@@ -407,13 +409,15 @@ export interface OrchestrationClient {
     input: { objective: string; mode: OrchestrationMode },
   ): Promise<OrchestrationSession>
   /** Approve after reviewing base/plan/permissions/budget (stage 8). */
-  approve(sessionId: string): Promise<OrchestrationSession>
+  approve(sessionId: string, expectedRevision?: number): Promise<OrchestrationSession>
+  /** Discard an unstarted slice and release its approval; creates no success receipt. */
+  discard(sessionId: string, expectedRevision?: number): Promise<void>
   /** Run inspection/execution (stage 9) with progress events. */
-  run(sessionId: string): AsyncIterable<PlanProgressEvent>
+  run(sessionId: string, expectedRevision?: number): AsyncIterable<PlanProgressEvent>
   /** Record review + independent review (stages 10–11). */
-  submitReview(sessionId: string, input: { accepted: boolean; notes?: string }): Promise<OrchestrationSession>
+  submitReview(sessionId: string, input: { accepted: boolean; notes?: string }, expectedRevision?: number): Promise<OrchestrationSession>
   /** Close and stop; creates the receipt (stages 12–13). */
-  close(sessionId: string): Promise<{ session: OrchestrationSession; receipt: Receipt }>
+  close(sessionId: string, expectedRevision?: number): Promise<{ session: OrchestrationSession; receipt: Receipt }>
   /** Emergency stop: halts a running session honestly (state: cancelled). */
   stop(sessionId: string): Promise<OrchestrationSession>
 }

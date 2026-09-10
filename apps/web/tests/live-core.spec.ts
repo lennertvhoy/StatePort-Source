@@ -466,7 +466,7 @@ async function installTerminalConstructorProbe(
     class ObservedWebSocket extends NativeWebSocket {
       constructor(url: string | URL, protocols?: string | string[]) {
         super(url, protocols)
-        const observation = {
+        const observation: TerminalConstructorObservation = {
           url: String(url),
           requestedProtocols:
             typeof protocols === 'string'
@@ -2394,6 +2394,293 @@ test('Orchestration completes one exact provider-free slice, refuses stale autho
       nextItemAutoStart: false,
       receipt: 'exact indexed detail opened',
       environmentLiveProvider: 'not attempted',
+    },
+  }
+})
+
+test('Orchestration shows terminal base drift and requires fresh approval after restart', async ({ page }) => {
+  const signals = browserSignals(page)
+  const objective = 'Inspect this disposable project after an explicit clean-base check.'
+  const recoveryObjective = 'Prepare a fresh provider-free slice after the terminal stop.'
+  const goalPath = `/v1/instances/${PROJECT_ID}/goal-execution`
+  const goalRecordPath = path.join(
+    disposableRoot,
+    'xdg',
+    'state',
+    'stateport',
+    'goal-execution',
+    PROJECT_ID,
+    'current.json',
+  )
+
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/workbench/orchestration`)
+  await expect(page.getByTestId('orchestration-tool')).toBeVisible()
+
+  const newSlice = page.getByTestId('orchestration-new-slice')
+  const newObjective = page.getByTestId('orchestration-new-objective')
+  const objectiveInput = page.getByTestId('orchestration-objective')
+  await expect
+    .poll(async () => {
+      if (await newSlice.isVisible()) return 'receipt'
+      if (await newObjective.isVisible()) return 'stopped'
+      if (await objectiveInput.isVisible()) return 'objective'
+      return 'loading'
+    })
+    .toMatch(/receipt|stopped|objective/)
+  if (await newSlice.isVisible()) await newSlice.click()
+  else if (await newObjective.isVisible()) await newObjective.click()
+  await expect(objectiveInput).toBeVisible()
+
+  const currentResponse = await page.request.get(`${service.url}${goalPath}`)
+  expect(currentResponse.status()).toBe(200)
+  const currentPayload = (await currentResponse.json()) as {
+    result: {
+      revision: number
+      currentIdentity: { baseCommit: string }
+    }
+  }
+
+  await objectiveInput.fill(objective)
+  const prepareResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `${goalPath}/prepare`,
+  )
+  await page.getByTestId('orchestration-prepare').click()
+  const prepareResponse = await prepareResponsePromise
+  expect(prepareResponse.status()).toBe(200)
+  expect(prepareResponse.request().postDataJSON()).toMatchObject({
+    expectedInstanceId: PROJECT_ID,
+    expectedRevision: currentPayload.result.revision,
+    expectedBaseCommit: currentPayload.result.currentIdentity.baseCommit,
+    mode: 'assisted',
+    intent: objective,
+  })
+  const prepared = (await prepareResponse.json()).result as {
+    revision: number
+    slice: { planDigest: string }
+    state: string
+  }
+  expect(prepared.state).toBe('proposal_ready')
+
+  for (const stage of ['review_plan', 'review_permissions', 'review_budget', 'approve']) {
+    await page.getByTestId('orchestration-mark-reviewed').click()
+    await expect(page.getByTestId(`stage-${stage}`)).toBeVisible()
+  }
+  const approveResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `${goalPath}/approve`,
+  )
+  await page.getByTestId('orchestration-approve').click()
+  const approveResponse = await approveResponsePromise
+  expect(approveResponse.status()).toBe(200)
+  const approved = (await approveResponse.json()).result as {
+    revision: number
+    slice: { planDigest: string }
+    state: string
+  }
+  expect(approved.state).toBe('approved')
+
+  const ownedDrift = path.join(projectRoot, 'r8-terminal-ui-owned-drift.txt')
+  writeFileSync(ownedDrift, 'owned disposable drift for the browser proof\n', {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  })
+  try {
+    const executeResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === `${goalPath}/execute`,
+    )
+    await page.getByTestId('orchestration-run').click()
+    const executeResponse = await executeResponsePromise
+    expect(executeResponse.status()).toBe(409)
+    expect(executeResponse.request().postDataJSON()).toEqual({
+      expectedInstanceId: PROJECT_ID,
+      expectedRevision: approved.revision,
+      expectedPlanDigest: approved.slice.planDigest,
+    })
+    expect((await executeResponse.json()).error.code).toBe('base_drift')
+    await expect(page.getByTestId('orchestration-terminal-stop')).toBeVisible()
+    await expect(page.getByTestId('orchestration-terminal-stop')).toContainText(
+      'selected project no longer matches its exact clean snapshot',
+    )
+    await expect(page.getByTestId('orchestration-run-retry')).toHaveCount(0)
+    await expect(page.getByTestId('orchestration-close')).toHaveCount(0)
+    await expect(page.getByTestId('orchestration-new-objective')).toBeVisible()
+
+    await expect
+      .poll(() => {
+        if (!existsSync(goalRecordPath)) return null
+        return JSON.parse(readFileSync(goalRecordPath, 'utf8')) as {
+          state: string
+          revision: number
+          stop?: { code: string }
+          executionResult?: unknown
+          receipt?: unknown
+        }
+      })
+      .toMatchObject({
+        state: 'stopped',
+        revision: approved.revision + 1,
+        stop: { code: 'base_drift' },
+        executionResult: null,
+        receipt: null,
+      })
+  } finally {
+    rmSync(ownedDrift, { force: true })
+  }
+  expect(execFileSync('git', ['-C', projectRoot, 'status', '--short'], { encoding: 'utf8', timeout: 5_000 })).toBe('')
+
+  // Confirm the stopped reason through a document reload before exercising a
+  // real AppServer restart over the same disposable durable roots.
+  await reloadWithReadObservation(page, signals)
+  await expect(page.getByTestId('orchestration-terminal-stop')).toContainText(
+    'selected project no longer matches its exact clean snapshot',
+  )
+  const oldPid = service.child.pid
+  await expect.poll(() => signals.inFlight.size).toBe(0)
+  await page.goto('about:blank')
+  await stopChild(service.child)
+  service = await startService(true)
+  expect(service.child.pid).not.toBe(oldPid)
+  const restartedSignals = browserSignals(page)
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/workbench/orchestration`)
+  await expect(page.getByTestId('orchestration-terminal-stop')).toContainText(
+    'selected project no longer matches its exact clean snapshot',
+  )
+  await expect(page.getByTestId('orchestration-run-retry')).toHaveCount(0)
+  await expect(page.getByTestId('orchestration-close')).toHaveCount(0)
+  await expect(page.getByTestId('orchestration-new-objective')).toBeVisible()
+
+  await page.getByTestId('orchestration-new-objective').click()
+  await page.getByTestId('orchestration-objective').fill(recoveryObjective)
+  const recoveryPrepareResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `${goalPath}/prepare`,
+  )
+  await page.getByTestId('orchestration-prepare').click()
+  const recoveryPrepareResponse = await recoveryPrepareResponsePromise
+  expect(recoveryPrepareResponse.status()).toBe(200)
+  const recoveryPrepared = (await recoveryPrepareResponse.json()).result as {
+    revision: number
+    slice: { planDigest: string }
+    state: string
+  }
+  expect(recoveryPrepared.state).toBe('proposal_ready')
+  await expect(page.getByTestId('orchestration-run')).toHaveCount(0)
+
+  // Discard is a separate pre-execution operation, not running cancellation.
+  // Prove its real service effect before preparing the final recovery slice.
+  await page.getByTestId('orchestration-discard').click()
+  const discardResponsePromise = page.waitForResponse(
+    (response) => response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `${goalPath}/prepare`,
+  )
+  await page.getByTestId('confirm-action').click()
+  const discardResponse = await discardResponsePromise
+  expect(discardResponse.status()).toBe(200)
+  expect(discardResponse.request().postDataJSON()).toMatchObject({
+    mode: 'off', expectedRevision: recoveryPrepared.revision,
+  })
+  const discarded = (await discardResponse.json()).result as { revision: number; state: string }
+  expect(discarded.state).toBe('off')
+  expect(discarded.revision).toBe(recoveryPrepared.revision + 1)
+  expect(JSON.parse(readFileSync(goalRecordPath, 'utf8'))).toMatchObject({
+    state: 'off', revision: discarded.revision, previousState: 'proposal_ready',
+    stop: { code: 'operator_disabled' }, providerExecution: false,
+  })
+  expect(restartedSignals.requests.filter((request) =>
+    request.method === 'POST' && request.path === `${goalPath}/execute`)).toHaveLength(0)
+  await expect(page.getByTestId('orchestration-objective')).toBeVisible()
+  await page.getByTestId('orchestration-objective').fill(recoveryObjective)
+  const freshPreparePromise = page.waitForResponse(
+    (response) => response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `${goalPath}/prepare`,
+  )
+  await page.getByTestId('orchestration-prepare').click()
+  const freshPrepareResponse = await freshPreparePromise
+  expect(freshPrepareResponse.status()).toBe(200)
+  expect(freshPrepareResponse.request().postDataJSON()).toMatchObject({ expectedRevision: discarded.revision })
+  const freshPrepared = (await freshPrepareResponse.json()).result as {
+    revision: number; slice: { planDigest: string }; state: string
+  }
+  expect(freshPrepared.state).toBe('proposal_ready')
+  for (const stage of ['review_plan', 'review_permissions', 'review_budget', 'approve']) {
+    await page.getByTestId('orchestration-mark-reviewed').click()
+    await expect(page.getByTestId(`stage-${stage}`)).toBeVisible()
+  }
+  await expect(page.getByTestId('orchestration-run')).toHaveCount(0)
+  const recoveryApproveResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `${goalPath}/approve`,
+  )
+  await page.getByTestId('orchestration-approve').click()
+  const recoveryApproveResponse = await recoveryApproveResponsePromise
+  expect(recoveryApproveResponse.status()).toBe(200)
+  expect(recoveryApproveResponse.request().postDataJSON()).toMatchObject({
+    expectedRevision: freshPrepared.revision, expectedPlanDigest: freshPrepared.slice.planDigest,
+  })
+  const recoveryApproved = (await recoveryApproveResponse.json()).result as {
+    revision: number
+    slice: { planDigest: string }
+    state: string
+  }
+  expect(recoveryApproved.state).toBe('approved')
+
+  const recoveryExecuteResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `${goalPath}/execute`,
+  )
+  await page.getByTestId('orchestration-run').click()
+  const recoveryExecuteResponse = await recoveryExecuteResponsePromise
+  expect(recoveryExecuteResponse.status()).toBe(200)
+  const recovered = (await recoveryExecuteResponse.json()).result as {
+    state: string
+    providerExecution: boolean
+    backendId: string
+    executionResult?: unknown
+  }
+  expect(recovered).toMatchObject({
+    state: 'awaiting_independent_review',
+    providerExecution: false,
+    backendId: 'fake',
+  })
+  expect(recovered.executionResult).toBeTruthy()
+  await expect(page.getByTestId('stage-independent_review')).toBeVisible()
+  await page.getByTestId('orchestration-accept').click()
+  await expect(page.getByTestId('stage-close')).toBeVisible()
+  await page.getByTestId('orchestration-close').click()
+  await expect(page.getByTestId('stage-receipt')).toBeVisible()
+
+  expectRequest(signals, 'POST', `${goalPath}/prepare`)
+  expectRequest(signals, 'POST', `${goalPath}/approve`)
+  expectRequest(signals, 'POST', `${goalPath}/execute`)
+  expectRequest(restartedSignals, 'POST', `${goalPath}/prepare`)
+  expectRequest(restartedSignals, 'POST', `${goalPath}/approve`)
+  expectRequest(restartedSignals, 'POST', `${goalPath}/execute`)
+  expectClean(signals, [
+    { status: 409, method: 'POST', path: `${goalPath}/execute` },
+  ])
+  expectClean(restartedSignals)
+
+  matrix.surfaces = {
+    ...(matrix.surfaces as Record<string, unknown>),
+    orchestrationTerminalRecovery: {
+      status: 'live-tested',
+      classification: 'real AppServer browser; deterministic synthetic backend; disposable fixture',
+      baseDrift: '409 persisted as terminal stopped state with exact code and no result or receipt',
+      browserControls: 'terminal reason visible; retry and close absent',
+      restart: 'same reason retained after a real new AppServer process',
+      freshSlice: 'new objective, review, explicit approval, provider-free execution, review, close',
+      discard: 'prepared slice disabled through exact HTTP revision; durable operator_disabled stop; fresh preparation/approval required',
+      providerExecution: false,
+      ownedFixtureFile: 'created and removed; repository clean at test end',
     },
   }
 })
