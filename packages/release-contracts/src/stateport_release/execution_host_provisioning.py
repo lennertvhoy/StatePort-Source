@@ -6166,6 +6166,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands.add_parser("update", help="execute one authenticated operator update command under the control account")
     issue = subcommands.add_parser("issue-workspace", help="issue one exact reviewed workspace under its installed policy through authenticated sudo; no browser write authority")
     issue.add_argument("--request-digest", required=True)
     emit = subcommands.add_parser(
@@ -6179,6 +6180,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     provision_parser.add_argument("--release-index", type=Path, required=True)
     _add_trust_args(provision_parser, required=True)
+    updater_parser = subcommands.add_parser(
+        "initialize-updater", help="initialize the accepted release updater under the control account"
+    )
+    updater_parser.add_argument("--release-index", type=Path, required=True)
+    updater_parser.add_argument("--actor-id", default=None, help="installer actor identity; defaults to the authenticated local owner")
+    _add_trust_args(updater_parser, required=True)
     provision_parser.add_argument(
         "--plan",
         type=Path,
@@ -6207,6 +6214,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     probe.add_argument("--expected-contract-version", type=int, default=None)
     args = parser.parse_args(argv)
+    if args.command == "update":
+        from .updater_provisioning import MAX_REQUEST_BYTES, execute_update
+        try:
+            code, output = execute_update(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1))
+            sys.stdout.buffer.write(output)
+            return code
+        except Exception:
+            print("control-account updater command refused", file=sys.stderr)
+            return 77
     if args.command == "issue-workspace":
         try:
             raw = sys.stdin.buffer.read(1024 * 1024 + 1)
@@ -6225,6 +6241,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 77
 
     try:
+        if args.command == "initialize-updater":
+            from .updater_provisioning import initialize
+            try:
+                result = initialize(args)
+            except Exception:
+                # Requests and tool output can include private host paths.
+                print("control-account updater initialization refused", file=sys.stderr)
+                return 77
+            print(json.dumps(result, sort_keys=True))
+            return 0
         if args.command == "health-probe":
             expected_mode = (
                 int(args.expected_mode, 8) if args.expected_mode is not None else None

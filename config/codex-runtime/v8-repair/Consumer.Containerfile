@@ -30,10 +30,18 @@ RUN test -s "$RUSTY_V8_ARCHIVE" && test -s "$RUSTY_V8_SRC_BINDING_PATH" \
     && cargo build --locked --release --target x86_64-unknown-linux-musl --bin codex
 RUN mkdir -p /out \
     && cp target/x86_64-unknown-linux-musl/release/codex /out/codex \
+    && strip --strip-debug --strip-unneeded /out/codex \
     && cp Cargo.lock /out/Cargo.lock \
     && cp ../consumer-context.json /out/consumer-context.json \
-    && /out/codex --version | grep -Fx 'codex-cli 0.146.0+stateport.3' \
+    && cp ../LICENSE ../NOTICE /out/ \
+    && version=$(/out/codex --version) \
+    && test "$version" = 'codex-cli 0.146.0+stateport.3' \
+    && readelf -h -l -d /out/codex > /out/elf-headers.txt \
+    && ! grep -Eq 'INTERP|\(NEEDED\)' /out/elf-headers.txt \
     && sha256sum /out/codex > /out/codex.sha256 \
     && cargo tree --locked --target x86_64-unknown-linux-musl --package codex-cli --edges normal > /out/runtime-dependencies.txt \
+    && cargo tree --locked --target x86_64-unknown-linux-musl --package codex-cli --edges normal --prefix none --format '{p} features={f}' > /out/runtime-features.txt \
+    && apk info -vv > /out/build-packages.txt \
+    && pkg-config --modversion openssl > /out/openssl-library-version.txt \
     && rustc --version --verbose > /out/rustc.txt \
     && ld.lld --version > /out/linker-version.txt

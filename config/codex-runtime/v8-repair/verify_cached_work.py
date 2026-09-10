@@ -185,7 +185,7 @@ def _normalise_mount(value: str) -> tuple[str, str, str] | None:
 
 
 def _verify_outer_command(cached_run: Path, expected_image: str, inputs: Path,
-                          vendor_inputs: Path) -> dict:
+                          vendor_inputs: Path, *, historical_runner: Path | None = None) -> dict:
     # These helpers exist on the coordinator, not in the original pinned builder.
     # Inner correspondence reconstruction must retain the original pilot API.
     from pilot import _read_resume_json, validate_resume_admission
@@ -273,7 +273,8 @@ def _verify_outer_command(cached_run: Path, expected_image: str, inputs: Path,
                     or command_receipt.get('resumeAdmission') != validated):
                 raise VerificationError("resumed command and admission bindings differ")
             if (command_receipt.get('pilotSha256') != sha256(HERE / 'pilot.py')
-                    or command_receipt.get('runnerSha256') != sha256(HERE / 'booked_pilot.py')):
+                    or command_receipt.get('runnerSha256') != _regular_digest(
+                        historical_runner if historical_runner is not None else HERE / 'booked_pilot.py')):
                 raise VerificationError("resumed pilot or runner identity differs")
         except (OSError, KeyError, TypeError, ValueError, StopIteration) as error:
             raise VerificationError("resumed outer command lacks a valid bound admission receipt") from error
@@ -348,7 +349,7 @@ def _verify_receipts(cached_run: Path, expected_image: str, value: dict) -> dict
     return {"recipeSha256": recipe_hash, "builderImage": expected_image, "cachedBuildStatus": build["status"]}
 
 
-def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: Path, staging: Path) -> dict:
+def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: Path, staging: Path, *, historical_runner: Path | None = None) -> dict:
     # Host-only governor integration; the inner image startup must depend only
     # on the recipe/pilot modules available in the pinned image.
     from booked_pilot import observed_native, governor_cgroup_parent
@@ -359,7 +360,7 @@ def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: P
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise VerificationError("builder image identity is not an exact SHA-256")
     verify_inputs(inputs)
-    outer = _verify_outer_command(cached_run, image, inputs, vendor_inputs)
+    outer = _verify_outer_command(cached_run, image, inputs, vendor_inputs, historical_runner=historical_runner)
     receipt = _verify_receipts(cached_run, image, value)
     staging.mkdir(parents=False, exist_ok=False)
     # Archive installers (and dpkg) are executable only in the pinned builder
@@ -400,6 +401,9 @@ def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: P
         "vendorInputs": str(vendor_inputs),
         "verifierSha256": sha256(Path(__file__).resolve()),
         "outerCommand": outer,
+        "historicalRunner": ({"path": str(historical_runner.absolute()),
+                              "sha256": _regular_digest(historical_runner)}
+                             if historical_runner is not None else None),
         "trees": compared["trees"],
         "generatedState": "excluded; target, cargo, home, tmp, artifacts are not provenance inputs",
         "qualification": "not_run; final reproducibility and release scan remain required",
@@ -409,6 +413,8 @@ def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: P
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cached-run", type=Path)
+    parser.add_argument("--historical-runner", type=Path,
+                        help="reviewed historical runner source; hash checked, never executed")
     parser.add_argument("--inputs", type=Path)
     parser.add_argument("--vendor-inputs", type=Path)
     parser.add_argument("--image-id-file", type=Path)
@@ -451,7 +457,7 @@ def main() -> int:
             return 0
         if not all((args.cached_run, args.inputs, args.vendor_inputs, args.image_id_file, args.staging)):
             raise VerificationError("host verification requires cached-run, inputs, vendor-inputs, image-id-file and staging")
-        result = verify(args.cached_run.resolve(), args.inputs.resolve(strict=True), args.vendor_inputs.resolve(strict=True), args.image_id_file.resolve(strict=True), args.staging.resolve())
+        result = verify(args.cached_run.resolve(), args.inputs.resolve(strict=True), args.vendor_inputs.resolve(strict=True), args.image_id_file.resolve(strict=True), args.staging.resolve(), historical_runner=args.historical_runner)
     except (OSError, VerificationError, ValueError, RuntimeError) as error:
         print(json.dumps({"status": "cached-work-refused", "error": str(error)}, indent=2))
         return 1

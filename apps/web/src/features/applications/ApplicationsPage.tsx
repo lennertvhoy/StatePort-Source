@@ -80,6 +80,9 @@ export default function ApplicationsPage() {
   const reconcileUnpinned = useApplicationsPrefs((s) => s.reconcileUnpinned)
   const moveUnpinned = useApplicationsPrefs((s) => s.moveUnpinned)
   const [defaultSort, setDefaultSort] = useState<ApplicationsSort>('recent')
+  // Do not guess the server preference while the request is pending. A saved
+  // tool must never be opened by an early Continue click before this resolves.
+  const [restoreLastTool, setRestoreLastTool] = useState<boolean | null>(null)
   const [sortSettingsError, setSortSettingsError] = useState(false)
   const [showRecents, setShowRecents] = useState(false)
   const [orderPersistenceError, setOrderPersistenceError] = useState(false)
@@ -100,6 +103,7 @@ export default function ApplicationsPage() {
       if (!cancelled) {
         setDefaultSort(settings.general.defaultApplicationSorting)
         setShowRecents(settings.general.showRecentApplications)
+        setRestoreLastTool(settings.navigation.restoreLastTool)
         setSortSettingsError(false)
       }
     }).catch(() => {
@@ -166,7 +170,10 @@ export default function ApplicationsPage() {
     if (last) return last
     return [...instances].sort((a, b) => (b.lastOpenedAt ?? '').localeCompare(a.lastOpenedAt ?? ''))[0] ?? null
   }, [instances, continuity.lastInstanceId])
-  const heroTarget = useMemo(() => (hero ? resumeTargetFor(hero, continuity) : null), [hero, continuity])
+  const heroTarget = useMemo(
+    () => (hero ? resumeTargetFor(hero, continuity, { restoreLastTool: restoreLastTool === true }) : null),
+    [hero, continuity, restoreLastTool],
+  )
   const heroLiveOp = hero ? operations.filter((o) => o.kind !== 'infrastructure_observation').find((o) => o.instanceId === hero.id && LIVE_OP_STATES.includes(o.state)) : undefined
 
   // ── Recently used (excluding the hero, most recent first) ──────────────────

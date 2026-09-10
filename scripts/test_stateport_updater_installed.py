@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import inspect
+import io
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,7 @@ from stateport_updater import (
 from stateport_updater.authority import UpdateAuthorityError, _validate_receipt  # noqa: E402
 from stateport_updater.cli import main  # noqa: E402
 from stateport_updater.engine import TARGET_ID  # noqa: E402
+from stateport_updater.genesis import initialize_installed_updater  # noqa: E402
 from stateport_updater.installed import (  # noqa: E402
     AUTHORIZATION_BUNDLE_SCHEMA,
     IDENTITY_SCHEMA,
@@ -57,6 +59,7 @@ from stateport_updater.installed import (  # noqa: E402
 )
 from scripts.test_stateport_updater import (  # noqa: E402
     NOW,
+    PINNED_POLICY,
     POLICY,
     FixtureAuthority,
     FixtureHost,
@@ -65,8 +68,10 @@ from scripts.test_stateport_updater import (  # noqa: E402
     _EphemeralTestVerifier,
     initialized_engine,
     initialized_pinned_engine,
+    pinned_envelope,
 )
 from scripts.test_release_contracts import (  # noqa: E402
+    PINNED_KEY,
     _signature,
     release_index,
     topology_digest,
@@ -78,6 +83,138 @@ INSTALLER_ORIGIN = "https://github.com/stateport/stateport-installer.git"
 INSTALLER_VERSION = "0.1.0"
 INSTALLER_ACTOR = "stateport-installer"
 UPDATER_ROOT = "updater"
+
+
+def genesis_fixture(tmp_path: Path) -> tuple[UpdateStore, Any, dict[str, Any]]:
+    envelope, _document, _identity = pinned_envelope(
+        "stateport-alpha-0.1.0-rc.1", "0.1.0-rc.1", predecessor=None
+    )
+    store = UpdateStore.create(tmp_path / UPDATER_ROOT)
+    trust_root = {
+        "schema": "stateport.internal-update-trust-root/v1",
+        "trustRootId": "update_trust_root_" + "1" * 32,
+        "trustRootDigest": "sha256:" + "2" * 64,
+        "mode": "pinned-public-key",
+        "keyId": PINNED_KEY.key_id,
+        "publicKeyFingerprint": PINNED_KEY.public_key_fingerprint,
+        "channel": "alpha",
+        "targetId": PINNED_POLICY.expected_target,
+    }
+    (store.root / "trust").mkdir(mode=0o700)
+    (store.root / "trust" / "trust-root.json").write_text(
+        json.dumps(trust_root, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return store, envelope, trust_root
+
+
+def run_genesis(store: UpdateStore, envelope: Any, trust_root: Mapping[str, Any], *, actor_id: str = INSTALLER_ACTOR):
+    return initialize_installed_updater(
+        store,
+        envelope,
+        UpdatePolicy(mode="download-and-notify", channel="alpha"),
+        verification_policy=PINNED_POLICY,
+        signature_verifier=_EphemeralTestVerifier(),
+        target_id=PINNED_POLICY.expected_target,
+        trust_root=trust_root,
+        installer_digest=INSTALLER_DIGEST,
+        installer_origin=INSTALLER_ORIGIN,
+        installer_version=INSTALLER_VERSION,
+        actor_id=actor_id,
+        clock=lambda: NOW,
+    )
+
+
+def _updater_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_public_genesis_api_converges_on_a_real_store_without_host_effects(
+    tmp_path: Path,
+) -> None:
+    store, envelope, trust_root = genesis_fixture(tmp_path)
+    first = run_genesis(store, envelope, trust_root)
+    before = _updater_bytes(store.root)
+
+    second = run_genesis(UpdateStore.open_existing(store.root), envelope, trust_root)
+
+    assert first.admission == second.admission
+    assert first.identity == second.identity
+    assert first.install_trust == second.install_trust
+    assert _updater_bytes(store.root) == before
+    assert not (store.root / "host-effects").exists()
+    assert not (store.root / "host-receipts").exists()
+
+
+def test_public_genesis_api_refuses_conflicting_status_identity_and_trust(
+    tmp_path: Path,
+) -> None:
+    store, envelope, trust_root = genesis_fixture(tmp_path)
+    run_genesis(store, envelope, trust_root)
+
+    status_path = store.status_path
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["current"] = {**status["current"], "releaseId": "stateport-alpha-9.9.9-rc.1"}
+    status["accepted"] = status["current"]
+    status_path.write_text(json.dumps(status, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(UpdateAuthorityError) as status_failure:
+        run_genesis(UpdateStore.open_existing(store.root), envelope, trust_root)
+    assert status_failure.value.code == "updater_genesis_conflict"
+
+    # Restore the status and alter only the create-only installed identity.
+    status["current"] = {
+        **status["current"],
+        "releaseId": "stateport-alpha-0.1.0-rc.1",
+    }
+    status["accepted"] = status["current"]
+    status_path.write_text(json.dumps(status, sort_keys=True) + "\n", encoding="utf-8")
+    identity_path = next((store.root / "installed-authority/identity").glob("*.json"))
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    original_identity = dict(identity)
+    identity_body = {key: value for key, value in identity.items() if key not in {"identityId", "identityDigest"}}
+    identity_body["releaseId"] = "stateport-alpha-9.9.9-rc.1"
+    identity_digest = canonical_digest(identity_body)
+    identity = {
+        **identity_body,
+        "identityId": f"installed_identity_{identity_digest.removeprefix('sha256:')[:32]}",
+        "identityDigest": identity_digest,
+    }
+    identity_path.unlink()
+    identity_path = identity_path.with_name(f"{identity['identityId']}.json")
+    identity_path.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
+    identity_path.chmod(0o600)
+    with pytest.raises(UpdateAuthorityError) as identity_failure:
+        run_genesis(UpdateStore.open_existing(store.root), envelope, trust_root)
+    assert identity_failure.value.code == "updater_genesis_conflict"
+
+    # Restore the identity and alter only the create-only install-trust record.
+    identity_path.unlink()
+    identity_path = identity_path.with_name(f"{original_identity['identityId']}.json")
+    identity_path.write_text(json.dumps(original_identity, sort_keys=True) + "\n", encoding="utf-8")
+    identity_path.chmod(0o600)
+    trust_path = store.root / "trust/install-trust.json"
+    install_trust = json.loads(trust_path.read_text(encoding="utf-8"))
+    install_trust["channel"] = "stable"
+    trust_path.write_text(json.dumps(install_trust, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(UpdateAuthorityError) as trust_failure:
+        run_genesis(UpdateStore.open_existing(store.root), envelope, trust_root)
+    assert trust_failure.value.code == "updater_genesis_conflict"
+
+
+def test_public_genesis_api_rejects_non_object_install_trust(
+    tmp_path: Path,
+) -> None:
+    store, envelope, trust_root = genesis_fixture(tmp_path)
+    run_genesis(store, envelope, trust_root)
+    trust_path = store.root / "trust/install-trust.json"
+    trust_path.write_text("[]\n", encoding="utf-8")
+
+    with pytest.raises(UpdateAuthorityError) as failure:
+        run_genesis(UpdateStore.open_existing(store.root), envelope, trust_root)
+    assert failure.value.code == "state_unreadable"
 
 
 def inject(tmp_path: Path) -> dict[str, Any]:
@@ -646,9 +783,12 @@ def test_apply_with_authorization_still_requires_control_plane(
     }
 
 
+@pytest.mark.parametrize("transport", ["file", "stdio"])
 def test_cli_check_plan_authorize_apply_roundtrip(
     tmp_path: Path,
     capsysbinary: pytest.CaptureFixture[bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
 ) -> None:
     _updater, host, _authority, successor, document = initialized_engine(tmp_path)
     genesis = inject(tmp_path)
@@ -696,15 +836,20 @@ def test_cli_check_plan_authorize_apply_roundtrip(
                 "--plan-id",
                 plan["planId"],
                 "--output",
-                str(bundle),
+                "-" if transport == "stdio" else str(bundle),
             )
         )
         == 0
     )
-    assert payload(capsysbinary)["result"] == "authorization_reserved"
-    written = json.loads(bundle.read_text())
+    response = payload(capsysbinary)
+    if transport == "stdio":
+        written = response
+        assert not bundle.exists()
+    else:
+        assert response["result"] == "authorization_reserved"
+        written = json.loads(bundle.read_text())
+        assert bundle.stat().st_mode & 0o777 == 0o600
     assert written["schema"] == AUTHORIZATION_BUNDLE_SCHEMA
-    assert bundle.stat().st_mode & 0o777 == 0o600
 
     replay = tmp_path / "authorization-replay.json"
     assert (
@@ -723,6 +868,9 @@ def test_cli_check_plan_authorize_apply_roundtrip(
     payload(capsysbinary)
     assert json.loads(replay.read_text()) == written
 
+    if transport == "stdio":
+        monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(written).encode())))
+
     assert (
         main(
             cli_args(
@@ -731,7 +879,7 @@ def test_cli_check_plan_authorize_apply_roundtrip(
                 "--plan-id",
                 plan["planId"],
                 "--authorization",
-                str(bundle),
+                "-" if transport == "stdio" else str(bundle),
             ),
             control_plane=binding(host),
         )
@@ -749,6 +897,15 @@ def test_cli_check_plan_authorize_apply_roundtrip(
 
     assert main(cli_args(tmp_path, "plan", "--rollback"), control_plane=binding(host)) == 0
     assert payload(capsysbinary)["operation"] == "rollback"
+
+
+@pytest.mark.parametrize("content", [b"[]", b"{bad", b"\xff", b"{}", b"x" * (2 * 1024 * 1024 + 1), b"[" * 1000 + b"]" * 1000])
+def test_authorization_stdin_refuses_malformed_or_unbounded_data(monkeypatch, content):
+    from stateport_updater.cli import _load_authorization
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(content)))
+    with pytest.raises(UpdateAuthorityError) as failure:
+        _load_authorization(Path("-"))
+    assert failure.value.code == "authority_reservation_invalid"
 
 
 def test_cli_policy_show_and_set_roundtrip(
@@ -1023,6 +1180,56 @@ def test_cli_check_is_read_only_and_plan_retains_the_successor_bundle(
     assert slot.stat().st_mode & 0o777 == 0o600
 
     assert slot.read_bytes() == SUCCESSOR_BUNDLE
+
+
+def test_candidate_engine_reverification_uses_live_staged_bundle_bytes(
+    tmp_path: Path, capsysbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    from dataclasses import replace
+
+    _updater, host, _authority, _successor, document = initialized_engine(tmp_path)
+    inject(tmp_path)
+    state_root = tmp_path / UPDATER_ROOT
+    durable = state_root / "bundles"
+    durable.mkdir()
+    index, staged = _staged_successor(tmp_path, document)
+    selected = {canonical_digest(staged["signatures"][0])}
+    selected.update(canonical_digest(image["signature"]) for image in staged["signed"]["images"])
+    observations = []
+
+    class RequireBundle(_RetainingTestVerifier):
+        # Signature math remains explicit fixture crypto; actual byte presence
+        # and create-only retention are required at each verification boundary.
+        def _require(self, signature):
+            if canonical_digest(signature) in selected:
+                slot = bundle_slot(self._bundle_root, signature)
+                assert slot.read_bytes() == SUCCESSOR_BUNDLE
+                observations.append(self._bundle_root)
+
+        def verify_blob(self, payload, signature):
+            self._require(signature)
+            return super().verify_blob(payload, signature)
+
+        def verify_image(self, reference, signature):
+            self._require(signature)
+            return super().verify_image(reference, signature)
+
+    binding = replace(_retaining_binding(host, durable),
+                      signature_verifier=RequireBundle(durable),
+                      transport_verifier_factory=lambda root: RequireBundle(root))
+    before = {path.relative_to(state_root): path.read_bytes()
+              for path in state_root.rglob("*") if path.is_file()}
+    assert main(cli_args(tmp_path, "check", "--release-index", str(index)), control_plane=binding) == 0
+    assert payload(capsysbinary)["result"] == "update_available"
+    assert len(observations) >= 2 * len(selected)
+    assert durable not in observations
+    assert all(not root.exists() for root in observations)
+    after = {path.relative_to(state_root): path.read_bytes()
+             for path in state_root.rglob("*") if path.is_file()}
+    assert before == after
+    assert main(cli_args(tmp_path, "plan", "--release-index", str(index)), control_plane=binding) == 0
+    payload(capsysbinary)
+    assert bundle_slot(durable, staged["signatures"][0]).read_bytes() == SUCCESSOR_BUNDLE
 
 
 def test_cli_check_refuses_a_successor_bundle_that_diverges_from_the_record(
@@ -1416,3 +1623,51 @@ def test_cli_check_reports_an_unavailable_successor_predecessor(
         == 3
     )
     assert payload(capsysbinary)["code"] == "release_predecessor_unavailable"
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_candidate_manifest_transport_checks_digest_before_retention(tmp_path: Path, tampered: bool) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from stateport_updater.cli import _retain_image_manifests
+
+    content = b'{"schemaVersion":2,"fixture":"candidate-manifest"}'
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    image = {"imageId": "stateport-web", "digest": digest,
+             "signature": {"subjectKind": "oci-manifest-blob"}}
+    index = SimpleNamespace(document={"signed": {"images": [image]}})
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest").write_bytes(content + (b"changed" if tampered else b""))
+    durable = tmp_path / "durable"
+    durable.mkdir()
+
+    class Resolver:
+        def __init__(self, root):
+            self.root = root
+
+        def resolve_local_image_manifest(self, image_id, claimed):
+            assert (image_id, claimed) == ("stateport-web", digest)
+            return (self.root / "manifest").read_bytes()
+
+    binding = replace(_retaining_binding(object(), durable),
+                      transport_verifier_factory=lambda root: Resolver(root))
+    if tampered:
+        with pytest.raises(UpdateAuthorityError, match="exact candidate image manifest"):
+            _retain_image_manifests(binding, index, source, durable)
+        assert list(durable.iterdir()) == []
+    else:
+        _retain_image_manifests(binding, index, source, durable)
+        slot = durable / "image-manifests" / (digest.removeprefix("sha256:") + ".json")
+        assert slot.read_bytes() == content
+        _retain_image_manifests(binding, index, source, durable)
+        assert slot.read_bytes() == content
+
+
+def test_shared_genesis_actor_conflict_preserves_all_bytes(tmp_path: Path) -> None:
+    store, envelope, trust_root = genesis_fixture(tmp_path)
+    run_genesis(store, envelope, trust_root)
+    before = _updater_bytes(store.root)
+    with pytest.raises(UpdateAuthorityError):
+        run_genesis(store, envelope, trust_root, actor_id="foreign-actor")
+    assert _updater_bytes(store.root) == before

@@ -216,3 +216,53 @@ def test_booked_resume_mounts_external_receipt_and_reviewed_code_read_only(tmp_p
     context = json.loads((output / 'resume-admission.json').read_text())
     assert context['receiptSha256'] == pilot.sha256(path)
     assert not (old / 'work/correspondence-result.json').exists()
+
+
+def test_delegation_moves_only_owned_direct_tasks_and_preserves_limits(tmp_path: Path, monkeypatch) -> None:
+    import booked_pilot
+    parent = "/user.slice/user-1000.slice/user@1000.service/stateport.slice/stateport-heavy.slice/stateport-heavy-1-2.service"
+    cgroups = tmp_path / 'cgroups'
+    directory = cgroups / parent.lstrip('/')
+    directory.mkdir(parents=True)
+    proc = tmp_path / 'proc'
+    for pid in ('self', '11', '12'):
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / 'cgroup').write_text('0::' + parent + '\n')
+    values = {'cgroup.controllers': 'cpu io memory pids', 'cgroup.subtree_control': '',
+              'cgroup.procs': '11\n12\n', 'memory.max': '3221225472',
+              'memory.high': '2684354560', 'memory.swap.max': '1073741824',
+              'cpu.max': '70000 100000', 'pids.max': '4096'}
+    for name, value in values.items():
+        (directory / name).write_text(value)
+    output = tmp_path / 'proof'
+    output.mkdir()
+    real_write = Path.write_text
+    moves = []
+    def write(path, value, *args, **kwargs):
+        if path == directory / 'runtime/cgroup.procs':
+            moves.append(value)
+            remaining = [pid for pid in (directory / 'cgroup.procs').read_text().split() if pid != value]
+            real_write(directory / 'cgroup.procs', '\n'.join(remaining))
+            real_write(proc / value / 'cgroup', '0::' + parent + '/runtime\n')
+        elif path == directory / 'cgroup.subtree_control':
+            assert not (directory / 'cgroup.procs').read_text().strip()
+            value = value.replace('+', '')
+        return real_write(path, value, *args, **kwargs)
+    monkeypatch.setattr(Path, 'write_text', write)
+    booked_pilot.prepare_delegation(parent, output, proc=proc, cgroups=cgroups)
+    assert moves == ['11', '12']
+    result = json.loads((output / 'delegation.json').read_text())
+    assert result['enabledAfter'] == ['cpu', 'io', 'memory', 'pids']
+    for name in ('memory.max', 'memory.high', 'memory.swap.max', 'cpu.max', 'pids.max'):
+        assert (directory / name).read_text() == values[name]
+
+
+def test_delegation_failure_prevents_container_launch(tmp_path: Path, monkeypatch) -> None:
+    import booked_pilot
+    def refuse(*args, **kwargs):
+        raise ValueError('missing controller')
+    monkeypatch.setattr(booked_pilot, 'prepare_delegation', refuse)
+    monkeypatch.setattr(booked_pilot.subprocess, 'Popen', lambda *a, **k: pytest.fail('launched without delegation'))
+    assert booked_pilot.observed_native(['podman', 'run'], tmp_path, '/not-admitted', None) == 1
+    result = json.loads((tmp_path / 'containment-failure.json').read_text())
+    assert 'before launch' in result['nativeCompilation']

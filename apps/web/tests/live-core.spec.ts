@@ -5210,6 +5210,10 @@ test('Saved startup focus reaches the real Workbench once and respects explicit 
   await expect(page.getByTestId('workbench-focus')).toHaveCount(0)
   await expect(page).not.toHaveURL(/focus=1/)
   await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/files?focus=0&view=wide`)
+  // Establish the real Files result before the separate reload. Immediate
+  // goto+reload raced newly scheduled bootstrap reads after observation began.
+  await expect(page.getByTestId('workbench-shell')).toBeVisible()
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
   await reloadWithReadObservation(page, signals)
   await expect(page.getByTestId('workbench-shell')).toBeVisible()
   await expect(page.getByTestId('files-stub')).toBeVisible()
@@ -5225,6 +5229,205 @@ test('Saved startup focus reaches the real Workbench once and respects explicit 
   expectClean(signals, [], [], { pathPattern: /^\/v1\/instances(\/live-core-[\w-]+(\/experience)?)?$/ })
 })
 
+
+for (const restoreView of [false, true]) {
+  for (const restoreTool of [false, true]) {
+    test(`Saved resume preferences restore view=${restoreView} tool=${restoreTool} after document reload`, async ({ page }) => {
+      const signals = browserSignals(page)
+      const saveToggle = async (route: string, anchor: string, value: boolean) => {
+        await openApplicationRoute(page, route)
+        const toggle = page.locator(`#setting-${anchor}`).getByRole('switch')
+        await expect(toggle).toHaveAttribute('aria-checked', /^(true|false)$/)
+        // Exercise an actual save even when this case requests the default.
+        if ((await toggle.getAttribute('aria-checked')) === String(value)) {
+          await toggle.click()
+          await page.getByTestId('settings-save').click()
+          await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+        }
+        await toggle.click()
+        await page.getByTestId('settings-save').click()
+        await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+        await expect(toggle).toHaveAttribute('aria-checked', String(value))
+      }
+      await saveToggle('/settings/general', 'reopen-app', true)
+      await saveToggle('/settings/general', 'reopen-view', restoreView)
+      await saveToggle('/settings/navigation', 'restore-tool', restoreTool)
+      const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('stateport.http.global-ui-settings.v1') ?? '{}'))
+      expect(saved.general.reopenLastApplication).toBe(true)
+      expect(saved.general.reopenLastApplicationView).toBe(restoreView)
+      expect(saved.navigation.restoreLastTool).toBe(restoreTool)
+
+      // Populate continuity by using the real Files view, never by seeding storage.
+      await openApplicationRoute(page, `/app/${PROJECT_ID}/workbench/files`)
+      await expect(page.getByTestId('tree-row-src')).toBeVisible()
+      await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('stateport.workspace.v1') ?? '{}').state)).toMatchObject({
+        lastInstanceId: PROJECT_ID,
+        lastView: 'workbench',
+        lastWorkbenchTool: 'files',
+      })
+      const expectedRoute = `/app/${PROJECT_ID}${restoreView ? `/workbench${restoreTool ? '/files' : ''}` : ''}`
+      await page.goto(`${service.url}/`, { waitUntil: 'domcontentloaded' })
+      await expect(page).toHaveURL(`${service.url}/#${expectedRoute}`)
+      await expect(page.getByTestId(restoreView ? 'workbench-shell' : 'app-overview-page')).toBeVisible()
+      if (restoreView && restoreTool) await expect(page.getByTestId('tree-row-src')).toBeVisible()
+      expect(await page.evaluate(() => JSON.parse(localStorage.getItem('stateport.http.global-ui-settings.v1') ?? '{}'))).toEqual(saved)
+      const startupUrl = page.url()
+      // Continue is an explicit action: it restores the saved view even when
+      // automatic view reopening is off, but still obeys Restore last tool.
+      await openApplicationRoute(page, `/app/${PROJECT_ID}/workbench/files`)
+      await expect(page.getByTestId('tree-row-src')).toBeVisible()
+      await openApplicationRoute(page, '/applications')
+      const hero = page.getByTestId('continue-hero')
+      await expect(hero).toContainText(restoreTool ? 'Files' : 'Workbench')
+      await hero.getByRole('button', { name: /^Continue in / }).click()
+      const continueRoute = `/app/${PROJECT_ID}/workbench${restoreTool ? '/files' : ''}`
+      await expect(page).toHaveURL(`${service.url}/#${continueRoute}`)
+      await expect(page.getByTestId('workbench-shell')).toBeVisible()
+      if (restoreTool) await expect(page.getByTestId('tree-row-src')).toBeVisible()
+      writeFileSync(path.join(ARTIFACT_ROOT, `resume-view-${restoreView}-tool-${restoreTool}.json`), JSON.stringify({
+        classification: 'source browser, real AppServer application lookup and Files listing; saved local UI preference and natural continuity; installed unrun',
+        restoreView, restoreTool, expectedRoute, startupUrl, continueRoute, continueUrl: page.url(), saved,
+      }, null, 2))
+      expectClean(signals, [], [], { pathPattern: /^\/v1\/instances(\/live-core-[\w-]+(\/experience)?)?$/ })
+    })
+  }
+}
+
+test('Saved message delivery details expose real inbound acceptance after reload', async ({ page }) => {
+  const signals = browserSignals(page)
+  const save = async (enabled: boolean) => {
+    await openApplicationRoute(page, '/settings/conversation')
+    const toggle = page.locator('#setting-delivery-details').getByRole('switch')
+    await expect(toggle).toHaveAttribute('aria-checked', /^(true|false)$/)
+    if ((await toggle.getAttribute('aria-checked')) !== String(enabled)) {
+      await toggle.click()
+      await page.getByTestId('settings-save').click()
+      await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+    }
+  }
+  await save(true)
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/conversation`)
+  const messageText = 'Public-safe delivery preference acceptance proof.'
+  const acceptedResponse = page.waitForResponse(response =>
+    response.request().method() === 'POST' && new URL(response.url()).pathname === `/v1/instances/${PROJECT_ID}/conversation/messages`)
+  await page.getByTestId('composer-input').fill(messageText)
+  await page.getByTestId('composer-send').click()
+  const accepted = await (await acceptedResponse).json()
+  const wire = accepted.result.presentation.messages.find((message: { body?: string }) => message.body === messageText)
+  expect(wire).toBeDefined()
+  expect(wire.display).toMatchObject({ inboundAccepted: true, deliveryState: [] })
+  const row = page.getByTestId('message-user').filter({ hasText: messageText })
+  await expect(row).toBeVisible()
+  await reloadWithReadObservation(page, signals)
+  await expect(row.getByTestId('message-delivery-details')).toContainText('Recorded inbound acceptance')
+  await expect(row.getByTestId('message-delivery-details')).toContainText('No delivery receipt recorded')
+  await expect(row.getByTestId('message-delivery-details')).not.toContainText('Delivered')
+
+  // Observe the independently persisted message, not just a successful POST.
+  const stored = JSON.parse(execFileSync(PYTHON, ['-c',
+    'import json,sqlite3,sys; c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); r=c.execute("SELECT payload FROM messages WHERE message_id=?",(sys.argv[2],)).fetchone(); print(r[0] if r else "null")',
+    path.join(disposableRoot, 'xdg', 'state', 'stateport', 'conversation.sqlite3'), wire.messageId,
+  ], { encoding: 'utf8', timeout: 5_000 }))
+  expect(stored.messageId).toBe(wire.messageId)
+  expect(stored.externalIdentity.direction).toBe('inbound')
+
+  await save(false)
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/conversation`)
+  await reloadWithReadObservation(page, signals)
+  await expect(row).toBeVisible()
+  await expect(row.getByTestId('message-delivery-details')).toHaveCount(0)
+  await expect(page.getByTestId('thread-header')).toBeVisible()
+  await expect(page.getByTestId('composer-input')).toBeVisible()
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('stateport.http.global-ui-settings.v1') ?? '{}').conversation?.showDeliveryDetails)).toBe(false)
+
+  await save(true)
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/conversation`)
+  await reloadWithReadObservation(page, signals)
+  await expect(row.getByTestId('message-delivery-details')).toContainText('Recorded inbound acceptance')
+  await expect(page.getByTestId('composer-input')).toBeVisible()
+  expect(readFileSync(path.join(projectRoot, 'state', 'PROJECT.yaml'), 'utf8')).toBe(projectCanonicalBefore)
+  writeFileSync(path.join(ARTIFACT_ROOT, 'message-delivery-preference.json'), JSON.stringify({
+    classification: 'source browser with real Web ingest, persisted SQLite message and presentation; local saved preference; no external outbound delivery or human-read acknowledgement claim; installed unrun',
+    messageId: wire.messageId, recordedDisplay: wire.display, persistedExternalIdentity: stored.externalIdentity,
+    savedOffHidesDetails: true, savedOnRestoresAfterReload: true, composerRetained: true,
+  }, null, 2))
+  expectClean(signals, [], [], { pathPattern: /^\/v1\/instances(\/live-core-[\w-]+(\/experience)?)?$/ })
+})
+
+test('Saved search history records, reuses, disables and clears real palette searches', async ({ page }) => {
+  const signals = browserSignals(page)
+  const storedHistory = () => page.evaluate(() => JSON.parse(localStorage.getItem('stateport.workspace.v1') ?? '{}').state?.searchHistory ?? [])
+  const openPalette = async () => {
+    const settingsRead = page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname === '/v1/settings')
+    await page.keyboard.press('Control+k')
+    await (await settingsRead).finished()
+    await expect(page.getByRole('combobox', { name: 'Search commands' })).toBeVisible()
+  }
+  await openApplicationRoute(page, '/settings/general')
+  const toggle = page.locator('#setting-search-history').getByRole('switch')
+  // Save a real true value even when this is the fresh default.
+  await expect(toggle).toHaveAttribute('aria-checked', 'true')
+  for (const enabled of [false, true]) {
+    await toggle.click()
+    await page.getByTestId('settings-save').click()
+    await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+    await expect(toggle).toHaveAttribute('aria-checked', String(enabled))
+  }
+  await openPalette()
+  const search = page.getByRole('combobox', { name: 'Search commands' })
+  await search.fill('Applications')
+  await page.getByRole('option', { name: 'Go to Applications', exact: true }).click()
+  await expect(page).toHaveURL(`${service.url}/#/applications`)
+  await expect(page.getByTestId('all-applications-section')).toBeVisible()
+  await expect.poll(storedHistory).toEqual(['Applications'])
+  await reloadWithReadObservation(page, signals)
+  await openPalette()
+  await page.getByTestId('command-palette-search-history-item').filter({ hasText: /^Applications$/ }).click()
+  await expect(search).toHaveValue('Applications')
+  for (let index = 0; index < 20; index += 1) {
+    await search.fill(`unmatched-public-search-${index}`)
+    await expect(page.getByText('No matching commands.', { exact: true })).toBeVisible()
+    await search.press('Enter')
+  }
+  await expect.poll(storedHistory).toHaveLength(20)
+  const retained = await storedHistory()
+  await search.fill('')
+  await page.setViewportSize({ width: 390, height: 600 })
+  const history = page.getByTestId('command-palette-search-history')
+  await expect(page.getByTestId('command-palette-search-history-item')).toHaveCount(20)
+  expect(await history.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true)
+  const bounds = await page.getByTestId('command-palette').boundingBox()
+  expect(bounds).not.toBeNull()
+  expect(bounds!.y).toBeGreaterThanOrEqual(0)
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(600)
+  await page.getByTestId('command-palette-search-history-item').last().click()
+  await expect(search).toHaveValue(retained[retained.length - 1])
+  await search.press('Escape')
+  await page.setViewportSize({ width: 1440, height: 900 })
+
+  await openApplicationRoute(page, '/settings/general')
+  await toggle.click()
+  await page.getByTestId('settings-save').click()
+  await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
+  await openPalette()
+  await expect(history).toHaveCount(0)
+  await search.fill('off-search-must-not-persist')
+  await search.press('Enter')
+  expect(await storedHistory()).toEqual(retained)
+  await search.press('Escape')
+  await openApplicationRoute(page, '/settings/privacy')
+  await page.locator('#setting-clear-search').getByRole('button', { name: 'Clear search history', exact: true }).click()
+  await expect.poll(storedHistory).toEqual([])
+  await reloadWithReadObservation(page, signals)
+  expect(await storedHistory()).toEqual([])
+  await expect(page.locator('#setting-clear-search').getByRole('button', { name: 'Clear search history', exact: true })).toBeDisabled()
+  writeFileSync(path.join(ARTIFACT_ROOT, 'search-history-preference.json'), JSON.stringify({
+    classification: 'source browser real palette navigation/search, local persistent history and saved preference; installed unrun',
+    selectedCommandReachedApplications: true, restoredSearch: 'Applications', retainedCount: retained.length,
+    allEntriesAccessibleAt390x600: true, paletteBounds: bounds, offDidNotRecord: true, clearedAfterReload: true,
+  }, null, 2))
+  expectClean(signals, [], [], { pathPattern: /^\/v1\/instances(\/live-core-[\w-]+(\/experience)?)?$/ })
+})
 
 test('Reviewed source authority prepares and downloads exact committed facts without issuing a grant', async ({ page }) => {
   test.skip(process.env.STATEPORT_UI_SOURCE_AUTHORITY !== '1', 'Requires explicit source-authority publication fixture')

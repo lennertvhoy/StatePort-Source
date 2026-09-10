@@ -218,6 +218,21 @@ def test_updater_wheel_installs_without_checkout_or_pythonpath(tmp_path: Path) -
         capture_output=True,
         text=True,
     )
+    # Exercise both production installer import paths in fresh interpreters,
+    # with the installer copied out of the checkout and only the built payload.
+    installer_copy = tmp_path / "install_no_checkout.py"
+    shutil.copyfile(ROOT / "scripts/install_no_checkout.py", installer_copy)
+    for loader, payload in (("load_modules_from_authenticated_wheel", first_wheel),
+                            ("load_modules_from_venv", virtualenv)):
+        subprocess.run(
+            [str(python), "-I", "-c",
+             "import runpy,sys; from pathlib import Path; "
+             "module=runpy.run_path(sys.argv[1]); "
+             "module[sys.argv[2]](Path(sys.argv[3]))",
+             str(installer_copy), loader, str(payload)],
+            cwd=tmp_path, env=environment, check=True,
+            capture_output=True, text=True, timeout=30,
+        )
     state_root = tmp_path / "must-not-exist"
     runtime_environment = {
         "PATH": str(virtualenv / "bin"),

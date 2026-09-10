@@ -322,12 +322,13 @@ def test_gateway_disposes_only_pinned_cipd_version_grammar_in_reviewed_files(tmp
     )
 
 
-def test_gateway_disposes_only_cgroup_fixture_user_path_in_test_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fixture_file", ["scripts/test_release_images.py", "scripts/test_codex_runtime_resume.py"])
+def test_gateway_disposes_only_cgroup_fixture_user_path_in_test_source(tmp_path: Path, fixture_file: str) -> None:
     candidate = tmp_path / "cgroup-candidate"
     candidate.mkdir()
     _write(
-        candidate / "scripts/test_release_images.py",
-        "parent = /user.slice/user-1000.slice/user" + "@1000.service\n",
+        candidate / fixture_file,
+        "parent = \"/user.slice/user-1000.slice/user" + "@1000.service\"\n",
     )
 
     receipt = _gateway_receipt(candidate)
@@ -336,13 +337,13 @@ def test_gateway_disposes_only_cgroup_fixture_user_path_in_test_source(tmp_path:
     assert receipt["reviewedCgroupFixtureCount"] == 1
     assert receipt["highRiskFindingCount"] == 0
     assert _reviewed_cgroup_fixture(
-        PurePosixPath("scripts/test_release_images.py"), "/user.slice/user-1000.slice/user" + "@1000.service"
+        PurePosixPath(fixture_file), "/user.slice/user-1000.slice/user" + "@1000.service"
     )
     assert not _reviewed_cgroup_fixture(
         PurePosixPath("other.py"), "/user.slice/user-1000.slice/user" + "@1000.service"
     )
     assert not _reviewed_cgroup_fixture(
-        PurePosixPath("scripts/test_release_images.py"), "person@" + "company.be"
+        PurePosixPath(fixture_file), "person@" + "company.be"
     )
 
 

@@ -729,6 +729,23 @@ export interface ToolEvent {
   createdAt: string
 }
 
+/** A service-recorded delivery attempt for one conversation message. */
+export interface ConversationMessageDelivery {
+  formatVersion: 'stateport.delivery-receipt/v1'
+  deliveryId: string
+  messageId: string
+  conversationId: string
+  bindingId: string
+  channel: ConversationChannel
+  deliveryPolicy: 'source_channel_only' | 'mirror_to_all' | 'web_primary' | 'telegram_primary'
+  deliveryMode: 'full' | 'notification' | 'archive' | 'suppressed'
+  status: 'planned' | 'delivered' | 'failed' | 'suppressed'
+  createdAt: string
+  externalMessageId: string | null
+  echoGuard: string
+  failureReason: string | null
+}
+
 export interface ConversationMessage {
   id: string
   conversationId: string
@@ -740,6 +757,12 @@ export interface ConversationMessage {
   attachments: Attachment[]
   contextChips: ContextChip[]
   toolEvents: ToolEvent[]
+  /** Source channel recorded on this message, never inferred from the thread. */
+  sourceChannel?: ConversationChannel
+  /** Exact per-message delivery receipts; absent means the legacy wire had no facts. */
+  deliveryState?: ConversationMessageDelivery[]
+  /** Whether the service accepted this message from an inbound channel. */
+  inboundAccepted?: boolean
   /** Set when the message carries a governed-operation proposal card. */
   proposal?: {
     title: string

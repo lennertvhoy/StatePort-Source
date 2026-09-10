@@ -29,9 +29,14 @@ export function StartupRoute() {
           if (cancelled) return
           if (instance.id === id) {
             const safeInstance = { ...instance, id: encodeURIComponent(id) }
-            route = settings.general.reopenLastApplication
-              ? `/app/${safeInstance.id}`
-              : resumeTargetFor(safeInstance, { ...workspace, lastInstanceId: safeInstance.id }).route
+            route = resumeTargetFor(
+              safeInstance,
+              { ...workspace, lastInstanceId: safeInstance.id },
+              {
+                restoreLastApplicationView: settings.general.reopenLastApplicationView,
+                restoreLastTool: settings.navigation.restoreLastTool,
+              },
+            ).route
           }
         }
       } catch {

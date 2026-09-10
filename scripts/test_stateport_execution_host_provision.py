@@ -265,6 +265,8 @@ def _wheel_bytes() -> bytes:
         archive.writestr("stateport_release/__init__.py", b"release-module")
         archive.writestr("stateport_release/sub/engine.py", b"engine-module")
         archive.writestr("execution_host/__init__.py", b"host-module")
+        archive.writestr("stateport_updater/__init__.py", b"updater-module")
+        archive.writestr("stateport_updater/cli.py", b"updater-cli")
         archive.writestr("unrelated/package.py", b"not-provisioning")
         archive.writestr("stateport_release/cached.pyc", b"bytecode")
     return buffer.getvalue()
@@ -275,6 +277,8 @@ def _converged_tree(namespace: dict[str, object]) -> None:
         "stateport_release/__init__.py": b"release-module",
         "stateport_release/sub/engine.py": b"engine-module",
         "execution_host/__init__.py": b"host-module",
+        "stateport_updater/__init__.py": b"updater-module",
+        "stateport_updater/cli.py": b"updater-cli",
     }
     module_root = namespace["module_root"]
     for name, content in entries.items():
@@ -304,7 +308,7 @@ def test_materialization_adopts_byte_identical_existing_tree(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "drift",
-    ["module-content", "extra-file", "manifest", "cosign", "public-key"],
+    ["module-content", "updater-content", "missing-updater", "extra-file", "manifest", "cosign", "public-key"],
 )
 def test_materialization_still_refuses_drifted_existing_tree(
     tmp_path: Path, drift: str
@@ -313,6 +317,10 @@ def test_materialization_still_refuses_drifted_existing_tree(
     _converged_tree(namespace)
     if drift == "module-content":
         (namespace["module_root"] / "execution_host" / "__init__.py").write_bytes(b"drifted")
+    elif drift == "updater-content":
+        (namespace["module_root"] / "stateport_updater" / "cli.py").write_bytes(b"changed-updater")
+    elif drift == "missing-updater":
+        (namespace["module_root"] / "stateport_updater" / "cli.py").unlink()
     elif drift == "extra-file":
         (namespace["module_root"] / "stateport_release" / "extra.py").write_bytes(b"extra")
     elif drift == "manifest":
@@ -467,3 +475,25 @@ def test_execution_service_probe_accepts_only_exact_inactive_status(
             namespace["service_inactive"]("stateport.service")
     else:
         assert namespace["service_inactive"]("stateport.service") is expected
+
+
+def test_fresh_materialization_includes_exact_updater_modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    source = _heredocs()[1]
+    start = source.index("    entries = []\n", source.index("staging = Path(tempfile.mkdtemp"))
+    stop = source.index("    os.chown(staging, 0, 0)", start)
+    import textwrap
+    block = textwrap.dedent(source[start:stop])
+    ownership = []
+    monkeypatch.setattr(os, "chown", lambda path, uid, gid: ownership.append((Path(path), uid, gid)))
+    namespace = _materialize_namespace(tmp_path, _wheel_bytes())
+    namespace.update(staging=tmp_path / "fresh", os=os)
+    exec(compile(block, "fresh-materialization", "exec"), namespace)
+    fresh = namespace["staging"]
+    assert (fresh / "stateport_updater/cli.py").read_bytes() == b"updater-cli"
+    assert (fresh / "stateport_updater/cli.py").stat().st_mode & 0o777 == 0o644
+    assert not (fresh / "unrelated").exists()
+    assert not (fresh / "stateport_release/cached.pyc").exists()
+    lines = namespace["manifest_lines"]
+    assert f"{hashlib.sha256(b'updater-cli').hexdigest()}  stateport_updater/cli.py" in lines
+    assert (fresh / "stateport_updater/cli.py", 0, 0) in ownership

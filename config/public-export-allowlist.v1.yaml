@@ -928,6 +928,7 @@ rules:
   - packages/release-contracts/src/stateport_release/contract.py
   - packages/release-contracts/src/stateport_release/cosign.py
   - packages/release-contracts/src/stateport_release/execution_host_provisioning.py
+  - packages/release-contracts/src/stateport_release/updater_provisioning.py
   - packages/release-contracts/src/stateport_release/schemas/__init__.py
   - packages/release-contracts/src/stateport_release/schemas/candidate-provenance.v1.schema.json
   - packages/release-contracts/src/stateport_release/schemas/candidate-provenance.v2.schema.json
@@ -1018,12 +1019,16 @@ rules:
   - packages/updater/src/stateport_updater/__init__.py
   - packages/updater/src/stateport_updater/__main__.py
   - packages/updater/src/stateport_updater/authority.py
+  - packages/updater/src/stateport_updater/bootstrap.py
   - packages/updater/src/stateport_updater/cli.py
+  - packages/updater/src/stateport_updater/control_cli.py
   - packages/updater/src/stateport_updater/control_plane.py
   - packages/updater/src/stateport_updater/engine.py
+  - packages/updater/src/stateport_updater/genesis.py
   - packages/updater/src/stateport_updater/host_local.py
   - packages/updater/src/stateport_updater/installed.py
   - packages/updater/src/stateport_updater/models.py
+  - packages/updater/src/stateport_updater/operator_cli.py
   - packages/updater/src/stateport_updater/safe_io.py
   - packages/updater/src/stateport_updater/service.py
   - packages/updater/src/stateport_updater/store.py
@@ -1267,6 +1272,7 @@ rules:
   - scripts/test_provider_operation_matrix.py
   - scripts/test_provider_router.py
   - scripts/test_provision_execution_host.py
+  - scripts/test_updater_provisioning.py
   - scripts/test_public_alpha_quickstart.py
   - scripts/test_public_release_bundle.py
   - scripts/test_public_snapshot_audit.py
@@ -1305,9 +1311,11 @@ rules:
   - scripts/test_statepack.py
   - scripts/test_stateport_execution_host_provision.py
   - scripts/test_stateport_updater.py
+  - scripts/test_stateport_updater_bootstrap.py
   - scripts/test_stateport_updater_control_plane.py
   - scripts/test_stateport_updater_host_local.py
   - scripts/test_stateport_updater_installed.py
+  - scripts/test_stateport_updater_operator_transport.py
   - scripts/test_stateport_updater_package.py
   - scripts/test_stateport_updater_service.py
   - scripts/test_statespec_schema_registry.py
@@ -1860,6 +1868,12 @@ rules:
     author retained.
   paths:
   - config/codex-runtime/v8-repair/native-backports/xz-upstream-regression.patch
+- id: native-repair-ts-rs-macro-order
+  classification: third-party-reviewed
+  license: MIT
+  provenanceRationale: Minimal token-emission ordering diff against checksum-bound ts-rs-macros 11.1.0 at upstream commit 1dce5297090804082e9639d2b7d851ba815aa359; exact pre/postimages and original MIT notice retained. No complete dependency payload or artifact included.
+  paths:
+  - config/codex-runtime/v8-repair/native-backports/ts-rs-macros.patch
 - id: native-repair-rusty-v8-lock
   classification: third-party-reviewed
   license: MIT
@@ -1878,6 +1892,7 @@ rules:
   - config/codex-runtime/v8-repair/licenses/Rusty-V8-MIT.txt
   - config/codex-runtime/v8-repair/licenses/V8-BSD-3-Clause.txt
   - config/codex-runtime/v8-repair/licenses/XZ-0BSD.txt
+  - config/codex-runtime/v8-repair/licenses/TS-RS-MIT.txt
 - id: native-repair-documentation
   classification: public-documentation
   license: CC-BY-4.0

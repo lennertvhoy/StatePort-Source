@@ -2123,6 +2123,29 @@ const attachmentWire = z.object({
   retentionClass: z.string().optional(),
 })
 
+const messageDeliveryWire = z.object({
+  formatVersion: z.literal('stateport.delivery-receipt/v1'),
+  deliveryId: z.string(),
+  messageId: z.string(),
+  conversationId: z.string(),
+  bindingId: z.string(),
+  channel: z.enum(['web', 'telegram']),
+  deliveryPolicy: z.enum(['source_channel_only', 'mirror_to_all', 'web_primary', 'telegram_primary']),
+  deliveryMode: z.enum(['full', 'notification', 'archive', 'suppressed']),
+  status: z.enum(['planned', 'delivered', 'failed', 'suppressed']),
+  createdAt: isoTimestamp,
+  externalMessageId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/).nullable(),
+  echoGuard: z.string(),
+  failureReason: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/).nullable(),
+}).superRefine((receipt, context) => {
+  if (receipt.status === 'delivered' && !receipt.externalMessageId) {
+    context.addIssue({ code: 'custom', message: 'delivered receipt requires an external message identity' })
+  }
+  if (receipt.status === 'failed' && !receipt.failureReason) {
+    context.addIssue({ code: 'custom', message: 'failed receipt requires a failure reason' })
+  }
+})
+
 export function mapAttachment(payload: unknown): Attachment {
   const wire = attachmentWire.parse(payload)
   const id = wire.id ?? wire.attachmentId
@@ -2152,12 +2175,18 @@ const messageWire = z.object({
   summary: z.string().optional(),
   sequence: z.number().optional(),
   channel: z.string().optional(),
-  sourceChannel: z.string().optional(),
+  sourceChannel: z.enum(['web', 'telegram']).optional(),
   createdAt: isoTimestamp.optional(),
   at: isoTimestamp.optional(),
   attachments: z.array(z.unknown()).optional(),
   runId: z.string().optional(),
   tool: z.string().optional(),
+  display: z
+    .object({
+      deliveryState: z.array(messageDeliveryWire).optional(),
+      inboundAccepted: z.boolean().optional(),
+    })
+    .optional(),
   proposal: z
     .object({ title: z.string().optional(), detail: z.string().optional(), actionRoute: z.string().optional() })
     .optional(),
@@ -2195,6 +2224,10 @@ function mapMessage(
   }
   const content = wire.text ?? wire.content ?? wire.body ?? wire.summary ?? ''
   const createdAt = wire.createdAt ?? wire.at ?? new Date().toISOString()
+  const deliveryState = wire.display?.deliveryState
+  if (deliveryState?.some((receipt) => receipt.messageId !== id || receipt.conversationId !== identity.conversationId)) {
+    failClosed(`conversation message ${id} carries a delivery receipt for another message`)
+  }
   const base = {
     id,
     conversationId: identity.conversationId,
@@ -2203,6 +2236,9 @@ function mapMessage(
     attachments: (wire.attachments ?? []).map(mapAttachment),
     contextChips: [],
     toolEvents: [],
+    ...(wire.sourceChannel === undefined ? {} : { sourceChannel: wire.sourceChannel }),
+    ...(deliveryState === undefined ? {} : { deliveryState }),
+    ...(wire.display?.inboundAccepted === undefined ? {} : { inboundAccepted: wire.display.inboundAccepted }),
   }
   switch (wire.kind as (typeof MESSAGE_KINDS)[number]) {
     case 'user_message':

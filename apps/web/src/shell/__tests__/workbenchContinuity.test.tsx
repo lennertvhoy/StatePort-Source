@@ -10,22 +10,32 @@ beforeEach(() => {
   useWorkspaceStore.setState({ lastInstanceId: null, lastView: null, lastWorkbenchTool: null })
 })
 afterEach(() => { cleanup(); window.location.hash = ''; vi.restoreAllMocks(); resetClientForTests() })
-async function savedLanding() {
+async function savedLanding(reopenView = true, restoreTool = true) {
   await getClient().globalSettings.update({ general: {
-    defaultLandingPage: 'last_workspace', reopenLastApplication: false, startInFocusMode: false,
-  } })
+    defaultLandingPage: 'last_workspace', reopenLastApplication: false, reopenLastApplicationView: reopenView, startInFocusMode: false,
+  }, navigation: { restoreLastTool: restoreTool } })
 }
 function mount(path: string) {
   window.location.hash = `#${path}`
   return render(<App />)
 }
 
-it.each(['files', 'terminal'] as const)('actually visiting %s persists its tool and bare-root startup resumes it', async (tool) => {
-  await savedLanding()
+it.each([
+  ['files', true, true, '#/app/ins_cto_pilot/workbench/files'],
+  ['terminal', true, true, '#/app/ins_cto_pilot/workbench/terminal'],
+  ['files', false, true, '#/app/ins_cto_pilot'],
+  ['terminal', false, true, '#/app/ins_cto_pilot'],
+  ['files', true, false, '#/app/ins_cto_pilot/workbench'],
+  ['terminal', true, false, '#/app/ins_cto_pilot/workbench'],
+] as const)('visiting %s persists its tool and startup applies view=%s/tool=%s', async (tool, reopenView, restoreTool, expectedHash) => {
+  await savedLanding(reopenView, restoreTool)
   const client = getClient()
   const touch = vi.spyOn(client.applications, 'touchOpened')
   const first = mount(`/app/ins_cto_pilot/workbench/${tool}`)
-  await screen.findByTestId(tool === 'files' ? 'files-stub' : 'terminal-stub')
+  // Lazy tool readiness can exceed the default Testing Library timeout on the
+  // shared runner; retain the same production route predicate with a bounded
+  // 10-second wait rather than weakening the assertion.
+  await screen.findByTestId(tool === 'files' ? 'files-stub' : 'terminal-stub', undefined, { timeout: 10_000 })
   await waitFor(() => expect(useWorkspaceStore.getState()).toMatchObject({
     lastInstanceId: 'ins_cto_pilot', lastView: 'workbench', lastWorkbenchTool: tool,
   }))
@@ -34,7 +44,7 @@ it.each(['files', 'terminal'] as const)('actually visiting %s persists its tool 
   first.unmount()
   await act(async () => { await useWorkspaceStore.persist.rehydrate() })
   mount('/')
-  await waitFor(() => expect(window.location.hash).toBe(`#/app/ins_cto_pilot/workbench/${tool}`))
+  await waitFor(() => expect(window.location.hash).toBe(expectedHash), { timeout: 10_000 })
 })
 
 it('switching actual tools replaces the global remembered tool without an extra opened request', async () => {

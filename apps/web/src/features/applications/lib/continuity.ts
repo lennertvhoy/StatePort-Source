@@ -24,6 +24,13 @@ export interface ResumeTarget {
   contextLabel: string
 }
 
+export interface ResumePreferences {
+  /** When false, land on the application overview instead of its saved view. */
+  restoreLastApplicationView?: boolean
+  /** When false, land on the workbench overview instead of its saved tool. */
+  restoreLastTool?: boolean
+}
+
 /** Compute where Continue leads and what it restores (workspace store aware). */
 export function resumeTargetFor(
   instance: ApplicationInstance,
@@ -35,13 +42,14 @@ export function resumeTargetFor(
     openFiles: Record<string, { path: string }[]>
     activeFile: Record<string, string | null>
   },
+  preferences: ResumePreferences = {},
 ): ResumeTarget {
   const hasWorkbench = instance.capabilities.some(
     (c) => c.id === 'workbench' && (c.status === 'available' || c.status === 'degraded'),
   )
   const isLast = workspace.lastInstanceId === instance.id
-  const view = isLast ? workspace.lastView : null
-  const tool = isLast ? workspace.lastWorkbenchTool : null
+  const view = isLast && preferences.restoreLastApplicationView !== false ? workspace.lastView : null
+  const tool = isLast && preferences.restoreLastTool !== false ? workspace.lastWorkbenchTool : null
 
   let route = `/app/${instance.id}`
   let viewLabel = 'Overview'

@@ -8,6 +8,7 @@ from .authority import (
     UpdateAuthorityError,
 )
 from .engine import UpdateEngine, UpdateError, UpdateHost, UpdateHostError
+from .genesis import GenesisResult, initialize_installed_updater
 from .installed import ControlPlaneBinding, InstalledAuthorityAdapter
 from .models import (
     DEFAULT_ALPHA_POLICY,
@@ -20,6 +21,7 @@ __all__ = [
     "AuthorityScope",
     "ControlPlaneBinding",
     "DEFAULT_ALPHA_POLICY",
+    "GenesisResult",
     "InstalledAuthorityAdapter",
     "UpdateEngine",
     "UpdateAuthorityError",
@@ -29,4 +31,5 @@ __all__ = [
     "UpdatePolicy",
     "UpdateStore",
     "UpdaterReleaseEnvelope",
+    "initialize_installed_updater",
 ]

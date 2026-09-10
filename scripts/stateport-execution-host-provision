@@ -3,7 +3,9 @@
 #
 # This file is installed root:root at /usr/local/libexec.  It deliberately
 # does not accept a Python path: the only module tree it may execute is the
-# root-owned, manifest-bound tree below /usr/local/lib/stateport.
+# root-owned, manifest-bound tree below /usr/local/lib/stateport. The signed
+# updater module is retained with the release and execution-host modules so
+# account handoff never needs an operator-writable Python environment.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -321,7 +323,7 @@ elif module_root.exists() or manifest.exists() or cosign_root.exists() or public
             name = info.filename
             if name.endswith("/") or name.endswith(".pyc"):
                 continue
-            if not (name.startswith("stateport_release/") or name.startswith("execution_host/")):
+            if not name.startswith(("stateport_release/", "execution_host/", "stateport_updater/")):
                 continue
             relative = Path(name)
             if relative.is_absolute() or ".." in relative.parts:
@@ -407,7 +409,7 @@ try:
             name = info.filename
             if name.endswith("/") or name.endswith(".pyc"):
                 continue
-            if not (name.startswith("stateport_release/") or name.startswith("execution_host/")):
+            if not name.startswith(("stateport_release/", "execution_host/", "stateport_updater/")):
                 continue
             relative = Path(name)
             if relative.is_absolute() or ".." in relative.parts:
@@ -887,7 +889,7 @@ while IFS='  ' read -r digest relative; do
     entries=$((entries + 1))
     case "$relative" in
         *..*|/*) printf '%s\n' 'provisioning manifest contains an unsafe path' >&2; exit 77 ;;
-        stateport_release/*|stateport_release/schemas/*|execution_host/*) ;;
+        stateport_release/*|stateport_release/schemas/*|execution_host/*|stateport_updater/*) ;;
         *) printf '%s\n' 'provisioning manifest contains an unsafe path' >&2; exit 77 ;;
     esac
     file="$module_root/$relative"

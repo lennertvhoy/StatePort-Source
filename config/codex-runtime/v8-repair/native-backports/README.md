@@ -1,7 +1,7 @@
 # Native backports for the new Codex consumer tree
 
 Preparation only. The current release pins and retained r6/r7 source/artifacts are
-unchanged. These two repairs supplement the V8/ICU candidate; they do not establish
+unchanged. The two native repairs supplement the V8/ICU candidate; they do not establish
 that the complete native stack is fixed or that the consumer builds.
 
 * SQLite CVE-2026-11822/11824: the exact bundled fts5LeafRead function equals the
@@ -16,11 +16,11 @@ that the complete native stack is fixed or that the consumer builds.
   harmless -10-line offset against the packaged 5.2.5 source. The entire resulting
   file is checked against its pinned expected SHA-256. No decoder is removed.
 
-`pins.json` binds both original registry crate checksums, native source preimages
+`pins.json` binds the original registry crate checksums, native source preimages
 and postimages, exact patches, regression inputs, and the three expected files
 of the preceding V8/ICU consumer candidate. The helper copies that consumer to a
 **new** tree, extracts the verified crates under `codex-rs/stateport-native-overrides`,
-and adds two explicit local `[patch.crates-io]` entries. It changes only those two
+and adds three explicit local `[patch.crates-io]` entries. It changes only those three
 Cargo lock nodes from registry to local source; versions, dependencies and
 features remain the same. The existing candidate version remains .3, which is
 unreleased. This is a source candidate, not an artifact with certified new bytes.
@@ -33,7 +33,7 @@ python3 "$repo/config/codex-runtime/v8-repair/native-backports/prepare_backports
 ```
 
 The input directory must contain exactly named libsqlite3-sys-0.37.0.crate and
-lzma-sys-0.1.20.crate files; unrelated cache files are ignored. The manifest gives
+lzma-sys-0.1.20.crate and ts-rs-macros-11.1.0.crate files; unrelated cache files are ignored. The manifest gives
 immutable registry URLs, sizes and hashes for a coordinator-booked fetch if they
 are unavailable locally. No download or compile occurs in this helper. The source
 must be the previous `prepare.py consumer` result, not r6/r7. Failed outputs are
@@ -65,3 +65,19 @@ must retain final linker inputs proving these exact local crate overrides were
 selected, then account for all remaining native advisories and scan final bytes.
 Neither an unproved current caller exclusion nor a version label substitutes for
 that proof.
+
+## Deterministic macro output
+
+The third local override pins ts-rs-macros 11.1.0 and sorts only the generated
+dependency calls and inferred generic bounds at the token emission boundary.
+Randomized HashSet iteration previously changed generated Rust across processes.
+All dependency calls, deduplication and existing where predicates are retained;
+no RNG seed, dependency version or public TypeScript feature is changed. Both
+modified files have exact preimage/postimage hashes in pins.json.
+
+The R5 focused dependency-emitter probe produced 12 original orders versus one
+sorted order with the same ten unique calls. Real registry extraction and patch
+application pass. The R6 complete derive probe also compiled and ran real struct/enum dependency
+declarations and inferred generic bounds in32.67s. Upstream macro-suite coverage
+and independent final CLI byte comparison remain unrun.
+Old compiler contexts and both differing CLI artifacts are preserved.

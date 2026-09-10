@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import importlib
 import json
 import logging
@@ -39,7 +41,7 @@ from .installed import (
     InstalledAuthorityAdapter,
 )
 from .models import UPDATE_CHANNELS, UPDATE_POLICIES, ContractError, UpdatePolicy
-from .safe_io import SafeIOError, create_json, read_json
+from .safe_io import MAX_DOCUMENT_BYTES, SafeIOError, _bounded, create_bytes, create_json, ensure_private_directory, read_bytes, read_json
 from .service import UpdaterDiagnostics, UpdaterServiceError, build_server, health_status
 from .store import StoreError, UpdateStore
 
@@ -70,8 +72,16 @@ def _authority_refusal() -> dict[str, str]:
     }
 
 
+class _ExactArgumentParser(argparse.ArgumentParser):
+    """Transport path rewriting requires the documented full option names."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["allow_abbrev"] = False
+        super().__init__(*args, **kwargs)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="stateport-updater")
+    parser = _ExactArgumentParser(prog="stateport-updater")
     parser.add_argument(
         "--state-root",
         type=Path,
@@ -116,19 +126,19 @@ def _parser() -> argparse.ArgumentParser:
         help="reserve installed authority for an exact plan and write the authorization bundle",
     )
     authorize.add_argument("--plan-id", required=True)
-    authorize.add_argument("--output", type=Path, required=True)
+    authorize.add_argument("--output", type=Path, required=True, help="private output file, or - for stdout")
     apply = subcommands.add_parser(
         "apply",
         help="apply an exact authorized plan when the control plane injects the typed seam",
     )
     apply.add_argument("--plan-id", required=True)
-    apply.add_argument("--authorization", type=Path)
+    apply.add_argument("--authorization", type=Path, help="private authorization file, or - for stdin")
     rollback = subcommands.add_parser(
         "rollback",
         help="apply an exact authorized rollback plan when the control plane injects the seam",
     )
     rollback.add_argument("--plan-id", required=True)
-    rollback.add_argument("--authorization", type=Path)
+    rollback.add_argument("--authorization", type=Path, help="private authorization file, or - for stdin")
     reconcile = subcommands.add_parser(
         "reconcile",
         help="observe or explicitly resolve one interrupted update journal",
@@ -193,7 +203,8 @@ def _signature_bundle_source(
     """
 
     name = signature_bundle_name(signature)
-    candidates = [source_root / name, source_root / "signatures" / name]
+    candidates = [source_root / name, source_root / "signatures" / name,
+                  source_root / "image-bundles" / name, bundle_slot(source_root, signature)]
     if bundle_root is not None:
         candidates.append(bundle_root / name)
     if bundle_root is not None:
@@ -204,6 +215,54 @@ def _signature_bundle_source(
     return candidates[0]
 
 
+class _CandidateVerifier:
+    """Route exact staged descriptors to their live verifier, all others to history."""
+
+    def __init__(self, candidate: Any, durable: Any, signatures: list[Mapping[str, Any]], images: list[Mapping[str, Any]]) -> None:
+        self.candidate, self.durable = candidate, durable
+        self.signatures = {canonical_digest(signature) for signature in signatures}
+        self.images = {(image["imageId"], image["digest"]) for image in images}
+
+    def _select(self, signature: Mapping[str, Any]) -> Any:
+        return self.candidate if canonical_digest(signature) in self.signatures else self.durable
+
+    def verify_blob(self, payload: bytes, signature: Mapping[str, Any]) -> Any:
+        return self._select(signature).verify_blob(payload, signature)
+
+    def verify_image(self, reference: str, signature: Mapping[str, Any]) -> Any:
+        return self._select(signature).verify_image(reference, signature)
+
+    def resolve_local_image_manifest(self, image_id: str, digest: str) -> bytes | None:
+        verifier = self.candidate if (image_id, digest) in self.images else self.durable
+        resolver = getattr(verifier, "resolve_local_image_manifest", None)
+        return resolver(image_id, digest) if callable(resolver) else None
+
+
+def _retain_image_manifests(binding: ControlPlaneBinding, index: Any, source_root: Path, target_root: Path) -> None:
+    images = [image for image in index.document["signed"]["images"]
+              if image["signature"].get("subjectKind") == "oci-manifest-blob"]
+    if not images:
+        return
+    source_verifier = binding.transport_verifier_factory(source_root)
+    for image in images:
+        resolver = getattr(source_verifier, "resolve_local_image_manifest", None)
+        content = resolver(image["imageId"], image["digest"]) if callable(resolver) else None
+        if content is None:
+            resolver = getattr(binding.signature_verifier, "resolve_local_image_manifest", None)
+            content = resolver(image["imageId"], image["digest"]) if callable(resolver) else None
+        if (not isinstance(content, bytes) or len(content) > 2 * 1024 * 1024
+                or "sha256:" + hashlib.sha256(content).hexdigest() != image["digest"]):
+            raise UpdateAuthorityError("release_manifest_unavailable", "exact candidate image manifest is unavailable")
+        directory = ensure_private_directory(target_root / "image-manifests")
+        path = directory / (image["digest"].removeprefix("sha256:") + ".json")
+        if path.exists() or path.is_symlink():
+            if read_bytes(path, "candidate image manifest") != content:
+                raise UpdateAuthorityError("release_manifest_conflict", "retained image manifest differs")
+        else:
+            create_bytes(path, content, "candidate image manifest")
+
+
+@contextmanager
 def _verified_envelope(
     binding: ControlPlaneBinding, release_index: Path, store: UpdateStore
 ) -> Any:
@@ -266,18 +325,22 @@ def _verified_envelope(
                     / signature_bundle_name(predecessor_signature),
                     predecessor_signature,
                 )
+                signatures.append(predecessor_signature)
             except CosignVerificationError as exc:
                 raise UpdateAuthorityError(
                     "release_bundle_retention_refused",
                     f"predecessor signature bundle cannot be retained: {exc}",
                 ) from exc
+        _retain_image_manifests(binding, index, source_root, retained_root)
         verified = verify_release_index(
             index,
             policy=binding.verification_policy,
             verifier=verifier,
             predecessor=predecessor,
         )
-    return to_updater_release_envelope(verified)
+        yield to_updater_release_envelope(verified), _CandidateVerifier(
+            verifier, binding.signature_verifier, signatures, index.document["signed"]["images"]
+        )
 
 
 def _retain_release_bundles(
@@ -317,6 +380,8 @@ def _retain_release_bundles(
             )
         for source, signature in sources:
             binding.signature_verifier.retain_bundle(source, signature)
+        if binding.bundle_root is not None:
+            _retain_image_manifests(binding, index, source_root, binding.bundle_root)
     except CosignVerificationError as exc:
         raise UpdateAuthorityError(
             "release_bundle_retention_refused",
@@ -325,7 +390,17 @@ def _retain_release_bundles(
 
 
 def _load_authorization(path: Path) -> dict[str, Any]:
-    document = read_json(path, "update authorization bundle")
+    if path == Path("-"):
+        try:
+            content = sys.stdin.buffer.read(MAX_DOCUMENT_BYTES + 1)
+            if len(content) > MAX_DOCUMENT_BYTES:
+                raise ValueError("authorization input exceeds its byte bound")
+            document = json.loads(content)
+            _bounded(document, label="update authorization bundle")
+        except (ValueError, UnicodeError, RecursionError, SafeIOError) as exc:
+            raise UpdateAuthorityError("authority_reservation_invalid", "authorization stdin is malformed or oversized") from exc
+    else:
+        document = read_json(path, "update authorization bundle")
     if (
         not isinstance(document, dict)
         or set(document) != {"schema", "decision", "reservation"}
@@ -444,6 +519,9 @@ def _dispatch(
         with store.transaction() as session:
             plan = session.load_plan(arguments.plan_id)
         bundle = adapter.reserve(plan)
+        if arguments.output == Path("-"):
+            _print({"schema": AUTHORIZATION_BUNDLE_SCHEMA, **bundle})
+            return 0
         create_json(
             arguments.output,
             {"schema": AUTHORIZATION_BUNDLE_SCHEMA, **bundle},
@@ -504,20 +582,20 @@ def _dispatch(
         target_id=binding.verification_policy.expected_target,
         clock=binding.clock,
     )
-    if command == "check":
-        _print(engine.check(_verified_envelope(binding, arguments.release_index, store)))
+    if command == "check" or (command == "plan" and not arguments.rollback):
+        with _verified_envelope(binding, arguments.release_index, store) as (envelope, verifier):
+            engine.signature_verifier = verifier
+            if command == "check":
+                result = engine.check(envelope)
+            else:
+                result = engine.plan(
+                    envelope,
+                    retain_candidate=lambda: _retain_release_bundles(binding, arguments.release_index),
+                )
+            _print(result)
         return 0
     if command == "plan":
-        if arguments.rollback:
-            plan = engine.plan(operation="rollback")
-        else:
-            plan = engine.plan(
-                _verified_envelope(binding, arguments.release_index, store),
-                retain_candidate=lambda: _retain_release_bundles(
-                    binding, arguments.release_index
-                ),
-            )
-        _print(plan)
+        _print(engine.plan(operation="rollback"))
         return 0
     if command in {"apply", "rollback"}:
         authorization = _load_authorization(arguments.authorization)

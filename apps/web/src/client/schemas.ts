@@ -474,6 +474,29 @@ const toolEventSchema = z.object({
   createdAt: iso,
 })
 
+const conversationMessageDeliverySchema = z.object({
+  formatVersion: z.literal('stateport.delivery-receipt/v1'),
+  deliveryId: z.string(),
+  messageId: z.string(),
+  conversationId: z.string(),
+  bindingId: z.string(),
+  channel: z.enum(['web', 'telegram']),
+  deliveryPolicy: z.enum(['source_channel_only', 'mirror_to_all', 'web_primary', 'telegram_primary']),
+  deliveryMode: z.enum(['full', 'notification', 'archive', 'suppressed']),
+  status: z.enum(['planned', 'delivered', 'failed', 'suppressed']),
+  createdAt: iso,
+  externalMessageId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/).nullable(),
+  echoGuard: z.string(),
+  failureReason: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/).nullable(),
+}).superRefine((receipt, context) => {
+  if (receipt.status === 'delivered' && !receipt.externalMessageId) {
+    context.addIssue({ code: 'custom', message: 'delivered receipt requires an external message identity' })
+  }
+  if (receipt.status === 'failed' && !receipt.failureReason) {
+    context.addIssue({ code: 'custom', message: 'failed receipt requires a failure reason' })
+  }
+})
+
 const conversationMessageSchema = z.object({
   id: z.string(),
   conversationId: z.string(),
@@ -484,6 +507,9 @@ const conversationMessageSchema = z.object({
   attachments: z.array(attachmentSchema),
   contextChips: z.array(contextChipSchema),
   toolEvents: z.array(toolEventSchema),
+  sourceChannel: z.enum(['web', 'telegram']).optional(),
+  deliveryState: z.array(conversationMessageDeliverySchema).optional(),
+  inboundAccepted: z.boolean().optional(),
   proposal: z
     .object({ title: z.string(), detail: z.string(), actionRoute: z.string().optional() })
     .optional(),

@@ -224,6 +224,7 @@ export const Transcript = forwardRef<TranscriptHandle, TranscriptProps>(function
         dense={dense}
         highlighted={currentMatchId === message.id}
         showTimestamp={settings.showMessageTimestamps}
+        showDeliveryDetails={settings.showDeliveryDetails}
         toolEventsExpandedDefault={settings.toolEventsExpanded}
       />
     )

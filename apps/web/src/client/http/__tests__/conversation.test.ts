@@ -384,6 +384,122 @@ describe('HttpConversationClient — presentation mapping', () => {
     expect(conversation.retentionNote).toBe('Kept on this machine.')
   })
 
+  it('maps recorded per-message delivery and inbound acceptance facts', async () => {
+    const receipt = {
+      formatVersion: 'stateport.delivery-receipt/v1',
+      deliveryId: 'delivery-1',
+      messageId: 'm1',
+      conversationId: CONVERSATION_ID,
+      bindingId: 'binding-web-1',
+      channel: 'web',
+      deliveryPolicy: 'source_channel_only',
+      deliveryMode: 'full',
+      status: 'delivered',
+      createdAt: '2026-07-04T08:30:01.000Z',
+      externalMessageId: 'external-1',
+      echoGuard: `sha256:${'e'.repeat(64)}`,
+      failureReason: null,
+    } as const
+    const payload = {
+      ...PRESENTATION,
+      messages: [
+        { ...PRESENTATION.messages[0], sourceChannel: 'telegram', display: { deliveryState: [receipt], inboundAccepted: true } },
+        { ...PRESENTATION.messages[1], display: { deliveryState: [], inboundAccepted: false } },
+      ],
+    }
+    const fake = makeFakeFetch([
+      ['GET', '/v1/instances/ins_1/conversation', jsonResponse({ ok: true, result: payload })],
+    ])
+    const conversation = await new HttpConversationClient(new HttpTransport({ fetchFn: fake.fetchFn })).get('ins_1')
+
+    expect(conversation.messages[0].deliveryState).toEqual([receipt])
+    expect(conversation.messages[0].sourceChannel).toBe('telegram')
+    expect(conversation.messages[0].inboundAccepted).toBe(true)
+    expect(conversation.messages[1].deliveryState).toEqual([])
+    expect(conversation.messages[1].inboundAccepted).toBe(false)
+  })
+
+  it('keeps legacy messages without display facts explicitly unknown', async () => {
+    const fake = makeFakeFetch([
+      ['GET', '/v1/instances/ins_1/conversation', jsonResponse({ ok: true, result: PRESENTATION })],
+    ])
+    const conversation = await new HttpConversationClient(new HttpTransport({ fetchFn: fake.fetchFn })).get('ins_1')
+
+    expect(conversation.messages[0].deliveryState).toBeUndefined()
+    expect(conversation.messages[0].inboundAccepted).toBeUndefined()
+    expect(conversation.messages[0].sourceChannel).toBeUndefined()
+  })
+
+  it.each([
+    ['delivered receipt without an external identity', { status: 'delivered', externalMessageId: null, failureReason: null }],
+    ['failed receipt without a failure reason', { status: 'failed', externalMessageId: null, failureReason: null }],
+  ])('fails closed on %s', async (_label, overrides) => {
+    const receipt = Object.assign({
+      formatVersion: 'stateport.delivery-receipt/v1',
+      deliveryId: 'delivery-invalid',
+      messageId: 'm1',
+      conversationId: CONVERSATION_ID,
+      bindingId: 'binding-web-1',
+      channel: 'web',
+      deliveryPolicy: 'source_channel_only',
+      deliveryMode: 'full',
+      createdAt: '2026-07-04T08:30:01.000Z',
+      echoGuard: `sha256:${'i'.repeat(64)}`,
+      status: 'delivered',
+      externalMessageId: 'external-1',
+      failureReason: null,
+    }, overrides)
+    const payload = {
+      ...PRESENTATION,
+      messages: [{
+        ...PRESENTATION.messages[0],
+        display: {
+          deliveryState: [receipt],
+        },
+      }],
+    }
+    const fake = makeFakeFetch([
+      ['GET', '/v1/instances/ins_1/conversation', jsonResponse({ ok: true, result: payload })],
+    ])
+    const client = new HttpConversationClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+
+    await expect(client.get('ins_1')).rejects.toThrow(/delivered receipt requires an external message identity|failed receipt requires a failure reason/)
+  })
+
+  it('fails closed when a message carries a receipt for another message', async () => {
+    const payload = {
+      ...PRESENTATION,
+      messages: [
+        {
+          ...PRESENTATION.messages[0],
+          display: {
+            deliveryState: [{
+              formatVersion: 'stateport.delivery-receipt/v1',
+              deliveryId: 'delivery-foreign',
+              messageId: 'm2',
+              conversationId: CONVERSATION_ID,
+              bindingId: 'binding-web-1',
+              channel: 'web',
+              deliveryPolicy: 'source_channel_only',
+              deliveryMode: 'full',
+              status: 'delivered',
+              createdAt: '2026-07-04T08:30:01.000Z',
+              externalMessageId: 'external-foreign',
+              echoGuard: `sha256:${'f'.repeat(64)}`,
+              failureReason: null,
+            }],
+          },
+        },
+      ],
+    }
+    const fake = makeFakeFetch([
+      ['GET', '/v1/instances/ins_1/conversation', jsonResponse({ ok: true, result: payload })],
+    ])
+    const client = new HttpConversationClient(new HttpTransport({ fetchFn: fake.fetchFn }))
+
+    await expect(client.get('ins_1')).rejects.toMatchObject({ kind: 'validation' })
+  })
+
   it('fails closed on the wrong formatVersion', async () => {
     const fake = makeFakeFetch([
       ['GET', '/v1/instances/ins_1/conversation', jsonResponse({ ...PRESENTATION, formatVersion: 'stateport.conversation-presentation/v2' })],

@@ -132,3 +132,57 @@ def test_context_verify_cli_refuses_context_mutation(tmp_path, kind):
     else: (root/'escape').symlink_to('/tmp')
     p=subprocess.run([sys.executable,str(ROOT/'config/codex-runtime/v8-repair/context_verify.py'),str(root),'--sha',expected],capture_output=True,text=True)
     assert p.returncode != 0
+
+@pytest.mark.parametrize('corrupt', [None, 'before', 'after'])
+def test_backport_secondary_source_integrity_before_lock_publication(tmp_path, monkeypatch, corrupt):
+    """A multi-file patch must authenticate every pre/postimage before publishing paths."""
+    import io
+    import tarfile
+    import prepare_backports
+    h = lambda data: hashlib.sha256(data).hexdigest()
+    rules = tmp_path / 'rules'; rules.mkdir()
+    inputs = tmp_path / 'inputs'; inputs.mkdir()
+    source = tmp_path / 'source'; (source / 'codex-rs').mkdir(parents=True)
+    archive = inputs / 'example-1.0.0.crate'
+    with tarfile.open(archive, 'w:gz') as stream:
+        for name in ('first.txt', 'second.txt'):
+            member = tarfile.TarInfo('example-1.0.0/' + name)
+            member.size = len(b'before\n')
+            stream.addfile(member, io.BytesIO(b'before\n'))
+    patch = rules / 'example.patch'
+    patch.write_text(''.join(
+        f'--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-before\n+after\n'
+        for name in ('first.txt', 'second.txt')))
+    manifest = source / 'codex-rs/Cargo.toml'
+    manifest.write_text('[patch.crates-io]\n')
+    lock = source / 'codex-rs/Cargo.lock'
+    lock.write_text('[[package]]\nname = "example"\nversion = "1.0.0"\n'
+                    'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                    f'checksum = "{h(archive.read_bytes())}"\n')
+    secondary = {'sourcePath': 'second.txt', 'beforeSha256': h(b'before\n'),
+                 'afterSha256': h(b'after\n')}
+    if corrupt:
+        secondary[corrupt + 'Sha256'] = '0' * 64
+    pins = {'consumerInputs': {str(p.relative_to(source)): h(p.read_bytes())
+                              for p in (manifest, lock)}, 'regressionInputs': [],
+            'packages': [{'name': 'example', 'version': '1.0.0',
+                          'crateFile': archive.name, 'crateSha256': h(archive.read_bytes()),
+                          'patchFile': patch.name, 'patchSha256': h(patch.read_bytes()),
+                          'patchWorkingDirectory': '.', 'sourcePath': 'first.txt',
+                          'beforeSha256': h(b'before\n'), 'afterSha256': h(b'after\n'),
+                          'additionalSources': [secondary]}]}
+    (rules / 'pins.json').write_text(json.dumps(pins))
+    monkeypatch.setattr(prepare_backports, 'HERE', rules)
+    output = tmp_path / 'output'
+    if corrupt:
+        with pytest.raises(ValueError, match='second.txt'):
+            prepare_backports.prepare(source, inputs, output)
+        assert (output / 'codex-rs/Cargo.toml').read_bytes() == manifest.read_bytes()
+        assert (output / 'codex-rs/Cargo.lock').read_bytes() == lock.read_bytes()
+        assert not (output / 'codex-rs/stateport-native-overrides/backport-preparation.json').exists()
+    else:
+        receipt = prepare_backports.prepare(source, inputs, output)
+        assert receipt['packages'][0]['patchedSources'] == {
+            'first.txt': h(b'after\n'), 'second.txt': h(b'after\n')}
+        assert receipt['changedCargoLockNodes'] == ['example']
+        assert 'source = ' not in (output / 'codex-rs/Cargo.lock').read_text()

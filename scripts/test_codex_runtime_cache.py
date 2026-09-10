@@ -169,6 +169,19 @@ def test_outer_command_checks_exact_resumed_pilot_shape(tmp_path: Path, mutation
         "/opt/stateport-v8-repair/verify_cached_work.py", "/resume-admission.json", "/vendor-inputs", "/work"]
 
     if mutation is None:
+        # A reviewed old runner is explicit data, never the executable used
+        # for this verification. Drift still refuses without that exact file.
+        historical = tmp_path / 'historical-booked-pilot.py'
+        historical.write_text('# retained historical runner source\n')
+        command_receipt['runnerSha256'] = hashlib.sha256(historical.read_bytes()).hexdigest()
+        (tmp_path / 'command.json').write_text(json.dumps(command_receipt))
+        with pytest.raises(VerificationError):
+            _verify_outer_command(tmp_path, image, inputs, vendor)
+        assert _verify_outer_command(tmp_path, image, inputs, vendor,
+                                     historical_runner=historical)['timeoutArgument'] == '--timeout-seconds=4800'
+        historical.write_text('# altered bytes\n')
+        with pytest.raises(VerificationError):
+            _verify_outer_command(tmp_path, image, inputs, vendor, historical_runner=historical)
         return
     admission_path = tmp_path / "resume-admission.json"
     if mutation == "receipt-binding":

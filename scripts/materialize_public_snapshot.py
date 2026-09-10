@@ -210,9 +210,10 @@ _CGROUP_USER_PATH = re.compile(r"^/user\.slice/user-[0-9]+\.slice/user@[0-9]+\.s
 
 
 def _reviewed_cgroup_fixture(relative_path: PurePosixPath, value: str) -> bool:
-    return relative_path == PurePosixPath("scripts/test_release_images.py") and bool(
-        _CGROUP_USER_PATH.fullmatch(value)
-    )
+    return relative_path in {
+        PurePosixPath("scripts/test_release_images.py"),
+        PurePosixPath("scripts/test_codex_runtime_resume.py"),
+    } and bool(_CGROUP_USER_PATH.fullmatch(value))
 
 
 # Exact upstream bytes were reviewed for public copyright/author attribution.

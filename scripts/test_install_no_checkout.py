@@ -36,6 +36,7 @@ from stateport_release import (  # noqa: E402
     validate_install_receipt,
 )
 import stateport_updater.engine as updater_engine  # noqa: E402
+import stateport_updater.genesis as updater_genesis  # noqa: E402
 import stateport_updater.installed as updater_installed  # noqa: E402
 import stateport_updater.models as updater_models  # noqa: E402
 import stateport_updater.store as updater_store  # noqa: E402
@@ -1173,6 +1174,7 @@ def _modules(venv_dir: Path) -> installer.VerifiedModules:
     return installer.VerifiedModules(
         release=stateport_release,
         updater_engine=updater_engine,
+        updater_genesis=updater_genesis,
         updater_installed=updater_installed,
         updater_models=updater_models,
         updater_store=updater_store,
@@ -1814,16 +1816,12 @@ def test_happy_path_installs_and_receipts(
     assert stat.S_IMODE(wrapper_path.stat().st_mode) & 0o777 == 0o755
     wrapper_text = wrapper_path.read_text(encoding="utf-8")
     assert wrapper_text.startswith("#!/bin/sh\n")
-    assert (
-        "export STATEPORT_UPDATER_CONTROL_PLANE=stateport_updater.control_plane:build\n"
-        in wrapper_text
-    )
-    assert f"export STATEPORT_COSIGN={installer.INSTALLED_COSIGN_PATH}\n" in wrapper_text
-    assert "STATEPORT_UPDATER_BUNDLE_ROOT" not in wrapper_text
-    assert f"export STATEPORT_QUADLET_ROOT={config.live_quadlet_root}\n" in wrapper_text
+    assert "STATEPORT_UPDATER_CONTROL_PLANE" not in wrapper_text
+    assert "STATEPORT_QUADLET_ROOT" not in wrapper_text
+    assert "STATEPORT_COSIGN" not in wrapper_text
     assert wrapper_text.endswith(
-        f"exec {config.state_root}/updater-venv/bin/python -m stateport_updater "
-        f'--state-root {config.state_root}/updater "$@"\n'
+        f"exec {config.state_root}/updater-venv/bin/python "
+        '-I -m stateport_updater.operator_cli "$@"\n'
     )
 
     # Runtime identity evidence is captured from the services, not claimed.
@@ -1971,10 +1969,19 @@ def test_wsl2_prepare_mode_auto_selects_target_without_runtime_mutation(
     assert not [call for call in runner.calls if call[:2] == ("systemctl", "--user")]
 
 
+@pytest.mark.parametrize("control_transport", [False, True])
 def test_wsl2_bootstrap_is_deterministic_pinned_and_one_command_ready(
     tmp_path: Path,
     trust: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    control_transport: bool,
 ) -> None:
+    if control_transport:
+        wheel_buffer = io.BytesIO(_minimal_wheel_bytes())
+        with zipfile.ZipFile(wheel_buffer, "a") as wheel:
+            for module in ("bootstrap", "operator_cli", "control_cli"):
+                wheel.writestr(f"stateport_updater/{module}.py", "# structural fixture\n")
+        monkeypatch.setattr(sys.modules[__name__], "_minimal_wheel_bytes", lambda: wheel_buffer.getvalue())
     fixture = _signed_index(
         tmp_path / "fixture", trust, target_id=installer.WSL2_TARGET_ID,
         version="0.1.0-alpha.5",
@@ -2007,6 +2014,11 @@ def test_wsl2_bootstrap_is_deterministic_pinned_and_one_command_ready(
         'sudo -n install -o root -g root -m 0555 "$tmp/provisioner"'
     )
     assert text.count('python3 "$tmp/installer"') == 2
+    assert ("stateport-execution-host-provision initialize-updater" in text) is control_transport
+    if control_transport:
+        position = text.index("stateport-execution-host-provision initialize-updater")
+        assert text.rindex('python3 "$tmp/installer"') < position < text.index('printf "StatePort %s installed successfully')
+        assert '--actor-id "local-owner-$(id -un)"' in text
     assert "Windows 11 build 22000 or newer is required" in text
     assert "wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet" in text
     assert "apt-get install -y" in text and "skopeo" in text
@@ -5274,3 +5286,31 @@ def test_uninstall_enablement_absence_requires_a_known_manager_result(code: int,
         installer._require_unit_enablement_observed(
             installer.Completed(code, state + "\n", "failed to connect to bus"), "known.service"
         )
+
+
+@pytest.mark.parametrize("missing", ["bootstrap", "operator_cli", "control_cli"])
+@pytest.mark.parametrize("layout", ["wheel", "venv"])
+def test_current_installer_refuses_incomplete_control_transport(tmp_path: Path, missing: str, layout: str) -> None:
+    """Old/partial payloads must refuse before wrapper installation can succeed."""
+    files = {"stateport_release/__init__.py": b"", "stateport_updater/__init__.py": b""}
+    for name in ("bootstrap", "operator_cli", "control_cli"):
+        if name != missing:
+            files[f"stateport_updater/{name}.py"] = b"raise AssertionError('must refuse before import')"
+    if layout == "wheel":
+        wheel = tmp_path / "stateport_updater-0.1.1-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, content in files.items():
+                archive.writestr(name, content)
+            archive.writestr("stateport_updater-0.1.1.dist-info/METADATA", "Metadata-Version: 2.1\nName: stateport-updater\nVersion: 0.1.1\n")
+        with pytest.raises(installer.InstallerRefusal) as refusal:
+            installer.load_modules_from_authenticated_wheel(wheel)
+        assert refusal.value.code == "wheel_layout_invalid"
+    else:
+        root = tmp_path / "lib/python3.12/site-packages"
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        with pytest.raises(installer.InstallerRefusal) as refusal:
+            installer.load_modules_from_venv(tmp_path)
+        assert refusal.value.code == "venv_layout_unexpected"

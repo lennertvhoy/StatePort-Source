@@ -590,6 +590,42 @@ it('saved compact message spacing survives reopening without changing conversati
   expect(screen.getByTestId('composer')).toBeTruthy()
 }, 20_000)
 
+it.each([false, true] as const)('uses the saved delivery-details preference for per-message facts (%s)', async (showDeliveryDetails) => {
+  const client = getClient()
+  await client.globalSettings.update({ conversation: { showDeliveryDetails } })
+
+  renderSurface('ins_cto_pilot')
+  await waitForReady()
+
+  const delivered = document.querySelector('[data-message-id="msg_0002"]')
+  const inbound = document.querySelector('[data-message-id="msg_0001"]')
+  const legacy = document.querySelector('[data-message-id="msg_0003"]')
+  const failed = document.querySelector('[data-message-id="msg_0004"]')
+  expect(delivered).toBeTruthy()
+  expect(inbound).toBeTruthy()
+  expect(legacy).toBeTruthy()
+  expect(failed).toBeTruthy()
+  await waitFor(() => {
+    expect(delivered?.querySelector('[data-testid="message-delivery-details"]') !== null).toBe(showDeliveryDetails)
+    expect(inbound?.querySelector('[data-testid="message-delivery-details"]') !== null).toBe(showDeliveryDetails)
+    expect(legacy?.querySelector('[data-testid="message-delivery-details"]') !== null).toBe(showDeliveryDetails)
+    expect(failed?.querySelector('[data-testid="message-delivery-details"]') !== null).toBe(showDeliveryDetails)
+  })
+  if (showDeliveryDetails) {
+    expect(delivered?.textContent).toContain('Delivered')
+    expect(inbound?.textContent).toContain('Recorded inbound acceptance')
+    expect(inbound?.textContent).toContain('Web')
+    expect(legacy?.textContent).toContain('Delivery details unavailable')
+    expect(failed?.textContent).toContain('Delivery failed')
+    expect(failed?.textContent).toContain('telegram-sink-rejected')
+  } else {
+    expect(failed?.querySelector('[data-testid="message-delivery-failure"]')).toBeTruthy()
+    expect(failed?.textContent).toContain('telegram-sink-rejected')
+  }
+  expect(screen.getByTestId('thread-header').textContent).toContain('Web · Delivered')
+  expect(screen.getByTestId('composer')).toBeTruthy()
+}, 20_000)
+
 
 it('shows unknown thread delivery neutrally while keeping transcript and send controls', async () => {
   const client = getClient()

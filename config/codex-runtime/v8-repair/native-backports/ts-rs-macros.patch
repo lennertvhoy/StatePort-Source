@@ -1,0 +1,23 @@
+--- a/src/deps.rs
++++ b/src/deps.rs
+@@ -79,7 +79,8 @@
+ 
+ impl ToTokens for Dependencies {
+     fn to_tokens(&self, tokens: &mut TokenStream) {
+-        let lines = self.dependencies.iter();
++        let mut lines = self.dependencies.iter().map(ToTokens::to_token_stream).collect::<Vec<_>>();
++        lines.sort_by_cached_key(TokenStream::to_string);
+ 
+         tokens.extend(quote![
+             #(#lines;)*
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -439,6 +439,8 @@
+         for ty in dependencies.used_types() {
+             used_type_params(&mut used_types, ty, is_type_param);
+         }
++        let mut used_types = used_types.into_iter().collect::<Vec<_>>();
++        used_types.sort_by_cached_key(|ty| quote!(#ty).to_string());
+         used_types.into_iter()
+     };
+ 

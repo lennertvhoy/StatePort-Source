@@ -31,7 +31,7 @@ import {
   ShieldQuestion,
   SquareTerminal,
 } from 'lucide-react'
-import { createElement, useCallback, useMemo, useState } from 'react'
+import { createElement, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
 import type { ActivityItem, ApplicationInstance, AttentionItem } from '@/client'
@@ -118,6 +118,18 @@ export default function AppOverviewPage() {
   const [renameOpen, setRenameOpen] = useState(false)
   const [backupBusy, setBackupBusy] = useState(false)
   const [activityExpanded, setActivityExpanded] = useState(false)
+  // Keep Continue conservative until the server preference is known. This
+  // prevents a fast click during bootstrap from opening a saved tool when the
+  // operator has disabled tool restoration (or settings are unavailable).
+  const [restoreLastTool, setRestoreLastTool] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void getClient().globalSettings.get().then((settings) => {
+      if (!cancelled) setRestoreLastTool(settings.navigation.restoreLastTool)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
 
   const data = useOverviewData(instance)
   const refreshData = data.refresh
@@ -127,7 +139,7 @@ export default function AppOverviewPage() {
   // ── Continue: resume the last view/tool; fall back to the honest primary ──
   const continueAction = useMemo(() => {
     if (!instance) return { route: '', label: 'Continue' }
-    const target = resumeTargetFor(instance, continuity)
+    const target = resumeTargetFor(instance, continuity, { restoreLastTool: restoreLastTool === true })
     const isLast = continuity.lastInstanceId === instance.id
     if (isLast && target.viewLabel !== 'Overview') {
       return { route: target.route, label: `Continue in ${target.viewLabel}` }
@@ -139,13 +151,13 @@ export default function AppOverviewPage() {
       }
     }
     return { route: `/app/${instance.id}/conversation`, label: 'Open Conversation' }
-  }, [instance, continuity, hasWorkbench])
+  }, [instance, continuity, hasWorkbench, restoreLastTool])
 
   const currentViewLabel = useMemo(() => {
     if (!instance) return 'Overview'
     if (continuity.lastInstanceId !== instance.id) return 'Overview'
-    return resumeTargetFor(instance, continuity).viewLabel
-  }, [instance, continuity])
+    return resumeTargetFor(instance, continuity, { restoreLastTool: restoreLastTool === true }).viewLabel
+  }, [instance, continuity, restoreLastTool])
 
   const status = useMemo(
     () =>

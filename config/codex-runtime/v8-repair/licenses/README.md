@@ -12,6 +12,7 @@ are not an inventory of licenses in a future full native archive or Codex binary
 | `../icu-corrections/*.patch` | Unicode-3.0; exact notice in `../icu-corrections/LICENSE-ICU`. Original source headers and patch authorship remain intact. |
 | `../native-backports/libsqlite3-sys.patch` and `sqlite-upstream-regression.test` | SQLite public-domain source; the regression's original copyright disclaimer/blessing is preserved. The patch modifies only SQLite amalgamation code, not the Rust wrapper. |
 | `../native-backports/lzma-sys.patch` | Maintained XZ v5.2 `src/liblzma/common/index.c`, author Lasse Collin, explicitly placed in the public domain. This is the native source patch, not a relicensing of the Rust wrapper. |
+| `../native-backports/ts-rs-macros.patch` | ts-rs MIT source at registry-bound commit `1dce5297090804082e9639d2b7d851ba815aa359`; original notice in `TS-RS-MIT.txt`. |
 | `../native-backports/xz-upstream-regression.patch` | Current XZ test source carries SPDX `0BSD`; `XZ-0BSD.txt`. Original patch author is retained. |
 
 Immutable source URLs and SHA-256 digests for verbatim notices are in

@@ -17,11 +17,17 @@ function Frame() {
     <Routes><Route path="/" element={<StartupRoute />} /><Route path="*" element={<div>Destination</div>} /></Routes></>
 }
 function mount(path = '/') { return render(<MemoryRouter initialEntries={[path]}><Frame /></MemoryRouter>) }
-async function settings(reopen: boolean, landing: 'applications' | 'last_workspace') {
+async function settings(
+  reopen: boolean,
+  landing: 'applications' | 'last_workspace',
+  preferences: { reopenView?: boolean; restoreTool?: boolean } = {},
+) {
   const client = getClient()
   const value = await client.globalSettings.get()
   value.general.reopenLastApplication = reopen
   value.general.defaultLandingPage = landing
+  value.general.reopenLastApplicationView = preferences.reopenView ?? true
+  value.navigation.restoreLastTool = preferences.restoreTool ?? true
   return { value, get: vi.spyOn(client.globalSettings, 'get').mockResolvedValue(value) }
 }
 beforeEach(() => {
@@ -31,8 +37,8 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); resetClientForTests() })
 
 it.each([
-  [true, 'applications', `/app/${instance.id}`],
-  [true, 'last_workspace', `/app/${instance.id}`],
+  [true, 'applications', `/app/${instance.id}/workbench/files`],
+  [true, 'last_workspace', `/app/${instance.id}/workbench/files`],
   [false, 'applications', '/applications'],
   [false, 'last_workspace', `/app/${instance.id}/workbench/files`],
 ] as const)('reopen=%s and landing=%s resolves to %s', async (reopen, landing, expected) => {
@@ -42,6 +48,20 @@ it.each([
   await waitFor(() => expect(screen.getByTestId('route').textContent).toBe(expected))
   expect(saved.get).toHaveBeenCalledTimes(1) // shared with shell bootstrap
   expect(get).toHaveBeenCalledTimes(reopen || landing === 'last_workspace' ? 1 : 0)
+})
+
+it.each([
+  [true, 'applications', true, true, `/app/${instance.id}/workbench/files`],
+  [true, 'applications', false, true, `/app/${instance.id}`],
+  [false, 'last_workspace', true, true, `/app/${instance.id}/workbench/files`],
+  [false, 'last_workspace', false, true, `/app/${instance.id}`],
+  [false, 'last_workspace', true, false, `/app/${instance.id}/workbench`],
+  [true, 'applications', true, false, `/app/${instance.id}/workbench`],
+] as const)('reopen=%s landing=%s reopenView=%s restoreTool=%s resolves to %s', async (reopen, landing, reopenView, restoreTool, expected) => {
+  await settings(reopen, landing, { reopenView, restoreTool })
+  vi.spyOn(getClient().applications, 'get').mockResolvedValue(instance)
+  mount()
+  await waitFor(() => expect(screen.getByTestId('route').textContent).toBe(expected))
 })
 
 it.each([null, 'deleted', '../settings', 'a/b', 'a?x=1', '%2Fsettings'])('recovers absent/invalid remembered id %s without changing continuity', async (id) => {

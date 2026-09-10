@@ -12,7 +12,7 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getClient, resetClientForTests } from '@/client'
@@ -62,9 +62,15 @@ afterEach(() => {
 function renderPage() {
   return render(
     <MemoryRouter>
+      <LocationProbe />
       <ApplicationsPage />
     </MemoryRouter>,
   )
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="current-path">{location.pathname}</output>
 }
 
 const statusOf = (id: string) => screen.getByTestId(`instance-status-${id}`)
@@ -237,6 +243,27 @@ describe('Applications home', () => {
       expect(ids).toContain('applications.switch.ins_nixos_infra')
     },
     LONG,
+  )
+
+  it.each(['delayed', 'error'] as const)(
+    'does not open the saved tool when settings are %s during an early Continue click',
+    async (mode) => {
+      useWorkspaceStore.setState({ lastInstanceId: 'ins_cto_pilot', lastView: 'workbench', lastWorkbenchTool: 'files' })
+      const client = getClient()
+      const saved = await client.globalSettings.get()
+      saved.navigation.restoreLastTool = false
+      let resolve!: (value: typeof saved) => void
+      let reject!: (reason?: unknown) => void
+      const pending = new Promise<typeof saved>((done, fail) => { resolve = done; reject = fail })
+      vi.spyOn(client.globalSettings, 'get').mockReturnValue(pending)
+      const user = userEvent.setup()
+      renderPage()
+      const hero = await screen.findByTestId('continue-hero', undefined, { timeout: LONG })
+      await user.click(within(hero).getByRole('button', { name: /continue in stateport cto pilot/i }))
+      await waitFor(() => expect(screen.getByTestId('current-path').textContent).toBe('/app/ins_cto_pilot/workbench'), { timeout: LONG })
+      if (mode === 'delayed') resolve(saved)
+      else reject(new Error('settings unavailable'))
+    },
   )
 
   it(

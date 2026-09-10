@@ -1092,6 +1092,8 @@ export function buildSeed(now = Date.now()): MockDatabase {
             { id: 'chip_1', kind: 'application', label: 'StatePort CTO Pilot', refId: INSTANCE_IDS.ctoPilot, removable: true },
           ],
           toolEvents: [],
+          inboundAccepted: true,
+          sourceChannel: 'web',
         },
         {
           id: 'msg_0002',
@@ -1105,6 +1107,23 @@ export function buildSeed(now = Date.now()): MockDatabase {
           contextChips: [],
           toolEvents: [
             { id: 'tev_1', kind: 'application.summary', summary: 'Read application summary', state: 'validated', createdAt: iso(now - 8 * HOUR + 20_000) },
+          ],
+          deliveryState: [
+            {
+              formatVersion: 'stateport.delivery-receipt/v1',
+              deliveryId: 'delivery_mock_0002',
+              messageId: 'msg_0002',
+              conversationId: CONVERSATION_IDS.ctoPilot,
+              bindingId: 'binding_web_mock',
+              channel: 'web',
+              deliveryPolicy: 'source_channel_only',
+              deliveryMode: 'full',
+              status: 'delivered',
+              createdAt: iso(now - 8 * HOUR + 40_000),
+              externalMessageId: 'external_mock_0002',
+              echoGuard: `sha256:${'2'.repeat(64)}`,
+              failureReason: null,
+            },
           ],
         },
         {
@@ -1130,6 +1149,23 @@ export function buildSeed(now = Date.now()): MockDatabase {
           contextChips: [],
           toolEvents: [
             { id: 'tev_2', kind: 'file.write', summary: 'Saved notes/pilot-notes.md', detail: 'Receipt rcpt_0001', state: 'validated', createdAt: iso(now - 7 * HOUR) },
+          ],
+          deliveryState: [
+            {
+              formatVersion: 'stateport.delivery-receipt/v1',
+              deliveryId: 'delivery_mock_0004',
+              messageId: 'msg_0004',
+              conversationId: CONVERSATION_IDS.ctoPilot,
+              bindingId: 'binding_telegram_mock',
+              channel: 'telegram',
+              deliveryPolicy: 'source_channel_only',
+              deliveryMode: 'full',
+              status: 'failed',
+              createdAt: iso(now - 7 * HOUR),
+              externalMessageId: null,
+              echoGuard: `sha256:${'4'.repeat(64)}`,
+              failureReason: 'telegram-sink-rejected',
+            },
           ],
         },
       ],

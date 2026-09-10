@@ -11,7 +11,7 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ApplicationInstance } from '@/client'
@@ -64,6 +64,7 @@ afterEach(() => {
 function renderOverview(instanceId: string) {
   return render(
     <MemoryRouter initialEntries={[`/app/${instanceId}`]}>
+      <LocationProbe />
       <Routes>
         <Route path="/app/:instanceId" element={<AppContextShell />}>
           <Route index element={<AppOverviewPage />} />
@@ -71,6 +72,11 @@ function renderOverview(instanceId: string) {
       </Routes>
     </MemoryRouter>,
   )
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="current-path">{location.pathname}</output>
 }
 
 function SameInstanceRefreshProbe() {
@@ -251,6 +257,27 @@ describe('App overview', () => {
       expect(screen.getByRole('button', { name: /back up now/i })).toBeTruthy()
     },
     LONG,
+  )
+
+  it.each(['delayed', 'error'] as const)(
+    'does not open the saved tool when settings are %s during an early Continue click',
+    async (mode) => {
+      useWorkspaceStore.setState({ lastInstanceId: 'ins_cto_pilot', lastView: 'workbench', lastWorkbenchTool: 'files' })
+      const client = getClient()
+      const saved = await client.globalSettings.get()
+      saved.navigation.restoreLastTool = false
+      let resolve!: (value: typeof saved) => void
+      let reject!: (reason?: unknown) => void
+      const pending = new Promise<typeof saved>((done, fail) => { resolve = done; reject = fail })
+      vi.spyOn(client.globalSettings, 'get').mockReturnValue(pending)
+      const user = userEvent.setup()
+      renderOverview('ins_cto_pilot')
+      const header = await screen.findByTestId('overview-header', undefined, { timeout: LONG })
+      await user.click(within(header).getByRole('button', { name: /continue in workbench/i }))
+      await waitFor(() => expect(screen.getByTestId('current-path').textContent).toBe('/app/ins_cto_pilot/workbench'), { timeout: LONG })
+      if (mode === 'delayed') resolve(saved)
+      else reject(new Error('settings unavailable'))
+    },
   )
 
   it(

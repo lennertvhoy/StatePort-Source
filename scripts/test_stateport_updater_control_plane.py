@@ -23,6 +23,7 @@ for source in (
         sys.path.insert(0, str(source))
 
 from stateport_release import canonical_digest, public_key_der_spki_fingerprint  # noqa: E402
+from stateport_release.cosign import CosignVerifier, CosignVerificationError  # noqa: E402
 from stateport_updater.authority import UpdateAuthorityError  # noqa: E402
 from stateport_updater.engine import TARGET_ID, UPDATER_VERSION, WSL2_TARGET_ID  # noqa: E402
 from stateport_updater.host_local import LocalPodmanHost  # noqa: E402
@@ -174,6 +175,25 @@ def test_build_refuses_without_a_cosign_executable(
     with pytest.raises(UpdateAuthorityError) as failure:
         control_plane.build(state_root)
     assert failure.value.code == "control_plane_cosign_unavailable"
+
+
+def test_local_image_manifest_slot_is_digest_bound_and_small(tmp_path: Path) -> None:
+    """Control bootstrap can retain a manifest without transferring an OCI archive."""
+
+    bundle_root = tmp_path / "bundles"
+    manifest_root = bundle_root / "image-manifests"
+    manifest_root.mkdir(parents=True)
+    payload = b'{"schemaVersion":2,"config":{"digest":"sha256:' + b"a" * 64 + b'"}}'
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    path = manifest_root / f"{digest.removeprefix('sha256:')}.json"
+    path.write_bytes(payload)
+    verifier = object.__new__(CosignVerifier)
+    object.__setattr__(verifier, "bundle_root", bundle_root)
+
+    assert verifier.resolve_local_image_manifest("stateport-web", digest) == payload
+    path.write_bytes(b"tampered")
+    with pytest.raises(CosignVerificationError, match="manifest is tampered"):
+        verifier.resolve_local_image_manifest("stateport-web", digest)
 
 
 def test_build_refuses_a_missing_cosign_override(

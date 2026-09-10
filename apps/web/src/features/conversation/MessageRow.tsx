@@ -25,7 +25,7 @@ import { memo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import type { Attachment, ContextChip, ConversationMessage } from '@/client'
-import { CopyButton, OperationStateLabel, TimeAgo, Tooltip } from '@/components'
+import { CopyButton, OperationStateLabel, StatusDot, TimeAgo, Tooltip } from '@/components'
 import { sendToBridge } from '@/features/bridge/bridgeStore'
 import { cn } from '@/lib/utils'
 import { useSessionStore } from '@/state'
@@ -276,6 +276,80 @@ function ProposalCards({ message, instanceId }: { message: ConversationMessage; 
   return <>{cards}</>
 }
 
+function receiptPresentation(status: NonNullable<ConversationMessage['deliveryState']>[number]['status']) {
+  switch (status) {
+    case 'delivered': return { state: 'success' as const, label: 'Delivered' }
+    case 'failed': return { state: 'danger' as const, label: 'Delivery failed' }
+    case 'planned': return { state: 'attention' as const, label: 'Pending delivery' }
+    case 'suppressed': return { state: 'neutral' as const, label: 'Suppressed' }
+  }
+}
+
+function MessageDeliveryDetails({ message, show }: { message: ConversationMessage; show: boolean }) {
+  const receipts = message.deliveryState
+  const failedReceipts = receipts?.filter((receipt) => receipt.status === 'failed') ?? []
+  if (!show) {
+    return failedReceipts.length > 0 ? (
+      <div
+        className="mt-2 flex flex-wrap items-center gap-2 text-xs text-status-danger"
+        data-testid="message-delivery-failure"
+        aria-label="Message delivery failure"
+      >
+        <StatusDot state="danger" label="Delivery failed" />
+        {failedReceipts.map((receipt) => (
+          <span key={receipt.deliveryId}>{receipt.failureReason}</span>
+        ))}
+      </div>
+    ) : null
+  }
+
+  const hasFacts = receipts !== undefined || message.inboundAccepted !== undefined
+  if (!hasFacts) {
+    return (
+      <div
+        className="mt-2 flex items-center gap-2 text-xs text-foreground-tertiary"
+        data-testid="message-delivery-details"
+        data-delivery-state="unknown"
+        aria-label="Message delivery details"
+      >
+        <span>Delivery details</span>
+        <StatusDot state="neutral" label="Delivery details unavailable" />
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-foreground-tertiary"
+      data-testid="message-delivery-details"
+      data-delivery-state={receipts && receipts.length > 0 ? 'recorded' : 'unknown'}
+      aria-label="Message delivery details"
+    >
+      <span>Delivery details</span>
+      {message.inboundAccepted === true ? (
+        <span className="inline-flex items-center gap-1.5">
+          {message.sourceChannel ? <span>{message.sourceChannel === 'telegram' ? 'Telegram' : 'Web'}</span> : null}
+          <StatusDot state="success" label="Recorded inbound acceptance" />
+        </span>
+      ) : null}
+      {receipts && receipts.length > 0 ? (
+        receipts.map((receipt) => {
+          const presentation = receiptPresentation(receipt.status)
+          return (
+            <span key={receipt.deliveryId} className="inline-flex items-center gap-1.5">
+              <span>{receipt.channel === 'telegram' ? 'Telegram' : 'Web'}</span>
+              <StatusDot state={presentation.state} label={presentation.label} />
+              {receipt.failureReason ? <span className="text-status-danger">{receipt.failureReason}</span> : null}
+            </span>
+          )
+        })
+      ) : (
+        <StatusDot state="neutral" label="No delivery receipt recorded" />
+      )}
+    </div>
+  )
+}
+
 // ── The row ──────────────────────────────────────────────────────────────────
 
 export interface MessageRowProps {
@@ -294,6 +368,7 @@ export interface MessageRowProps {
   /** Current search match — accent ring. */
   highlighted?: boolean
   showTimestamp?: boolean
+  showDeliveryDetails?: boolean
   toolEventsExpandedDefault?: boolean
 }
 
@@ -310,6 +385,7 @@ export const MessageRow = memo(function MessageRow({
   dense,
   highlighted,
   showTimestamp = true,
+  showDeliveryDetails = false,
   toolEventsExpandedDefault = false,
 }: MessageRowProps) {
   const isUser = message.role === 'user'
@@ -389,6 +465,7 @@ export const MessageRow = memo(function MessageRow({
 
       <ToolEvents message={message} defaultExpanded={toolEventsExpandedDefault} />
       {!isUser ? <ProposalCards message={message} instanceId={instanceId} /> : null}
+      <MessageDeliveryDetails message={message} show={showDeliveryDetails} />
 
       {failedUser ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-2" role="alert">

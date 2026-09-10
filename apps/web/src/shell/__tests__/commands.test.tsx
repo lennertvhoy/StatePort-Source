@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getClient, resetClientForTests } from '@/client'
-import { useSessionStore } from '@/state'
+import { useSessionStore, useWorkspaceStore, WORKSPACE_STORAGE_KEY } from '@/state'
 import { CommandPalette } from '../CommandPalette'
 
 import type { ShellCommand } from '../commands'
@@ -81,6 +81,7 @@ beforeEach(() => {
   resetClientForTests()
   useCommandStore.setState({ commands: {}, recents: [], paletteOpen: false })
   useSessionStore.setState({ toasts: [] })
+  useWorkspaceStore.setState({ searchHistory: [] })
 })
 
 it('reloads recent visibility on open while preserving all commands and the eight-item history', async () => {
@@ -103,6 +104,48 @@ it('reloads recent visibility on open while preserving all commands and the eigh
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'item0' } })
   expect(screen.getAllByRole('option')).toHaveLength(1)
   expect(screen.getByRole('option').textContent).toContain('Command item0')
+})
+
+it('records reusable palette searches only when the saved preference is enabled', async () => {
+  await getClient().globalSettings.update({ general: { rememberSearchHistory: true } })
+  useWorkspaceStore.setState({ searchHistory: ['existing'] })
+  render(<><Probe commands={[cmd('item0')]} /><CommandPalette /></>)
+  await act(async () => {
+    useCommandStore.getState().setPaletteOpen(true)
+    await Promise.resolve()
+  })
+  await screen.findByTestId('command-palette-search-history')
+  const input = await screen.findByRole('combobox')
+  fireEvent.change(input, { target: { value: 'unmatched search' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(useWorkspaceStore.getState().searchHistory).toEqual(['unmatched search', 'existing'])
+  await waitFor(() => {
+    const persisted = localStorage.getItem(WORKSPACE_STORAGE_KEY)
+    expect(persisted ? JSON.parse(persisted).state.searchHistory : null).toEqual(['unmatched search', 'existing'])
+  })
+  await act(async () => {
+    await useWorkspaceStore.persist.rehydrate()
+  })
+  expect(useWorkspaceStore.getState().searchHistory).toEqual(['unmatched search', 'existing'])
+
+  fireEvent.change(input, { target: { value: 'item' } })
+  fireEvent.click(await screen.findByRole('option'))
+  expect(useWorkspaceStore.getState().searchHistory).toEqual(['item', 'unmatched search', 'existing'])
+
+  act(() => useCommandStore.getState().setPaletteOpen(false))
+  act(() => useCommandStore.getState().setPaletteOpen(true))
+  expect(await screen.findByTestId('command-palette-search-history')).toBeTruthy()
+  fireEvent.click(screen.getAllByTestId('command-palette-search-history-item')[0]!)
+  expect((screen.getByRole('combobox') as HTMLInputElement).value).toBe('item')
+
+  act(() => useCommandStore.getState().setPaletteOpen(false))
+  await getClient().globalSettings.update({ general: { rememberSearchHistory: false } })
+  act(() => useCommandStore.getState().setPaletteOpen(true))
+  const disabledInput = await screen.findByRole('combobox')
+  fireEvent.change(disabledInput, { target: { value: 'unmatched search' } })
+  fireEvent.keyDown(disabledInput, { key: 'Enter' })
+  expect(useWorkspaceStore.getState().searchHistory).toEqual(['item', 'unmatched search', 'existing'])
+  expect(screen.queryByTestId('command-palette-search-history')).toBeNull()
 })
 
 it('executes once despite history storage denial and reports an independent asynchronous command failure', async () => {

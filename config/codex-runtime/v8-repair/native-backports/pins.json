@@ -43,6 +43,28 @@
       "cves": [
         "CVE-2026-34743"
       ]
+    },
+    {
+      "name": "ts-rs-macros",
+      "version": "11.1.0",
+      "crateFile": "ts-rs-macros-11.1.0.crate",
+      "crateUrl": "https://static.crates.io/crates/ts-rs-macros/ts-rs-macros-11.1.0.crate",
+      "crateSha256": "ee6ff59666c9cbaec3533964505d39154dc4e0a56151fdea30a09ed0301f62e2",
+      "crateBytes": 20646,
+      "sourcePath": "src/deps.rs",
+      "beforeSha256": "a69b778958c1b22af94a521f76c7bb09ac4b22021418ac816b51548d9f2cc505",
+      "afterSha256": "e198378e7ac91fbbbceb0954b584fb03a2842df69baa8018df29632a2e68904e",
+      "additionalSources": [
+        {
+          "sourcePath": "src/lib.rs",
+          "beforeSha256": "25d8f9964e86f7046075c190ae753b616ae59fe87bc8bd54a24adc80b647b610",
+          "afterSha256": "9a61acd7e60e86c1cad83eb2f06ebfdc7f8b52d4c45be57b1c42a8e73923ef9b"
+        }
+      ],
+      "patchFile": "ts-rs-macros.patch",
+      "patchSha256": "2345a6f67f3d43c75bd89cffab05b290b2d99ef3b59fefdf37433bc555cb7d45",
+      "patchWorkingDirectory": ".",
+      "purpose": "Stable generated dependency calls and inferred generic bounds; full consumer byte reproduction unrun"
     }
   ],
   "regressionInputs": [

@@ -508,6 +508,7 @@ class VerifiedModules:
 
     release: Any
     updater_engine: Any
+    updater_genesis: Any
     updater_installed: Any
     updater_models: Any
     updater_store: Any
@@ -527,9 +528,19 @@ def load_modules_from_venv(venv_dir: Path) -> VerifiedModules:
         raise InstallerRefusal(
             "venv_layout_unexpected", "the updater venv does not contain exactly one module root"
         )
+    transport_modules = ("bootstrap", "operator_cli", "control_cli")
+    if any(not (exact[0] / "stateport_updater" / f"{name}.py").is_file()
+           for name in transport_modules):
+        raise InstallerRefusal(
+            "venv_layout_unexpected", "the updater venv lacks the required control transport"
+        )
     sys.path.insert(0, str(exact[0]))
     import stateport_release
+    import stateport_updater.bootstrap
+    import stateport_updater.operator_cli
+    import stateport_updater.control_cli
     import stateport_updater.engine
+    import stateport_updater.genesis
     import stateport_updater.installed
     import stateport_updater.models
     import stateport_updater.store
@@ -537,6 +548,7 @@ def load_modules_from_venv(venv_dir: Path) -> VerifiedModules:
     return VerifiedModules(
         release=stateport_release,
         updater_engine=stateport_updater.engine,
+        updater_genesis=stateport_updater.genesis,
         updater_installed=stateport_updater.installed,
         updater_models=stateport_updater.models,
         updater_store=stateport_updater.store,
@@ -557,6 +569,9 @@ def load_modules_from_authenticated_wheel(wheel: Path) -> VerifiedModules:
             if len(metadata_entries) != 1:
                 raise ValueError("the wheel has no exact metadata record")
             metadata = archive.read(metadata_entries[0]).decode("utf-8")
+            if any(f"stateport_updater/{name}.py" not in archive.namelist()
+                   for name in ("bootstrap", "operator_cli", "control_cli")):
+                raise ValueError("the wheel lacks the required control transport")
     except (OSError, KeyError, UnicodeDecodeError, ValueError, zipfile.BadZipFile) as exc:
         raise InstallerRefusal(
             "wheel_layout_invalid", "the authenticated updater wheel is not importable"
@@ -571,7 +586,11 @@ def load_modules_from_authenticated_wheel(wheel: Path) -> VerifiedModules:
     required_modules = (
         "stateport_release",
         "stateport_updater",
+        "stateport_updater.bootstrap",
+        "stateport_updater.operator_cli",
+        "stateport_updater.control_cli",
         "stateport_updater.engine",
+        "stateport_updater.genesis",
         "stateport_updater.installed",
         "stateport_updater.models",
         "stateport_updater.store",
@@ -583,7 +602,11 @@ def load_modules_from_authenticated_wheel(wheel: Path) -> VerifiedModules:
     sys.path.insert(0, str(wheel))
     try:
         import stateport_release
+        import stateport_updater.bootstrap
+        import stateport_updater.operator_cli
+        import stateport_updater.control_cli
         import stateport_updater.engine
+        import stateport_updater.genesis
         import stateport_updater.installed
         import stateport_updater.models
         import stateport_updater.store
@@ -595,7 +618,11 @@ def load_modules_from_authenticated_wheel(wheel: Path) -> VerifiedModules:
     loaded_modules = (
         stateport_release,
         stateport_updater,
+        stateport_updater.bootstrap,
+        stateport_updater.operator_cli,
+        stateport_updater.control_cli,
         stateport_updater.engine,
+        stateport_updater.genesis,
         stateport_updater.installed,
         stateport_updater.models,
         stateport_updater.store,
@@ -607,6 +634,7 @@ def load_modules_from_authenticated_wheel(wheel: Path) -> VerifiedModules:
     return VerifiedModules(
         release=stateport_release,
         updater_engine=stateport_updater.engine,
+        updater_genesis=stateport_updater.genesis,
         updater_installed=stateport_updater.installed,
         updater_models=stateport_updater.models,
         updater_store=stateport_updater.store,
@@ -3487,24 +3515,20 @@ def _persist_update_trust_root(
 
 
 def _install_update_wrapper(config: InstallConfig, state_root: Path) -> None:
-    """Persist the create-only ``stateport-update`` entry point.
+    """Persist the operator transport entry point, with create-only convergence.
 
-    The wrapper binds the installed control-plane seam and the operator-
-    controlled tool locations, then execs the updater CLI from the
-    digest-verified venv against the durable updater store.  An exact
-    reinstall is a no-op; different existing content refuses closed.
+    The unprivileged venv reads operator-selected public files. The fixed root
+    helper authenticates the operator and executes manifest-bound control code;
+    no operator venv or environment becomes privileged execution authority.
     """
 
     wrapper_dir = _ensure_private_directory(state_root / "bin")
     wrapper_path = wrapper_dir / "stateport-update"
     wrapper_content = (
         "#!/bin/sh\n"
-        "# Installed StatePort updater entry point; written once by the installer.\n"
-        "export STATEPORT_UPDATER_CONTROL_PLANE=stateport_updater.control_plane:build\n"
-        f"export STATEPORT_COSIGN={shlex.quote(INSTALLED_COSIGN_PATH)}\n"
-        f"export STATEPORT_QUADLET_ROOT={shlex.quote(str(config.live_quadlet_root))}\n"
+        "# Installed StatePort updater operator transport.\n"
         f"exec {shlex.quote(str(state_root / 'updater-venv' / 'bin' / 'python'))} "
-        f'-m stateport_updater --state-root {shlex.quote(str(state_root / "updater"))} "$@"\n'
+        '-I -m stateport_updater.operator_cli "$@"\n'
     ).encode("utf-8")
     if wrapper_path.exists() or wrapper_path.is_symlink():
         if wrapper_path.is_symlink() or wrapper_path.read_bytes() != wrapper_content:
@@ -4744,134 +4768,45 @@ def _execute_install(
     store = modules.updater_store.UpdateStore.create(state_root / "updater")
     envelope = release.to_updater_release_envelope(verified)
     trust_root = _persist_update_trust_root(config, release=release, clock=clock)
-    engine = modules.updater_engine.UpdateEngine(
-        store,
-        object(),  # host: genesis initialization performs no host calls
-        object(),  # authority: genesis initialization claims no authority
-        verification_policy=release.ReleaseVerificationPolicy(
-            expected_channel=config.channel,
-            expected_target=config.expected_target,
-            updater_version=str(modules.updater_engine.UPDATER_VERSION),
-            accepted_signers=frozenset(),
-            accepted_public_keys=frozenset(
-                {release.PinnedPublicKeyIdentity(config.trust_key_fingerprint, config.trust_key_id)}
-            ),
-            expected_trust_mode="pinned-public-key",
-            now=clock(),
-            allow_candidate=True,
-            require_transparency_log=False,
+    verification_policy = release.ReleaseVerificationPolicy(
+        expected_channel=config.channel,
+        expected_target=config.expected_target,
+        updater_version=str(modules.updater_engine.UPDATER_VERSION),
+        accepted_signers=frozenset(),
+        accepted_public_keys=frozenset(
+            {release.PinnedPublicKeyIdentity(config.trust_key_fingerprint, config.trust_key_id)}
         ),
-        signature_verifier=verifier,
-        target_id=config.expected_target,
-        clock=clock,
+        expected_trust_mode="pinned-public-key",
+        now=clock(),
+        allow_candidate=True,
+        require_transparency_log=False,
     )
     try:
-        engine.initialize(envelope, update_policy)
-    except modules.updater_engine.UpdateError as exc:
-        if exc.code != "already_initialized":
-            raise InstallerRefusal("updater_genesis_failed", str(exc)[:300]) from exc
-        existing_status = _load_json(store.status_path, "update status")
-        current = existing_status.get("current", {})
-        if (
-            current.get("releaseId") != str(verified.index.release_id)
-            or current.get("signedPayloadDigest") != index.signed_digest
-        ):
-            raise InstallerRefusal(
-                "updater_genesis_conflict", "existing updater status binds a different release"
-            ) from exc
-    if verified.authenticated_predecessor is not None:
-        predecessor_index = verified.authenticated_predecessor.index
-        # Same-lane predecessors (the J1 qualification lane shares one
-        # releaseId across candidates) are already embedded and authenticated
-        # inside the successor's verified index chain; the releases/ store
-        # slot is keyed by releaseId, so writing the predecessor there would
-        # conflict with the genesis index. Only persist a predecessor when it
-        # has a distinct release identity.
-        if str(predecessor_index.release_id) != str(verified.index.release_id):
-            with store.transaction() as session:
-                session.save_release_index_bytes(
-                    predecessor_index.release_id, predecessor_index.canonical_index_bytes
-                )
-    genesis_admissions = [
-        item
-        for item in (
-            _load_json(path, "release admission")
-            for path in sorted(store.admissions.glob("*.json"))
-        )
-        if item.get("kind") == "installed-initialize"
-        and item.get("releaseId") == str(verified.index.release_id)
-        and item.get("releaseIndexDigest") == index.index_digest
-        and item.get("signedPayloadDigest") == index.signed_digest
-    ]
-    if len(genesis_admissions) != 1:
-        raise InstallerRefusal(
-            "updater_genesis_conflict",
-            "updater admissions do not bind the exact genesis release",
-        )
-    admission = genesis_admissions[0]
-    try:
-        identity = modules.updater_installed.InstalledAuthorityAdapter.install(
+        genesis = modules.updater_genesis.initialize_installed_updater(
             store,
+            envelope,
+            update_policy,
+            verification_policy=verification_policy,
+            signature_verifier=verifier,
+            target_id=config.expected_target,
+            trust_root=trust_root,
             installer_digest=str(installer_artifact["digest"]),
             installer_origin=INSTALLER_ORIGIN,
             installer_version=INSTALLER_VERSION,
             actor_id=config.actor_id,
+            authenticated_predecessor=verified.authenticated_predecessor,
             clock=clock,
         )
+    except modules.updater_engine.UpdateError as exc:
+        if exc.code == "already_initialized":
+            raise InstallerRefusal("updater_genesis_conflict", str(exc)[:300]) from exc
+        raise InstallerRefusal("updater_genesis_failed", str(exc)[:300]) from exc
     except modules.updater_installed.UpdateAuthorityError as exc:
-        if exc.code != "installed_identity_exists":
-            raise InstallerRefusal("updater_genesis_failed", str(exc)[:300]) from exc
-        adapter = modules.updater_installed.InstalledAuthorityAdapter(store, clock=clock)
-        identities = [
-            _load_json(path, "installed identity record")
-            for path in sorted(adapter.identity_dir.glob("*.json"))
-        ]
-        if (
-            len(identities) != 1
-            or identities[0].get("releaseId") != str(verified.index.release_id)
-            or identities[0].get("releaseIndexDigest") != index.index_digest
-            or identities[0].get("signedPayloadDigest") != index.signed_digest
-            or identities[0].get("installerDigest") != str(installer_artifact["digest"])
-        ):
-            raise InstallerRefusal(
-                "updater_genesis_conflict",
-                "existing installed authority binds a different release",
-            ) from exc
-        identity = identities[0]
-    # The install-receipt schema is strict, so the genesis trust binding lives
-    # in its own durable record; it never names the PEM path, only digests.
-    install_trust = {
-        "schema": INSTALL_TRUST_SCHEMA,
-        "trustRootId": trust_root["trustRootId"],
-        "trustRootDigest": trust_root["trustRootDigest"],
-        "mode": "pinned-public-key",
-        "keyId": config.trust_key_id,
-        "publicKeyFingerprint": config.trust_key_fingerprint,
-        "channel": config.channel,
-        "targetId": config.expected_target,
-        "releaseId": str(verified.index.release_id),
-        "releaseIndexDigest": index.index_digest,
-        "signedPayloadDigest": index.signed_digest,
-        "admissionId": str(admission["admissionId"]),
-        "admissionDigest": str(admission["admissionDigest"]),
-        "installedIdentityId": str(identity["identityId"]),
-        "installedIdentityDigest": str(identity["identityDigest"]),
-        "installerDigest": str(installer_artifact["digest"]),
-        "createdAt": _timestamp(clock()),
-    }
-    install_trust_path = state_root / "updater" / "trust" / "install-trust.json"
-    comparable = {key: value for key, value in install_trust.items() if key != "createdAt"}
-    if install_trust_path.exists() or install_trust_path.is_symlink():
-        existing_trust = _load_json(install_trust_path, "install trust record")
-        if {
-            key: value for key, value in existing_trust.items() if key != "createdAt"
-        } != comparable:
-            raise InstallerRefusal(
-                "updater_genesis_conflict",
-                "existing install trust record binds a different release",
-            )
-    else:
-        _write_json(install_trust_path, install_trust)
+        if exc.code == "updater_genesis_conflict":
+            raise InstallerRefusal(exc.code, str(exc)[:300]) from exc
+        raise InstallerRefusal("updater_genesis_failed", str(exc)[:300]) from exc
+    admission = dict(genesis.admission)
+    identity = dict(genesis.identity)
     intent["phase"] = "updater-genesis"
     _write_json(intent_path, intent)
 

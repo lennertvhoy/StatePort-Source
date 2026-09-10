@@ -14,7 +14,7 @@ import { getClient } from '@/client'
 import { Kbd } from '@/components'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
-import { useSessionStore } from '@/state'
+import { useSessionStore, useWorkspaceStore } from '@/state'
 
 import type { ShellCommand } from './commands'
 import { availableCommands, COMMAND_GROUP_ORDER, useCommandStore } from './commands'
@@ -52,9 +52,12 @@ export function CommandPalette() {
   const recents = useCommandStore((s) => s.recents)
   const recordRun = useCommandStore((s) => s.recordRun)
   const pushToast = useSessionStore((s) => s.pushToast)
+  const searchHistory = useWorkspaceStore((s) => s.searchHistory)
+  const addSearchHistory = useWorkspaceStore((s) => s.addSearchHistory)
 
   const [query, setQuery] = useState('')
   const [showRecents, setShowRecents] = useState(false)
+  const [rememberSearchHistory, setRememberSearchHistory] = useState<boolean | null>(null)
   const [preferenceError, setPreferenceError] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -71,9 +74,13 @@ export function CommandPalette() {
     if (!open) return
     let cancelled = false
     setShowRecents(false)
+    setRememberSearchHistory(null)
     setPreferenceError(false)
     void getClient().globalSettings.get().then((settings) => {
-      if (!cancelled) setShowRecents(settings.navigation.recentCommands)
+      if (!cancelled) {
+        setShowRecents(settings.navigation.recentCommands)
+        setRememberSearchHistory(settings.general.rememberSearchHistory)
+      }
     }).catch(() => {
       if (!cancelled) setPreferenceError(true)
     })
@@ -131,9 +138,20 @@ export function CommandPalette() {
     if (flatIndex >= 0) virtualizer.scrollToIndex(flatIndex, { align: 'auto' })
   }, [activeIndex, selectable, rows, virtualizer])
 
+  const rememberQuery = () => {
+    const trimmed = query.trim()
+    if (rememberSearchHistory !== true || !trimmed) return
+    try {
+      addSearchHistory(trimmed)
+    } catch {
+      pushToast({ kind: 'error', title: 'Search history could not be saved', body: 'The search still ran. Its history may not survive reload.' })
+    }
+  }
+
   const runCommand = async (command: ShellCommand) => {
     try {
       setOpen(false)
+      rememberQuery()
       recordRun(command.id)
     } catch {
       pushToast({ kind: 'error', title: 'Recent commands could not be saved', body: 'The selected command will still run. Its history may not survive reload.' })
@@ -160,14 +178,17 @@ export function CommandPalette() {
       e.preventDefault()
       const row = selectable[activeIndex]
       if (row) void runCommand(row.command)
+      else rememberQuery()
     }
   }
+
+  const visibleSearchHistory = !query.trim() && rememberSearchHistory === true ? searchHistory : []
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
         showCloseButton={false}
-        className="fixed left-1/2 top-[12vh] z-palette flex w-[640px] max-w-[92vw] -translate-x-1/2 flex-col gap-0 overflow-hidden rounded-lg border border-border bg-surface p-0 shadow-2 duration-med ease-enter data-[state=open]:slide-in-from-top-2 data-[state=open]:fade-in-0"
+        className="fixed left-1/2 top-[12vh] z-palette flex max-h-[80vh] min-h-0 w-[640px] max-w-[92vw] -translate-x-1/2 translate-y-0 flex-col gap-0 overflow-hidden rounded-lg border border-border bg-surface p-0 shadow-2 duration-med ease-enter data-[state=open]:slide-in-from-top-2 data-[state=open]:fade-in-0"
         aria-label="Command palette"
         data-testid="command-palette"
         onOpenAutoFocus={(e) => {
@@ -176,7 +197,7 @@ export function CommandPalette() {
         }}
       >
         <DialogTitle className="sr-only">Command palette</DialogTitle>
-        <div className="flex h-11 items-center gap-2 border-b border-border px-3">
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
           <CommandIcon className="size-4 shrink-0 text-foreground-secondary" aria-hidden="true" />
           <input
             ref={inputRef}
@@ -195,8 +216,27 @@ export function CommandPalette() {
           />
         </div>
 
-        {preferenceError && <p role="status" className="px-3 py-2 text-sm text-foreground-secondary">Recent command preferences could not be loaded. All commands remain available; reopen the palette to retry.</p>}
-        <div ref={scrollRef} className="max-h-[50vh] overflow-y-auto" id="command-palette-list" role="listbox" aria-label="Commands">
+        {preferenceError && <p role="status" className="px-3 py-2 text-sm text-foreground-secondary">Recent command and search preferences could not be loaded. All commands remain available; reopen the palette to retry.</p>}
+        {visibleSearchHistory.length > 0 ? (
+          <div className="max-h-[20vh] shrink-0 overflow-y-auto border-b border-border px-1 py-1" aria-label="Recent searches" data-testid="command-palette-search-history">
+            <p className="px-2 py-1 text-xs font-medium text-foreground-secondary">Recent searches</p>
+            {visibleSearchHistory.map((search) => (
+              <button
+                key={search}
+                type="button"
+                onClick={() => {
+                  setQuery(search)
+                  inputRef.current?.focus()
+                }}
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-sm text-foreground-secondary hover:bg-hover hover:text-foreground"
+                data-testid="command-palette-search-history-item"
+              >
+                <span className="min-w-0 truncate">{search}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div ref={scrollRef} className="min-h-0 max-h-[calc(60vh-124px)] overflow-y-auto" id="command-palette-list" role="listbox" aria-label="Commands">
           {selectable.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-foreground-secondary">No matching commands.</p>
           ) : (
@@ -252,7 +292,7 @@ export function CommandPalette() {
           )}
         </div>
 
-        <div className="flex items-center gap-3 border-t border-border px-3 py-1.5 text-xs text-foreground-tertiary">
+        <div className="flex shrink-0 items-center gap-3 border-t border-border px-3 py-1.5 text-xs text-foreground-tertiary">
           <span className="inline-flex items-center gap-1">
             <Kbd>↑↓</Kbd> navigate
           </span>

@@ -12,6 +12,7 @@ import re
 import shlex
 import subprocess
 import tarfile
+import zipfile
 from typing import Mapping, Sequence
 
 
@@ -386,6 +387,16 @@ def render(
     installer = _artifact(candidate, document, "installer")
     provisioner = _artifact(candidate, document, "executionHostProvisioner")
     updater = _artifact(candidate, document, "updater")
+    control_updater_modules = {
+        "stateport_updater/bootstrap.py", "stateport_updater/operator_cli.py",
+        "stateport_updater/control_cli.py",
+    }
+    control_updater = False
+    if zipfile.is_zipfile(updater):
+        with zipfile.ZipFile(updater) as wheel:
+            present = control_updater_modules.intersection(wheel.namelist())
+        _require(not present or present == control_updater_modules, "updater control transport package is incomplete")
+        control_updater = bool(present)
     package_descriptor = document["signed"]["artifacts"].get("podmanPackageBundle")
     podman_package_bundle = (
         _artifact(candidate, document, "podmanPackageBundle")
@@ -757,6 +768,10 @@ def render(
         # keep-groups container start with the fresh membership.
         'sudo -n systemctl restart "user@$(id -u).service"',
         'python3 "$tmp/installer" \\\n  ' + installer_args + final_installer_confirmation,
+        *(
+            ('sudo -n /usr/local/libexec/stateport-execution-host-provision initialize-updater \\\n  --release-index "$tmp/release-index.json" --bundle-root "$tmp" \\\n  --cosign /usr/local/lib/stateport/tools/cosign \\\n  --trust-public-key /etc/stateport/alpha-2026-08-cosign.pub \\\n  --trust-key-id "' + trust_id + '" --trust-key-fingerprint "' + trust_fingerprint + '" \\\n  --channel alpha --actor-id "local-owner-$(id -un)"',)
+            if control_updater else ()
+        ),
         'printf "StatePort %s installed successfully for %s.\\n" "$STATEPORT_VERSION" "$TARGET"',
         "",
     ]

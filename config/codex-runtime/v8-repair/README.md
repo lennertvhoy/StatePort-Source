@@ -1,7 +1,26 @@
 # V8 native repair preparation
 
-This is an uncompiled repair candidate, isolated from the existing r6/r7 release
-inputs. It does not change the provider artifact pin or qualify a release.
+This is a preparation-only repair candidate. The corrected native archive and
+full `.3` static CLI have now compiled, and the final CLI passed ordinary provider
+isolation in rootless namespaces at both runtime UIDs. The canonical current
+results and exact external receipts are in
+[the slice summary](../../../evidence/one-line-release-001/summary.md).
+Independent reproduction, security disposition, consuming-image and native
+installed qualification remain open. The provider release pin is unchanged.
+
+The sections below retain the original pilot premises and subsequent findings;
+statements that a check was unrun describe that pilot stage, not current status.
+Choose each new job's limits from measured evidence and its admitted time window.
+The latest CLI compiler needed6GiB high=max after a3GiB OOM; the compiler's resource
+requirement is not the installed product's memory requirement.
+
+`Consumer.Containerfile` now retains the stripped artifact, rejects a dynamic
+loader or NEEDED entries, and exports the normal runtime feature graph, builder
+package list, OpenSSL version and upstream LICENSE/NOTICE. These metadata are
+inputs for review, not a complete linked-library SBOM or license audit. The
+container recipe still needs its own build qualification; the completed local
+consumer used an offline mounted vendor tree and different internal paths. Its
+byte identity cannot be assumed for a future Containerfile build.
 
 `recipe.json` pins rusty_v8 152.2.0 (packaged Rust API plus native source) and the
 complete upstream V8 15.2.124.1 → 15.2.124.21 patch at
@@ -69,10 +88,12 @@ python3 "$repo/config/codex-runtime/v8-repair/booked_pilot.py" native --output "
 ```
 
 `booked_pilot.py` checks actual finite governor service cgroup controls and places
-Podman children inside that service. The native stage uses `--cgroups=split`
-without `--cgroup-parent`: Podman splits the verified current booked service for
-conmon and payload. The actual PID observer still must prove both descendants
-before any compilation. Builder uses its separate unique Buildah cgroup-parent.
+Podman children inside that service. The native stage uses `--cgroups=no-conmon` with `--cgroup-parent` set to the
+exact governed service. The payload is placed directly below that service while
+conmon remains within its owned runtime child. The actual PID observer must prove
+both descendants before any compilation. This replaces split-mode nesting, which
+failed before compilation because the nested payload lacked controller files.
+The real same-image admission probe passed the corrected placement and limits. Builder uses its separate unique Buildah cgroup-parent.
 Builder context contains only this recipe,
 not the checkout or preparation caches. Both build and native run have network
 none and pull never. The native container has a read-only root, no capabilities,

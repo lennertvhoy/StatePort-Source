@@ -60,7 +60,10 @@ export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
   autoScroll: 'when_at_bottom',
   confirmBeforeClearingHistory: true,
   defaultContext: ['application', 'summary'],
-  showDeliveryDetails: true,
+  // Keep optional delivery metadata hidden until the persisted preference is
+  // loaded successfully; this avoids flashing details while settings load or
+  // after a settings read failure.
+  showDeliveryDetails: false,
   toolEventsExpanded: false,
   soundOnResponseFinished: false,
 }

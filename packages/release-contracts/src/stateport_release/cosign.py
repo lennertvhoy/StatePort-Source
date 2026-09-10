@@ -32,6 +32,7 @@ from .contract import PinnedPublicKeyIdentity, SignatureVerificationProof
 BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
 MAX_PUBLIC_KEY_BYTES = 64 * 1024
 MAX_BUNDLE_BYTES = 4 * 1024 * 1024
+MAX_IMAGE_MANIFEST_BYTES = 2 * 1024 * 1024
 _BUNDLE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,118}\.sigstore\.json$")
 _KEY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
 _FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -278,7 +279,33 @@ class CosignVerifier:
         return retain_bundle(self.bundle_root, source, signature)
 
     def resolve_local_image_manifest(self, image_id: str, digest: str) -> bytes | None:
-        """Resolve a private candidate manifest from retained image archives."""
+        """Resolve a private candidate manifest from retained bytes or archives.
+
+        The digest-keyed manifest slot is the small durable transport used by
+        the control-account bootstrap.  Archives remain supported for the
+        existing installer path, but a present manifest slot is authoritative:
+        malformed or changed bytes refuse instead of falling back to another
+        carrier.
+        """
+
+        if _FINGERPRINT.fullmatch(digest) is None:
+            raise CosignVerificationError("private image manifest digest is malformed")
+        manifest_root = self.bundle_root / "image-manifests"
+        manifest_path = manifest_root / f"{digest.removeprefix('sha256:')}.json"
+        if manifest_root.is_symlink():
+            raise CosignVerificationError("private image manifest directory is symlinked")
+        if manifest_path.exists() or manifest_path.is_symlink():
+            candidate = _regular_file(
+                manifest_path,
+                description=f"private image manifest {image_id}",
+                maximum_bytes=MAX_IMAGE_MANIFEST_BYTES,
+            )
+            payload = candidate.read_bytes()
+            if "sha256:" + hashlib.sha256(payload).hexdigest() != digest:
+                raise CosignVerificationError(
+                    f"private image manifest is tampered: {image_id}"
+                )
+            return payload
 
         candidates = (
             self.bundle_root / "image-archives" / f"{image_id}.oci.tar",

@@ -50,7 +50,80 @@ def containment(info: dict, container_id: str, parent: str,
             'ancestorLimits': limits, 'processes': processes}
 
 
+def prepare_delegation(parent: str, output: Path, *,
+                       proc: Path = Path('/proc'),
+                       cgroups: Path = Path('/sys/fs/cgroup')) -> None:
+    """Enable child controls inside this command's already bounded service.
+
+    A delegated domain must have no direct processes before its domain
+    controllers can be enabled. Move only this owned service's direct tasks
+    into its runtime child; never move anything outside the booked service or
+    alter the aggregate service limits. Podman otherwise creates payload
+    children without memory/cpu/pids control files on this host.
+    """
+    observed_parent = governor_cgroup_parent(
+        proc_cgroup=proc / 'self/cgroup', cgroup_root=cgroups)
+    if observed_parent != parent:
+        raise ValueError('delegation does not match the current governor service')
+    directory = cgroups / parent.lstrip('/')
+    required = {'cpu', 'memory', 'pids'}
+    available = set((directory / 'cgroup.controllers').read_text().split())
+    if not required <= available:
+        raise ValueError('governor lacks required delegated controllers')
+    limit_names = ('memory.max', 'memory.high', 'memory.swap.max', 'cpu.max', 'pids.max')
+    limits = {name: (directory / name).read_text().strip() for name in limit_names}
+    if not limits['pids.max'].isdigit() or int(limits['pids.max']) <= 0:
+        raise ValueError('governor has no finite process limit')
+    enabled_before = (directory / 'cgroup.subtree_control').read_text().split()
+    runtime = directory / 'runtime'
+    if runtime.is_symlink():
+        raise ValueError('governor runtime subgroup cannot be a symlink')
+    runtime.mkdir(exist_ok=True)
+    moved = []
+    for _ in range(3):
+        pids = (directory / 'cgroup.procs').read_text().split()
+        if not pids:
+            break
+        for pid in pids:
+            if not pid.isdigit() or int(pid) <= 0:
+                raise ValueError('invalid direct governor process identity')
+            try:
+                membership = (proc / pid / 'cgroup').read_text().strip()
+                if membership != '0::' + parent:
+                    raise ValueError('direct process changed cgroup during delegation')
+                (runtime / 'cgroup.procs').write_text(pid)
+                moved.append(int(pid))
+            except (ProcessLookupError, FileNotFoundError):
+                # An exited process needs no move. A live process or missing
+                # subgroup control is a real failure, not a waived race.
+                if (proc / pid).exists():
+                    raise
+    if (directory / 'cgroup.procs').read_text().strip():
+        raise ValueError('governor still has direct processes; child controls unavailable')
+    wanted = required | ({'io'} if 'io' in available else set())
+    (directory / 'cgroup.subtree_control').write_text(
+        ' '.join('+' + name for name in sorted(wanted)))
+    enabled = set((directory / 'cgroup.subtree_control').read_text().split())
+    if not wanted <= enabled:
+        raise ValueError('governor child controllers did not become available')
+    if limits != {name: (directory / name).read_text().strip() for name in limit_names}:
+        raise ValueError('governor aggregate limits changed during delegation')
+    (output / 'delegation.json').write_text(json.dumps({
+        'status': 'passed', 'bookedScope': parent, 'movedDirectPids': moved,
+        'enabledBefore': enabled_before, 'enabledAfter': sorted(enabled),
+        'unchangedAncestorLimits': limits,
+    }, indent=2) + '\n')
+
+
 def observed_native(command: list[str], output: Path, parent: str, log) -> int:
+    try:
+        prepare_delegation(parent, output)
+    except Exception as error:
+        (output / 'containment-failure.json').write_text(json.dumps({
+            'status': 'failed', 'error': str(error),
+            'nativeCompilation': 'not admitted; delegation failed before launch',
+        }) + '\n')
+        return 1
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
     cidfile = output / 'container-id'
     cid = None
@@ -145,7 +218,12 @@ def main() -> int:
         work = output / 'work'
         work.mkdir()
         command = ['/usr/bin/podman', '--cgroup-manager=cgroupfs', 'run',
-                   '--pull=never', '--cgroups=split', '--network=none',
+                   # Place the payload directly below the delegated service.
+                   # split nests it below the occupied runtime subgroup, where
+                   # child controller files are not reliably available. conmon
+                   # stays in runtime and is checked by observed_native too.
+                   '--pull=never', '--cgroups=no-conmon', '--cgroup-parent', parent,
+                   '--network=none',
                    '--cidfile', str(output / 'container-id'),
                    '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
                    '--pids-limit=256', '--cpus=1', '--memory=3g', '--memory-swap=3g',

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy an exact new Codex .3 tree and stage two checksum-bound native backports."""
+"""Copy an exact new Codex .3 tree and stage checksum-bound dependency patches."""
 from __future__ import annotations
 
 import argparse
@@ -52,13 +52,17 @@ def prepare(source: Path, inputs: Path, output: Path) -> dict:
                     raise ValueError('crate archive root differs')
             archive.extractall(overrides, filter='data')
         root = overrides / prefix
-        require(root / row['sourcePath'], row['beforeSha256'])
+        sources = [row, *row.get('additionalSources', [])]
+        for source_row in sources:
+            require(root / source_row['sourcePath'], source_row['beforeSha256'])
         subprocess.run(['patch', '--batch', '--fuzz=0', '--no-backup-if-mismatch',
                         '-p1', '-i', str(HERE / row['patchFile'])],
                        cwd=root / row['patchWorkingDirectory'], check=True)
-        require(root / row['sourcePath'], row['afterSha256'])
+        for source_row in sources:
+            require(root / source_row['sourcePath'], source_row['afterSha256'])
         receipts.append({'name': row['name'], 'path': str(root.relative_to(workspace)),
-                         'crateSha256': row['crateSha256'], 'patchedSourceSha256': row['afterSha256']})
+                         'crateSha256': row['crateSha256'], 'patchedSourceSha256': row['afterSha256'],
+                         'patchedSources': {s['sourcePath']: s['afterSha256'] for s in sources}})
     manifest = workspace / 'Cargo.toml'
     text = manifest.read_text()
     if text.count('[patch.crates-io]') != 1:
