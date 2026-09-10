@@ -528,6 +528,7 @@ rules:
   - apps/web/src/shell/Toaster.tsx
   - apps/web/src/shell/Topbar.tsx
   - apps/web/src/shell/WorkbenchShell.tsx
+  - apps/web/src/shell/__tests__/StatusBar.test.tsx
   - apps/web/src/shell/__tests__/commands.test.tsx
   - apps/web/src/shell/__tests__/dataPolling.test.tsx
   - apps/web/src/shell/__tests__/operationControls.test.tsx
@@ -1566,6 +1567,7 @@ rules:
   - evidence/one-line-release-001/public-release-campaign-handoff.md
   - evidence/one-line-release-001/resume-after-wait-config-20260908.md
   - evidence/one-line-release-001/run-history-through-20260909.md
+  - evidence/one-line-release-001/run-history-through-20260910-r13-start.md
   - evidence/template-lifecycle-001/journey.json
   - evidence/template-lifecycle-001/summary.md
   - docs/evidence/2026-07-12-overnight-program-convergence/integration-order.md
