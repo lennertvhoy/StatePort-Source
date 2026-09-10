@@ -1,5 +1,5 @@
 formatVersion: stateport.container-build-inputs/v1
-resolvedOn: "2026-09-04"
+resolvedOn: "2026-09-10"
 platform: linux/amd64
 
 builder:
@@ -181,9 +181,9 @@ upstreamTools:
 
 browserAssets:
   chrome-for-testing:
-    version: 152.0.7977.82
-    uri: https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chrome-linux64.zip
-    digest: sha256:0704631fb3e4f741092e08f55272f90abc3e307f991f05f332924364415b02e0
+    version: 153.0.8010.36
+    uri: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.36/linux64/chrome-linux64.zip
+    digest: sha256:167a098c4fdec156b58a9f678c90a84f9072d789f9c6e7b35496a6987b8b7ef8
     installPath: /ms-playwright/chromium-1234/chrome-linux64
 
 definitions:
@@ -193,7 +193,7 @@ definitions:
   apps/runner/Dockerfile: sha256:2895b2ee36cebb8b9133fa930b6ef3cc88d1508dad62fe19aaccca2abdbd49a3
   images/stateport-dev-workspace/Containerfile: sha256:b9dca76cc68b6f3663e3baae2bbdd7c8805b73e8962a0e966bc88e17c3582b01
   images/stateport-execution-host/Containerfile: sha256:83554c3ee7077e14f18fc856526bc63fca06dbbb55378feadeb63cb9c5af4b64
-  images/stateport-playwright/Containerfile: sha256:c0c36820945e04b5eb451a02e7ae7d6ce939ca76a58c5ee3ecd606cd2eae8c28
+  images/stateport-playwright/Containerfile: sha256:3c14269dc7e4fbafc937fc01d204a4121008ca237a5b14ce11ff62728e4d8d4f
   images/packaged-content.v1.yaml: sha256:4c34dbaa74b96fc3bcc5d2c061f7992c4d2513d3b80fab8fead207e2d217818c
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
 

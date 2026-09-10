@@ -48,22 +48,22 @@ RUN export HOME=/tmp/stateport-build-home \
     && rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx
 
 # The pinned Playwright base currently carries Chrome 151.0.7922.34. Replace
-# only that browser payload with the digest-pinned scanner-fixed Linux Chrome
-# for Testing build qualified against the exact Playwright runtime.
+# only that browser payload with digest-pinned Chrome for Testing153.0.8010.36.
+# Qualification must use this exact payload with the pinned Playwright runtime.
 RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
-       -o /tmp/chrome-linux64-152.0.7977.82.zip \
-       https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chrome-linux64.zip \
-    && echo "0704631fb3e4f741092e08f55272f90abc3e307f991f05f332924364415b02e0  /tmp/chrome-linux64-152.0.7977.82.zip" | sha256sum -c - \
+       -o /tmp/chrome-linux64-153.0.8010.36.zip \
+       https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.36/linux64/chrome-linux64.zip \
+    && echo "167a098c4fdec156b58a9f678c90a84f9072d789f9c6e7b35496a6987b8b7ef8  /tmp/chrome-linux64-153.0.8010.36.zip" | sha256sum -c - \
     && apt-get update \
     && apt-get install --no-install-recommends -y unzip=6.0-28ubuntu4.1 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /var/log/apt/history.log /var/log/apt/term.log /var/log/apt/eipp.log.xz \
       /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
     && rm -rf /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
-    && unzip -q /tmp/chrome-linux64-152.0.7977.82.zip -d /tmp \
+    && unzip -q /tmp/chrome-linux64-153.0.8010.36.zip -d /tmp \
     && mv /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
     && test -x /ms-playwright/chromium-1234/chrome-linux64/chrome \
-    && rm -f /tmp/chrome-linux64-152.0.7977.82.zip
+    && rm -f /tmp/chrome-linux64-153.0.8010.36.zip
 
 ENV HOME=/home/stateport \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \

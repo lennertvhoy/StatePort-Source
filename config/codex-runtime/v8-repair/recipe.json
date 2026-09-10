@@ -1,6 +1,6 @@
 {
   "formatVersion": "stateport.v8-native-repair/v1",
-  "status": "preparation-only; native compilation and qualification unrun",
+  "status": "preparation-only; current M152 security source refreshed, native compilation and qualification unrun",
   "source": {
     "crateVersion": "152.2.0",
     "crateFile": "v8-152.2.0.crate",
@@ -8,10 +8,10 @@
     "rustyV8Commit": "2768994f664e8a6e3aba27503606c58339136e2a",
     "crateReportsDirtyVcs": true,
     "baseV8Commit": "d848a2b3d3aedda62fd825ce5326e5c9d32db96f",
-    "fixedV8Commit": "4323497a6a73839e6d5260f6acd7ec0212cb3321",
-    "fixedV8Version": "15.2.124.21",
+    "fixedV8Commit": "7938dd73a1d5b6021daca3beeac450ebde3c141d",
+    "fixedV8Version": "15.2.124.27",
     "patchFile": "v8-security-update.patch",
-    "patchSha256": "327042220738834d20bb8cbaf8fd2cb4ae3e34895a364b51763f8b91c2907852",
+    "patchSha256": "17687ed02cfd89372c85fa084f5f91a4d4dce6d2a014fc4cc34006b0a3351d47",
     "depsSha256": "b588f2d248a7d4c6361c1d22a18dffc3320d832dbb8aef9ddc8e763723b6b712",
     "missingTestPreimages": [
       {
@@ -34,20 +34,39 @@
         "file": "test_unittests_assembler_macro-assembler-arm64-unittest.cc",
         "sha256": "905b70b7b74b94f93777f039107b3ef01886181dedf4cf9f6a2a05da12ce92fb",
         "bytes": 8488
+      },
+      {
+        "path": "test/unittests/objects/feedback-vector-unittest.cc",
+        "url": "https://raw.githubusercontent.com/v8/v8/d848a2b3d3aedda62fd825ce5326e5c9d32db96f/test/unittests/objects/feedback-vector-unittest.cc",
+        "file": "test_unittests_objects_feedback-vector-unittest.cc",
+        "sha256": "e442b346f47539455e7f10310b9179e12db85c018591605d5c56834c99a2689e",
+        "bytes": 27176
       }
     ],
     "expectedPatchedFiles": [
       {
         "path": "include/v8-version.h",
-        "sha256": "74bb84d6eeab63ae4c646360a6175a30f03e8983d43857f84e95736647919095"
+        "sha256": "0b0e54e978b9a182f4a1ce088fb88e67e018c5f09f2007ce37d3723e5b00b3a7"
       },
       {
         "path": "src/ast/scopes.cc",
         "sha256": "b0dd09004d2f26acdc4a2c9699437ac3fb48d120c3efdc39c226f3e60a28b1d8"
       },
       {
+        "path": "src/builtins/array-flat.tq",
+        "sha256": "be4032620cc444293dfd95c2b648d136c8659e461a8adb2cd422339fb03a4788"
+      },
+      {
+        "path": "src/builtins/builtins-definitions.h",
+        "sha256": "8fb321fc573502e7c952d4e3292d00785268d52e7ef43f785c2b8b3669aaea1b"
+      },
+      {
         "path": "src/builtins/builtins-inl.h",
         "sha256": "6aa31f9719882b3948dfbe2de07bd9b30131d7ae491f3cba873a980d25bc4d5c"
+      },
+      {
+        "path": "src/builtins/builtins-wasm-gen.cc",
+        "sha256": "c5d6146ad089a7ac1f31a731bdd669b12a757d9ed1239e5b5b54d2456b159ab5"
       },
       {
         "path": "src/builtins/builtins.cc",
@@ -56,6 +75,10 @@
       {
         "path": "src/builtins/setup-builtins-internal.cc",
         "sha256": "b7df95f5ed9eed23192c66aab385b3e144c26281d0db140822dfcc3fd19a47c8"
+      },
+      {
+        "path": "src/builtins/wasm.tq",
+        "sha256": "c74e9d7d61e88633a541a6be1937df0828707b682a6eb5a9b9700827fe8258de"
       },
       {
         "path": "src/codegen/arm64/macro-assembler-arm64.cc",
@@ -94,12 +117,24 @@
         "sha256": "67bf8e207779992dddb4aa637a1e6dad631e52d4ffc200810e90ac6aa8457166"
       },
       {
+        "path": "src/compiler/turboshaft/builtin-call-descriptors.h",
+        "sha256": "071708846f377a78894e0ecaea7cadcdb5a29ad44002b6bd38c87553495ac591"
+      },
+      {
+        "path": "src/compiler/turboshaft/late-load-elimination-reducer.cc",
+        "sha256": "0b4eb0c8505fc5417fcd9b5655fba4a8571ad8c360da8756679d931245c76ece"
+      },
+      {
         "path": "src/compiler/turboshaft/store-store-elimination-reducer-inl.h",
         "sha256": "9581651ca6cbe6406bf7c6574ec10fa67636163ffad7f5b2a2dadd5cecea1648"
       },
       {
         "path": "src/diagnostics/disassembler.cc",
         "sha256": "bdfdb3e31431ceac7abef78a1d44850350262c30a57d678443a476f8a6a482f3"
+      },
+      {
+        "path": "src/diagnostics/objects-debug.cc",
+        "sha256": "7cd2ae98b901140fdfcd4bb3a24c59b676bf3eb92c0a52598930707a907e2c9b"
       },
       {
         "path": "src/flags/flag-definitions.h",
@@ -115,7 +150,11 @@
       },
       {
         "path": "src/maglev/maglev-graph-builder.cc",
-        "sha256": "c9989ba5bea72334af163491cbdafe1fb83d5dd4f4e36a668ca04012ee0027c9"
+        "sha256": "fb519f4ee45bebf2b8946307d3769e5ad0b432b596736d56dfdc6d55f72b257e"
+      },
+      {
+        "path": "src/maglev/maglev-graph-builder.h",
+        "sha256": "d72f744a4eb7c6a84533d7a682af67d829294bdc6c519a41b5983fcbb6f4046b"
       },
       {
         "path": "src/maglev/maglev-ir.h",
@@ -124,6 +163,10 @@
       {
         "path": "src/maglev/maglev-known-node-aspects.h",
         "sha256": "9d401d3d5c549a239f3d947f0075dd7efe0801f0a2818ac546ad9736f98a6b56"
+      },
+      {
+        "path": "src/objects/feedback-vector.h",
+        "sha256": "1ccc6502254f128a1175e6a962f2474bbb0ba073804b1672811c64e1a62eaac4"
       },
       {
         "path": "src/objects/js-data-object-builder-inl.h",
@@ -154,8 +197,20 @@
         "sha256": "9ddaacbf462143254a443c2dec45b20cbe7072164fbd05254bb2332f418fc927"
       },
       {
+        "path": "src/snapshot/deserializer.cc",
+        "sha256": "180ec17a53db025f62e605e2717c88a7148a392530a525849dac8d235cd6f926"
+      },
+      {
+        "path": "src/wasm/baseline/liftoff-compiler.cc",
+        "sha256": "377f4c66d11d4b0d628746612c73dd1d275005171d3a703a3ddb767bcfb5cb58"
+      },
+      {
         "path": "src/wasm/module-compiler.cc",
         "sha256": "3c9212832082658ebf1fa81910a190f81810ecf7ceab609d0204c8b20bc2cbb6"
+      },
+      {
+        "path": "src/wasm/turboshaft-graph-interface.cc",
+        "sha256": "885aa7fd76f402797e1c7c617d46270f56969f7704975f6f8793e1b167e3578d"
       },
       {
         "path": "src/wasm/wasm-code-manager.cc",
@@ -186,8 +241,12 @@
         "sha256": "c881f9cf8ee16d303aed5918136e3ea7933a9df6e8eb1bdc2a10daad60ef3742"
       },
       {
+        "path": "test/mjsunit/maglev/regress/regress-550360762.js",
+        "sha256": "5808036d1b2959f11a7df90c854a3bbd19a5feba18a82092c03984645005ad15"
+      },
+      {
         "path": "test/mjsunit/mjsunit.status",
-        "sha256": "183918ce19867c1b8102ce6cda7da1bb1f56796da3c8142524610c86a36f719e"
+        "sha256": "52f85aa5ccc584d40652d668204a806a0bea6a09410ba16ee375c8a4ee6f6fd3"
       },
       {
         "path": "test/mjsunit/regress/regress-526380803-1.js",
@@ -214,6 +273,10 @@
         "sha256": "3f585b024bdd0b1138feb553e32219be3c6a1c78e4615a17e7edd46b3d4178cb"
       },
       {
+        "path": "test/mjsunit/regress/regress-554236352.js",
+        "sha256": "60cf9aae065634c0baf01e2f17b8f29da425a53ba20992a40336f4904f453667"
+      },
+      {
         "path": "test/mjsunit/regress/regress-crbug-542403045.js",
         "sha256": "0e518b948a62541b34554f74df54b2bedc46d15f269eb982b8fbf21c69ab4609"
       },
@@ -230,8 +293,16 @@
         "sha256": "2d3913e3152bc362ff09383ee49737050bb058333c83e45df6ae7d0697d4e118"
       },
       {
+        "path": "test/mjsunit/sandbox/regress/regress-543557673.js",
+        "sha256": "c4fbd669fd28e851ee533e9eb925baae8daaaac156ae68f278c23a258b1d150d"
+      },
+      {
         "path": "test/mjsunit/turboshaft/regress-547936520.js",
         "sha256": "fe16081392fba63fba2a57cdb7d6f028433cda35b90851aa77a03b7d33c97ac8"
+      },
+      {
+        "path": "test/mjsunit/turboshaft/regress-554421904.js",
+        "sha256": "6a222e3f3ae4780388a547965575121fa2ca5111d3d4522eb00f639d4d96ecdd"
       },
       {
         "path": "test/unittests/BUILD.gn",
@@ -244,6 +315,10 @@
       {
         "path": "test/unittests/assembler/macro-assembler-arm64-unittest.cc",
         "sha256": "74efa61542c3286af64ed55174ec55e7c0a54c0e793cbce5762a234b0c187ee5"
+      },
+      {
+        "path": "test/unittests/objects/feedback-vector-unittest.cc",
+        "sha256": "276c225a9d5faea712515ababb65b6ef42b4a501a9949509f71802ace2c6d5cf"
       },
       {
         "path": "test/unittests/regress/regress-536271629-unittest.cc",
@@ -410,6 +485,13 @@
       "url": "https://apt.llvm.org/noble/pool/main/l/llvm-toolchain-21/libclang-common-21-dev_21.1.8~++20251221032922+2078da43e25a-1~exp1~20251221153059.70_amd64.deb",
       "sha256": "8cac87266a164b961d85ebcc583806454957ba05429c74e87c4de5e9de2730aa",
       "bytes": 800354
+    },
+    {
+      "name": "test-preimage-test_unittests_objects_feedback-vector-unittest.cc",
+      "file": "test_unittests_objects_feedback-vector-unittest.cc",
+      "url": "https://raw.githubusercontent.com/v8/v8/d848a2b3d3aedda62fd825ce5326e5c9d32db96f/test/unittests/objects/feedback-vector-unittest.cc",
+      "sha256": "e442b346f47539455e7f10310b9179e12db85c018591605d5c56834c99a2689e",
+      "bytes": 27176
     }
   ],
   "nativeCargoLockSha256": "4303ad4b560fcc024f800f31f306ca4401ae8636002733e3407c91df386bda9e",
@@ -430,7 +512,7 @@
       "args.gn",
       "build.log"
     ],
-    "sourceDateEpoch": 1788250972
+    "sourceDateEpoch": 1788865900
   },
   "consumer": {
     "v8": "152.2.0",
@@ -490,6 +572,6 @@
     ],
     "qualification": "source correctness corrections; severity and supported caller applicability unestablished; upstream regressions and native API/data compatibility unrun"
   },
-  "licenseNoticesSha256": "00332da6eb231311762f3622da1399b95bd9f9a052dd072b85928ff8ae2d8181",
+  "licenseNoticesSha256": "6b9bb202ce95ebda78f24c5d927f36ae37dbc6e8d28e2e5a0e2304b8e33d38ae",
   "chromiumVendorManifestSha256": "5419a9235bec5aab6c6b801877e24f14621c657e81ea11191f1812ef0618f7b6"
 }

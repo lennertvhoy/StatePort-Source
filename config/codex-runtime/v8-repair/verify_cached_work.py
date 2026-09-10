@@ -202,8 +202,33 @@ def _verify_outer_command(cached_run: Path, expected_image: str, inputs: Path,
     # Match the complete booked_pilot argv, allowing only the reviewed roots,
     # image, timeout and run-specific cidfile to vary. Presence checks would
     # accept contradictory additions such as --privileged or --network=host.
-    if command[:5] != ['/usr/bin/podman', '--cgroup-manager=cgroupfs', 'run',
-                       '--pull=never', '--cgroups=split']:
+    prefix = ['/usr/bin/podman', '--cgroup-manager=cgroupfs', 'run', '--pull=never']
+    cgroup_arguments = ['--cgroups=split']
+    if command[:5] == prefix + ['--cgroups=no-conmon']:
+        parent = command_receipt.get('governorCgroup')
+        if (not isinstance(parent, str) or not re.fullmatch(
+                r'/user\.slice/user-(?P<uid>[0-9]+)\.slice/user@(?P=uid)\.service/'
+                r'stateport\.slice/stateport-heavy\.slice/stateport-heavy-[0-9]+-[0-9]+\.service',
+                parent)):
+            raise VerificationError('current runner lacks an exact governor scope')
+        try:
+            proof = _read_resume_json(cached_run / 'work/containment-approved.json')
+            observed = _read_resume_json(cached_run / 'containment.json')
+            cid = observed.get('containerId')
+            if (proof.get('status') != 'passed' or proof.get('bookedScope') != parent
+                    or not isinstance(cid, str) or not re.fullmatch(r'[0-9a-f]{64}', cid)
+                    or proof != observed):
+                raise ValueError('containment identity differs')
+            for name in ('init', 'conmon'):
+                membership = proof['processes'][name]['cgroup']
+                if (not isinstance(membership, str) or '..' in Path(membership).parts
+                        or str(Path(membership)) != membership
+                        or not (membership == parent or membership.startswith(parent + '/'))):
+                    raise ValueError('process is outside the recorded governor scope')
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            raise VerificationError('current runner containment does not match its command') from error
+        cgroup_arguments = ['--cgroups=no-conmon', '--cgroup-parent', parent]
+    elif command[:5] != prefix + ['--cgroups=split']:
         raise VerificationError("outer command does not use the booked native runner")
     if '--network=none' not in command or '--network=host' in command or '--privileged' in command:
         raise VerificationError("outer command has unsafe network/privilege options")
@@ -295,8 +320,7 @@ def _verify_outer_command(cached_run: Path, expected_image: str, inputs: Path,
     if seen != set(expected):
         raise VerificationError("outer command bind mounts are incomplete")
     expected_command = [
-        '/usr/bin/podman', '--cgroup-manager=cgroupfs', 'run', '--pull=never',
-        '--cgroups=split', '--network=none', '--cidfile',
+        *prefix, *cgroup_arguments, '--network=none', '--cidfile',
         str((cached_run / 'container-id').resolve()), '--read-only', '--cap-drop=ALL',
         '--security-opt=no-new-privileges', '--pids-limit=256', '--cpus=1',
         '--memory=3g', '--memory-swap=3g', '--tmpfs=/tmp:rw,nosuid,nodev,size=64m',
@@ -365,8 +389,10 @@ def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: P
     staging.mkdir(parents=False, exist_ok=False)
     # Archive installers (and dpkg) are executable only in the pinned builder
     # image.  Never perform that correspondence reconstruction on the host.
+    parent = governor_cgroup_parent()
     command = ["/usr/bin/podman", "--cgroup-manager=cgroupfs", "run", "--pull=never",
-               "--cgroups=split", "--network=none", "--cidfile", str(staging / "container-id"),
+               "--cgroups=no-conmon", "--cgroup-parent", parent,
+               "--network=none", "--cidfile", str(staging / "container-id"),
                "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
                "--pids-limit=256", "--cpus=1", "--memory=3g", "--memory-swap=3g",
                "--tmpfs=/tmp:rw,nosuid,nodev,size=64m",
@@ -377,7 +403,6 @@ def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: P
                "--mount", f"type=bind,src={staging / 'work'},dst=/work,rw", "--entrypoint", "/usr/bin/python3", image,
                "/opt/stateport-v8-repair/verify_cached_work.py",
                "--inside", "--cached", "/cached/work", "--expected-recipe-sha", receipt["recipeSha256"]]
-    parent = governor_cgroup_parent()
     (staging / 'work').mkdir()
     (staging / 'command.json').write_text(json.dumps({
         'command': command, 'verifierSha256': sha256(Path(__file__).resolve()),

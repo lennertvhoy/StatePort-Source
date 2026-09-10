@@ -1,5 +1,5 @@
 diff --git a/include/v8-version.h b/include/v8-version.h
-index e819fef..e7adb6e 100644
+index e819fef9e196..12f30bc85850 100644
 --- a/include/v8-version.h
 +++ b/include/v8-version.h
 @@ -11,7 +11,7 @@
@@ -7,15 +7,15 @@ index e819fef..e7adb6e 100644
  #define V8_MINOR_VERSION 2
  #define V8_BUILD_NUMBER 124
 -#define V8_PATCH_LEVEL 1
-+#define V8_PATCH_LEVEL 21
++#define V8_PATCH_LEVEL 27
  
  // Use 1 for candidates and 0 otherwise.
  // (Boolean macro values are not supported by all preprocessors.)
 diff --git a/src/ast/scopes.cc b/src/ast/scopes.cc
-index d700d61..61b61e5 100644
+index d700d619eac0..61b61e5c470e 100644
 --- a/src/ast/scopes.cc
 +++ b/src/ast/scopes.cc
-@@ -2904,6 +2904,12 @@
+@@ -2904,6 +2904,12 @@ void Scope::AllocateScopeInfosRecursively(
      CHECK_EQ(scope_info_->scope_type(), scope_type_);
      CHECK_EQ(scope_info_->HasContext(), NeedsContext());
      CHECK_EQ(scope_info_->ContextLength(), num_heap_slots_);
@@ -28,11 +28,39 @@ index d700d61..61b61e5 100644
  #ifdef DEBUG
      // Consume the scope info.
      it->second = {};
+diff --git a/src/builtins/array-flat.tq b/src/builtins/array-flat.tq
+index a40b8a0d8e8f..659de786c9ec 100644
+--- a/src/builtins/array-flat.tq
++++ b/src/builtins/array-flat.tq
+@@ -420,9 +420,8 @@ transitioning macro FlattenIntoArrayFast(
+       otherwise goto Bailout(targetIndex, smiSourceIndex);
+   let fastOW = NewFastJSArrayWitness(fastSource);
+ 
+-  // The source is a FastJSArray, thus its length must be a Smi.
+-  dcheck(Is<Smi>(sourceLength));
+-  const smiSourceLength = UnsafeCast<Smi>(sourceLength);
++  const smiSourceLength = Cast<Smi>(sourceLength)
++      otherwise goto Bailout(targetIndex, smiSourceIndex);
+ 
+   // 3. Repeat, while sourceIndex < sourceLen
+   for (; smiSourceIndex < smiSourceLength; smiSourceIndex++) {
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 8ec77ac91f1b..4918024d3111 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -1473,6 +1473,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+   IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
+   IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \
+   IF_WASM(TFC, JSToWasmLazyDeoptContinuation, SingleParameterOnStack)          \
++  IF_WASM(TFS, WasmGetOwnProperty, NeedsContext{false}, kObject, kSymbol)      \
+                                                                                \
+   /* WeakMap */                                                                \
+   TFJ(WeakMapConstructor, kDontAdaptArgumentsSentinel)                         \
 diff --git a/src/builtins/builtins-inl.h b/src/builtins/builtins-inl.h
-index fa5bd0c..a2fcf92 100644
+index fa5bd0c70a22..a2fcf92c60f3 100644
 --- a/src/builtins/builtins-inl.h
 +++ b/src/builtins/builtins-inl.h
-@@ -275,8 +275,15 @@
+@@ -275,8 +275,15 @@ int Builtins::GetFormalParameterCount(Builtin builtin) {
      return Builtins::GetStackParameterCount(builtin);
  
    } else if (kind == ASM || kind == TFC) {
@@ -50,7 +78,7 @@ index fa5bd0c..a2fcf92 100644
      return kDontAdaptArgumentsSentinel;
  
    } else if (kind == CPP) {
-@@ -321,8 +328,6 @@
+@@ -321,8 +328,6 @@ bool Builtins::IsJSTrampoline(Builtin builtin) {
  #ifdef V8_ENABLE_WEBASSEMBLY
      case Builtin::kJSToWasmWrapper:
      case Builtin::kWasmPromising:
@@ -59,11 +87,87 @@ index fa5bd0c..a2fcf92 100644
  #if V8_ENABLE_DRUMBRAKE
      case Builtin::kJSToWasmInterpreterWrapper:
  #endif
+diff --git a/src/builtins/builtins-wasm-gen.cc b/src/builtins/builtins-wasm-gen.cc
+index 92ffd89b2b75..3ba93d9a05a7 100644
+--- a/src/builtins/builtins-wasm-gen.cc
++++ b/src/builtins/builtins-wasm-gen.cc
+@@ -266,6 +266,71 @@ TNode<BoolT> WasmBuiltinsAssembler::InSharedSpace(TNode<HeapObject> object) {
+   return IsPageFlagSet(address, MemoryChunk::kInSharedHeap);
+ }
+ 
++// Wasm uses private symbols (e.g. wasm_exception_tag_symbol) to stamp certain
++// objects. This builtin checks for presence of such symbols; it is a
++// specialization of "GetOwnProperty" behavior: if the object is not a plain
++// JS object or the property is not an own data property, return undefined.
++// To allow compilers to assume no side effects from this builtin, it's
++// particularly important to not invoke any getters.
++TF_BUILTIN(WasmGetOwnProperty, WasmBuiltinsAssembler) {
++  TNode<Object> object = Parameter<Object>(Descriptor::kObject);
++  TNode<Symbol> symbol = Parameter<Symbol>(Descriptor::kSymbol);
++
++  Label return_undefined(this, Label::kDeferred);
++
++  GotoIf(TaggedIsSmi(object), &return_undefined);
++  TNode<HeapObject> heap_object = CAST(object);
++
++  TNode<Map> map = LoadMap(heap_object);
++  TNode<Int32T> instance_type = LoadMapInstanceType(map);
++
++  GotoIfNot(IsJSReceiverInstanceType(instance_type), &return_undefined);
++  GotoIf(IsSpecialReceiverInstanceType(instance_type), &return_undefined);
++
++  TNode<JSObject> js_object = CAST(heap_object);
++
++  {
++    TVARIABLE(HeapObject, var_meta_storage);
++    TVARIABLE(IntPtrT, var_entry);
++    TVARIABLE(Object, var_value);
++    TVARIABLE(Uint32T, var_details);
++    Label if_found_fast(this), if_found_dict(this), got_value(this);
++
++    TryLookupPropertyInSimpleObject(
++        js_object, map, symbol, &if_found_fast, &if_found_dict,
++        &var_meta_storage, &var_entry, &return_undefined, &return_undefined);
++
++    BIND(&if_found_fast);
++    {
++      TNode<DescriptorArray> descriptors = CAST(var_meta_storage.value());
++      LoadPropertyFromFastObject(js_object, map, descriptors, var_entry.value(),
++                                 &var_details, &var_value);
++      Goto(&got_value);
++    }
++
++    BIND(&if_found_dict);
++    {
++      TNode<PropertyDictionary> dictionary = CAST(var_meta_storage.value());
++      LoadPropertyFromDictionary(dictionary, var_entry.value(), &var_details,
++                                 &var_value);
++      Goto(&got_value);
++    }
++
++    BIND(&got_value);
++    {
++      TNode<Uint32T> kind =
++          DecodeWord32<PropertyDetails::KindField>(var_details.value());
++      constexpr int kData = static_cast<int>(PropertyKind::kData);
++      GotoIfNot(Word32Equal(kind, Int32Constant(kData)), &return_undefined);
++      GotoIfLazyClosure(CAST(var_value.value()), &return_undefined);
++      Return(var_value.value());
++    }
++  }
++
++  BIND(&return_undefined);
++  Return(UndefinedConstant());
++}
++
+ #include "src/codegen/undef-code-stub-assembler-macros.inc"
+ 
+ }  // namespace v8::internal
 diff --git a/src/builtins/builtins.cc b/src/builtins/builtins.cc
-index 853a314..dea8d24 100644
+index 853a31487b10..dea8d245b825 100644
 --- a/src/builtins/builtins.cc
 +++ b/src/builtins/builtins.cc
-@@ -740,8 +740,6 @@
+@@ -740,8 +740,6 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
      // but are allowed to be installed into JSFunctions.
      case Builtin::kJSToWasmWrapper:
      case Builtin::kWasmPromising:
@@ -72,7 +176,7 @@ index 853a314..dea8d24 100644
  #if V8_ENABLE_DRUMBRAKE
      case Builtin::kJSToWasmInterpreterWrapper:
  #endif
-@@ -751,6 +749,8 @@
+@@ -751,6 +749,8 @@ Builtins::JSBuiltinStateFlags Builtins::GetJSBuiltinState(Builtin builtin) {
      // These are core JS builtins which are instantiated lazily.
      case Builtin::kWasmConstructorWrapper:
      case Builtin::kWasmMethodWrapper:
@@ -82,10 +186,10 @@ index 853a314..dea8d24 100644
      case Builtin::kWebAssemblyStringCast:
      case Builtin::kWebAssemblyStringTest:
 diff --git a/src/builtins/setup-builtins-internal.cc b/src/builtins/setup-builtins-internal.cc
-index 3273012..93d6879 100644
+index 327301277e3d..93d6879a0b39 100644
 --- a/src/builtins/setup-builtins-internal.cc
 +++ b/src/builtins/setup-builtins-internal.cc
-@@ -227,10 +227,18 @@
+@@ -227,10 +227,18 @@ V8_NOINLINE Tagged<Code> BuildWithMacroAssembler(
    masm.GetCode(isolate->main_thread_local_isolate(), &desc,
                 MacroAssembler::kNoSafepointTable, handler_table_offset);
  
@@ -104,11 +208,51 @@ index 3273012..93d6879 100644
            .Build();
  #if defined(V8_OS_WIN64)
    isolate->SetBuiltinUnwindData(builtin, masm.GetUnwindInfo());
+diff --git a/src/builtins/wasm.tq b/src/builtins/wasm.tq
+index aef4354b376b..937c259d000a 100644
+--- a/src/builtins/wasm.tq
++++ b/src/builtins/wasm.tq
+@@ -837,35 +837,6 @@ builtin CallIndirectIC(
+   return TargetAndImplicitArg{target: target, implicit_arg: implicitArg};
+ }
+ 
+-extern macro TryHasOwnProperty(HeapObject, Map, InstanceType, Name): never
+-    labels Found, NotFound, Bailout;
+-type OnNonExistent constexpr 'OnNonExistent';
+-const kReturnUndefined: constexpr OnNonExistent
+-    generates 'OnNonExistent::kReturnUndefined';
+-extern macro SmiConstant(constexpr OnNonExistent): Smi;
+-extern transitioning builtin GetPropertyWithReceiver(
+-    implicit context: Context)(JSAny, Name, JSAny, Smi): JSAny;
+-
+-transitioning builtin WasmGetOwnProperty(
+-    implicit context: Context)(object: Object, uniqueName: Name): JSAny {
+-  try {
+-    const heapObject: HeapObject =
+-        TaggedToHeapObject(object) otherwise NotFound;
+-    const receiver: JSReceiver =
+-        Cast<JSReceiver>(heapObject) otherwise NotFound;
+-    try {
+-      TryHasOwnProperty(
+-          receiver, receiver.map, receiver.instanceType, uniqueName)
+-          otherwise Found, NotFound, NotFound;
+-    } label Found {
+-      return GetPropertyWithReceiver(
+-          receiver, uniqueName, receiver, SmiConstant(kReturnUndefined));
+-    }
+-  } label NotFound deferred {
+-    return Undefined;
+-  }
+-}
+-
+ // Trap builtins.
+ 
+ builtin WasmTrap(error: Smi): JSAny {
 diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
-index 0da0f6d..f6af185 100644
+index 0da0f6d56777..f6af185086ba 100644
 --- a/src/codegen/arm64/macro-assembler-arm64.cc
 +++ b/src/codegen/arm64/macro-assembler-arm64.cc
-@@ -4223,7 +4223,7 @@
+@@ -4223,7 +4223,7 @@ void MacroAssembler::MoveObjectAndSlot(Register dst_object, Register dst_slot,
    ASM_CODE_COMMENT(this);
    DCHECK_NE(dst_object, dst_slot);
    // If `offset` is a register, it cannot overlap with `object`.
@@ -117,7 +261,7 @@ index 0da0f6d..f6af185 100644
  
    // If the slot register does not overlap with the object register, we can
    // overwrite it.
-@@ -4237,19 +4237,19 @@
+@@ -4237,19 +4237,19 @@ void MacroAssembler::MoveObjectAndSlot(Register dst_object, Register dst_slot,
  
    // If the destination object register does not overlap with the offset
    // register, we can overwrite it.
@@ -142,10 +286,10 @@ index 0da0f6d..f6af185 100644
  
  // If lr_status is kLRHasBeenSaved, lr will be clobbered.
 diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
-index af54b3e..adfbf3f 100644
+index af54b3eec0d9..adfbf3f4a15c 100644
 --- a/src/codegen/compiler.cc
 +++ b/src/codegen/compiler.cc
-@@ -2049,15 +2049,11 @@
+@@ -2049,15 +2049,11 @@ class ConstantPoolPointerForwarder {
    void RecordScopeInfos(Tagged<HeapObject> info) {
      Tagged<ScopeInfo> scope_info;
      if (Is<SharedFunctionInfo>(info)) {
@@ -166,7 +310,7 @@ index af54b3e..adfbf3f 100644
      } else {
        scope_info = Cast<ScopeInfo>(info);
      }
-@@ -2466,9 +2462,11 @@
+@@ -2466,9 +2462,11 @@ void BackgroundMergeTask::BeginMergeInBackground(
            Tagged<ScopeInfo> info = old_sfi->scope_info();
            if (!info->IsEmpty()) {
              new_sfi->SetScopeInfo(info);
@@ -182,10 +326,10 @@ index af54b3e..adfbf3f 100644
            forwarder.AddBytecodeArray(new_sfi->GetBytecodeArray(isolate));
          }
 diff --git a/src/common/code-memory-access.cc b/src/common/code-memory-access.cc
-index 81189ab..7af7f4a 100644
+index 81189abb2ea9..7af7f4ac188d 100644
 --- a/src/common/code-memory-access.cc
 +++ b/src/common/code-memory-access.cc
-@@ -431,6 +431,14 @@
+@@ -431,6 +431,14 @@ ThreadIsolation::JitPageReference::AllocationContaining(
    return {it->first, it->second};
  }
  
@@ -200,7 +344,7 @@ index 81189ab..7af7f4a 100644
  // static
  void ThreadIsolation::RegisterJitPage(Address address, size_t size) {
    CFIMetadataWriteScope write_scope("Adding new executable memory.");
-@@ -586,6 +594,8 @@
+@@ -586,6 +594,8 @@ ThreadIsolation::JitPageReference ThreadIsolation::SplitJitPageLocked(
      JitPage* mid;
      ConstructNew(&mid, size);
      jit_page.Shrink(mid);
@@ -210,10 +354,10 @@ index 81189ab..7af7f4a 100644
      return JitPageReference(mid, addr);
    }
 diff --git a/src/common/code-memory-access.h b/src/common/code-memory-access.h
-index 0c16621..cb649b5 100644
+index 0c16621f59ff..cb649b558260 100644
 --- a/src/common/code-memory-access.h
 +++ b/src/common/code-memory-access.h
-@@ -282,6 +282,7 @@
+@@ -282,6 +282,7 @@ class V8_EXPORT ThreadIsolation {
      base::Address StartOfAllocationAt(base::Address inner_pointer);
      std::pair<base::Address, JitAllocation&> AllocationContaining(
          base::Address addr);
@@ -222,10 +366,10 @@ index 0c16621..cb649b5 100644
      bool Empty() const { return jit_page_->allocations_.empty(); }
      void Shrink(class JitPage* tail);
 diff --git a/src/common/segmented-table.h b/src/common/segmented-table.h
-index 924398e..6b0d233 100644
+index 924398eb5bf8..6b0d233a6657 100644
 --- a/src/common/segmented-table.h
 +++ b/src/common/segmented-table.h
-@@ -41,13 +41,7 @@
+@@ -41,13 +41,7 @@ class V8_EXPORT_PRIVATE SegmentedTable {
    static constexpr bool kUseContiguousMemory = true;
    static constexpr size_t kReservationSize = size;
    static constexpr size_t kMaxCapacity = kReservationSize / kEntrySize;
@@ -240,10 +384,10 @@ index 924398e..6b0d233 100644
  #else
    // On 32 bit, segments are individually mapped.
 diff --git a/src/compiler/access-info.cc b/src/compiler/access-info.cc
-index f82da93..a316a72 100644
+index f82da930eeec..a316a7238896 100644
 --- a/src/compiler/access-info.cc
 +++ b/src/compiler/access-info.cc
-@@ -994,6 +994,43 @@
+@@ -994,6 +994,43 @@ bool AccessInfoFactory::TryLoadPropertyDetails(
    return true;
  }
  
@@ -287,7 +431,7 @@ index f82da93..a316a72 100644
  PropertyAccessInfo AccessInfoFactory::ComputePropertyAccessInfo(
      MapRef map, NameRef name, AccessMode access_mode,
      OptionalObjectRef handler) const {
-@@ -1004,22 +1041,11 @@
+@@ -1004,22 +1041,11 @@ PropertyAccessInfo AccessInfoFactory::ComputePropertyAccessInfo(
  
    JSHeapBroker::MapUpdaterGuardIfNeeded mumd_scope(broker());
  
@@ -316,10 +460,10 @@ index f82da93..a316a72 100644
    }
  
 diff --git a/src/compiler/access-info.h b/src/compiler/access-info.h
-index d51bebad..7402929 100644
+index d51bebad2534..74029290fd75 100644
 --- a/src/compiler/access-info.h
 +++ b/src/compiler/access-info.h
-@@ -314,6 +314,8 @@
+@@ -314,6 +314,8 @@ class AccessInfoFactory final {
    PropertyAccessInfo ComputeAccessorDescriptorAccessInfo(
        MapRef receiver_map, NameRef name, MapRef map, OptionalJSObjectRef holder,
        InternalIndex descriptor, AccessMode access_mode) const;
@@ -329,10 +473,10 @@ index d51bebad..7402929 100644
    PropertyAccessInfo Invalid() const {
      return PropertyAccessInfo::Invalid(zone());
 diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
-index e870726..0e2d9bf 100644
+index e8707261d3e2..0e2d9bfd0a74 100644
 --- a/src/compiler/js-call-reducer.cc
 +++ b/src/compiler/js-call-reducer.cc
-@@ -4068,6 +4068,10 @@
+@@ -4068,6 +4068,10 @@ class IteratingArrayBuiltinHelper {
        return;
      }
  
@@ -343,7 +487,7 @@ index e870726..0e2d9bf 100644
      // TODO(jgruber): May only be needed for holey elements kinds.
      if (!dependencies->DependOnNoElementsProtector()) return;
  
-@@ -4083,10 +4087,13 @@
+@@ -4083,10 +4087,13 @@ class IteratingArrayBuiltinHelper {
    Control control() const { return control_; }
    MapInference* inference() { return &inference_; }
    ElementsKind elements_kind() const { return elements_kind_; }
@@ -357,7 +501,7 @@ index e870726..0e2d9bf 100644
    Node* receiver_;
    Effect effect_;
    Control control_;
-@@ -4126,6 +4133,11 @@
+@@ -4126,6 +4133,11 @@ Reduction JSCallReducer::ReduceArraySort(Node* node,
    IteratingArrayBuiltinHelper h(node, broker(), jsgraph(), dependencies());
    if (!h.can_reduce()) return h.inference()->NoChange();
  
@@ -370,10 +514,10 @@ index e870726..0e2d9bf 100644
    // hole handling; double arrays need a FixedDoubleArray temp copy.
    if (IsHoleyElementsKind(h.elements_kind())) return h.inference()->NoChange();
 diff --git a/src/compiler/load-elimination.cc b/src/compiler/load-elimination.cc
-index 7659f99..ca52f44 100644
+index 7659f99337c9..ca52f4409b5d 100644
 --- a/src/compiler/load-elimination.cc
 +++ b/src/compiler/load-elimination.cc
-@@ -784,7 +784,8 @@
+@@ -784,7 +784,8 @@ Reduction LoadElimination::ReduceMapGuard(Node* node) {
  }
  
  Reduction LoadElimination::ReduceCheckMaps(Node* node) {
@@ -383,7 +527,7 @@ index 7659f99..ca52f44 100644
    Node* const object = NodeProperties::GetValueInput(node, 0);
    Node* const effect = NodeProperties::GetEffectInput(node);
    AbstractState const* state = node_states_.Get(effect);
-@@ -794,6 +795,12 @@
+@@ -794,6 +795,12 @@ Reduction LoadElimination::ReduceCheckMaps(Node* node) {
      if (maps.contains(object_maps)) return Replace(effect);
      // TODO(turbofan): Compute the intersection.
    }
@@ -396,7 +540,7 @@ index 7659f99..ca52f44 100644
    state = state->SetMaps(object, maps, zone());
    return UpdateState(node, state);
  }
-@@ -1452,7 +1459,17 @@
+@@ -1452,7 +1459,17 @@ LoadElimination::AbstractState const* LoadElimination::ComputeLoopState(
              state = state->KillElement(object, index, zone());
              break;
            }
@@ -415,11 +559,81 @@ index 7659f99..ca52f44 100644
            case IrOpcode::kStoreTypedElement: {
              // Doesn't affect anything we track with the state currently.
              break;
+diff --git a/src/compiler/turboshaft/builtin-call-descriptors.h b/src/compiler/turboshaft/builtin-call-descriptors.h
+index e07a6f0e484a..c73e1d66cc7e 100644
+--- a/src/compiler/turboshaft/builtin-call-descriptors.h
++++ b/src/compiler/turboshaft/builtin-call-descriptors.h
+@@ -1123,14 +1123,10 @@ struct BuiltinCallDescriptor {
+     using results_t = std::tuple<V<Object>>;
+ 
+     static constexpr bool kNeedsFrameState = false;
+-    static constexpr bool kNeedsContext = true;
++    static constexpr bool kNeedsContext = false;
+     static constexpr Operator::Properties kProperties = Operator::kNoThrow;
+-    // Calls {GetPropertyWithReceiver}, which has paths that can allocate,
+-    // but from this caller we won't reach them. Nevertheless, to please the
+-    // verifier we currently have no other choice than setting the CanAllocate
+-    // effect here.
+-    // TODO(dmercadier): Support overriding the automatic can-allocate
+-    // inference.
++    // Can allocate a HeapNumber when it encounters a MutableHeapNumber. This
++    // won't happen in practice, but can-allocate verification detects it.
+     static constexpr OpEffects kEffects =
+         base_effects.CanReadHeapMemory().CanAllocate();
+   };
+diff --git a/src/compiler/turboshaft/late-load-elimination-reducer.cc b/src/compiler/turboshaft/late-load-elimination-reducer.cc
+index 7b78d3f68a70..d9e386fb3103 100644
+--- a/src/compiler/turboshaft/late-load-elimination-reducer.cc
++++ b/src/compiler/turboshaft/late-load-elimination-reducer.cc
+@@ -566,28 +566,32 @@ void LateLoadEliminationAnalyzer::ProcessCall(OpIndex op_idx,
+   // Some builtins do not create aliases and do not invalidate existing
+   // memory, and some even return fresh objects. For such cases, we don't
+   // invalidate the state, and record the non-alias if any.
+-  if (!op.Effects().can_write()) {
+-    TRACE(">> Call doesn't write, skipping");
+-    return;
+-  }
+-
+   auto builtin_id = TryGetBuiltinId(callee.TryCast<ConstantOp>(), broker_);
+-
+-  // Not a builtin call, or not a builtin that we know doesn't invalidate
+-  // memory.
+-  InvalidateAllNonAliasingInputs(op);
+-
+   if (builtin_id) {
+     switch (*builtin_id) {
+       case Builtin::kCreateShallowObjectLiteral:
+         // This builtin creates a fresh non-aliasing object.
+         non_aliasing_objects_.Set(op_idx, true);
+-        break;
++        return;
+       default:
+         break;
+     }
+   }
+ 
++  // Not a builtin call, or not a builtin that we know doesn't invalidate
++  // memory.
++  InvalidateAllNonAliasingInputs(op);
++
++  // Keep in mind that "can_write" really means "can write to already allocated
++  // memory" and excludes writes to memory that the call itself allocates.
++  // Hence, InvalidateAllNonAliasingInputs must be called before this can_write
++  // bailout, to account for the fact that some builtins may create fresh
++  // objects that copy their inputs, thus creating aliases.
++  if (!op.Effects().can_write()) {
++    TRACE(">> Call doesn't write, skipping");
++    return;
++  }
++
+   // The call could modify arbitrary memory, so we invalidate every
+   // potentially-aliasing object.
+   memory_.InvalidateMaybeAliasing();
 diff --git a/src/compiler/turboshaft/store-store-elimination-reducer-inl.h b/src/compiler/turboshaft/store-store-elimination-reducer-inl.h
-index 3c4f4ed..a292ef0 100644
+index 3c4f4ed907fe..a292ef081a19 100644
 --- a/src/compiler/turboshaft/store-store-elimination-reducer-inl.h
 +++ b/src/compiler/turboshaft/store-store-elimination-reducer-inl.h
-@@ -230,6 +230,15 @@
+@@ -230,6 +230,15 @@ class MaybeRedundantStoresTable
      }
    }
  
@@ -435,7 +649,7 @@ index 3c4f4ed..a292ef0 100644
    void MarkAllStoresAsGCObservable() {
      TRACE("> MarkAllStoresAsGCObservable");
      for (Key key : active_keys_) {
-@@ -330,14 +339,26 @@
+@@ -330,14 +339,26 @@ class RedundantStoreAnalysis {
        // If this block is a loop header, check if this loop needs to be
        // revisited.
        if (block.IsLoop()) {
@@ -464,7 +678,7 @@ index 3c4f4ed..a292ef0 100644
            // We need a +2 to process the backedge at the next iteration:
            //   - the `--processed` at the end of the loop will undo a +1.
            //   - `block_index` is computed with `processed - 1`, which will undo
-@@ -374,6 +395,14 @@
+@@ -374,6 +395,14 @@ class RedundantStoreAnalysis {
            // For now we consider only stores of fixed offsets of objects on the
            // heap.
            if (is_on_heap_store && is_fixed_offset_store) {
@@ -480,10 +694,10 @@ index 3c4f4ed..a292ef0 100644
              switch (table_.GetObservability(store.base(), store.offset, size)) {
                case StoreObservability::kUnobservable:
 diff --git a/src/diagnostics/disassembler.cc b/src/diagnostics/disassembler.cc
-index d45f150..8b8a4e8 100644
+index d45f1509c1e7..8b8a4e83e43a 100644
 --- a/src/diagnostics/disassembler.cc
 +++ b/src/diagnostics/disassembler.cc
-@@ -104,8 +104,9 @@
+@@ -104,8 +104,9 @@ const char* V8NameConverter::NameOfAddress(uint8_t* pc) const {
      }
  
  #if V8_ENABLE_WEBASSEMBLY
@@ -494,11 +708,23 @@ index d45f150..8b8a4e8 100644
        SNPrintF(v8_buffer_, "%p  (%s)", static_cast<void*>(pc),
                 wasm::GetWasmCodeKindAsString(wasm_code->kind()));
        return v8_buffer_.begin();
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index d40b09109f98..ba234f4fae9f 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -1009,6 +1009,7 @@ void FeedbackVector::FeedbackVectorVerify(Isolate* isolate) {
+   CHECK(IsFeedbackCell(parent_feedback_cell()));
+   // Variable-length maybe-weak tail.
+   const uint32_t len = length().value();
++  CHECK_LE(len, static_cast<uint32_t>(kMaxLength));
+   for (uint32_t i = 0; i < len; ++i) {
+     Tagged<MaybeObject> value = raw_feedback_slots()[i].Relaxed_Load();
+     Object::VerifyMaybeObjectPointer(isolate, value);
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index cb05b58..d74ba62 100644
+index cb05b58a1483..d74ba62a7846 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -887,7 +887,7 @@
+@@ -887,7 +887,7 @@ DEFINE_WEAK_IMPLICATION(future, flush_baseline_code)
  
  
  #ifdef V8_TARGET_ARCH_64_BIT
@@ -508,10 +734,10 @@ index cb05b58..d74ba62 100644
  DEFINE_BOOL(turbolev_additive_safe_int_feedback, true,
              "Enable the use of AdditiveSafeInteger feedback for Turbolev")
 diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
-index 7cabdd0..7e3add2 100644
+index 7cabdd051685..7e3add2ab883 100644
 --- a/src/heap/setup-heap-internal.cc
 +++ b/src/heap/setup-heap-internal.cc
-@@ -74,6 +74,7 @@
+@@ -74,6 +74,7 @@ DirectHandle<SharedFunctionInfo> CreateSharedFunctionInfo(
    DirectHandle<SharedFunctionInfo> shared =
        isolate->factory()->NewSharedFunctionInfoForBuiltin(
            isolate->factory()->empty_string(), builtin, len, kAdapt, kind);
@@ -520,10 +746,10 @@ index 7cabdd0..7e3add2 100644
  }
  
 diff --git a/src/maglev/maglev-code-generator.cc b/src/maglev/maglev-code-generator.cc
-index 7abc14c..d893cee 100644
+index 7abc14ca28ab..d893cee4d9fd 100644
 --- a/src/maglev/maglev-code-generator.cc
 +++ b/src/maglev/maglev-code-generator.cc
-@@ -1549,17 +1549,9 @@
+@@ -1549,17 +1549,9 @@ class MaglevFrameTranslationBuilder {
      return kNotDuplicated;
    }
  
@@ -544,7 +770,7 @@ index 7abc14c..d893cee 100644
    }
  
    void BuildNestedValue(const ValueNode* value,
-@@ -1614,13 +1606,16 @@
+@@ -1614,13 +1606,16 @@ class MaglevFrameTranslationBuilder {
                            const InputLocation*& input_location,
                            const VirtualObjectList& virtual_objects) {
      vobj::ObjectType object_type = object->object_type();
@@ -566,7 +792,7 @@ index 7abc14c..d893cee 100644
      if (dup_id != kNotDuplicated) {
        translation_array_builder_->DuplicateObject(dup_id);
        object->ForEachNestedRuntimeInput(
-@@ -1788,7 +1783,7 @@
+@@ -1788,7 +1783,7 @@ class MaglevFrameTranslationBuilder {
    ZoneVector<IndirectHandle<TrustedObject>>* protected_deopt_literals_vector_;
    ZoneVector<IndirectHandle<Object>>* deopt_literals_vector_;
  
@@ -576,10 +802,10 @@ index 7abc14c..d893cee 100644
  };
  
 diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
-index d93cbd8..c6ae7f7 100644
+index d93cbd835f53..4f682b998193 100644
 --- a/src/maglev/maglev-graph-builder.cc
 +++ b/src/maglev/maglev-graph-builder.cc
-@@ -113,9 +113,9 @@
+@@ -113,9 +113,9 @@ class FunctionContextSpecialization final : public AllStatic {
    }
  };
  
@@ -592,7 +818,7 @@ index d93cbd8..c6ae7f7 100644
    if (access_info.field_representation().IsSmi()) {
      return NodeType::kSmi;
    }
-@@ -124,8 +124,8 @@
+@@ -124,8 +124,8 @@ NodeType NodeTypeFromAccessInfo(
      return NodeType::kHeapNumber;
    }
  
@@ -603,7 +829,7 @@ index d93cbd8..c6ae7f7 100644
    }
  
    const auto type = access_info.field_type();
-@@ -4460,13 +4460,14 @@
+@@ -4460,13 +4460,14 @@ ReduceResult MaglevGraphBuilder::BuildLoadField(
          {heap_number}, static_cast<int>(offsetof(HeapNumber, value_)));
    }
  
@@ -619,7 +845,20 @@ index d93cbd8..c6ae7f7 100644
    ValueNode* value;
    GET_VALUE_OR_ABORT(
        value, BuildLoadTaggedField(load_source, field_index.offset(), node_type,
-@@ -9796,6 +9797,16 @@
+@@ -7981,8 +7982,10 @@ ReduceResult MaglevGraphBuilder::BuildEagerInlineCall(
+   // Propagate frame information back to the caller.
+   current_interpreter_frame_.set_known_node_aspects(
+       inner_graph_builder.current_interpreter_frame_.known_node_aspects());
+-  current_for_in_state.receiver_needs_map_check =
+-      inner_graph_builder.current_for_in_state.receiver_needs_map_check;
++  if (inner_graph_builder.may_have_changed_maps()) {
++    may_have_changed_maps_ = true;
++    current_for_in_state.receiver_needs_map_check = true;
++  }
+ 
+   // Resume execution using the final block of the inner builder.
+   inner_graph_builder.reducer_.FlushNodesToBlock();
+@@ -9796,6 +9799,16 @@ MaybeReduceResult MaglevGraphBuilder::TryReduceArrayPrototypeSort(
          " array iteration");
    }
  
@@ -636,11 +875,33 @@ index d93cbd8..c6ae7f7 100644
    // Holey arrays require holes to be moved to the end of the sorted result
    // (ECMA-262 23.1.3.30 step 5, skip-holes mode).  The insertion sort does
    // not implement this, so bail out for any holey kind.
+diff --git a/src/maglev/maglev-graph-builder.h b/src/maglev/maglev-graph-builder.h
+index af39760fc074..9802401fa0e1 100644
+--- a/src/maglev/maglev-graph-builder.h
++++ b/src/maglev/maglev-graph-builder.h
+@@ -1933,6 +1933,9 @@ class MaglevGraphBuilder {
+ 
+   // When set, inline only small functions.
+   bool only_inline_small_ = false;
++
++  bool may_have_changed_maps() const { return may_have_changed_maps_; }
++  bool may_have_changed_maps_ = false;
+ };
+ 
+ template <bool is_possible_map_change>
+@@ -1943,6 +1946,7 @@ void MaglevGraphBuilder::ResetBuilderCachedState() {
+   // TODO(leszeks): Track this on merge states / known node aspects, rather
+   // than on the graph, so that it can survive control flow.
+   if constexpr (is_possible_map_change) {
++    may_have_changed_maps_ = true;
+     current_for_in_state.receiver_needs_map_check = true;
+   }
+ }
 diff --git a/src/maglev/maglev-ir.h b/src/maglev/maglev-ir.h
-index 58f997a..5062cc8 100644
+index 58f997a9b677..5062cc86dc7d 100644
 --- a/src/maglev/maglev-ir.h
 +++ b/src/maglev/maglev-ir.h
-@@ -6004,11 +6004,9 @@
+@@ -6004,11 +6004,9 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
          vobj::Field snd = FieldForOffset(offsetof(ConsString, second_));
          return callback(slots_[snd.slot_index], snd);
        }
@@ -655,7 +916,7 @@ index 58f997a..5062cc8 100644
      }
      for (int i = 0; i < slot_count(); i++) {
        vobj::Field field = FieldForSlot(i);
-@@ -6364,8 +6362,8 @@
+@@ -6364,8 +6362,8 @@ struct VirtualPrimitiveHeapObjectShape : VirtualHeapObjectShape {};
  
  struct VirtualHeapNumberShape : VirtualPrimitiveHeapObjectShape {
    using T = HeapNumber;
@@ -667,10 +928,10 @@ index 58f997a..5062cc8 100644
  #define FIELD_LIST(V) V(value, offsetof(T, value_), vobj::FieldType::kFloat64)
    DEF_SHAPE(VirtualPrimitiveHeapObjectShape, FIELD_LIST);
 diff --git a/src/maglev/maglev-known-node-aspects.h b/src/maglev/maglev-known-node-aspects.h
-index 83ae75e..6fdd8ed 100644
+index 83ae75ed3931..6fdd8ed10202 100644
 --- a/src/maglev/maglev-known-node-aspects.h
 +++ b/src/maglev/maglev-known-node-aspects.h
-@@ -336,6 +336,13 @@
+@@ -336,6 +336,13 @@ class NodeInfo {
      }
  #endif
      IntersectType(possible_type);
@@ -684,7 +945,7 @@ index 83ae75e..6fdd8ed 100644
      return !IsEmptyNodeType(type_);
    }
  
-@@ -1002,7 +1009,9 @@
+@@ -1002,7 +1009,9 @@ class KnownMapsMerger {
            // approximation. This filtering is done to avoid creating
            // non-sensical types later (e.g. if we think only a non-string map
            // is possible, after a string check).
@@ -695,7 +956,7 @@ index 83ae75e..6fdd8ed 100644
              InsertMap(possible_map);
            }
          } else {
-@@ -1012,12 +1021,6 @@
+@@ -1012,12 +1021,6 @@ class KnownMapsMerger {
        if (intersect_set_.is_empty()) {
          // TODO(marja): Refactor to return false here explicitly.
          node_type_ = EmptyNodeType();
@@ -708,11 +969,36 @@ index 83ae75e..6fdd8ed 100644
        }
      } else {
        // A missing entry here means the universal set, i.e., we don't know
+diff --git a/src/objects/feedback-vector.h b/src/objects/feedback-vector.h
+index 7d657ed10fe4..2ca26741f484 100644
+--- a/src/objects/feedback-vector.h
++++ b/src/objects/feedback-vector.h
+@@ -513,6 +513,7 @@ V8_OBJECT class FeedbackVector : public HeapObject {
+ 
+   static const int kHeaderSize;
+   static const int kRawFeedbackSlotsOffset;
++  static const int kMaxLength;
+ 
+   static constexpr int SizeFor(int length);
+   static constexpr int OffsetOfElementAt(int index);
+@@ -565,8 +566,12 @@ inline constexpr int FeedbackVector::kHeaderSize =
+     OFFSET_OF_DATA_START(FeedbackVector);
+ inline constexpr int FeedbackVector::kRawFeedbackSlotsOffset =
+     OFFSET_OF_DATA_START(FeedbackVector);
++inline constexpr int FeedbackVector::kMaxLength =
++    (kMaxInt - kHeaderSize) / kTaggedSize;
+ 
+ constexpr int FeedbackVector::SizeFor(int length) {
++  CHECK_GE(length, 0);
++  CHECK_LE(length, kMaxLength);
+   return OFFSET_OF_DATA_START(FeedbackVector) + length * kTaggedSize;
+ }
+ constexpr int FeedbackVector::OffsetOfElementAt(int index) {
 diff --git a/src/objects/js-data-object-builder-inl.h b/src/objects/js-data-object-builder-inl.h
-index 9a758ec..7a1f527 100644
+index 9a758ec2cc2d..7a1f527cd2f2 100644
 --- a/src/objects/js-data-object-builder-inl.h
 +++ b/src/objects/js-data-object-builder-inl.h
-@@ -235,7 +235,20 @@
+@@ -235,7 +235,20 @@ bool JSDataObjectBuilder::TryAddFastPropertyForValue(
  bool JSDataObjectBuilder::TryAddFastPropertyForValue(
      DirectHandle<InternalizedString> key, DirectHandle<Object> value) {
    if (map_->is_deprecated()) {
@@ -734,7 +1020,7 @@ index 9a758ec..7a1f527 100644
    }
  
    DCHECK(object_.is_null());
-@@ -259,9 +272,28 @@
+@@ -259,9 +272,28 @@ bool JSDataObjectBuilder::TryAddFastPropertyForValue(
  template <typename ValueIterator>
  inline void JSDataObjectBuilder::CreateAndInitialiseObject(
      ValueIterator&& value_it, DirectHandle<FixedArrayBase> elements) {
@@ -765,42 +1051,28 @@ index 9a758ec..7a1f527 100644
    }
    // We've created a map for the first `i` property stack values (which might
    // be all of them). We need to write these properties to a newly allocated
-@@ -312,53 +344,60 @@
+@@ -312,53 +344,60 @@ inline void JSDataObjectBuilder::CreateAndInitialiseObject(
    Handle<JSObject> object = isolate_->factory()->NewJSObjectFromMap(
        map_, AllocationType::kYoung, DirectHandle<AllocationSite>::null(),
        NewJSObjectType::kNoEmbedderFieldsAndNoApiWrapper);
 -  DisallowGarbageCollection no_gc;
 -  Tagged<JSObject> raw_object = *object;
-+  {
-+    DisallowGarbageCollection no_gc;
-+    Tagged<JSObject> raw_object = *object;
- 
+-
 -  raw_object->set_elements(*elements);
 -  Tagged<DescriptorArray> descriptors =
 -      raw_object->map()->instance_descriptors();
-+    raw_object->set_elements(*elements);
-+    Tagged<DescriptorArray> descriptors =
-+        raw_object->map()->instance_descriptors();
- 
+-
 -  FoldedMutableHeapNumberAllocator hn_allocator(isolate_, &hn_allocation,
 -                                                no_gc);
-+    FoldedMutableHeapNumberAllocator hn_allocator(isolate_, &hn_allocation,
-+                                                  no_gc);
- 
+-
 -  ReadOnlyRoots roots(isolate_);
-+    ReadOnlyRoots roots(isolate_);
- 
+-
 -  // Initialize the in-object properties up to the last added property.
 -  int current_property_offset = raw_object->GetInObjectPropertyOffset(0);
 -  for (int i = 0; i < current_property_index_; ++i) {
 -    InternalIndex descriptor_index(i);
 -    Tagged<Object> value = value_it.GetNext();
-+    // Initialize the in-object properties up to the last added property.
-+    int current_property_offset = raw_object->GetInObjectPropertyOffset(0);
-+    for (int i = 0; i < current_property_index_; ++i) {
-+      InternalIndex descriptor_index(i);
-+      Tagged<Object> value = value_it.GetNext();
- 
+-
 -    // See comment in RegisterFieldNeedsFreshHeapNumber, we need to allocate
 -    // HeapNumbers for double representation fields when we can't make
 -    // existing HeapNumbers mutable, or when we only have a Smi value.
@@ -811,6 +1083,25 @@ index 9a758ec..7a1f527 100644
 -        Float64 d = Float64::hole_nan();
 -        if (IsNumber(value)) {
 -          d = Float64::FromMaybeNaN(Object::NumberValue(value));
++  {
++    DisallowGarbageCollection no_gc;
++    Tagged<JSObject> raw_object = *object;
++
++    raw_object->set_elements(*elements);
++    Tagged<DescriptorArray> descriptors =
++        raw_object->map()->instance_descriptors();
++
++    FoldedMutableHeapNumberAllocator hn_allocator(isolate_, &hn_allocation,
++                                                  no_gc);
++
++    ReadOnlyRoots roots(isolate_);
++
++    // Initialize the in-object properties up to the last added property.
++    int current_property_offset = raw_object->GetInObjectPropertyOffset(0);
++    for (int i = 0; i < current_property_index_; ++i) {
++      InternalIndex descriptor_index(i);
++      Tagged<Object> value = value_it.GetNext();
++
 +      // See comment in RegisterFieldNeedsFreshHeapNumber, we need to allocate
 +      // HeapNumbers for double representation fields when we can't make
 +      // existing HeapNumbers mutable, or when we only have a Smi value.
@@ -826,19 +1117,7 @@ index 9a758ec..7a1f527 100644
          }
 -        value = hn_allocator.AllocateNext(roots, d);
        }
--    }
- 
--    DCHECK(FieldIndex::ForPropertyIndex(object->map(), i).is_inobject());
--    DCHECK_EQ(current_property_offset,
--              FieldIndex::ForPropertyIndex(object->map(), i).offset());
--    DCHECK_EQ(current_property_offset,
--              object->map()->GetInObjectPropertyOffset(i));
--    FieldIndex index = FieldIndex::ForInObjectOffset(current_property_offset,
--                                                     FieldIndex::kTagged);
--    // Object is the most recent young allocation, so no write barrier
--    // required.
--    raw_object->RawFastInobjectPropertyAtPut(index, value, SKIP_WRITE_BARRIER);
--    current_property_offset += kTaggedSize;
++
 +      DCHECK(FieldIndex::ForPropertyIndex(object->map(), i).is_inobject());
 +      DCHECK_EQ(current_property_offset,
 +                FieldIndex::ForPropertyIndex(object->map(), i).offset());
@@ -851,20 +1130,32 @@ index 9a758ec..7a1f527 100644
 +      raw_object->RawFastInobjectPropertyAtPut(index, value,
 +                                               SKIP_WRITE_BARRIER);
 +      current_property_offset += kTaggedSize;
-+    }
+     }
 +    DCHECK_EQ(current_property_offset, object->map()->GetInObjectPropertyOffset(
 +                                           current_property_index_));
-   }
++  }
+ 
+-    DCHECK(FieldIndex::ForPropertyIndex(object->map(), i).is_inobject());
+-    DCHECK_EQ(current_property_offset,
+-              FieldIndex::ForPropertyIndex(object->map(), i).offset());
+-    DCHECK_EQ(current_property_offset,
+-              object->map()->GetInObjectPropertyOffset(i));
+-    FieldIndex index = FieldIndex::ForInObjectOffset(current_property_offset,
+-                                                     FieldIndex::kTagged);
+-    // Object is the most recent young allocation, so no write barrier
+-    // required.
+-    raw_object->RawFastInobjectPropertyAtPut(index, value, SKIP_WRITE_BARRIER);
+-    current_property_offset += kTaggedSize;
+-  }
 -  DCHECK_EQ(current_property_offset,
 -            object->map()->GetInObjectPropertyOffset(current_property_index_));
-+
 +  if (needs_migration) {
 +    JSObject::MigrateToMap(isolate_, object, Map::Update(isolate_, map_));
 +  }
  
    object_ = object;
  }
-@@ -489,7 +528,12 @@
+@@ -489,7 +528,12 @@ bool JSDataObjectBuilder::TryAddFastPropertyTransitionForValue(
    if (next_map->is_dictionary_map()) return false;
  
    if (next_map->is_deprecated()) {
@@ -879,10 +1170,10 @@ index 9a758ec..7a1f527 100644
    } else {
      map_ = next_map;
 diff --git a/src/objects/scope-info.h b/src/objects/scope-info.h
-index ef57385..f60bbba 100644
+index ef573853da7b..f60bbba01a3f 100644
 --- a/src/objects/scope-info.h
 +++ b/src/objects/scope-info.h
-@@ -166,8 +166,8 @@
+@@ -166,8 +166,8 @@ V8_OBJECT class ScopeInfo : public HeapObject {
  
    V8_EXPORT_PRIVATE bool HasInferredFunctionName() const;
  
@@ -894,7 +1185,7 @@ index ef57385..f60bbba 100644
    // Does this scope belong to a function?
    bool HasPositionInfo() const;
 diff --git a/src/objects/shared-function-info-inl.h b/src/objects/shared-function-info-inl.h
-index 46b3130..5b00130 100644
+index 46b3130eb496..5b0013043896 100644
 --- a/src/objects/shared-function-info-inl.h
 +++ b/src/objects/shared-function-info-inl.h
 @@ -16,6 +16,7 @@
@@ -905,7 +1196,7 @@ index 46b3130..5b00130 100644
  #include "src/handles/handles-inl.h"
  #include "src/heap/heap-write-barrier-inl.h"
  #include "src/objects/abstract-code.h"
-@@ -729,6 +730,36 @@
+@@ -729,6 +730,36 @@ Tagged<ScopeInfo> SharedFunctionInfo::GetOuterScopeInfo() const {
    return info->OuterScopeInfo();
  }
  
@@ -943,10 +1234,10 @@ index 46b3130..5b00130 100644
      Tagged<UnionOf<ScopeInfo, TheHole>> value, WriteBarrierMode mode) {
    DCHECK(!is_compiled());
 diff --git a/src/objects/shared-function-info.h b/src/objects/shared-function-info.h
-index 1ea073e..a30a685 100644
+index 1ea073e34fbb..a30a685b1d55 100644
 --- a/src/objects/shared-function-info.h
 +++ b/src/objects/shared-function-info.h
-@@ -408,6 +408,8 @@
+@@ -408,6 +408,8 @@ V8_OBJECT class SharedFunctionInfo : public HeapObject {
    // Get the outer scope info whether this function is compiled or not.
    inline bool HasOuterScopeInfo() const;
    inline Tagged<ScopeInfo> GetOuterScopeInfo() const;
@@ -956,10 +1247,10 @@ index 1ea073e..a30a685 100644
    // [feedback metadata] Metadata template for feedback vectors of instances of
    // this function.
 diff --git a/src/objects/string.tq b/src/objects/string.tq
-index a506d11..2ac2c80 100644
+index a506d11e8785..2ac2c80f7fb2 100644
 --- a/src/objects/string.tq
 +++ b/src/objects/string.tq
-@@ -330,6 +330,11 @@
+@@ -330,6 +330,11 @@ macro StringToSlice(string: String): never labels OneByte(ConstSlice<char8>),
  // Dispatch on the slice type of two different strings.
  macro TwoStringsToSlices<Result: type, Functor: type>(
      s1: String, s2: String, f: Functor): Result {
@@ -972,10 +1263,10 @@ index a506d11..2ac2c80 100644
      StringToSlice(s1) otherwise FirstOneByte, FirstTwoByte;
    } label FirstOneByte(s1Slice: ConstSlice<char8>) {
 diff --git a/src/parsing/expression-scope.h b/src/parsing/expression-scope.h
-index eee29e7..a448a4e 100644
+index eee29e77e16a..a448a4e50682 100644
 --- a/src/parsing/expression-scope.h
 +++ b/src/parsing/expression-scope.h
-@@ -370,7 +370,8 @@
+@@ -370,7 +370,8 @@ class VariableDeclarationParsingScope : public ExpressionScope<Types> {
                                       ? ExpressionScopeT::kLexicalDeclaration
                                       : ExpressionScopeT::kVarDeclaration),
          mode_(mode),
@@ -985,7 +1276,7 @@ index eee29e7..a448a4e 100644
  
    VariableDeclarationParsingScope(const VariableDeclarationParsingScope&) =
        delete;
-@@ -381,10 +382,9 @@
+@@ -381,10 +382,9 @@ class VariableDeclarationParsingScope : public ExpressionScope<Types> {
      VariableKind kind = NORMAL_VARIABLE;
      bool was_added;
      Variable* var = this->parser()->DeclareVariable(
@@ -999,7 +1290,7 @@ index eee29e7..a448a4e 100644
        this->parser()->ReportMessage(MessageTemplate::kTooManyVariables);
      }
      if (names_) names_->Add(name, this->parser()->zone());
-@@ -428,6 +428,7 @@
+@@ -428,6 +428,7 @@ class VariableDeclarationParsingScope : public ExpressionScope<Types> {
  
    VariableMode mode_;
    ZonePtrList<const AstRawString>* names_;
@@ -1008,10 +1299,10 @@ index eee29e7..a448a4e 100644
  
  template <typename Types>
 diff --git a/src/runtime/runtime-scopes.cc b/src/runtime/runtime-scopes.cc
-index 7df136e..fe8a3ed 100644
+index 7df136e60c79..fe8a3edf5284 100644
 --- a/src/runtime/runtime-scopes.cc
 +++ b/src/runtime/runtime-scopes.cc
-@@ -552,7 +552,7 @@
+@@ -552,7 +552,7 @@ DirectHandle<JSObject> NewSloppyArguments(Isolate* isolate,
                                            T parameters,
                                            uint32_t argument_count) {
    CHECK(!IsDerivedConstructor(callee->shared()->kind()));
@@ -1020,11 +1311,60 @@ index 7df136e..fe8a3ed 100644
    DirectHandle<JSObject> result =
        isolate->factory()->NewArgumentsObject(callee, argument_count);
  
+diff --git a/src/snapshot/deserializer.cc b/src/snapshot/deserializer.cc
+index 27e92bf74921..c91280b71fc5 100644
+--- a/src/snapshot/deserializer.cc
++++ b/src/snapshot/deserializer.cc
+@@ -922,6 +922,9 @@ template <typename IsolateT>
+ template <typename SlotAccessor>
+ int Deserializer<IsolateT>::ReadRepeatedRoot(SlotAccessor slot_accessor,
+                                              int repeat_count) {
++  DCHECK(!next_reference_is_weak_);
++  DCHECK(!next_reference_is_indirect_pointer_);
++  DCHECK(!next_reference_is_protected_pointer);
+   CHECK_LE(2, repeat_count);
+ 
+   uint8_t id = source_.Get();
+@@ -1579,8 +1582,9 @@ int Deserializer<IsolateT>::ReadRootArrayConstants(uint8_t data,
+     PrintF("%*sRootArrayConstants [%u] : %s\n", depth_, "",
+            static_cast<int>(root_index), RootsTable::name(root_index));
+   }
+-  return slot_accessor.Write(heap_object, HeapObjectReferenceType::STRONG, 0,
+-                             SKIP_WRITE_BARRIER);
++  return WriteHeapPointer(slot_accessor, heap_object,
++                          GetAndResetNextReferenceDescriptor(),
++                          SKIP_WRITE_BARRIER);
+ }
+ 
+ template <typename IsolateT>
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 0c4d1a2b1171..7d2411761a59 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -1868,16 +1868,12 @@ class LiftoffCompiler {
+     LiftoffRegister tag_symbol_reg =
+         pinned.set(__ GetUnusedRegister(kGpReg, pinned));
+     LoadExceptionSymbol(tag_symbol_reg.gp(), pinned, root_index);
+-    LiftoffRegister context_reg =
+-        pinned.set(__ GetUnusedRegister(kGpReg, pinned));
+-    LOAD_TAGGED_PTR_INSTANCE_FIELD(context_reg.gp(), NativeContext, pinned);
+ 
+     VarState tag_symbol{kRef, tag_symbol_reg, 0};
+-    VarState context{kRef, context_reg, 0};
+ 
+     CallBuiltin(Builtin::kWasmGetOwnProperty,
+-                MakeSig::Returns(kRef).Params(kRef, kRef, kRef),
+-                {exception, tag_symbol, context}, kNoSourcePosition);
++                MakeSig::Returns(kRef).Params(kRef, kRef),
++                {exception, tag_symbol}, kNoSourcePosition);
+ 
+     return LiftoffRegister(kReturnRegister0);
+   }
 diff --git a/src/wasm/module-compiler.cc b/src/wasm/module-compiler.cc
-index 5776493..65e42c8 100644
+index 577649371876..65e42c8c9fbd 100644
 --- a/src/wasm/module-compiler.cc
 +++ b/src/wasm/module-compiler.cc
-@@ -1213,10 +1213,11 @@
+@@ -1213,10 +1213,11 @@ class FeedbackMaker {
  
      // Feedback data is untrusted. An invalid handle could lead to an OOB read
      // from the `WasmCodePointerTable`, which either crashes or returns some
@@ -1040,7 +1380,7 @@ index 5776493..65e42c8 100644
      // by the sandbox crash filter about an OOB read.
      uint32_t untrusted_code_pointer =
          static_cast<uint32_t>(target_truncated_smi.value());
-@@ -1224,10 +1225,9 @@
+@@ -1224,10 +1225,9 @@ class FeedbackMaker {
      WasmCodePointer handle = WasmCodePointer{untrusted_code_pointer};
      Address entry = GetProcessWideWasmCodePointerTable()
                          ->GetEntrypointWithoutSignatureCheck(handle);
@@ -1054,7 +1394,7 @@ index 5776493..65e42c8 100644
        // Was not in the main table (e.g., because it's an imported function).
        has_non_inlineable_targets_ = true;
        return;
-@@ -2786,7 +2786,10 @@
+@@ -2786,7 +2786,10 @@ void AsyncCompileJob::StartForegroundTask() {
  
    auto new_task = std::make_unique<CompileTask>(this, true);
    pending_foreground_task_ = new_task.get();
@@ -1066,11 +1406,72 @@ index 5776493..65e42c8 100644
  }
  
  void AsyncCompileJob::CancelPendingForegroundTask() {
+diff --git a/src/wasm/turboshaft-graph-interface.cc b/src/wasm/turboshaft-graph-interface.cc
+index 1c6f61ddce2f..cb4fb458f456 100644
+--- a/src/wasm/turboshaft-graph-interface.cc
++++ b/src/wasm/turboshaft-graph-interface.cc
+@@ -3849,12 +3849,10 @@ class TurboshaftGraphBuildingInterface
+ 
+     BindBlockAndGeneratePhis(decoder, block->false_or_loop_or_catch_block,
+                              nullptr, &block->exception);
+-    V<NativeContext> native_context = instance_cache_.native_context();
+     V<WasmExceptionTag> caught_tag = V<WasmExceptionTag>::Cast(
+         CallBuiltinThroughJumptable<BuiltinCallDescriptor::WasmGetOwnProperty>(
+-            decoder, native_context,
+-            {block->exception,
+-             __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
++            decoder, {block->exception,
++                      __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
+     // TODO(14616): Support shared tags.
+     V<TrustedFixedArray> instance_tags =
+         LOAD_IMMUTABLE_PROTECTED_INSTANCE_FIELD(
+@@ -3885,7 +3883,7 @@ class TurboshaftGraphBuildingInterface
+ 
+       IF (UNLIKELY(caught_tag_undefined)) {
+         V<Object> tag_object = __ Load(
+-            native_context, LoadOp::Kind::TaggedBase(),
++            instance_cache_.native_context(), LoadOp::Kind::TaggedBase(),
+             MemoryRepresentation::TaggedPointer(),
+             NativeContext::OffsetOfElementAt(Context::WASM_JS_TAG_INDEX));
+         V<Object> js_tag = __ Load(tag_object, LoadOp::Kind::TaggedBase(),
+@@ -3985,12 +3983,10 @@ class TurboshaftGraphBuildingInterface
+       BrOrRet(decoder, catch_case.br_imm.depth);
+       return;
+     }
+-    V<NativeContext> native_context = instance_cache_.native_context();
+     V<WasmExceptionTag> caught_tag = V<WasmExceptionTag>::Cast(
+         CallBuiltinThroughJumptable<BuiltinCallDescriptor::WasmGetOwnProperty>(
+-            decoder, native_context,
+-            {block->exception,
+-             __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
++            decoder, {block->exception,
++                      __ LoadRoot<RootIndex::kwasm_exception_tag_symbol>()}));
+     // TODO(14616): Support shared tags.
+     V<TrustedFixedArray> instance_tags =
+         LOAD_IMMUTABLE_PROTECTED_INSTANCE_FIELD(
+@@ -4022,7 +4018,7 @@ class TurboshaftGraphBuildingInterface
+ 
+       IF (UNLIKELY(caught_tag_undefined)) {
+         V<Object> tag_object = __ Load(
+-            native_context, LoadOp::Kind::TaggedBase(),
++            instance_cache_.native_context(), LoadOp::Kind::TaggedBase(),
+             MemoryRepresentation::TaggedPointer(),
+             NativeContext::OffsetOfElementAt(Context::WASM_JS_TAG_INDEX));
+         V<Object> js_tag = __ Load(tag_object, LoadOp::Kind::TaggedBase(),
+@@ -8891,7 +8887,7 @@ class TurboshaftGraphBuildingInterface
+                            base::Vector<Value> values) {
+     V<FixedArray> exception_values_array = V<FixedArray>::Cast(
+         CallBuiltinThroughJumptable<BuiltinCallDescriptor::WasmGetOwnProperty>(
+-            decoder, instance_cache_.native_context(),
++            decoder,
+             {exception,
+              __ LoadRoot<RootIndex::kwasm_exception_values_symbol>()}));
+ 
 diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
-index 16f8ee8..b29f253 100644
+index 16f8ee84893b..b29f25395a2f 100644
 --- a/src/wasm/wasm-code-manager.cc
 +++ b/src/wasm/wasm-code-manager.cc
-@@ -3061,17 +3061,11 @@
+@@ -3061,17 +3061,11 @@ WasmCode* WasmCodeManager::LookupCode(Address pc) const {
  }
  
  WasmCode* WasmCodeManager::LookupCode(Isolate* isolate, Address pc) const {
@@ -1092,10 +1493,10 @@ index 16f8ee8..b29f253 100644
  
  std::pair<WasmCode*, SafepointEntry&> WasmCodeManager::LookupCodeAndSafepoint(
 diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
-index 482c66c..d3a367b 100644
+index 482c66c436c3..d3a367b426a4 100644
 --- a/src/wasm/wasm-code-manager.h
 +++ b/src/wasm/wasm-code-manager.h
-@@ -1178,14 +1178,19 @@
+@@ -1178,14 +1178,19 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
    static bool CanRegisterUnwindInfoForNonABICompliantCodeRange();
  #endif  // V8_OS_WIN64
  
@@ -1121,7 +1522,7 @@ index 482c66c..d3a367b 100644
    // The referenced {SafepointEntry} is owned by the cache. The next call
    // to this function must be assumed to invalidate the reference.
    std::pair<WasmCode*, SafepointEntry&> LookupCodeAndSafepoint(Isolate* isolate,
-@@ -1243,8 +1248,6 @@
+@@ -1243,8 +1248,6 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
  
    void AssignRange(base::AddressRegion, NativeModule*);
  
@@ -1131,10 +1532,10 @@ index 482c66c..d3a367b 100644
  
    std::atomic<size_t> total_committed_code_space_{0};
 diff --git a/src/wasm/wasm-serialization.cc b/src/wasm/wasm-serialization.cc
-index 11c66b1..83cd5af 100644
+index 11c66b11e89f..83cd5af3dcb0 100644
 --- a/src/wasm/wasm-serialization.cc
 +++ b/src/wasm/wasm-serialization.cc
-@@ -1016,12 +1016,14 @@
+@@ -1016,12 +1016,14 @@ DeserializationUnit NativeModuleDeserializer::ReadCode(int fn_index,
    if (current_code_space_.size() < static_cast<size_t>(code_size)) {
      // Allocate the next code space. Don't allocate more than 90% of
      // {kMaxCodeSpaceSize}, to leave some space for jump tables.
@@ -1152,7 +1553,7 @@ index 11c66b1..83cd5af 100644
  
 diff --git a/test/mjsunit/compiler/regress-541251902.js b/test/mjsunit/compiler/regress-541251902.js
 new file mode 100644
-index 0000000..6d53ebc
+index 000000000000..6d53ebc369f6
 --- /dev/null
 +++ b/test/mjsunit/compiler/regress-541251902.js
 @@ -0,0 +1,42 @@
@@ -1200,7 +1601,7 @@ index 0000000..6d53ebc
 +}
 diff --git a/test/mjsunit/maglev/regress-541085654.js b/test/mjsunit/maglev/regress-541085654.js
 new file mode 100644
-index 0000000..06aa400
+index 000000000000..06aa4003e465
 --- /dev/null
 +++ b/test/mjsunit/maglev/regress-541085654.js
 @@ -0,0 +1,48 @@
@@ -1254,7 +1655,7 @@ index 0000000..06aa400
 +assertFalse(f(false, a, holder));
 diff --git a/test/mjsunit/maglev/regress-541926503.js b/test/mjsunit/maglev/regress-541926503.js
 new file mode 100644
-index 0000000..11ec072
+index 000000000000..11ec0720bdce
 --- /dev/null
 +++ b/test/mjsunit/maglev/regress-541926503.js
 @@ -0,0 +1,42 @@
@@ -1302,7 +1703,7 @@ index 0000000..11ec072
 +assertThrows(() => read(holder), TypeError);
 diff --git a/test/mjsunit/maglev/regress-547819997.js b/test/mjsunit/maglev/regress-547819997.js
 new file mode 100644
-index 0000000..43a8e39
+index 000000000000..43a8e395d3fc
 --- /dev/null
 +++ b/test/mjsunit/maglev/regress-547819997.js
 @@ -0,0 +1,38 @@
@@ -1344,11 +1745,73 @@ index 0000000..43a8e39
 +for (let i = 0; i < boxes.length; i++) {
 +  assertEquals(i, boxes[i].x);
 +}
+diff --git a/test/mjsunit/maglev/regress/regress-550360762.js b/test/mjsunit/maglev/regress/regress-550360762.js
+new file mode 100644
+index 000000000000..7e8a663e1144
+--- /dev/null
++++ b/test/mjsunit/maglev/regress/regress-550360762.js
+@@ -0,0 +1,48 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Flags: --maglev --maglev-inlining --allow-natives-syntax
++
++const probe = {a: 1};
++
++function Receiver(v) {
++  this.p0 = 10;
++  this.p1 = 11;
++  this.p2 = 12;
++  this.p3 = 13;
++  this.x = v;
++  this.y = 99;
++  for (let i = 0; i < 4; ++i) Object.defineProperty(this, 'p' + i, {enumerable: false});
++}
++
++function erasePressureThenRevalidate(victim, other) {
++  delete victim.x;
++  let key;
++  OUT: {
++    for (key in other) break OUT;
++    throw 0;
++  }
++  return other.hasOwnProperty(key);
++}
++
++function vulnerable(victim, other) {
++  for (let key in victim) {
++    erasePressureThenRevalidate(victim, other);
++    return victim[key];
++  }
++  return -1;
++}
++
++%PrepareFunctionForOptimization(Receiver);
++%PrepareFunctionForOptimization(erasePressureThenRevalidate);
++%PrepareFunctionForOptimization(vulnerable);
++
++for (let i = 0; i < 2; ++i) {
++  vulnerable(new Receiver(0), probe);
++}
++%OptimizeMaglevOnNextCall(vulnerable);
++vulnerable(new Receiver(0), probe);
++
++const victim = new Receiver(1337);
++assertEquals(undefined, vulnerable(victim, probe));
 diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
-index d256a71..4c94507 100644
+index d256a71c10ec..b5e69bf4c97a 100644
 --- a/test/mjsunit/mjsunit.status
 +++ b/test/mjsunit/mjsunit.status
-@@ -277,6 +277,9 @@
+@@ -75,6 +75,7 @@
+   'maglev/regress-421228426': [PASS, SLOW, ['mode == debug', SKIP]],
+ 
+   'turbolev/regress-532607231': [PASS, SLOW],
++  'turboshaft/regress-554421904': [PASS, SLOW],
+ 
+   # https://crbug.com/1129854
+   'tools/log': ['arch == arm or arch == arm64', SKIP],
+@@ -277,6 +278,9 @@
    # Disabled since v8_flags.always_use_string_forwarding_table is now READONLY.
    'string-forwarding-table': [SKIP],
  
@@ -1358,7 +1821,7 @@ index d256a71..4c94507 100644
    # Slow tests in the lower_limits_mode.
    # The lower limits makes EphemeronHashTables more inefficient by making hashes
    # collide more. This tests adds many objects to a WeakMap and that is very
-@@ -639,6 +642,7 @@
+@@ -639,6 +643,7 @@
  
    'sandbox/regress/regress-334120897': [SKIP],
    'sandbox/regress/regress-349502157': [SKIP],
@@ -1366,7 +1829,7 @@ index d256a71..4c94507 100644
    'sandbox/wasm-inlining-sigcheck': [SKIP],
    'sandbox/wasm-signature-verification': [SKIP],
    'sandbox/wasm-table-import': [SKIP],
-@@ -2748,6 +2752,7 @@
+@@ -2748,6 +2753,7 @@
    'regress/wasm/regress-483269968': [SKIP],
    'compiler/regress-347724915': [SKIP],
    'regress/regress-crbug-418520151': [SKIP],
@@ -1376,7 +1839,7 @@ index d256a71..4c94507 100644
    # supported by the Maglev->Turboshaft graph builder.
 diff --git a/test/mjsunit/regress/regress-526380803-1.js b/test/mjsunit/regress/regress-526380803-1.js
 new file mode 100644
-index 0000000..c4662fc
+index 000000000000..c4662fca7072
 --- /dev/null
 +++ b/test/mjsunit/regress/regress-526380803-1.js
 @@ -0,0 +1,5 @@
@@ -1387,7 +1850,7 @@ index 0000000..c4662fc
 +assertThrows(() => eval("let[class x{...x}]"), SyntaxError);
 diff --git a/test/mjsunit/regress/regress-526380803-2.js b/test/mjsunit/regress/regress-526380803-2.js
 new file mode 100644
-index 0000000..bcede54
+index 000000000000..bcede54c978e
 --- /dev/null
 +++ b/test/mjsunit/regress/regress-526380803-2.js
 @@ -0,0 +1,9 @@
@@ -1402,7 +1865,7 @@ index 0000000..bcede54
 +testScopeResolutionInPatternDefault();
 diff --git a/test/mjsunit/regress/regress-535000102.js b/test/mjsunit/regress/regress-535000102.js
 new file mode 100644
-index 0000000..b7584bc
+index 000000000000..b7584bc6b4a9
 --- /dev/null
 +++ b/test/mjsunit/regress/regress-535000102.js
 @@ -0,0 +1,43 @@
@@ -1451,7 +1914,7 @@ index 0000000..b7584bc
 +assertEquals(-1, indexOfAndDropSubject(search));
 diff --git a/test/mjsunit/regress/regress-541275802.js b/test/mjsunit/regress/regress-541275802.js
 new file mode 100644
-index 0000000..e3b2e17
+index 000000000000..e3b2e17af546
 --- /dev/null
 +++ b/test/mjsunit/regress/regress-541275802.js
 @@ -0,0 +1,37 @@
@@ -1494,7 +1957,7 @@ index 0000000..e3b2e17
 +})();
 diff --git a/test/mjsunit/regress/regress-546670199-inobject.js b/test/mjsunit/regress/regress-546670199-inobject.js
 new file mode 100644
-index 0000000..324acfb
+index 000000000000..324acfbfc6af
 --- /dev/null
 +++ b/test/mjsunit/regress/regress-546670199-inobject.js
 @@ -0,0 +1,64 @@
@@ -1564,7 +2027,7 @@ index 0000000..324acfb
 +assertEquals(112, unmigrated.x);
 diff --git a/test/mjsunit/regress/regress-546670199.js b/test/mjsunit/regress/regress-546670199.js
 new file mode 100644
-index 0000000..9528db8
+index 000000000000..9528db810b0b
 --- /dev/null
 +++ b/test/mjsunit/regress/regress-546670199.js
 @@ -0,0 +1,75 @@
@@ -1643,9 +2106,24 @@ index 0000000..9528db8
 +victim(unmigrated, true, 13);
 +assertEquals(13, unmigrated.y);
 +assertEquals(112, unmigrated.x);
+diff --git a/test/mjsunit/regress/regress-554236352.js b/test/mjsunit/regress/regress-554236352.js
+new file mode 100644
+index 000000000000..63faeffd3e26
+--- /dev/null
++++ b/test/mjsunit/regress/regress-554236352.js
+@@ -0,0 +1,9 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --cache=after-execute
++
++var R = Array.of(() => { 'use strict'; return eval('1'); }, "hello_world");
++assertEquals("hello_world", R[1]);
++assertEquals(1, R[0]());
 diff --git a/test/mjsunit/regress/regress-crbug-542403045.js b/test/mjsunit/regress/regress-crbug-542403045.js
 new file mode 100644
-index 0000000..e60a974
+index 000000000000..e60a974f8784
 --- /dev/null
 +++ b/test/mjsunit/regress/regress-crbug-542403045.js
 @@ -0,0 +1,89 @@
@@ -1740,7 +2218,7 @@ index 0000000..e60a974
 +assertOptimized(sortSameKind);
 diff --git a/test/mjsunit/regress/wasm/regress-530663440.js b/test/mjsunit/regress/wasm/regress-530663440.js
 new file mode 100644
-index 0000000..6e67423
+index 000000000000..6e6742385a23
 --- /dev/null
 +++ b/test/mjsunit/regress/wasm/regress-530663440.js
 @@ -0,0 +1,36 @@
@@ -1782,7 +2260,7 @@ index 0000000..6e67423
 +instance.exports.fill(1, 0, 0, 0, arr, {});
 diff --git a/test/mjsunit/regress/wasm/regress-538378084.js b/test/mjsunit/regress/wasm/regress-538378084.js
 new file mode 100644
-index 0000000..3025365
+index 000000000000..30253655ff56
 --- /dev/null
 +++ b/test/mjsunit/regress/wasm/regress-538378084.js
 @@ -0,0 +1,52 @@
@@ -1840,7 +2318,7 @@ index 0000000..3025365
 +assertEquals(0, inst.exports.big(3));
 diff --git a/test/mjsunit/sandbox/regress-537948358.js b/test/mjsunit/sandbox/regress-537948358.js
 new file mode 100644
-index 0000000..22e5fd7
+index 000000000000..22e5fd74ea3e
 --- /dev/null
 +++ b/test/mjsunit/sandbox/regress-537948358.js
 @@ -0,0 +1,76 @@
@@ -1920,9 +2398,140 @@ index 0000000..22e5fd7
 +carrier(undefined);
 +
 +assertUnreachable('A mismatched JDT entry accepted WasmResume');
+diff --git a/test/mjsunit/sandbox/regress/regress-543557673.js b/test/mjsunit/sandbox/regress/regress-543557673.js
+new file mode 100644
+index 000000000000..ddf0591c099c
+--- /dev/null
++++ b/test/mjsunit/sandbox/regress/regress-543557673.js
+@@ -0,0 +1,125 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --sandbox-testing --allow-natives-syntax
++
++const moduleABytes = new Uint8Array([
++    0,   97,  115, 109, 1,   0,   0,   0,   1,   22,  5,   96,  0,   1,   127,
++    96,  1,   111, 0,   96,  0,   1,   111, 96,  1,   127, 1,   127, 96,  0,
++    1,   127, 2,   27,  2,   1,   109, 9,   102, 117, 110, 99,  116, 105, 111,
++    110, 115, 1,   112, 1,   1,   1,   1,   109, 3,   116, 97,  103, 4,   0,
++    1,   3,   3,   2,   3,   4,   4,   5,   1,   105, 1,   1,   1,   6,   32,
++    6,   127, 1,   65,  239, 0,   11,  127, 1,   65,  0,   11,  127, 1,   65,
++    0,   11,  127, 1,   65,  0,   11,  127, 1,   65,  0,   11,  127, 1,   65,
++    0,   11,  7,   30,  3,   10,  101, 120, 99,  101, 112, 116, 105, 111, 110,
++    115, 1,   1,   6,   100, 114, 105, 118, 101, 114, 0,   0,   4,   115, 101,
++    101, 100, 0,   1,   10,  48,  2,   41,  0,   65,  0,   17,  0,   0,   26,
++    32,  0,   4,   64,  2,   2,   31,  2,   1,   0,   0,   0,   65,  0,   37,
++    1,   10,  11,  11,  26,  65,  0,   36,  5,   65,  0,   17,  0,   0,   15,
++    11,  65,  0,   11,  4,   0,   65,  7,   11,  0,   22,  4,   110, 97,  109,
++    101, 1,   15,  2,   0,   6,   100, 114, 105, 118, 101, 114, 1,   4,   115,
++    101, 101, 100,
++]);
++const moduleDBytes = new Uint8Array([
++    0,  97, 115, 109, 1,  0,   0,   0,   1,   13,  3,  96,  0,   1,   127,
++    96, 0,  1,   127, 96, 0,   1,   127, 3,   4,   3,  0,   1,   2,   7,
++    10, 1,  6,   116, 97, 114, 103, 101, 116, 0,   2,  10,  17,  3,   4,
++    0,  65, 0,   11,  4,  0,   65,  1,   11,  5,   0,  65,  222, 1,   11,
++    0,  28, 4,   110, 97, 109, 101, 1,   21,  3,   0,  4,   112, 97,  100,
++    48, 1,  4,   112, 97, 100, 49,  2,   6,   116, 97, 114, 103, 101, 116
++]);
++
++const kHeapObjectTag = 1;
++const memory = new DataView(new Sandbox.MemoryView(0, 0x100000000));
++const read32 = address => memory.getUint32(address, true);
++const write32 = (address, val) => memory.setUint32(address, val >>> 0, true);
++const tagged = object => (Sandbox.getAddressOf(object) + kHeapObjectTag) >>> 0;
++
++function instanceTypeAt(address) {
++  try {
++    return Sandbox.getInstanceTypeOfObjectAt(address);
++  } catch (_) {
++    return undefined;
++  }
++}
++
++function descriptorArrayOf(object) {
++  const map = read32(Sandbox.getAddressOf(object)) & ~kHeapObjectTag;
++  const size = Sandbox.getSizeOfObjectAt(map);
++  for (let offset = 0; offset < size; offset += 4) {
++    const candidate = read32(map + offset) & ~kHeapObjectTag;
++    if (instanceTypeAt(candidate) === 'DESCRIPTOR_ARRAY_TYPE') return candidate;
++  }
++  throw new Error('descriptor array not found');
++}
++
++function findTaggedWord(objectAddress, expectedType, expectedValue) {
++  const size = Sandbox.getSizeOfObjectAt(objectAddress);
++  for (let offset = 0; offset < size; offset += 4) {
++    const value = read32(objectAddress + offset);
++    if (expectedValue !== undefined && value !== expectedValue) continue;
++    if (instanceTypeAt(value & ~kHeapObjectTag) === expectedType) {
++      return {offset, value};
++    }
++  }
++  throw new Error(`tagged ${expectedType} word not found`);
++}
++
++const table =
++    new WebAssembly.Table({element: 'anyfunc', initial: 1, maximum: 1});
++const d = new WebAssembly.Instance(new WebAssembly.Module(moduleDBytes));
++const a = new WebAssembly.Instance(new WebAssembly.Module(moduleABytes), {
++  m: {functions: table, tag: WebAssembly.JSTag},
++});
++if (d.exports.target() !== 222) throw new Error('D target sanity failed');
++
++// Recover the private exception-tag symbol from a genuine exception.
++const genuine =
++    new WebAssembly.Exception(new WebAssembly.Tag({parameters: []}), []);
++const genuineDescriptors = descriptorArrayOf(genuine);
++const hiddenTagSymbol = findTaggedWord(genuineDescriptors, 'SYMBOL_TYPE').value;
++
++let getterCount = 0;
++const forged = Object.defineProperty({}, 'x', {
++  get() {
++    ++getterCount;
++    table.set(0, d.exports.target);
++    return undefined;
++  },
++  configurable: true,
++});
++
++// Replace only the one-property donor descriptor's key. Its accessor details
++// and AccessorPair remain unchanged.
++const forgedDescriptors = descriptorArrayOf(forged);
++const xName = Object.getOwnPropertyNames(forged)[0];
++const descriptorKey = findTaggedWord(
++    forgedDescriptors,
++    Sandbox.getInstanceTypeOfObjectAt(Sandbox.getAddressOf(xName)),
++    tagged(xName));
++write32(forgedDescriptors + descriptorKey.offset, hiddenTagSymbol);
++
++// Put the ordinary JSReceiver into the backing FixedArray of the exported
++// Wasm-declared exnref table.
++const tableType = Sandbox.getInstanceTypeIdFor('WASM_TABLE_OBJECT_TYPE');
++const entriesOffset = Sandbox.getFieldOffset(tableType, 'entries');
++const fixedArrayType = Sandbox.getInstanceTypeIdFor('FIXED_ARRAY_TYPE');
++const fixedArrayDataOffset = Sandbox.getFieldOffset(fixedArrayType, 'data');
++const exnTableAddress = Sandbox.getAddressOf(a.exports.exceptions);
++const entries = read32(exnTableAddress + entriesOffset) & ~kHeapObjectTag;
++write32(entries + fixedArrayDataOffset, tagged(forged));
++
++// Only the first call_indirect site receives feedback and is inlined. The
++// second site remains uninitialized and therefore generic.
++table.set(0, a.exports.seed);
++for (let i = 0; i < 20; ++i) {
++  if (a.exports.driver(0) !== 0) throw new Error('training failed');
++}
++%WasmTierUpFunction(a.exports.driver);
++if (a.exports.driver(0) !== 0) throw new Error('optimized training failed');
++
++const result = a.exports.driver(1);
++const tableChanged = table.get(0) === d.exports.target;
++assertEquals(getterCount, 0);
++assertFalse(tableChanged);
 diff --git a/test/mjsunit/turboshaft/regress-547936520.js b/test/mjsunit/turboshaft/regress-547936520.js
 new file mode 100644
-index 0000000..bc017a2
+index 000000000000..bc017a26141f
 --- /dev/null
 +++ b/test/mjsunit/turboshaft/regress-547936520.js
 @@ -0,0 +1,41 @@
@@ -1967,11 +2576,69 @@ index 0000000..bc017a2
 +candidate();
 +
 +assertEquals(0x42, holder.prev.target);
+diff --git a/test/mjsunit/turboshaft/regress-554421904.js b/test/mjsunit/turboshaft/regress-554421904.js
+new file mode 100644
+index 000000000000..1635e70d6de4
+--- /dev/null
++++ b/test/mjsunit/turboshaft/regress-554421904.js
+@@ -0,0 +1,52 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --allow-natives-syntax
++
++function set7(arr, v) { arr[7] = v; }
++function set0(arr, v) { arr[0] = v; }
++function carrier(...rest) {
++  const receiver = rest[32765] ? rest[32766] : doubleArray;
++  set0(receiver, 1.1);
++}
++function victim(payload) {
++  const staleArray = Array(8);
++  const target = [];
++  if (!trigger) staleArray.x = 0;
++  boundCarrier(trigger, staleArray);
++  set7(staleArray, payload);
++  return { target, staleArray };
++}
++
++%PrepareFunctionForOptimization(set0);
++%PrepareFunctionForOptimization(set7);
++%PrepareFunctionForOptimization(carrier);
++%PrepareFunctionForOptimization(victim);
++
++const doubleArray = Array(8);
++set0(doubleArray, 1.1);
++set7(doubleArray, 0);
++set0(Array(8), 0);
++
++// 32765 bound arguments + 2 call arguments = 32767 (kMaxArguments).
++const boundCarrier = carrier.bind(null, ...Array(32765).fill(0));
++
++let trigger = 0;
++victim(0);
++
++trigger = 1;
++boundCarrier(trigger, doubleArray);
++
++trigger = 0;
++victim(0);
++
++%OptimizeFunctionOnNextCall(victim);
++trigger = 1;
++const { target, staleArray } = victim(1.1);
++
++assertEquals(0, target.length);
++target[0] = 1;
++
++assertEquals(1.1, staleArray[0]);
++assertEquals(1.1, staleArray[7]);
 diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
-index a0c9333..a4b8a7c 100644
+index a0c93331265d..a4b8a7c3cc0a 100644
 --- a/test/unittests/BUILD.gn
 +++ b/test/unittests/BUILD.gn
-@@ -509,6 +509,7 @@
+@@ -509,6 +509,7 @@ v8_cluster_source_set("v8_unittests_sources") {
      "profiler/heap-snapshot-utils.h",
      "profiler/strings-storage-unittest.cc",
      "regexp/regexp-unittest.cc",
@@ -1980,7 +2647,7 @@ index a0c9333..a4b8a7c 100644
      "regress/regress-crbug-1056054-unittest.cc",
      "regress/regress-crbug-938251-unittest.cc",
 diff --git a/test/unittests/api/deserialize-unittest.cc b/test/unittests/api/deserialize-unittest.cc
-index e290107..ecd607e 100644
+index e29010760b50..ecd607e46fe9 100644
 --- a/test/unittests/api/deserialize-unittest.cc
 +++ b/test/unittests/api/deserialize-unittest.cc
 @@ -10,6 +10,7 @@
@@ -1991,7 +2658,7 @@ index e290107..ecd607e 100644
  #include "test/unittests/heap/heap-utils.h"
  #include "testing/gtest/include/gtest/gtest.h"
  
-@@ -953,6 +954,120 @@
+@@ -953,6 +954,120 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
    CHECK(expected->StrictEquals(actual));
  }
  
@@ -2113,10 +2780,10 @@ index e290107..ecd607e 100644
  // Script::infos() read concurrently by BackgroundMergeTask without acquire.
  //
 diff --git a/test/unittests/assembler/macro-assembler-arm64-unittest.cc b/test/unittests/assembler/macro-assembler-arm64-unittest.cc
-index 26a1e3b..2ef1b31 100644
+index 26a1e3b64f2e..2ef1b31f6d55 100644
 --- a/test/unittests/assembler/macro-assembler-arm64-unittest.cc
 +++ b/test/unittests/assembler/macro-assembler-arm64-unittest.cc
-@@ -141,25 +141,33 @@
+@@ -141,25 +141,33 @@ struct MoveObjectAndSlotTestCase {
    Register dst_slot;
    Register object;
    Register offset_register = no_reg;
@@ -2151,7 +2818,7 @@ index 26a1e3b..2ef1b31 100644
  
  // Make sure we include offsets that cannot be encoded in an add instruction.
  const int kOffsets[] = {0, 42, kMaxRegularHeapObjectSize, 0x101001};
-@@ -194,7 +202,12 @@
+@@ -194,7 +202,12 @@ TEST_P(MacroAssemblerTestMoveObjectAndSlot, MoveObjectAndSlot) {
          offset_operand = Operand(offset);
        } else {
          __ Mov(test_case.offset_register, Operand(offset));
@@ -2165,9 +2832,40 @@ index 26a1e3b..2ef1b31 100644
        }
  
        std::stringstream comment;
+diff --git a/test/unittests/objects/feedback-vector-unittest.cc b/test/unittests/objects/feedback-vector-unittest.cc
+index c0d081263521..2787c8641390 100644
+--- a/test/unittests/objects/feedback-vector-unittest.cc
++++ b/test/unittests/objects/feedback-vector-unittest.cc
+@@ -770,5 +770,26 @@ TEST_F(FeedbackVectorTest, DefineNamedOwnIC) {
+   CHECK_EQ(InlineCacheState::MONOMORPHIC, nexus.ic_state());
+ }
+ 
++TEST_F(FeedbackVectorTest, MaxLengthAndSizeFor) {
++  static_assert(FeedbackVector::SizeFor(0) == FeedbackVector::kHeaderSize);
++  static_assert(FeedbackVector::SizeFor(10) ==
++                FeedbackVector::kHeaderSize + 10 * kTaggedSize);
++  static_assert(FeedbackVector::SizeFor(FeedbackVector::kMaxLength) ==
++                FeedbackVector::kHeaderSize +
++                    FeedbackVector::kMaxLength * kTaggedSize);
++
++  EXPECT_EQ(FeedbackVector::kHeaderSize, FeedbackVector::SizeFor(0));
++  EXPECT_EQ(FeedbackVector::kHeaderSize + 10 * kTaggedSize,
++            FeedbackVector::SizeFor(10));
++  EXPECT_EQ(
++      FeedbackVector::kHeaderSize + FeedbackVector::kMaxLength * kTaggedSize,
++      FeedbackVector::SizeFor(FeedbackVector::kMaxLength));
++
++  ASSERT_DEATH_IF_SUPPORTED({ FeedbackVector::SizeFor(-1); }, ".*");
++  ASSERT_DEATH_IF_SUPPORTED(
++      { FeedbackVector::SizeFor(FeedbackVector::kMaxLength + 1); }, ".*");
++  ASSERT_DEATH_IF_SUPPORTED({ FeedbackVector::SizeFor(1 << 30); }, ".*");
++}
++
+ }  // namespace internal
+ }  // namespace v8
 diff --git a/test/unittests/regress/regress-536271629-unittest.cc b/test/unittests/regress/regress-536271629-unittest.cc
 new file mode 100644
-index 0000000..57c944d
+index 000000000000..57c944dfdb11
 --- /dev/null
 +++ b/test/unittests/regress/regress-536271629-unittest.cc
 @@ -0,0 +1,60 @@

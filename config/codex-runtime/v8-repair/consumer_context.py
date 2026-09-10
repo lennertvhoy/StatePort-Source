@@ -31,9 +31,9 @@ def prepare_context(source_archive: Path, backport_inputs: Path, native_artifact
     receipt = json.loads(receipt_bytes)
     if not isinstance(receipt, dict) or receipt.get('status') != 'native-compiled-unqualified':
         raise ValueError('native receipt is not an unqualified completed build')
-    if (receipt.get('recipeSha256') != 'f5d24380b83ad03e7596b0f472711c6ecd662c09d4404c962d0ceb07f63d9465'
-            or receipt.get('fixedV8Commit') != '4323497a6a73839e6d5260f6acd7ec0212cb3321'
-            or receipt.get('fixedV8Version') != '15.2.124.21'):
+    if (receipt.get('recipeSha256') != '1f4ce37550f5e47f61f048c1899656a62e706757dda33f164df843ff034cfbb8'
+            or receipt.get('fixedV8Commit') != '7938dd73a1d5b6021daca3beeac450ebde3c141d'
+            or receipt.get('fixedV8Version') != '15.2.124.27'):
         raise ValueError('native recipe or V8 identity mismatch')
     rows_list = receipt.get('artifacts')
     if not isinstance(rows_list, list) or any(not isinstance(r, dict) for r in rows_list):

@@ -16,7 +16,7 @@ def _digest(path: Path) -> str:
 
 def test_locked_build_inputs_match_exact_repository_bytes() -> None:
     value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
-    assert value["resolvedOn"] == "2026-09-04"
+    assert value["resolvedOn"] == "2026-09-10"
     for lock in value["locks"].values():
         assert _digest(ROOT / lock["path"]) == lock["digest"]
     for path, expected in value["definitions"].items():

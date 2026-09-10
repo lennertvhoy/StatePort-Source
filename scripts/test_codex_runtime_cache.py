@@ -108,6 +108,46 @@ def test_outer_command_rejects_reviewed_destinations_from_wrong_roots(tmp_path: 
         _verify_outer_command(tmp_path, image, inputs, vendor)
 
 
+@pytest.mark.parametrize('mutation', [None, 'malformed_scope', 'command_parent', 'proof_parent', 'escaped_process', 'container_id', 'extra_option'])
+def test_current_runner_requires_exact_command_and_containment(tmp_path: Path, mutation: str | None) -> None:
+    image = 'sha256:' + 'b' * 64
+    inputs, vendor = tmp_path / 'inputs', tmp_path / 'vendor'
+    inputs.mkdir(); vendor.mkdir(); (tmp_path / 'work').mkdir()
+    parent = "/user.slice/user-1000.slice/user@1000.service/stateport.slice/stateport-heavy.slice/stateport-heavy-123-456.service"
+    if mutation == 'malformed_scope':
+        parent = '/user.slice/unrelated/stateport-heavy-123-456.service'
+    cid = 'c' * 64
+    command = _valid_outer_command(image)
+    command[command.index('--cgroups=split'):command.index('--cgroups=split') + 1] = [
+        '--cgroups=no-conmon', '--cgroup-parent', parent,
+    ]
+    replacements = {
+        '/home/operator/container-id': str(tmp_path / 'container-id'),
+        'type=bind,src=/immutable/inputs,dst=/inputs,ro': f'type=bind,src={inputs},dst=/inputs,ro',
+        'type=bind,src=/immutable/vendor,dst=/vendor-inputs,ro': f'type=bind,src={vendor},dst=/vendor-inputs,ro',
+        'type=bind,src=/cached/work,dst=/work,rw': f'type=bind,src={tmp_path / "work"},dst=/work,rw',
+    }
+    command = [replacements.get(item, item) for item in command]
+    proof = {'status': 'passed', 'bookedScope': parent, 'containerId': cid,
+             'processes': {'init': {'cgroup': parent + '/libpod-' + cid},
+                           'conmon': {'cgroup': parent + '/runtime'}}}
+    (tmp_path / 'containment.json').write_text(json.dumps(proof))
+    if mutation == 'command_parent': command[command.index(parent)] = parent + '/other'
+    if mutation == 'proof_parent': proof['bookedScope'] = parent + '/other'
+    if mutation == 'escaped_process': proof['processes']['conmon']['cgroup'] = parent + '/../other'
+    if mutation == 'container_id': proof['containerId'] = 'd' * 64
+    if mutation == 'extra_option': command.insert(5, '--network=host')
+    # Podman removes its cidfile during normal container cleanup. The durable
+    # outer observation and inner admission must suffice after that cleanup.
+    (tmp_path / 'work/containment-approved.json').write_text(json.dumps(proof))
+    (tmp_path / 'command.json').write_text(json.dumps({'command': command, 'governorCgroup': parent}))
+    if mutation is None:
+        assert _verify_outer_command(tmp_path, image, inputs, vendor)['timeoutArgument'] == '--timeout-seconds=7200'
+    else:
+        with pytest.raises(VerificationError):
+            _verify_outer_command(tmp_path, image, inputs, vendor)
+
+
 def test_outer_command_rejects_unparsed_extra_mount(tmp_path: Path) -> None:
     image = "sha256:" + "c" * 64
     inputs, vendor = tmp_path / "inputs", tmp_path / "vendor"

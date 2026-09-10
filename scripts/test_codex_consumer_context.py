@@ -32,7 +32,7 @@ def test_context_positive_sequences_consumer_then_backports(tmp_path, monkeypatc
     for name,data in [('args.gn',b'gn'),('native-Cargo.lock',b'lock'),('source-preparation.json',b'prep')]:
         p=native/name; p.write_bytes(data); extras.append({'file':name,'sha256':__import__('hashlib').sha256(data).hexdigest(),'bytes':len(data)})
     digest=lambda p: __import__('hashlib').sha256(p.read_bytes()).hexdigest()
-    receipt=tmp_path/'receipt.json'; receipt.write_text(json.dumps({'status':'native-compiled-unqualified','recipeSha256':'f5d24380b83ad03e7596b0f472711c6ecd662c09d4404c962d0ceb07f63d9465','fixedV8Commit':'4323497a6a73839e6d5260f6acd7ec0212cb3321','fixedV8Version':'15.2.124.21','artifacts':[{'file':consumer_context.ARCHIVE,'sha256':digest(archive),'bytes':7},{'file':consumer_context.BINDINGS,'sha256':digest(binding),'bytes':7}]+extras}))
+    receipt=tmp_path/'receipt.json'; receipt.write_text(json.dumps({'status':'native-compiled-unqualified','recipeSha256':'1f4ce37550f5e47f61f048c1899656a62e706757dda33f164df843ff034cfbb8','fixedV8Commit':'7938dd73a1d5b6021daca3beeac450ebde3c141d','fixedV8Version':'15.2.124.27','artifacts':[{'file':consumer_context.ARCHIVE,'sha256':digest(archive),'bytes':7},{'file':consumer_context.BINDINGS,'sha256':digest(binding),'bytes':7}]+extras}))
     calls=[]
     def fake_consumer(src,dst): calls.append('consumer'); (dst/'codex-rs').mkdir(parents=True); (dst/'codex-rs/Cargo.toml').write_text('m'); (dst/'codex-rs/Cargo.lock').write_text('l')
     def fake_backports(src,inp,dst): calls.append('backports'); import shutil; shutil.copytree(src,dst); (dst/'codex-rs/stateport-native-overrides').mkdir(parents=True); (dst/'codex-rs/stateport-native-overrides/backport-preparation.json').write_text('{}')
@@ -65,7 +65,7 @@ def test_context_refuses_native_receipt_drift(tmp_path, mutate):
     if mutate=='null': rows[0]=None
     if mutate=='nondict': rows[0]='bad'
     if mutate=='bool-size': rows[0]['bytes']=True
-    receipt=tmp_path/'r.json'; receipt.write_text(json.dumps({'status':'native-compiled-unqualified','recipeSha256':'f5d24380b83ad03e7596b0f472711c6ecd662c09d4404c962d0ceb07f63d9465','fixedV8Commit':'4323497a6a73839e6d5260f6acd7ec0212cb3321','fixedV8Version':'15.2.124.21','artifacts':rows}))
+    receipt=tmp_path/'r.json'; receipt.write_text(json.dumps({'status':'native-compiled-unqualified','recipeSha256':'1f4ce37550f5e47f61f048c1899656a62e706757dda33f164df843ff034cfbb8','fixedV8Commit':'7938dd73a1d5b6021daca3beeac450ebde3c141d','fixedV8Version':'15.2.124.27','artifacts':rows}))
     if mutate=='recipe':
         value=json.loads(receipt.read_text()); value['recipeSha256']='0'*64; receipt.write_text(json.dumps(value))
     with pytest.raises(ValueError): prepare_context(source,inputs,native,receipt,tmp_path/'out')
@@ -186,3 +186,10 @@ def test_backport_secondary_source_integrity_before_lock_publication(tmp_path, m
             'first.txt': h(b'after\n'), 'second.txt': h(b'after\n')}
         assert receipt['changedCargoLockNodes'] == ['example']
         assert 'source = ' not in (output / 'codex-rs/Cargo.lock').read_text()
+
+
+def test_native_recipe_authenticates_current_source_and_license_inputs():
+    # Exercise the real cross-file pins; mocked context sequencing cannot catch
+    # a changed license manifest whose recipe digest was left stale.
+    from prepare import recipe
+    recipe()

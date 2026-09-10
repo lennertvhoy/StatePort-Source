@@ -213,6 +213,7 @@ def _reviewed_cgroup_fixture(relative_path: PurePosixPath, value: str) -> bool:
     return relative_path in {
         PurePosixPath("scripts/test_release_images.py"),
         PurePosixPath("scripts/test_codex_runtime_resume.py"),
+        PurePosixPath("scripts/test_codex_runtime_cache.py"),
     } and bool(_CGROUP_USER_PATH.fullmatch(value))
 
 

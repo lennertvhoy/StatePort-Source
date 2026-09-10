@@ -1,12 +1,17 @@
 # V8 native repair preparation
 
-This is a preparation-only repair candidate. The corrected native archive and
-full `.3` static CLI have now compiled, and the final CLI passed ordinary provider
-isolation in rootless namespaces at both runtime UIDs. The canonical current
-results and exact external receipts are in
-[the slice summary](../../../evidence/one-line-release-001/summary.md).
-Independent reproduction, security disposition, consuming-image and native
-installed qualification remain open. The provider release pin is unchanged.
+This is a preparation-only repair candidate. The pinned source is now V8
+15.2.124.27, the M152 revision selected by Chrome152.0.7977.120. The preceding
+15.2.124.21 archive and reproduced full `.3` CLI lack later High corrections
+CVE-2026-87612 and CVE-2026-87536. Their successful builds and ordinary journeys
+remain historical evidence, but do not qualify the refreshed input. The R7
+independent rebuild of the obsolete input was stopped with its files preserved.
+
+The refreshed native compilation, independent reproduction, ordinary consumer
+journeys and required security proof are unrun. The native security/memory
+regression lane remains paused. The canonical current results and external
+receipts are in [the slice summary](../../../evidence/one-line-release-001/summary.md).
+The production provider pin is unchanged; no unqualified image is published.
 
 The sections below retain the original pilot premises and subsequent findings;
 statements that a check was unrun describe that pilot stage, not current status.
@@ -23,9 +28,9 @@ consumer used an offline mounted vendor tree and different internal paths. Its
 byte identity cannot be assumed for a future Containerfile build.
 
 `recipe.json` pins rusty_v8 152.2.0 (packaged Rust API plus native source) and the
-complete upstream V8 15.2.124.1 → 15.2.124.21 patch at
-`4323497a6a73839e6d5260f6acd7ec0212cb3321`. All 53 resulting changed files were
-compared with that exact upstream commit. Three tests omitted from the crate are
+complete upstream V8 15.2.124.1 → 15.2.124.27 patch at
+`7938dd73a1d5b6021daca3beeac450ebde3c141d`. All 70 expected postimages are
+bound to that exact upstream commit. Four tests omitted from the crate are
 restored from the exact base commit before patching. V8 DEPS stays byte-identical.
 The root's 20 submodule identities and all 66 V8 DEPS entries are inventoried in
 separate digest-bound manifests; optional platform dependencies are inventory,
