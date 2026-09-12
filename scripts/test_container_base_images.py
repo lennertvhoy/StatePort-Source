@@ -46,15 +46,18 @@ def test_every_containerfile_from_is_in_the_pinned_base_manifest() -> None:
     paths = {ROOT / path for item in value["images"].values() for path in item["usedBy"]}
     for path in sorted(paths):
         assert path.is_file(), path
-        for line in path.read_text().splitlines():
+        text = path.read_text()
+        # Stage aliases (FROM <stage> [AS ...]) and the provider build-arg
+        # (FROM ${STATEPORT_PROVIDER_IMAGE}, injected by build_release_images
+        # from the admitted custom-OCI record in provider-runtime-inputs.yaml
+        # and verified by load_provider_oci_input plus the consumer build's
+        # provider verification) are not pinned registry bases.
+        import re as _re
+        stages = set(_re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", text, _re.M))
+        for line in text.splitlines():
             if line.startswith("FROM "):
                 reference = line.split()[1]
-                # The provider stage FROM is a build-arg reference injected by
-                # build_release_images from the admitted custom-OCI record
-                # (config/provider-runtime-inputs.yaml), verified separately
-                # by load_provider_oci_input and the consumer build's own
-                # provider verification; it is not a pinned registry base.
-                if reference == "${STATEPORT_PROVIDER_IMAGE}":
+                if reference in stages or reference == "${STATEPORT_PROVIDER_IMAGE}":
                     continue
                 assert reference in allowed, (path, reference)
 

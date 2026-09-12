@@ -11,7 +11,12 @@ import { getClient } from '@/client'
 import { useCurrentInstance } from '@/shell/currentInstance'
 import { useSessionStore } from '@/state'
 
-const POLL_MS = 15_000
+// The trail is append-only and has no delta endpoint, so the full list is
+// re-read. Shortly after a relevant mutation the list can grow, so keep the
+// original 15 s cadence for a bounded window; while idle, read at 60 s.
+const FAST_POLL_MS = 15_000
+const SLOW_POLL_MS = 60_000
+const HOT_WINDOW_MS = 60_000
 
 export interface ReceiptsData {
   receipts: Receipt[]
@@ -38,8 +43,14 @@ export function useReceipts(instanceId: string | undefined): ReceiptsData {
   const activeScenario = useSessionStore((s) => s.activeScenario)
   const { hasCapability } = useCurrentInstance()
   const hasCtoOrchestration = hasCapability('cto_orchestration')
+  // End of the window in which polling stays on the fast cadence (a relevant
+  // mutation or this hook's own manual refresh opens it).
+  const fastUntilRef = useRef(0)
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), [])
+  const refresh = useCallback(() => {
+    fastUntilRef.current = Date.now() + HOT_WINDOW_MS
+    setNonce((n) => n + 1)
+  }, [])
   const requestKey = `${instanceId ?? ''}#${nonce}`
 
   useEffect(() => {
@@ -76,10 +87,38 @@ export function useReceipts(instanceId: string | undefined): ReceiptsData {
 
     const initial = loadedInstance.current !== instanceId
     void load(initial)
-    const timer = window.setInterval(() => void load(false), POLL_MS)
+
+    // Self-scheduling poll so the cadence can switch without re-running the
+    // effect (which would re-read immediately and disturb the highlight sweep).
+    let timer: number | undefined
+    let nextAt = 0
+    const schedule = (delay: number) => {
+      if (cancelled) return
+      if (timer !== undefined) window.clearTimeout(timer)
+      nextAt = Date.now() + delay
+      timer = window.setTimeout(() => {
+        timer = undefined
+        void load(false).finally(() => {
+          if (!cancelled) schedule(Date.now() < fastUntilRef.current ? FAST_POLL_MS : SLOW_POLL_MS)
+        })
+      }, delay)
+    }
+    schedule(Date.now() < fastUntilRef.current ? FAST_POLL_MS : SLOW_POLL_MS)
+
+    const unsubscribe = useSessionStore.subscribe((state, previous) => {
+      if (state.operationsMutationCount === previous.operationsMutationCount) return
+      fastUntilRef.current = Date.now() + HOT_WINDOW_MS
+      // Never let an already-scheduled slow read hide a just-written receipt:
+      // re-arm only when the pending wait is longer than the fast cadence.
+      if (timer !== undefined && nextAt > Date.now() + FAST_POLL_MS) {
+        schedule(FAST_POLL_MS)
+      }
+    })
+
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      unsubscribe()
+      if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [instanceId, nonce, activeScenario, requestKey, hasCtoOrchestration])
 

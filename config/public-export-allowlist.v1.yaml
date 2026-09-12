@@ -284,6 +284,9 @@ rules:
   - apps/web/src/components/InlineNotice.tsx
   - apps/web/src/components/Kbd.tsx
   - apps/web/src/components/OperationStateLabel.tsx
+  - apps/web/src/client/http/__tests__/providerLogin.test.ts
+  - apps/web/src/components/__tests__/OperationStateLabel.test.tsx
+  - apps/web/src/features/receipts/__tests__/useReceipts.test.tsx
   - apps/web/src/components/SectionHeader.tsx
   - apps/web/src/components/Skeleton.tsx
   - apps/web/src/components/Spinner.tsx
@@ -607,7 +610,6 @@ rules:
   - config/provider-runtime-inputs.yaml
   - config/python-dependency-licenses.v1.json
   - config/python-dependency-policy.v1.json
-  - config/release-scan-exceptions.v1.yaml
   - config/release-tool-inputs.yaml
   - config/release-topology.v1.yaml
   - config/statespec-schema-registry.v1.json
@@ -1569,6 +1571,15 @@ rules:
   - evidence/one-line-release-001/stage1-advisory-notice-completion-20260912.md
   - evidence/one-line-release-001/stage1-continuation-handoff-20260912b.md
   - evidence/one-line-release-001/stage1-f3-advisory-consolidation-r1.md
+  - evidence/one-line-release-001/batch-item2-ui-audit-handoff-20260912.md
+  - evidence/one-line-release-001/product-completeness-batch-handoff-20260912.md
+  - evidence/one-line-release-001/session-discipline-contract-20260912.md
+  - evidence/one-line-release-001/stage1-exit-review-20260912.md
+  - evidence/one-line-release-001/stage1-f3-advisory-consolidation-r2.md
+  - evidence/one-line-release-001/stage1-handoff-20260912c.md
+  - evidence/one-line-release-001/stage1-handoff-go-20260912.md
+  - evidence/one-line-release-001/stage1-production-binding-plan-20260912.md
+  - config/release-scan-exceptions.v1.yaml
   - evidence/one-line-release-001/stage1-producer-build-procedure-r1.md
   - evidence/one-line-release-001/stage1-producer-build-procedure-r2.md
   - evidence/one-line-release-001/standard-source-and-notices-20260911.md

@@ -7,7 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, u
 
 import { useLocation, useNavigate } from 'react-router-dom'
 
-import type { ApplicationInstance, GlobalSettings } from '@/client'
+import type { ApplicationInstance, GlobalSettings, InfrastructureTarget } from '@/client'
 import { getClient } from '@/client'
 import { useSessionStore, useWorkspaceStore } from '@/state'
 
@@ -380,6 +380,99 @@ function useSharedCount(kind: 'approvals' | 'notifications'): ShellCountResult {
 
 export function usePendingApprovalsCount(): ShellCountResult {
   return useSharedCount('approvals')
+}
+
+// ── Infrastructure target (workbench status bar + deployments nav) ───────────
+
+const TARGET_POLL_MS = 10_000
+
+export interface SharedTargetResult {
+  /** Last successfully fetched target; retained across failed polls. */
+  target: InfrastructureTarget | null
+  /** Set when the latest poll failed — consumers must not present `target`
+   *  as fresh truth (and the status-bar name must hide, as before). */
+  error: unknown
+}
+
+const EMPTY_TARGET_RESULT: SharedTargetResult = { target: null, error: null }
+
+// Chrome surfaces that show the same target (the workbench status bar and the
+// deployments nav panel) share one observation and timer. The 10 s read is a
+// capability-gated convenience; a second identical poller per mounted surface
+// only doubled the requests.
+function targetPoller(load: () => Promise<InfrastructureTarget>) {
+  let snapshot: SharedTargetResult = { target: null, error: null }
+  const listeners = new Set<() => void>()
+  let timer: ReturnType<typeof setInterval> | undefined
+  let generation = 0
+  let pending = false
+  const tick = async () => {
+    if (pending) return
+    pending = true
+    const current = generation
+    try {
+      const target = await load()
+      if (current === generation) snapshot = { target, error: null }
+    } catch (error) {
+      if (current === generation) snapshot = { ...snapshot, error }
+    } finally {
+      if (current === generation) {
+        pending = false
+        listeners.forEach(listener => listener())
+      }
+    }
+  }
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      if (listeners.size === 1) {
+        void tick()
+        timer = setInterval(() => void tick(), TARGET_POLL_MS)
+      }
+      return () => {
+        listeners.delete(listener)
+        if (!listeners.size) {
+          clearInterval(timer)
+          generation += 1
+          pending = false
+          snapshot = { target: null, error: null }
+        }
+      }
+    },
+  }
+}
+
+const targetPollers = new WeakMap<ReturnType<typeof getClient>, Map<string, ReturnType<typeof targetPoller>>>()
+
+/** One shared 10 s target observation for every mounted consumer. */
+export function useSharedInfrastructureTarget(
+  instanceId: string | undefined,
+  enabled: boolean,
+): SharedTargetResult {
+  const client = getClient()
+  const scenario = useSessionStore((s) => s.activeScenario)
+  const poller = useMemo(() => {
+    if (!instanceId || !enabled) return null
+    let cache = targetPollers.get(client)
+    if (!cache) { cache = new Map(); targetPollers.set(client, cache) }
+    const key = JSON.stringify([instanceId, scenario])
+    let current = cache.get(key)
+    if (!current) {
+      current = targetPoller(() => client.infrastructure.getTarget(instanceId))
+      cache.set(key, current)
+    }
+    return current
+  }, [client, instanceId, enabled, scenario])
+  const subscribe = useCallback(
+    (listener: () => void) => (poller ? poller.subscribe(listener) : () => undefined),
+    [poller],
+  )
+  const getSnapshot = useCallback(
+    () => (poller ? poller.getSnapshot() : EMPTY_TARGET_RESULT),
+    [poller],
+  )
+  return useSyncExternalStore(subscribe, getSnapshot)
 }
 
 // ── Operation records (operation center + status bar + topbar spinner) ───────

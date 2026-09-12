@@ -277,7 +277,7 @@ def test_unadmitted_custom_provider_fails_closed(monkeypatch: pytest.MonkeyPatch
     record = build_release_images.load_provider_oci_input()
     expected_digest = "sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17"
     assert record["image"] == (
-        "127.0.0.1:5001/stateport-alpha/stateport-provider@" + expected_digest
+        "ghcr.io/lennertvhoy/stateport-provider@" + expected_digest
     )
     assert record["manifestDigest"] == expected_digest
     assert record["platformManifestDigest"] == expected_digest

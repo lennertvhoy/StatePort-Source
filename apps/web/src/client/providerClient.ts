@@ -12,13 +12,30 @@ export const providerStatusSchema = z.object({
   telemetryStatus: z.literal('unavailable'), detail: z.string(),
 })
 export type ProviderStatus = z.infer<typeof providerStatusSchema>
+export const loginFlowSchema = z.object({
+  active: z.boolean(),
+  phase: z.enum(['pending', 'code', 'authenticated', 'failed', 'expired', 'cancelled']),
+  verificationUrl: z.string().nullable(),
+  userCode: z.string().nullable(),
+  detail: z.string(),
+})
+export type LoginFlow = z.infer<typeof loginFlowSchema>
 const transport = new HttpTransport()
 const mutate = (action: string, body: object = {}) => transport.request(`/v1/provider/${action}`, {
   method: 'POST', mutation: true, body, schema: providerStatusSchema,
+})
+const mutateLoginFlow = (path: string) => transport.request(`/v1/provider/${path}`, {
+  method: 'POST', mutation: true, body: {}, schema: loginFlowSchema,
 })
 export const providerClient = {
   getStatus: () => transport.request('/v1/provider/status', { schema: providerStatusSchema }),
   configure: (model: string, providerId?: 'codex' | 'opencode') => mutate('configure', { model, ...(providerId ? { providerId } : {}) }),
   verify: () => mutate('verify'),
   disconnect: () => mutate('disconnect'),
+  login: () => mutateLoginFlow('login'),
+  getLogin: () => transport.request('/v1/provider/login', { schema: loginFlowSchema }),
+  cancelLogin: () => mutateLoginFlow('login/cancel'),
+  logout: () => transport.request('/v1/provider/logout', {
+    method: 'POST', mutation: true, body: {}, schema: providerStatusSchema,
+  }),
 }

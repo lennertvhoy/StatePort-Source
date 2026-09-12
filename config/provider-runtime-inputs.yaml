@@ -27,14 +27,18 @@ codex:
   # result succeeded, reproducible true, double-build digests identical):
   # FROM-scratch context verified 9/9 against
   # maintained-consumer-20260910/provider-real-context-receipt.json. The
-  # loopback reference requires the retained task-owned TLS registry
-  # (127.0.0.1:5001) during custom-oci builds; the final public candidate
-  # assembly must pin the public anonymous-verified reference instead before
-  # publication. No security scan, signing, or release qualification of this
+  # public anonymous-verified reference is now pinned from transport probe r4
+  # (stage1-lane4-20260912/lane5-transport-receipt-r4.json, sha256
+  # 58574bd66c9d9a5862216f337aec69aa2bca06e8ffc6ed09bbcbbc15638b6c88,
+  # observed 2026-09-12T16:54:44Z, result passed, credentials none, 8/8
+  # images anonymously verified); the 14/14 legacy private digests remain
+  # unreachable (token-denied HTTP 401). The former loopback reference
+  # (retained task-owned TLS registry 127.0.0.1:5001) is no longer used by
+  # this record. No security scan, signing, or release qualification of this
   # image is claimed yet.
   oci:
     enabled: true
-    image: 127.0.0.1:5001/stateport-alpha/stateport-provider@sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
+    image: ghcr.io/lennertvhoy/stateport-provider@sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
     manifestDigest: sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
     platformManifestDigest: sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
     version: codex-cli 0.146.0+stateport.3

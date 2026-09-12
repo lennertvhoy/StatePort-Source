@@ -9,12 +9,13 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 
+import type { InfrastructureTarget } from '@/client'
 import { ClientError, getClient, resetClientForTests, resetMockState } from '@/client'
-import { buildSeed } from '@/client/mock/seed'
+import { buildSeed, INSTANCE_IDS } from '@/client/mock/seed'
 import { useSessionStore } from '@/state'
 import { useRuns } from '@/features/runs/useRuns'
 
-import { hasLiveOperation, useOperationsPolling, usePendingApprovalsCount, useUnreadNotificationsCount } from '../data'
+import { hasLiveOperation, useOperationsPolling, usePendingApprovalsCount, useSharedInfrastructureTarget, useUnreadNotificationsCount } from '../data'
 import { OperationCenter } from '../OperationCenter'
 import { useShellUiStore } from '../shellUi'
 import { Topbar } from '../Topbar'
@@ -403,6 +404,58 @@ describe('NotificationsPopover', () => {
     await waitFor(() => {
       expect(markRead).toHaveBeenCalledWith('attention-study', { instanceId: 'ins_study_alpha' })
     })
+  })
+})
+
+describe('useSharedInfrastructureTarget', () => {
+  it('serves every subscriber from one 10 s poll and stops with the last', async () => {
+    vi.useFakeTimers()
+    const getTarget = vi.spyOn(getClient().infrastructure, 'getTarget')
+
+    const first = renderHook(() => useSharedInfrastructureTarget(INSTANCE_IDS.nixosInfra, true))
+    const second = renderHook(() => useSharedInfrastructureTarget(INSTANCE_IDS.nixosInfra, true))
+    expect(getTarget).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(getTarget).toHaveBeenCalledTimes(2)
+    expect(first.result.current.target?.name).toBeTruthy()
+    expect(first.result.current.target).toEqual(second.result.current.target)
+
+    first.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(getTarget).toHaveBeenCalledTimes(3)
+
+    second.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(getTarget).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps the last known target and exposes the failure when a poll fails', async () => {
+    vi.useFakeTimers()
+    const target = {
+      id: 'tgt_1',
+      instanceId: INSTANCE_IDS.nixosInfra,
+      name: 'homelab-dev',
+    } as InfrastructureTarget
+    vi.spyOn(getClient().infrastructure, 'getTarget')
+      .mockResolvedValueOnce(target)
+      .mockRejectedValue(new Error('network unreachable'))
+
+    const view = renderHook(() => useSharedInfrastructureTarget(INSTANCE_IDS.nixosInfra, true))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(view.result.current).toEqual({ target, error: null })
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(view.result.current.target).toEqual(target)
+    expect(view.result.current.error).toBeTruthy()
+  })
+
+  it('does not poll while disabled', async () => {
+    vi.useFakeTimers()
+    const getTarget = vi.spyOn(getClient().infrastructure, 'getTarget')
+    renderHook(() => useSharedInfrastructureTarget(INSTANCE_IDS.nixosInfra, false))
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(getTarget).not.toHaveBeenCalled()
   })
 })
 

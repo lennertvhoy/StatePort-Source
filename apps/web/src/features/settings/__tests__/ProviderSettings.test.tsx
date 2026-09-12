@@ -4,10 +4,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProviderSettings } from '../ProviderSettings'
-import { providerClient, type ProviderStatus } from '@/client/providerClient'
+import { providerClient, type LoginFlow, type ProviderStatus } from '@/client/providerClient'
 import { useSessionStore } from '@/state'
 import { ClientError } from '@/client/types'
-vi.mock('@/client/providerClient', () => ({ providerClient: { getStatus: vi.fn(), configure: vi.fn(), verify: vi.fn(), disconnect: vi.fn() } }))
+vi.mock('@/client/providerClient', () => ({ providerClient: { getStatus: vi.fn(), configure: vi.fn(), verify: vi.fn(), disconnect: vi.fn(), login: vi.fn(), getLogin: vi.fn(), cancelLogin: vi.fn(), logout: vi.fn() } }))
 const status: ProviderStatus = { configured: false, executableInstalled: false, connected: false, model: null, authenticationStatus: 'unavailable', requestStatus: 'unverified', telemetryStatus: 'unavailable', detail: 'Codex is missing in this runtime.' }
 afterEach(() => { cleanup(); Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 }) })
 describe('Provider settings', () => {
@@ -35,6 +35,152 @@ describe('Provider settings', () => {
     expect(await screen.findByText('Present (expiry not guaranteed)')).not.toBeNull()
     await user.click(screen.getByRole('button', { name: 'Disconnect StatePort' }))
     await waitFor(() => expect((screen.getByRole('button', { name: 'Verify bounded request' }) as HTMLButtonElement).disabled).toBe(true))
+  })
+
+  afterEach(() => { vi.useRealTimers() })
+
+  const codeFlow: LoginFlow = { active: true, phase: 'code', verificationUrl: 'https://example.com/device', userCode: 'WDJB-MJHT', detail: 'Open the link and enter the code.' }
+  const authedFlow: LoginFlow = { active: false, phase: 'authenticated', verificationUrl: null, userCode: null, detail: 'Sign-in complete.' }
+  const expiredFlow: LoginFlow = { active: false, phase: 'expired', verificationUrl: null, userCode: null, detail: 'The one-time code expired.' }
+  const cancelledFlow: LoginFlow = { active: false, phase: 'cancelled', verificationUrl: null, userCode: null, detail: 'Cancelled by the operator.' }
+  const pendingFlow: LoginFlow = { active: true, phase: 'pending', verificationUrl: null, userCode: null, detail: 'Waiting for the provider.' }
+
+  it('starts device sign-in, shows the link and copyable code, polls once to authenticated and stops', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    vi.mocked(providerClient.login).mockResolvedValue(codeFlow)
+    vi.mocked(providerClient.getLogin).mockResolvedValue(authedFlow)
+    const view = render(<ProviderSettings />)
+    await act(async () => {})
+    expect(screen.getByText('Codex is missing in this runtime.')).toBeTruthy()
+    expect(screen.getByText(/No device sign-in is running/)).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: 'Start device sign-in' }))
+    await act(async () => {})
+    expect(screen.getByRole('link', { name: 'https://example.com/device' })).toBeTruthy()
+    const codeElement = screen.getByText('WDJB-MJHT')
+    expect(codeElement.tagName).toBe('CODE')
+    expect(codeElement.className).toContain('select-text')
+    expect(screen.getByRole('button', { name: 'Copy one-time code' })).toBeTruthy()
+    expect(providerClient.getLogin).not.toHaveBeenCalled()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    try {
+      await user.click(screen.getByRole('button', { name: 'Copy one-time code' }))
+      expect(writeText).toHaveBeenCalledWith('WDJB-MJHT')
+    } finally {
+      delete (navigator as { clipboard?: unknown }).clipboard
+    }
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    expect(providerClient.getLogin).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/Device sign-in confirmed/)).toBeTruthy()
+    await act(async () => { await vi.advanceTimersByTimeAsync(12000) })
+    expect(providerClient.getLogin).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
+  it('surfaces the expired phase and offers a restart', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    vi.mocked(providerClient.login).mockResolvedValue(codeFlow)
+    vi.mocked(providerClient.getLogin).mockResolvedValue(expiredFlow)
+    const view = render(<ProviderSettings />)
+    await act(async () => {})
+    await user.click(screen.getByRole('button', { name: 'Start device sign-in' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    expect(screen.getByText(/expired before the sign-in completed/)).toBeTruthy()
+    expect(screen.queryByText('WDJB-MJHT')).toBeNull()
+    expect((screen.getByRole('button', { name: 'Start device sign-in' }) as HTMLButtonElement).disabled).toBe(false)
+    view.unmount()
+  })
+
+  it('cancels the active flow, reports cancellation and stops polling', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    vi.mocked(providerClient.login).mockResolvedValue(codeFlow)
+    vi.mocked(providerClient.cancelLogin).mockResolvedValue(cancelledFlow)
+    const view = render(<ProviderSettings />)
+    await act(async () => {})
+    await user.click(screen.getByRole('button', { name: 'Start device sign-in' }))
+    await act(async () => {})
+    expect(screen.getByText(/Open the verification link/)).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: 'Cancel device sign-in' }))
+    await act(async () => {})
+    expect(screen.getByText(/was cancelled/)).toBeTruthy()
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000) })
+    expect(providerClient.getLogin).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('surfaces a double start as an already-active sign-in and adopts the running flow', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    vi.mocked(providerClient.login).mockRejectedValue(new ClientError('http', 'A device sign-in is already active', { status: 409, code: 'provider_login_active' }))
+    vi.mocked(providerClient.getLogin).mockResolvedValue(codeFlow)
+    const view = render(<ProviderSettings />)
+    await act(async () => {})
+    await user.click(screen.getByRole('button', { name: 'Start device sign-in' }))
+    await act(async () => {})
+    expect(screen.getByRole('alert').textContent).toContain('already active')
+    expect(screen.getByText('WDJB-MJHT')).toBeTruthy()
+    view.unmount()
+  })
+
+  it('signs out only after confirmation, then refreshes provider status', async () => {
+    const user = userEvent.setup()
+    const signedIn = { ...status, configured: true, executableInstalled: true, connected: true, model: 'test-model', authenticationStatus: 'authenticated' as const }
+    vi.mocked(providerClient.getStatus).mockResolvedValue(signedIn)
+    vi.mocked(providerClient.logout).mockResolvedValue({ ...signedIn, connected: false, authenticationStatus: 'unauthenticated' as const })
+    const view = render(<ProviderSettings />)
+    await screen.findByText('Present (expiry not guaranteed)')
+    await user.click(screen.getByRole('button', { name: 'Sign out of Codex' }))
+    expect(providerClient.logout).not.toHaveBeenCalled()
+    expect(await screen.findByRole('alertdialog')).toBeTruthy()
+    expect(screen.getByText(/separate from Disconnect StatePort/)).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(providerClient.logout).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Sign out of Codex' }))
+    await screen.findByRole('alertdialog')
+    await user.click(screen.getByRole('button', { name: 'Confirm sign-out' }))
+    await waitFor(() => expect(providerClient.logout).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('Disconnected')).toBeTruthy()
+    view.unmount()
+  })
+
+  it('refuses device sign-in controls without an operator session', async () => {
+    vi.resetAllMocks()
+    useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'local_user', actorId: 'user', platformOperationsAllowed: false, statebenchInspectionAllowed: false } } })
+    vi.mocked(providerClient.getStatus).mockResolvedValue(status)
+    const view = render(<ProviderSettings />)
+    await screen.findByText('Codex is missing in this runtime.')
+    expect((screen.getByRole('button', { name: 'Start device sign-in' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Sign out of Codex' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Start device sign-in' }))
+    await act(async () => {})
+    expect(providerClient.login).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('hides integrated device sign-in for OpenCode with a fixed explanation', async () => {
+    vi.mocked(providerClient.getStatus).mockResolvedValue({ ...status, providerId: 'opencode', configured: true, model: 'opencode/test' })
+    const view = render(<ProviderSettings />)
+    await screen.findByText(/Integrated device sign-in supports the Codex provider/)
+    expect(screen.queryByRole('button', { name: 'Start device sign-in' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Sign out of Codex' })).toBeNull()
+    view.unmount()
+  })
+
+  it('stops device sign-in polling after unmount', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    vi.mocked(providerClient.login).mockResolvedValue(pendingFlow)
+    const view = render(<ProviderSettings />)
+    await act(async () => {})
+    await user.click(screen.getByRole('button', { name: 'Start device sign-in' }))
+    await act(async () => {})
+    expect(screen.getByText(/Waiting for Codex to confirm/)).toBeTruthy()
+    view.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000) })
+    expect(providerClient.getLogin).not.toHaveBeenCalled()
   })
 })
 

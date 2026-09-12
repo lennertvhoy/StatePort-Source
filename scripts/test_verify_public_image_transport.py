@@ -1102,7 +1102,6 @@ def test_index_mode_is_recorded_as_unbound(tmp_path: Path) -> None:
     [
         "ghcr.io",
         "http://ghcr.io/a/b",
-        "ghcr.io/a",
         "ghcr.io/UPPER/x",
         "ghcr.io/a/b:c",
         "ghcr.io/a/../b",
@@ -1114,6 +1113,12 @@ def test_index_mode_is_recorded_as_unbound(tmp_path: Path) -> None:
 def test_validate_repository_rejects_unsafe_values(value: str) -> None:
     with pytest.raises(probe.InputError):
         probe.validate_repository(value)
+
+
+def test_validate_repository_accepts_flat_owner_pattern() -> None:
+    # The public flat package pattern used since Alpha.15
+    # (ghcr.io/<owner>/<image>) has a single-segment path.
+    assert probe.validate_repository("ghcr.io/lennertvhoy") == "ghcr.io/lennertvhoy"
 
 
 def test_validate_repository_accepts_reviewed_shape() -> None:

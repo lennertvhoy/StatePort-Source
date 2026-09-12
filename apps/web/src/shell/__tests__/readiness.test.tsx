@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { getClient, resetClientForTests, resetMockState } from '@/client'
@@ -13,7 +13,7 @@ beforeEach(() => {
   vi.spyOn(providerClient, 'getStatus').mockResolvedValue({ configured: false, executableInstalled: true, connected: false, model: null, authenticationStatus: 'unverified', requestStatus: 'unverified', telemetryStatus: 'unavailable', detail: '' })
   useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: 'http://localhost' } })
 })
-afterEach(() => { cleanup(); vi.restoreAllMocks(); resetClientForTests() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); resetClientForTests() })
 
 it('does not infer execution or provider readiness from a connected service', async () => {
   vi.spyOn(getClient().applications, 'list').mockResolvedValue([])
@@ -38,6 +38,25 @@ it('does not present cached runtime or inventory as current when offline', async
   expect(screen.getByText('Offline')).toBeTruthy()
   expect(screen.getByText('Inventory unavailable')).toBeTruthy()
   expect(screen.queryByText('Reachable')).toBeNull()
+})
+
+it('re-reads provider status on the shell service-poll revision, not on its own interval', async () => {
+  vi.useFakeTimers()
+  const getStatus = vi.mocked(providerClient.getStatus)
+  render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(getStatus).toHaveBeenCalledTimes(1)
+
+  // A quiet 30 s adds no provider read: the summary owns no timer.
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  expect(getStatus).toHaveBeenCalledTimes(1)
+
+  // The shell service poll publishes a new revision; that drives the read.
+  act(() => {
+    useSessionStore.getState().setServiceStatus({ state: 'connected', endpoint: 'http://localhost' })
+  })
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(getStatus).toHaveBeenCalledTimes(2)
 })
 
 it('makes every existing platform surface discoverable without granting operations', () => {

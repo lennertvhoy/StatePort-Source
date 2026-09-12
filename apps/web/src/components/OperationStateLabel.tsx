@@ -3,7 +3,7 @@
  * honest operation states (§7.1): icon + label + optional elapsed timer.
  * Inline text, NOT a pill. Color is reinforcement only (icon + words carry it).
  */
-import { useEffect, useState } from 'react'
+import { useSyncExternalStore } from 'react'
 
 import type { OperationState } from '@/client'
 import { operationStatePresentation } from '@/semantic'
@@ -47,12 +47,33 @@ export function OperationStateLabel({ state, label, startedAt, className }: Oper
   )
 }
 
+// One 1 s clock for every live elapsed ticker (same pattern as TimeAgo's
+// minute clock): the interval starts with the first live ticker and clears
+// with the last, so N running rows cost one interval, not N.
+const elapsedListeners = new Set<() => void>()
+let elapsedTimer: number | null = null
+let elapsedNow = Date.now()
+const elapsedSnapshot = () => elapsedNow
+function subscribeElapsed(listener: () => void) {
+  elapsedListeners.add(listener)
+  if (elapsedTimer === null) {
+    elapsedNow = Date.now()
+    elapsedTimer = window.setInterval(() => {
+      elapsedNow = Date.now()
+      for (const notify of elapsedListeners) notify()
+    }, 1000)
+  }
+  return () => {
+    elapsedListeners.delete(listener)
+    if (elapsedListeners.size === 0 && elapsedTimer !== null) {
+      window.clearInterval(elapsedTimer)
+      elapsedTimer = null
+    }
+  }
+}
+
 function ElapsedTicker({ startedAt }: { startedAt: string }) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [])
+  const now = useSyncExternalStore(subscribeElapsed, elapsedSnapshot, elapsedSnapshot)
   const elapsed = now - new Date(startedAt).getTime()
   if (elapsed < 2000) return null
   return <span className="tnum font-mono text-xs text-foreground-tertiary">{formatElapsed(elapsed)}</span>

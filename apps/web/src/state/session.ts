@@ -23,6 +23,10 @@ export interface Toast {
 
 interface SessionState {
   serviceStatus: LocalServiceStatus | null
+  /** Monotonic revision bumped on every service-status publication, so
+   *  dependent observations (provider readiness) ride the shell's one 30 s
+   *  service poll instead of owning a second timer. */
+  serviceStatusRevision: number
   buildInfo: BuildInfo | null
   /** Dev mirror of the scenario store in the client boundary. */
   activeScenario: ScenarioId | null
@@ -54,6 +58,7 @@ let toastSeq = 0
 
 export const useSessionStore = create<SessionState>()((set) => ({
   serviceStatus: null,
+  serviceStatusRevision: 0,
   buildInfo: null,
   activeScenario: useScenarioStore.getState().active,
   scenarioLabOpen: useScenarioStore.getState().labOpen,
@@ -63,7 +68,8 @@ export const useSessionStore = create<SessionState>()((set) => ({
   operationsError: null,
   toasts: [],
 
-  setServiceStatus: (serviceStatus) => set({ serviceStatus }),
+  setServiceStatus: (serviceStatus) =>
+    set((s) => ({ serviceStatus, serviceStatusRevision: s.serviceStatusRevision + 1 })),
   setBuildInfo: (buildInfo) => set({ buildInfo }),
   setActiveScenario: (activeScenario) => {
     useScenarioStore.getState().setActive(activeScenario)

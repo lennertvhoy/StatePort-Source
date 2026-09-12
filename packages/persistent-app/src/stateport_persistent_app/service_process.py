@@ -1059,6 +1059,11 @@ class Handler(BaseHTTPRequestHandler):
                     status["detail"] = "Provider execution is disabled in the validation release profile. Inspect status in the accepted installed runtime before enabling provider work."
                 self._send(200, {"ok": True, "result": status})
                 return
+            if path == "/v1/provider/login":
+                # Session-authenticated observation only: reading the login
+                # state never starts, cancels or probes anything.
+                self._send(200, {"ok": True, "result": self.server.provider_setup.login_status()})
+                return
             if path == "/v1/settings":
                 self._send(200, {"ok": True, "result": self.server.settings_store().projection()})
                 return
@@ -1410,6 +1415,24 @@ class Handler(BaseHTTPRequestHandler):
                 platform_surface.require_platform_operator(self.server)
                 self._strict_body(body, ({"model", "providerId"} if "providerId" in body else {"model"}) if path.endswith("/configure") else set())
                 self._send(200, {"ok": True, "result": self.server.provider_action(path.rsplit("/", 1)[1], body)})
+                return
+            if path in {"/v1/provider/login", "/v1/provider/login/cancel", "/v1/provider/logout"}:
+                from .provider_setup import ProviderLoginError
+                platform_surface.require_platform_operator(self.server)
+                self._strict_body(body, set())
+                if path == "/v1/provider/login":
+                    try:
+                        result = self.server.provider_login_start()
+                    except ProviderLoginError as exc:
+                        # Fixed-code refusals only: the detail never carries
+                        # CLI output or exception text.
+                        self._error(409, exc.detail, exc.code)
+                        return
+                elif path == "/v1/provider/login/cancel":
+                    result = self.server.provider_login_cancel()
+                else:
+                    result = self.server.provider_logout()
+                self._send(200, {"ok": True, "result": result})
                 return
             if path == "/v1/repository-import/inspect":
                 self._mutation_security("repository inspection")
@@ -2611,6 +2634,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(403, "governed run authorization failed", "execution_access_denied")
             elif path.startswith("/v1/portable-import/"):
                 self._error(403, "portable import authorization failed", "portable_import_denied")
+            elif path.startswith("/v1/provider"):
+                self._error(403, "provider action access denied", "provider_action_denied")
             elif path.startswith("/v1/sources/"):
                 self._error(403, "development source verification is operator-only", "source_verification_denied")
             else:
@@ -2872,6 +2897,21 @@ class AppServer(ThreadingHTTPServer):
                     self._assistant_processor = candidate
                     self._stop_provider_processor()
                 raise RuntimeError("provider setup failed; StatePort provider work remains disabled") from None
+
+    def provider_login_start(self):
+        if not self._provider_execution_allowed:
+            raise PermissionError("provider execution is disabled in the validation release profile")
+        return self.provider_setup.start_device_login()
+
+    def provider_login_cancel(self):
+        if not self._provider_execution_allowed:
+            raise PermissionError("provider execution is disabled in the validation release profile")
+        return self.provider_setup.cancel_device_login()
+
+    def provider_logout(self):
+        if not self._provider_execution_allowed:
+            raise PermissionError("provider execution is disabled in the validation release profile")
+        return self.provider_setup.logout()
 
     @staticmethod
     def _vite_assets(web_root: Path) -> frozenset[str]:
@@ -5083,6 +5123,10 @@ class AppServer(ThreadingHTTPServer):
         try:
             if self._assistant_processor is not None:
                 self._assistant_processor.shutdown()
+            try:
+                self.provider_setup.shutdown_device_login()
+            except Exception:  # noqa: BLE001 - login cleanup never blocks service shutdown
+                pass
             with self._terminal_sockets_mutex:
                 self._terminal_closing = True
                 active_sockets = tuple(self._terminal_sockets)

@@ -127,7 +127,7 @@ ERROR_BODY_MAX_BYTES = 64 * 1024
 
 _IMAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
-_REPOSITORY_PATH = re.compile(r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)+$")
+_REPOSITORY_PATH = re.compile(r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SINGLE_BYTE_CONTENT_RANGE = re.compile(r"^bytes 0-0/([1-9][0-9]*)$")
 

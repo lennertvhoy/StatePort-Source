@@ -25,7 +25,7 @@ locks:
     installMode: npm-ci-ignore-scripts-omit-dev
   providerRuntimeInputs:
     path: config/provider-runtime-inputs.yaml
-    digest: sha256:5f3574143d50cde6c1a08eb3eb49d7d9c79f4b1d4c36a5002fa3b9b37b46c58e
+    digest: sha256:528f796a8800aa1ee27162d1a3f884ef4b5008d9de3f551eac0d0e3c0b99e815
     installMode: reviewed-provider-record-only
   playwrightNpm:
     path: images/stateport-playwright/package-lock.json

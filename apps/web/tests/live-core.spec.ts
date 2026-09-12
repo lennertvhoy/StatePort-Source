@@ -1167,14 +1167,26 @@ test('Timestamp preferences persist and preserve application dates at narrow wid
     if (mode === 'both') await expect(installed).toContainText(' · ')
     else await expect(installed).not.toContainText(' · ')
     await page.setViewportSize({ width: 390, height: 844 })
-    await expect(installed).toBeVisible()
-    const geometry = await installed.evaluate(element => {
-      const box = element.getBoundingClientRect()
-      return { left: box.left, right: box.right, viewport: innerWidth, whiteSpace: getComputedStyle(element).whiteSpace, text: element.textContent }
-    })
-    expect(geometry.left).toBeGreaterThanOrEqual(0)
-    expect(geometry.right).toBeLessThanOrEqual(geometry.viewport)
-    expect(geometry.whiteSpace).toBe('normal')
+    // The 390px re-render can replace the <time> node between locator resolution
+    // and sampling, so computed whiteSpace may briefly read "" from a detached
+    // node. Re-resolve after the resize and retry the sample until it comes from
+    // an attached element (non-empty computed whiteSpace); the assertions below
+    // keep their exact semantics.
+    const installedNarrow = page.locator('#setting-app-created time')
+    await expect(installedNarrow).toBeVisible()
+    let geometry: { left: number; right: number; viewport: number; whiteSpace: string; text: string | null } | undefined
+    await expect
+      .poll(async () => {
+        geometry = await installedNarrow.evaluate(element => {
+          const box = element.getBoundingClientRect()
+          return { left: box.left, right: box.right, viewport: innerWidth, whiteSpace: getComputedStyle(element).whiteSpace, text: element.textContent }
+        })
+        return geometry.whiteSpace
+      })
+      .not.toBe('')
+    expect(geometry!.left).toBeGreaterThanOrEqual(0)
+    expect(geometry!.right).toBeLessThanOrEqual(geometry!.viewport)
+    expect(geometry!.whiteSpace).toBe('normal')
     observations.push({ mode, canonical, ...geometry })
     await page.screenshot({ path: path.join(ARTIFACT_ROOT, `timestamp-${mode}-narrow.png`) })
     await page.setViewportSize({ width: 1440, height: 900 })
@@ -1187,18 +1199,39 @@ test('Bare startup honors saved reopening and landing choice while preserving de
   const signals = browserSignals(page)
   await openApplicationRoute(page, '/settings/general')
   const toggle = page.locator('#setting-reopen-app').getByRole('switch')
+  const viewToggle = page.locator('#setting-reopen-view').getByRole('switch')
   await expect(toggle).toBeVisible()
   const save = async () => {
     await page.getByTestId('settings-save').click()
     await expect(page.getByTestId('settings-save-bar')).toHaveCount(0)
   }
   // Enable explicitly even if earlier tests used another service preference.
+  let changed = false
   if (await toggle.getAttribute('aria-checked') !== 'true') {
     await toggle.click()
-    await save()
+    changed = true
   }
+  // Reopen-view is a separate preference (resume-matrix covers it); this scenario isolates reopen-app's overview landing.
+  if (await viewToggle.getAttribute('aria-checked') !== 'false') {
+    await viewToggle.click()
+    changed = true
+  }
+  if (changed) await save()
+  // Settle the Files src preload (the read a deliberate navigation can cancel).
+  const srcPreload1 = page
+    .waitForResponse(
+      (response) =>
+        response.request().method() === 'GET' &&
+        response.url().includes('/file-workspace/listDirectory?path=src'),
+      { timeout: 20_000 },
+    )
+    .catch(() => null) // No preload issued ⇒ nothing can be cancelled; proceed.
   await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/files`)
   await expect(page.getByTestId('files-stub')).toBeVisible()
+  await srcPreload1
+  // Settle mounted Files reads (tree + conversation sidecar) before deliberate navigation.
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
+  await expect(page.getByTestId('conversation-loading')).toHaveCount(0)
   // Replace only the address, then perform one actual bare-root reload.
   await page.evaluate(url => window.history.replaceState(null, '', url), service.url)
   await reloadWithReadObservation(page, signals)
@@ -1210,15 +1243,43 @@ test('Bare startup honors saved reopening and landing choice while preserving de
 
   await page.goto(`${service.url}/#/settings/general`)
   await toggle.click()
+  // Deep-link restore for last_workspace requires view restore on under current semantics.
+  if (await viewToggle.getAttribute('aria-checked') !== 'true') await viewToggle.click()
   await page.locator('#setting-landing-page select').selectOption('last_workspace')
   await save()
+  // Settle the Files src preload (the read a deliberate navigation can cancel).
+  const srcPreload2 = page
+    .waitForResponse(
+      (response) =>
+        response.request().method() === 'GET' &&
+        response.url().includes('/file-workspace/listDirectory?path=src'),
+      { timeout: 20_000 },
+    )
+    .catch(() => null) // No preload issued ⇒ nothing can be cancelled; proceed.
   await page.goto(`${service.url}/#/app/${PROJECT_ID}/workbench/files`)
   await expect(page.getByTestId('files-stub')).toBeVisible()
+  await srcPreload2
+  // Settle mounted Files reads (tree + conversation sidecar) before deliberate navigation.
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
+  await expect(page.getByTestId('conversation-loading')).toHaveCount(0)
   // Replace only the address, then perform one actual bare-root reload.
   await page.evaluate(url => window.history.replaceState(null, '', url), service.url)
+  // Settle the Files src preload (the read a deliberate navigation can cancel).
+  const srcPreload3 = page
+    .waitForResponse(
+      (response) =>
+        response.request().method() === 'GET' &&
+        response.url().includes('/file-workspace/listDirectory?path=src'),
+      { timeout: 20_000 },
+    )
+    .catch(() => null) // No preload issued ⇒ nothing can be cancelled; proceed.
   await reloadWithReadObservation(page, signals)
   await expect(page).toHaveURL(new RegExp(`/app/${PROJECT_ID}/workbench/files$`))
   await expect(page.getByTestId('files-stub')).toBeVisible()
+  await srcPreload3
+  // Settle mounted Files reads (tree + conversation sidecar) before deliberate navigation.
+  await expect(page.getByTestId('tree-row-src')).toBeVisible()
+  await expect(page.getByTestId('conversation-loading')).toHaveCount(0)
 
   await page.goto(`${service.url}/#/settings/general`)
   await page.locator('#setting-landing-page select').selectOption('applications')

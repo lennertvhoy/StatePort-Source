@@ -6,9 +6,10 @@
  */
 import { useEffect, useState } from 'react'
 
-import type { InfrastructurePlan, InfrastructureTarget } from '@/client'
+import type { InfrastructurePlan } from '@/client'
 import { getClient } from '@/client'
 import { OperationStateLabel, StatusDotFrom, TimeAgo } from '@/components'
+import { useSharedInfrastructureTarget } from '@/shell/data'
 import type { WorkbenchSlotProps } from '@/shell/workbench/WorkbenchSlots'
 
 import { useDeploymentsSelection } from './deploymentsSelection'
@@ -17,9 +18,11 @@ import { dominantTargetPresentation } from './infrastructureModel'
 const POLL_MS = 10_000
 
 export function DeploymentsNavPanel({ instanceId }: WorkbenchSlotProps) {
-  const [target, setTarget] = useState<InfrastructureTarget | null>(null)
+  // The target is shared with the workbench status bar (one 10 s read for both
+  // mounted surfaces). Plans keep this panel's own poll — they are its data.
+  const { target, error: targetError } = useSharedInfrastructureTarget(instanceId, true)
   const [plans, setPlans] = useState<InfrastructurePlan[]>([])
-  const [error, setError] = useState<unknown>(null)
+  const [plansError, setPlansError] = useState<unknown>(null)
   const requestSelect = useDeploymentsSelection((s) => s.requestSelect)
 
   useEffect(() => {
@@ -27,18 +30,14 @@ export function DeploymentsNavPanel({ instanceId }: WorkbenchSlotProps) {
     let cancelled = false
     const tick = async () => {
       try {
-        const [nextTarget, nextPlans] = await Promise.all([
-          getClient().infrastructure.getTarget(instanceId),
-          getClient().infrastructure.listPlans(instanceId),
-        ])
+        const nextPlans = await getClient().infrastructure.listPlans(instanceId)
         if (cancelled) return
-        setTarget(nextTarget)
         setPlans(nextPlans)
-        setError(null)
+        setPlansError(null)
       } catch (err) {
-        // Honest failure: keep the last known target/plans and surface the
-        // failure — never pretend no target or plans exist.
-        if (!cancelled) setError(err)
+        // Honest failure: keep the last known plans and surface the failure —
+        // never pretend no plans exist.
+        if (!cancelled) setPlansError(err)
       }
     }
     void tick()
@@ -48,6 +47,10 @@ export function DeploymentsNavPanel({ instanceId }: WorkbenchSlotProps) {
       window.clearInterval(timer)
     }
   }, [instanceId])
+
+  // Either observation failing flags the panel stale; the last known target
+  // and plans stay on screen.
+  const error = plansError ?? targetError
 
   return (
     <div className="flex flex-col py-1" data-testid="deployments-nav-panel">

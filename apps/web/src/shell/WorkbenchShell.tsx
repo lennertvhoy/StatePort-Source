@@ -51,7 +51,7 @@ import { cn } from '@/lib/utils'
 import type { LayoutPreset } from '@/state'
 import { DEFAULT_LAYOUT, normalizeWorkbenchToolOrder, useWorkspaceStore } from '@/state'
 
-import { useStartupFocus } from './data'
+import { useSharedInfrastructureTarget, useStartupFocus } from './data'
 import { useCurrentInstance } from './currentInstance'
 import type { ShellCommand } from './commands'
 import { useRegisterCommands } from './commands'
@@ -326,9 +326,13 @@ export function WorkbenchShell() {
 
   // ── Status bar context (terminal state, target name) ───────────────────────
   const [terminalState, setTerminalState] = useState<TerminalSessionState | null>(null)
-  const [targetName, setTargetName] = useState<string | null>(null)
   const terminalAvailable = hasCapability('terminal')
   const deploymentsAvailable = hasCapability('infrastructure')
+  // Shared with the deployments nav panel: one 10 s target read for both
+  // surfaces. A failed poll hides the status-bar name (as before) instead of
+  // presenting the last known target as current.
+  const deploymentTarget = useSharedInfrastructureTarget(instanceId, deploymentsAvailable)
+  const targetName = deploymentTarget.error ? null : deploymentTarget.target?.name ?? null
 
   useEffect(() => {
     if (!instanceId || !terminalAvailable) return
@@ -350,25 +354,6 @@ export function WorkbenchShell() {
       window.clearInterval(timer)
     }
   }, [instanceId, terminalAvailable])
-
-  useEffect(() => {
-    if (!instanceId || !deploymentsAvailable) return
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const target = await getClient().infrastructure.getTarget(instanceId)
-        if (!cancelled) setTargetName(target.name)
-      } catch {
-        if (!cancelled) setTargetName(null)
-      }
-    }
-    void tick()
-    const timer = window.setInterval(tick, 10_000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [instanceId, deploymentsAvailable])
 
   const statusValue = useMemo<WorkbenchStatus | null>(() => {
     if (!instance) return null

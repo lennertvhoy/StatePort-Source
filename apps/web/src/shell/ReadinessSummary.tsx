@@ -7,6 +7,10 @@ import { useApplications } from './data'
 /** Observations are separate: reachability never establishes permission or successful work. */
 export function ReadinessSummary() {
   const status = useSessionStore((s) => s.serviceStatus)
+  // The provider observation rides the shell's single 30 s service poll:
+  // every service-status publication bumps the revision and re-reads the
+  // provider while the service is online. No second interval here.
+  const serviceStatusRevision = useSessionStore((s) => s.serviceStatusRevision)
   const { instances, loading, error } = useApplications()
   const online = status?.state === 'connected' || status?.state === 'degraded'
   const runtime = online ? status?.runtime : undefined
@@ -14,13 +18,11 @@ export function ReadinessSummary() {
   useEffect(() => {
     let alive = true
     if (!online) return
-    const check = () => providerClient.getStatus()
+    providerClient.getStatus()
       .then((value) => { if (alive) setProvider({ value, failed: false }) })
       .catch(() => { if (alive) setProvider({ failed: true }) })
-    void check()
-    const timer = window.setInterval(() => void check(), 30_000)
-    return () => { alive = false; window.clearInterval(timer) }
-  }, [online])
+    return () => { alive = false }
+  }, [online, serviceStatusRevision])
   const observation = online ? provider?.value : undefined
   const providerValue = !online ? 'Not checked while service is offline'
     : provider?.failed ? 'Status unavailable'

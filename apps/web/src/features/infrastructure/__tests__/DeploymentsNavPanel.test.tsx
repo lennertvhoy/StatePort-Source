@@ -55,6 +55,28 @@ describe('DeploymentsNavPanel', () => {
     expect(screen.queryByText('No plans yet.')).toBeNull()
   })
 
+  it('shares one target subscription with the other mounted consumer', async () => {
+    const getTarget = vi.spyOn(getClient().infrastructure, 'getTarget')
+    const first = renderPanel()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(getTarget).toHaveBeenCalledTimes(1)
+    expect(screen.getAllByTestId('nav-target-row')).toHaveLength(1)
+
+    // A second consumer mounting later (the workbench status bar shares this
+    // hook) must reuse the observation instead of firing another read.
+    const second = render(<DeploymentsNavPanel instanceId={NIXOS} tool="deployments" />)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(getTarget).toHaveBeenCalledTimes(1)
+    expect(screen.getAllByTestId('nav-target-row')).toHaveLength(2)
+
+    first.unmount()
+    second.unmount()
+  })
+
   it('shows an honest unavailable state when the first load fails', async () => {
     vi.spyOn(getClient().infrastructure, 'getTarget').mockRejectedValue(
       new ClientError('http', 'Forbidden', { status: 403 }),
