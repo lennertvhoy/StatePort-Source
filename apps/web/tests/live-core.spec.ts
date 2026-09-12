@@ -602,6 +602,41 @@ async function openApplicationRoute(
   await expect(page.locator('body')).not.toContainText(disposableRoot)
 }
 
+interface PreparedBrowserRun {
+  runId: string
+  instanceId: string
+  actionId: string
+  revision: number
+  runSpecDigest: string
+}
+
+async function prepareBrowserRun(
+  page: Page,
+  instanceId: string,
+  actionId: string,
+  inputs: Record<string, unknown> = {},
+): Promise<PreparedBrowserRun> {
+  await openApplicationRoute(page, `/app/${instanceId}/runs`)
+  await expect(page.getByTestId(`runs-action-${actionId}`)).toBeVisible()
+  await page.getByTestId(`runs-action-${actionId}`).click()
+  if (typeof inputs.summary === 'string') {
+    await page.getByLabel('What did you learn?').fill(inputs.summary)
+  }
+  const preparing = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname ===
+        `/v1/instances/${instanceId}/execution/prepare`,
+  )
+  await page.getByTestId('run-prepare').click()
+  const preparedResponse = await preparing
+  expect(preparedResponse.status()).toBe(200)
+  const run = (await preparedResponse.json()).result.run as PreparedBrowserRun
+  expect(run).toMatchObject({ instanceId, actionId })
+  await expect(page.getByTestId('run-exact-status')).toHaveText('Awaiting Approval')
+  return run
+}
+
 test.describe.configure({ mode: 'serial' })
 
 test.beforeAll(async () => {
@@ -5336,6 +5371,127 @@ test('Operation center cancels an awaiting approval run durably without executin
     bundleDigest: cancelled.runBundle.contentDigest, staleRevisionStatus: stale.status(),
     sourceBytes: 'unchanged', restart: 'same RunStore and bundle bytes, new service PID',
     closureReceipt: 'not applicable: no application change executed',
+  } }
+})
+
+test('Status bar scopes active operations to the current instance and clears after durable cancellation and restart', async ({ page }) => {
+  const signals = browserSignals(page)
+  // Actual ProjectState supports both a workbench and trusted adapter actions.
+  // Import through the real HTTP/session/CSRF boundary from an immutable local
+  // clone in the fixture's already-approved repository discovery root.
+  const instanceId = 'statusbar-actual-projectstate'
+  const sourceCommit = '7e4cb7c3397324d09f768eeb1d722316714c46e1'
+  const source = path.join(path.dirname(importCandidateRoot), 'ProjectState_Template')
+  execFileSync('git', ['clone', '--no-hardlinks', '--no-checkout', path.resolve(ROOT, '../ProjectState_Template'), source], { timeout: 30_000 })
+  execFileSync('git', ['-C', source, 'checkout', '--detach', sourceCommit], { timeout: 20_000 })
+  const sourceState = () => ({
+    head: execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+    tree: execFileSync('git', ['-C', source, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(),
+    status: execFileSync('git', ['-C', source, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' }),
+  })
+  const sourceBefore = sourceState()
+  expect(sourceBefore).toMatchObject({ head: sourceCommit, status: '' })
+  const sessionResponse = await page.request.get(`${service.url}/session`)
+  expect(sessionResponse.status()).toBe(200)
+  const csrf = (await sessionResponse.json()).result.csrfToken as string
+  const post = async (route: string, data: unknown) => {
+    const response = await page.request.post(`${service.url}${route}`, {
+      headers: { Origin: service.url, 'X-StatePort-CSRF': csrf }, data,
+    })
+    expect(response.status(), await response.text()).toBe(200)
+    return (await response.json()).result
+  }
+  const candidatesResponse = await page.request.get(`${service.url}/v1/repository-import/local-candidates`)
+  expect(candidatesResponse.status()).toBe(200)
+  const candidates = (await candidatesResponse.json()).result.candidates as {
+    candidateId: string; inspection?: { sourceIdentity?: { headCommit?: string }; template?: { adapterId?: string } }
+  }[]
+  const candidate = candidates.find(row => row.inspection?.template?.adapterId === 'projectstate-v6'
+    && row.inspection?.sourceIdentity?.headCommit === sourceCommit)
+  expect(candidate).toBeDefined()
+  const inspection = await post('/v1/repository-import/inspect', { candidateId: candidate!.candidateId })
+  const plan = await post('/v1/template-import/plan', {
+    candidateId: candidate!.candidateId, inspectionDigest: inspection.inspectionDigest,
+    instanceId, name: 'Actual ProjectState status proof',
+  })
+  const statusResponse = await page.request.get(`${service.url}/v1/status`)
+  expect(statusResponse.status()).toBe(200)
+  const actorId = (await statusResponse.json()).result.actor.actorId as string
+  const installed = await post('/v1/template-import/install', {
+    plan, approval: { decision: 'approve', actorId, planDigest: plan.planDigest },
+  })
+  expect(installed).toMatchObject({ managedCopyCreated: true, sourceRepositoryMutated: false })
+  const experienceResponse = await page.request.get(`${service.url}/v1/instances/${instanceId}/experience`)
+  expect(experienceResponse.status()).toBe(200)
+  expect((await experienceResponse.json()).result.capabilities).toContainEqual({ id: 'workbench', status: 'available', reasons: [] })
+  const current = await prepareBrowserRun(page, instanceId, 'stateport.template.projectstate.inspect/v1')
+  const statusOperation = page.getByTestId('status-operation')
+  const row = page.locator(`[data-testid="operation-row"][data-operation-id="op_${current.runId}"]`)
+
+  await openApplicationRoute(page, `/app/${instanceId}/workbench/files`)
+  await expect(statusOperation).toContainText(`Run ${current.actionId}`)
+  await openApplicationRoute(page, `/app/${PROJECT_ID}/workbench/files`)
+  // Opening the shared center proves the live record is loaded, not absent
+  // because the operation poll has not finished.
+  await statusOperation.click()
+  await expect(row.locator('[data-state="awaiting_approval"]')).toBeVisible()
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(statusOperation).toContainText('No active operation')
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'statusbar-scoped-foreign-before-cleanup.png'), fullPage: true })
+
+  await openApplicationRoute(page, `/app/${instanceId}/workbench/files`)
+  await expect(statusOperation).toContainText(`Run ${current.actionId}`)
+  await statusOperation.click()
+  await expect(row.locator('[data-state="awaiting_approval"]')).toBeVisible()
+  const cancelling = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === `/v1/runs/${current.runId}/cancel`)
+  await row.getByRole('button', { name: 'Cancel', exact: true }).click()
+  const response = await cancelling
+  expect(response.status()).toBe(200)
+  expect(response.request().postDataJSON()).toEqual({
+    expectedInstanceId: instanceId, expectedRevision: current.revision,
+  })
+  await expect(row).toContainText('Cancelled')
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(statusOperation).toContainText('No active operation')
+
+  const operationsRoot = path.join(disposableRoot, 'xdg', 'state', 'stateport', 'operations')
+  const storedRun = () => (JSON.parse(readFileSync(path.join(operationsRoot, 'portable-runs.json'), 'utf8')).runs as {
+    runId: string; instanceId: string; status: string; revision: number; runSpecDigest: string;
+    events: { type: string; from: string; to: string }[]; process?: unknown; result?: unknown; proposal?: unknown;
+  }[]).find(record => record.runId === current.runId)!
+  const cancelled = storedRun()
+  expect(cancelled).toMatchObject({ instanceId, status: 'cancelled', runSpecDigest: current.runSpecDigest })
+  expect(cancelled.revision).toBeGreaterThan(current.revision)
+  expect(cancelled.events).toContainEqual(expect.objectContaining({ type: 'state_transition', from: 'awaiting_approval', to: 'cancelled' }))
+  expect(cancelled.process).toBeFalsy()
+  expect(cancelled.result).toBeFalsy()
+  expect(cancelled.proposal).toBeFalsy()
+  expect(signals.requests.some(request => /\/runs\/[^/]+\/(execute|apply)$/.test(request.path))).toBe(false)
+
+  await page.goto('about:blank')
+  const oldPid = service.child.pid
+  await stopChild(service.child)
+  service = await startService(true)
+  expect(service.child.pid).not.toBe(oldPid)
+  expect(storedRun()).toEqual(cancelled)
+  await openApplicationRoute(page, `/app/${instanceId}/workbench/files`)
+  await statusOperation.click()
+  await expect(row).toContainText('Cancelled')
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(statusOperation).toContainText('No active operation')
+  await page.screenshot({ path: path.join(ARTIFACT_ROOT, 'statusbar-cancelled-after-restart.png'), fullPage: true })
+  expect(sourceState()).toEqual(sourceBefore)
+  expectClean(signals)
+  matrix.surfaces = { ...(matrix.surfaces as Record<string, unknown>), statusBarOperationScope: {
+    status: 'live-tested', classification: 'real AppServer browser; actual pinned ProjectState import; provider-free prepared run',
+    sourceCommit, sourceUnchanged: true,
+    owningInstance: instanceId, nonOwningInstance: PROJECT_ID, runId: current.runId,
+    liveOperationLoadedInSharedCenter: true, foreignAwaitingApprovalWasHidden: true,
+    currentAwaitingApprovalWasShown: true, instanceNavigation: 'owning, non-owning, owning',
+    operationCenterOpenedFromStatusBar: true,
+    cancellation: 'same durable cancelled RunStore record after service restart',
+    statusAfterRestart: 'No active operation', providerExecution: false,
   } }
 })
 

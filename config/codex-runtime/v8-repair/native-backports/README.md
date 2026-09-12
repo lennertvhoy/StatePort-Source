@@ -66,6 +66,40 @@ selected, then account for all remaining native advisories and scan final bytes.
 Neither an unproved current caller exclusion nor a version label substitutes for
 that proof.
 
+## Optional maintained SQLite 3.53.4 source — 2026-09-10
+
+The ordinary command above retains the existing exact SQLite backport. A separate,
+explicit `--maintained-sqlite-archive` input prepares an alternative source-only
+candidate from the official `sqlite-amalgamation-3530400.zip`; it is deliberately
+not wired into `consumer_context.py` or any default build path.
+
+```sh
+python3 "$repo/config/codex-runtime/v8-repair/native-backports/prepare_backports.py" \
+  --source "$run/codex-source-r3" \
+  --inputs "$verified_public_crate_directory" \
+  --maintained-sqlite-archive "$verified/sqlite-amalgamation-3530400.zip" \
+  --output "$run/codex-source-r3-maintained-sqlite"
+```
+
+`maintained-sqlite.json` pins the official archive, `sqlite3.c`, `sqlite3.h`, and
+`sqlite3ext.h`, including SHA-256 and SHA3-256 identities, SQLite 3.53.4's source
+ID, its distinct `SQLITE_VERSION_NUMBER` API value `3053004`, and their exact archive root. Before copying the consumer tree, the helper
+rejects a missing, wrong-size, wrong-hash, unsafe, encrypted, duplicate, malformed,
+or unexpected archive member. It reads the three authenticated members directly
+from the ZIP and replaces only `libsqlite3-sys-0.37.0/sqlite3/sqlite3.c`,
+`sqlite3.h`, and `sqlite3ext.h` in the new local crate override. It does not mutate
+the retained input source or crate archive.
+
+In this opt-in mode only, `libsqlite3-sys.patch` and its historical custom SQLite
+regression input are not required or applied. The crate's `build.rs`, Cargo flags,
+generated bindings, and every non-SQLite override remain unchanged. In particular,
+libsqlite3-sys 0.37.0's generated binding constants still identify its bundled
+SQLite 3.51.3 / API number `3051003`, while the replacement source identifies
+3.53.4 / `3053004`; the preparation receipt records that mismatch rather than presenting
+the constants as updated. The receipt explicitly records maintained SQLite 3.53.4,
+the archive/member/source identities, and marks compilation, standard upstream
+suites, and release qualification `not_run`.
+
 ## Deterministic macro output
 
 The third local override pins ts-rs-macros 11.1.0 and sorts only the generated
@@ -81,3 +115,30 @@ application pass. The R6 complete derive probe also compiled and ran real struct
 declarations and inferred generic bounds in32.67s. Upstream macro-suite coverage
 and independent final CLI byte comparison remain unrun.
 Old compiler contexts and both differing CLI artifacts are preserved.
+
+## Maintained XZ selection — 2026-09-10
+
+The consumer recipe now installs matching Alpine5.8.4 XZ runtime, static and
+development packages. The development package supplies liblzma.pc; without it,
+the existing no-static-feature Rust graph fell back to the bundled5.2.5 source.
+PKG_CONFIG_ALL_STATIC remains enabled. The recipe rejects environment overrides
+that force bundled compilation or disable/change pkg-config linkage.
+
+A bounded musl binding probe installed the signature-checked5.8.4 APK set,
+selected /usr/lib, reported5.8.4, passed an ordinary valid-data roundtrip and
+produced an ELF without INTERP/NEEDED. The original runner failed afterward on
+an over-specific Cargo-output assertion; separate retained-byte verification
+passed. This is neither a full consumer build nor memory/security qualification.
+Evidence is maintained-release-20260910 in the slice summary.
+
+XZ5.8.3 is not the replacement target: upstream5.8.4 fixes the newer
+GHSA-5qpq-xqfv-j9pg advisory. Existing override files and historical artifacts
+remain preserved; the new complete provider must prove actual final archive
+selection before claiming the bundled backport is no longer consumed. SQLite
+replacement, standard upstream suites and all exact-candidate gates remain open.
+
+The same option is exposed by `consumer_context.py --maintained-sqlite-archive`.
+That entrypoint copies the maintained-source identity into its context receipt,
+and its inventory binds the actual replaced files. Historical default mode and
+all previous artifacts remain available; new maintained-source candidates must
+explicitly select the verified archive and retain a new context receipt.

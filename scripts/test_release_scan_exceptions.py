@@ -219,6 +219,20 @@ def test_artifact_path_exception_refuses_a_different_binary(tmp_path: Path) -> N
     assert result["unexplainedFindings"] == []
 
 
+def test_direct_cpe_null_locations_keeps_path_bound_finding_unexplained(tmp_path: Path) -> None:
+    match = _match()
+    match["artifact"]["locations"] = None
+    result = evaluate_scan(
+        scan_path=_write_scan(tmp_path, [match]),
+        image_id="stateport-api",
+        exceptions_config=_exceptions_config([_record(artifactPath="/usr/bin/python")]),
+        today=TODAY,
+    )
+    assert result["findingsBySeverity"] == {"High": 1}
+    assert len(result["unexplainedFindings"]) == 1
+    assert result["appliedExceptions"] == []
+
+
 def test_exact_unexpired_exception_explains_a_finding(tmp_path: Path) -> None:
     scan = _write_scan(tmp_path, [_match()])
     result = evaluate_scan(

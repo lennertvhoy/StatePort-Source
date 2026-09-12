@@ -888,7 +888,7 @@ def evaluate_scan(
         version = str(artifact.get("version", ""))
         artifact_paths = {
             str(location.get("path"))
-            for location in artifact.get("locations", [])
+            for location in (artifact.get("locations") or [])
             if isinstance(location, Mapping) and location.get("path")
         }
         fix = vulnerability.get("fix", {})

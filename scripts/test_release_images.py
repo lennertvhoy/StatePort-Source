@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from importlib.util import module_from_spec, spec_from_file_location
 import hashlib
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
@@ -216,6 +218,265 @@ def test_build_plan_is_double_build_digest_only_and_podman_493_compatible() -> N
             assert not any(
                 path.suffix in {".pod", ".build", ".artifact"} for path in root.rglob("*")
             )
+
+
+def test_provider_build_args_use_recipe_names_and_both_consumers_have_contract() -> None:
+    provider = {
+        "mode": "custom-oci",
+        "image": "registry.example/codex@sha256:" + "a" * 64,
+        "manifestDigest": "sha256:" + "a" * 64,
+        "platformManifestDigest": "sha256:" + "b" * 64,
+        "version": "codex-cli 0.146.0+stateport.3",
+        "bubblewrapVersion": "bubblewrap 0.12.0",
+        "ripgrepVersion": "ripgrep 14.1.0",
+        "sourceCommit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+        "sourceArchiveDigest": "sha256:" + "c" * 64,
+        "buildContextDigest": "sha256:" + "d" * 64,
+        "codexDigest": "sha256:" + "e" * 64,
+        "bubblewrapDigest": "sha256:" + "f" * 64,
+        "ripgrepDigest": "sha256:" + "0" * 64,
+    }
+    args = build_release_images.provider_build_args(provider)
+    assert "STATEPORT_PROVIDER_MANIFEST_DIGEST=" + provider["manifestDigest"] in args
+    assert "STATEPORT_PROVIDER_PLATFORM_MANIFEST_DIGEST=" + provider["platformManifestDigest"] in args
+    assert "STATEPORT_PROVIDER_BUBBLEWRAP_VERSION=" + provider["bubblewrapVersion"] in args
+    assert all("MANIFESTDIGEST" not in item for item in args)
+    pulls = build_release_images.base_pull_commands(provider)
+    assert pulls[-1][-1] == provider["image"]
+    commands = build_release_images.build_commands(
+        build_release_images.validate_definitions(),
+        build_release_images.SourceIdentity(
+            "b" * 40, "c" * 40, "0.2.0-alpha.1", "2026-08-01T00:00:00Z", 1785542400
+        ),
+        registry="127.0.0.1:5000",
+        context_root=Path("/tmp/stateport-provider-context"),
+        digest_root=Path("/tmp/stateport-provider-digests"),
+        provider_input=provider,
+    )
+    build_commands = [item for item in commands if item[1] == "build"]
+    assert build_commands
+    assert all(
+        "STATEPORT_PROVIDER_IMAGE=" + provider["image"] in item for item in build_commands
+    )
+    for rel in ("apps/web/Dockerfile", "images/stateport-dev-workspace/Containerfile"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert "FROM ${STATEPORT_PROVIDER_IMAGE} AS stateport-provider" in text
+        assert "provider-metadata.json" in text
+        assert "/provider-input/bwrap" in text
+        assert "/usr/share/licenses/stateport-provider" in text
+
+
+def test_unadmitted_custom_provider_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The repository yaml is ADMITTED to the reviewed producer build
+    # (stage1-lane4-20260912/producer-build-r1/producer-build-receipt.json,
+    # verifier-reviewed procedure r2; double-build reproducible digest
+    # 95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17).
+    # Fail-closed now means: the committed record must match that exact
+    # reviewed identity, and any drift from it refuses admission.
+    monkeypatch.setenv("STATEPORT_PROVIDER_MODE", "custom-oci")
+    record = build_release_images.load_provider_oci_input()
+    expected_digest = "sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17"
+    assert record["image"] == (
+        "127.0.0.1:5001/stateport-alpha/stateport-provider@" + expected_digest
+    )
+    assert record["manifestDigest"] == expected_digest
+    assert record["platformManifestDigest"] == expected_digest
+    drifted = yaml.safe_load(
+        (ROOT / "config/provider-runtime-inputs.yaml").read_text(encoding="utf-8")
+    )
+    drifted["codex"]["oci"]["manifestDigest"] = "sha256:" + "c" * 64
+    drifted["codex"]["oci"]["image"] = (
+        "127.0.0.1:5001/stateport-alpha/stateport-provider@sha256:" + "c" * 64
+    )
+    drifted_path = tmp_path / "drifted-provider-runtime-inputs.yaml"
+    drifted_path.write_text(yaml.safe_dump(drifted), encoding="utf-8")
+    # A drifted but internally-consistent record still passes the admission
+    # gate: the gate checks format and consistency only. Identity binding to
+    # the reviewed producer build is enforced by the coupled
+    # providerRuntimeInputs lock digest in container-build-inputs.yaml —
+    # the committed pair must verify, and any edit to the yaml without the
+    # lock refresh fails every build.
+    monkeypatch.setattr(build_release_images, "PROVIDER_INPUTS", drifted_path)
+    drifted_record = build_release_images.load_provider_oci_input()
+    assert drifted_record["manifestDigest"] == "sha256:" + "c" * 64
+    monkeypatch.undo()
+    build_release_images.verify_locked_build_inputs()
+
+
+def _custom_provider_record(*, image_digest: str = "a" * 64) -> dict:
+    record = yaml.safe_load(
+        (ROOT / "config/provider-runtime-inputs.yaml").read_text(encoding="utf-8")
+    )
+    record["codex"]["oci"] = {
+        "enabled": True,
+        "image": f"registry.example/codex@sha256:{image_digest}",
+        "manifestDigest": "sha256:" + "a" * 64,
+        "platformManifestDigest": "sha256:" + "b" * 64,
+        "version": "codex-cli 0.146.0+stateport.3",
+        "bubblewrapVersion": "bubblewrap 0.12.0",
+        "ripgrepVersion": "ripgrep 14.1.0",
+        "sourceCommit": record["codex"]["source"]["commit"],
+        "sourceArchiveDigest": "sha256:" + "c" * 64,
+        "buildContextDigest": "sha256:" + "d" * 64,
+        "artifacts": {
+            "codexDigest": "sha256:" + "e" * 64,
+            "bubblewrapDigest": "sha256:" + "f" * 64,
+            "ripgrepDigest": "sha256:" + "0" * 64,
+        },
+        "licenses": ["LICENSE", "NOTICE", "BUBBLEWRAP-LICENSE", "BUBBLEWRAP-NOTICE"],
+    }
+    return record
+
+
+def test_admitted_provider_record_is_loaded_without_metadata_self_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = tmp_path / "provider-runtime-inputs.yaml"
+    fixture.write_text(yaml.safe_dump(_custom_provider_record(), sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(build_release_images, "PROVIDER_INPUTS", fixture)
+    monkeypatch.setenv("STATEPORT_PROVIDER_MODE", "custom-oci")
+    loaded = build_release_images.load_provider_oci_input()
+    assert loaded["manifestDigest"] != loaded["codexDigest"]
+    assert loaded["platformManifestDigest"] == "sha256:" + "b" * 64
+
+
+def test_provider_record_refuses_image_digest_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = tmp_path / "provider-runtime-inputs.yaml"
+    fixture.write_text(
+        yaml.safe_dump(_custom_provider_record(image_digest="1" * 64), sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(build_release_images, "PROVIDER_INPUTS", fixture)
+    monkeypatch.setenv("STATEPORT_PROVIDER_MODE", "custom-oci")
+    with pytest.raises(build_release_images.ReleaseBuildError, match="differs from manifestDigest"):
+        build_release_images.load_provider_oci_input()
+
+
+def _provider_build_shell(containerfile: Path, provider_root: Path, output_root: Path) -> str:
+    text = containerfile.read_text(encoding="utf-8")
+    marker = "RUN --mount=type=bind,from=stateport-provider,source=/out,target=/provider-input,readonly \\\n"
+    start = text.index(marker)
+    block = text[start:].split("\n\n", 1)[0]
+    lines = block.splitlines()
+    assert lines[0] == marker.rstrip("\n")
+    script = "\n".join(lines[1:])
+    script = script.replace("/provider-input", str(provider_root))
+    script = script.replace("/out", str(output_root))
+    return script
+
+
+def _run_provider_build_fixture(
+    containerfile: Path,
+    tmp_path: Path,
+    *,
+    mutate_metadata: bool = False,
+    wrong_codex_digest: bool = False,
+    missing_bwrap: bool = False,
+    changed_codex_bytes: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    provider = tmp_path / "provider-input"
+    output = tmp_path / "provider-output"
+    provider.mkdir(parents=True)
+    output.mkdir(parents=True)
+    versions = {
+        "codex": "codex-cli 0.146.0+stateport.3",
+        "bwrap": "bubblewrap 0.12.0",
+        "rg": "ripgrep 14.1.0",
+    }
+    for name, version in versions.items():
+        path = provider / name
+        path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n", encoding="utf-8")
+        path.chmod(0o755)
+    if missing_bwrap:
+        (provider / "bwrap").unlink()
+    licenses = ["LICENSE", "NOTICE", "BUBBLEWRAP-LICENSE", "BUBBLEWRAP-NOTICE"]
+    for name in licenses:
+        (provider / name).write_text(f"synthetic {name}\n", encoding="utf-8")
+    artifact_digests = {
+        name: (
+            "sha256:" + hashlib.sha256((provider / name).read_bytes()).hexdigest()
+            if (provider / name).exists()
+            else "sha256:" + "0" * 64
+        )
+        for name in versions
+    }
+    metadata = {
+        "formatVersion": "stateport.provider-runtime-metadata/v1",
+        "version": versions["codex"],
+        "bubblewrapVersion": versions["bwrap"],
+        "ripgrepVersion": versions["rg"],
+        "source": {
+            "repository": "https://github.com/openai/codex",
+            "commit": "e363b08c9175ac1cbe5893615dd2cb9ddf95043b",
+            "sourceArchiveDigest": "sha256:" + "c" * 64,
+            "buildContextDigest": "sha256:" + "d" * 64,
+        },
+        "artifacts": {
+            "codex": {"digest": artifact_digests["codex"]},
+            "bubblewrap": {"digest": artifact_digests["bwrap"]},
+            "ripgrep": {"digest": artifact_digests["rg"]},
+        },
+        "licenses": licenses,
+    }
+    if mutate_metadata:
+        metadata["version"] = "codex-cli 0.146.0+wrong"
+    (provider / "provider-metadata.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    if changed_codex_bytes:
+        with (provider / "codex").open("a") as stream:
+            stream.write("# bytes changed after metadata was recorded\n")
+    env = os.environ.copy()
+    env.update(
+        {
+            "STATEPORT_PROVIDER_MODE": "custom-oci",
+            "STATEPORT_PROVIDER_VERSION": versions["codex"],
+            "STATEPORT_PROVIDER_BUBBLEWRAP_VERSION": versions["bwrap"],
+            "STATEPORT_PROVIDER_RIPGREP_VERSION": versions["rg"],
+            "STATEPORT_PROVIDER_SOURCE_COMMIT": metadata["source"]["commit"],
+            "STATEPORT_PROVIDER_SOURCE_ARCHIVE_DIGEST": metadata["source"]["sourceArchiveDigest"],
+            "STATEPORT_PROVIDER_BUILD_CONTEXT_DIGEST": metadata["source"]["buildContextDigest"],
+            "STATEPORT_PROVIDER_CODEX_DIGEST": artifact_digests["codex"],
+            "STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST": artifact_digests["bwrap"],
+            "STATEPORT_PROVIDER_RIPGREP_DIGEST": artifact_digests["rg"],
+        }
+    )
+    if wrong_codex_digest:
+        env["STATEPORT_PROVIDER_CODEX_DIGEST"] = "sha256:" + "e" * 64
+    script = _provider_build_shell(containerfile, provider, output)
+    return subprocess.run(
+        ["sh", "-c", script],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+@pytest.mark.parametrize("recipe", ("apps/web/Dockerfile", "images/stateport-dev-workspace/Containerfile"))
+def test_provider_build_custom_fixture_copies_and_refuses_safely(
+    recipe: str, tmp_path: Path
+) -> None:
+    containerfile = ROOT / recipe
+    passed = _run_provider_build_fixture(containerfile, tmp_path / "pass")
+    assert passed.returncode == 0, passed.stderr
+    output = tmp_path / "pass" / "provider-output"
+    for name in ("codex", "bwrap", "rg", "LICENSE", "NOTICE", "BUBBLEWRAP-LICENSE", "BUBBLEWRAP-NOTICE"):
+        assert (output / name).is_file(), name
+    assert (output / "codex").read_bytes().startswith(b"#!/bin/sh")
+    for index, kwargs in enumerate((
+        {"wrong_codex_digest": True},
+        {"mutate_metadata": True},
+        {"missing_bwrap": True},
+        {"changed_codex_bytes": True},
+    ), start=1):
+        failed = _run_provider_build_fixture(containerfile, tmp_path / ("fail-" + str(index)), **kwargs)
+        assert failed.returncode != 0
+    assert all(path.is_relative_to(tmp_path) for path in tmp_path.rglob("*"))
 
 
 def test_locked_build_inputs_preflight_accepts_exact_repository_bytes() -> None:
@@ -764,3 +1025,27 @@ def test_build_cgroup_child_is_stable_per_create_only_digest_slot() -> None:
     assert child == build_release_images.build_cgroup_path(parent, digest_file=slot)
     assert child.startswith(parent + "/stateport-build-")
     assert child != build_release_images.build_cgroup_path(parent, digest_file=Path("/external/run2/digests/web-build1.digest"))
+
+
+@pytest.mark.parametrize('mutation', [None, 'different_image', 'missing_link', 'wrong_platform'])
+def test_provider_pull_binds_index_to_platform(monkeypatch: pytest.MonkeyPatch, mutation: str | None) -> None:
+    provider = _custom_provider_record()['codex']['oci'] | {'mode': 'custom-oci'}
+    index, platform = provider['manifestDigest'], provider['platformManifestDigest']
+    monkeypatch.setattr(build_release_images, '_load_yaml', lambda _path: {'images': {}})
+    monkeypatch.setattr(build_release_images, '_run', lambda *_args, **_kwargs: '')
+    def observe(reference: str) -> dict:
+        is_platform = reference.endswith(platform)
+        return {
+            'digest': platform if is_platform else index,
+            'observedDigests': [platform] if mutation == 'missing_link' else [index, platform],
+            'imageId': 'other' if mutation == 'different_image' and is_platform else 'same',
+            'os': 'linux',
+            'architecture': 'arm64' if mutation == 'wrong_platform' and not is_platform else 'amd64',
+        }
+    monkeypatch.setattr(build_release_images, '_image_observation', observe)
+    if mutation:
+        with pytest.raises(build_release_images.ReleaseBuildError):
+            build_release_images.pull_and_verify_base_images(provider)
+    else:
+        result = build_release_images.pull_and_verify_base_images(provider)
+        assert result[0]['platformManifestDigest'] == platform

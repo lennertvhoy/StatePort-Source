@@ -1,5 +1,5 @@
 formatVersion: stateport.container-build-inputs/v1
-resolvedOn: "2026-09-10"
+resolvedOn: "2026-09-12"
 platform: linux/amd64
 
 builder:
@@ -23,6 +23,10 @@ locks:
     path: config/codex-runtime/package-lock.json
     digest: sha256:0866fed991dbb853364c564418fd6945770500dbcc36cd186bf9a3f5eb4beed2
     installMode: npm-ci-ignore-scripts-omit-dev
+  providerRuntimeInputs:
+    path: config/provider-runtime-inputs.yaml
+    digest: sha256:5f3574143d50cde6c1a08eb3eb49d7d9c79f4b1d4c36a5002fa3b9b37b46c58e
+    installMode: reviewed-provider-record-only
   playwrightNpm:
     path: images/stateport-playwright/package-lock.json
     digest: sha256:4fedc00bafbba70c8e71b8240b14376e99c53b3b450ec6bcc494b5adbd6d68d2
@@ -44,6 +48,7 @@ alpinePackages:
     bubblewrap: 0.12.0-r0
     libcrypto3: 3.5.8-r0
     libssl3: 3.5.8-r0
+    libuuid: 2.41.6-r1
     sqlite-libs: 3.53.4-r0
 
 executionHostAlpine:
@@ -57,20 +62,20 @@ executionHostAlpine:
     aardvark-dns: 2.1.0-r0
     catatonit: 0.2.1-r0
     conmon: 2.2.1-r0
-    containers-common: 0.69.1-r0
+    container-libs: 0.69.1-r0
     crun: 1.28-r0
     glib: 2.88.3-r0
     json-c: 0.19-r1
-    libblkid: 2.42.2-r1
+    libblkid: 2.42.3-r1
     libbsd: 0.12.2-r0
     libcap2: 2.78-r0
     libeconf: 0.8.4-r0
     libgcc: 15.2.0-r9
     libintl: 1.0-r0
     libmd: 1.2.0-r0
-    libmount: 2.42.2-r1
+    libmount: 2.42.3-r1
     libseccomp: 2.6.0-r2
-    linux-pam: 1.7.1-r2
+    linux-pam: 1.7.1-r3
     netavark: 2.1.0-r0
     passt: 2026.07.28-r0
     pcre2: 10.48-r0
@@ -187,12 +192,12 @@ browserAssets:
     installPath: /ms-playwright/chromium-1234/chrome-linux64
 
 definitions:
-  apps/api/Dockerfile: sha256:2e34fd416b94a84adcd8c27315dc24eeab3a38ca122d59d3a91b6c92f28f7d38
-  apps/web/Dockerfile: sha256:47913635b565fe4bf9b96c6ac106461c3a7286847bbf6527af56f1d1a4f8303f
-  apps/worker/Dockerfile: sha256:949a106e76d6cb0016783274f80f305b801c5424024c11660bb595989b3f991f
-  apps/runner/Dockerfile: sha256:2895b2ee36cebb8b9133fa930b6ef3cc88d1508dad62fe19aaccca2abdbd49a3
-  images/stateport-dev-workspace/Containerfile: sha256:b9dca76cc68b6f3663e3baae2bbdd7c8805b73e8962a0e966bc88e17c3582b01
-  images/stateport-execution-host/Containerfile: sha256:83554c3ee7077e14f18fc856526bc63fca06dbbb55378feadeb63cb9c5af4b64
+  apps/api/Dockerfile: sha256:b99f3541983ab4d2ad5057249c2c54422d4356042ae1fc621338e87d351b7219
+  apps/web/Dockerfile: sha256:9f542c90befcebc39a659d4fe831d93fcedc2256986917a01714936816a1dc11
+  apps/worker/Dockerfile: sha256:4fc27944b9f35c9604b596baf4424659b3ed1a6e7c18a406d82e399ff0de317a
+  apps/runner/Dockerfile: sha256:3bb9c0535d80d683dfe289958020825d78c7f4cd777e39ab49797ebd3902d881
+  images/stateport-dev-workspace/Containerfile: sha256:71b1bfb2b42b6eca63f3e20da33ebab3700e67703e87ea3f976cf29b514094df
+  images/stateport-execution-host/Containerfile: sha256:fe3613986e3cda87e49d73716a0489147e2fc1fb336c2f8084e18eca33ca2823
   images/stateport-playwright/Containerfile: sha256:3c14269dc7e4fbafc937fc01d204a4121008ca237a5b14ce11ff62728e4d8d4f
   images/packaged-content.v1.yaml: sha256:4c34dbaa74b96fc3bcc5d2c061f7992c4d2513d3b80fab8fead207e2d217818c
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0

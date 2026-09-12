@@ -22,7 +22,8 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 def prepare_context(source_archive: Path, backport_inputs: Path, native_artifacts: Path,
-                    native_receipt: Path, output: Path) -> dict:
+                    native_receipt: Path, output: Path,
+                    maintained_sqlite_archive: Path | None = None) -> dict:
     if output.exists() or source_archive.is_symlink() or not source_archive.is_file(): raise ValueError('source archive/output unsafe')
     if native_artifacts.is_symlink() or not native_artifacts.is_dir(): raise ValueError('native artifacts directory unsafe')
     if native_receipt.is_symlink() or not native_receipt.is_file() or native_receipt.stat().st_size > 524288:
@@ -59,7 +60,10 @@ def prepare_context(source_archive: Path, backport_inputs: Path, native_artifact
     prepared = output.parent / (output.name + '.consumer-source')
     prepare_consumer(Path(base_receipt['sourceRoot']), prepared)
     target = output
-    prepare_backports(prepared, backport_inputs, target)
+    if maintained_sqlite_archive is None:
+        prepare_backports(prepared, backport_inputs, target)
+    else:
+        prepare_backports(prepared, backport_inputs, target, maintained_sqlite_archive)
     native_dir = target / 'native-v8-inputs'; native_dir.mkdir()
     for name in REQUIRED_ARTIFACTS:
         copied = native_dir / name
@@ -76,6 +80,9 @@ def prepare_context(source_archive: Path, backport_inputs: Path, native_artifact
                   name: {'sha256': digest(native_dir / name), 'bytes': (native_dir / name).stat().st_size}
                   for name in REQUIRED_ARTIFACTS}, 'backportPreparation': str(target / 'codex-rs/stateport-native-overrides/backport-preparation.json'),
               'lockedResolution': 'not_run', 'nativeRegressions': 'not_run', 'releaseQualification': 'not_run'}
+    if maintained_sqlite_archive is not None:
+        backport_record = json.loads((target / 'codex-rs/stateport-native-overrides/backport-preparation.json').read_text())
+        result['maintainedSqlite'] = backport_record['maintainedSqlite']
     shutil.copyfile(Path(__file__).with_name('context_verify.py'), target / 'context_verify.py')
     rows, inv = inventory(target)
     result['inventoryDigest'] = inv; result['inventoryEntries'] = len(rows)
@@ -94,6 +101,8 @@ if __name__ == '__main__':
     p.add_argument('--native-artifacts', type=Path, required=True)
     p.add_argument('--native-receipt', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--maintained-sqlite-archive', type=Path)
     args = p.parse_args()
     print(json.dumps(prepare_context(args.source_archive, args.backport_inputs,
-        args.native_artifacts, args.native_receipt, args.output), indent=2))
+        args.native_artifacts, args.native_receipt, args.output,
+        args.maintained_sqlite_archive), indent=2))

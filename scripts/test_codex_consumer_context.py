@@ -23,7 +23,8 @@ def test_context_refuses_qualified_or_placeholder_receipt(tmp_path):
     with pytest.raises(ValueError, match='unqualified'):
         prepare_context(source,tmp_path/'inputs',tmp_path/'native',receipt,tmp_path/'out')
 
-def test_context_positive_sequences_consumer_then_backports(tmp_path, monkeypatch):
+@pytest.mark.parametrize('maintained', [False, True])
+def test_context_positive_sequences_consumer_then_backports(tmp_path, monkeypatch, maintained):
     source=tmp_path/'source.tar.gz'; source.write_bytes(b'x'); inputs=tmp_path/'inputs'; inputs.mkdir()
     native=tmp_path/'native'; native.mkdir(); out=tmp_path/'out'
     archive=native/consumer_context.ARCHIVE; binding=native/consumer_context.BINDINGS
@@ -35,11 +36,19 @@ def test_context_positive_sequences_consumer_then_backports(tmp_path, monkeypatc
     receipt=tmp_path/'receipt.json'; receipt.write_text(json.dumps({'status':'native-compiled-unqualified','recipeSha256':'1f4ce37550f5e47f61f048c1899656a62e706757dda33f164df843ff034cfbb8','fixedV8Commit':'7938dd73a1d5b6021daca3beeac450ebde3c141d','fixedV8Version':'15.2.124.27','artifacts':[{'file':consumer_context.ARCHIVE,'sha256':digest(archive),'bytes':7},{'file':consumer_context.BINDINGS,'sha256':digest(binding),'bytes':7}]+extras}))
     calls=[]
     def fake_consumer(src,dst): calls.append('consumer'); (dst/'codex-rs').mkdir(parents=True); (dst/'codex-rs/Cargo.toml').write_text('m'); (dst/'codex-rs/Cargo.lock').write_text('l')
-    def fake_backports(src,inp,dst): calls.append('backports'); import shutil; shutil.copytree(src,dst); (dst/'codex-rs/stateport-native-overrides').mkdir(parents=True); (dst/'codex-rs/stateport-native-overrides/backport-preparation.json').write_text('{}')
+    sqlite_archive = tmp_path/'maintained.zip'; sqlite_archive.write_bytes(b'maintained-source')
+    maintained_record = {'version':'3.53.4','archive':{'sha256':digest(sqlite_archive)}}
+    def fake_backports(src,inp,dst,selected_archive=None):
+        assert selected_archive == (sqlite_archive if maintained else None)
+        calls.append('backports'); import shutil; shutil.copytree(src,dst)
+        overrides = dst/'codex-rs/stateport-native-overrides'; overrides.mkdir(parents=True)
+        (overrides/'backport-preparation.json').write_text(json.dumps(
+            {'maintainedSqlite':maintained_record} if maintained else {}))
     monkeypatch.setattr(consumer_context,'prepare_consumer',fake_consumer)
     monkeypatch.setattr(consumer_context,'prepare_backports',fake_backports)
     monkeypatch.setattr(consumer_context._source_mod,'prepare',lambda src,dst: (dst.mkdir(), {'sourceRoot':str(dst)})[1])
-    result=prepare_context(source,inputs,native,receipt,out)
+    result=prepare_context(source,inputs,native,receipt,out,sqlite_archive if maintained else None)
+    assert result.get("maintainedSqlite") == (maintained_record if maintained else None)
     assert calls == ['consumer','backports']
     assert result['consumerVersion']=='0.146.0+stateport.3'
     assert (out/'native-v8-inputs'/consumer_context.ARCHIVE).read_bytes()==b'archive'
@@ -72,7 +81,7 @@ def test_context_refuses_native_receipt_drift(tmp_path, mutate):
 
 def test_consumer_container_preserves_pinned_toolchain_and_repaired_inputs():
     text=(ROOT/'config/codex-runtime/v8-repair/Consumer.Containerfile').read_text()
-    for pin in ('build-base=0.5-r3','clang21=21.1.2-r2','lld21=21.1.2-r1','openssl-dev=3.5.8-r0','xz-static=5.8.3-r0'):
+    for pin in ('build-base=0.5-r3','clang21=21.1.2-r2','lld21=21.1.2-r1','openssl-dev=3.5.8-r0','xz-static=5.8.4-r0','xz-dev=5.8.4-r0','xz-libs=5.8.4-r0'):
         assert pin in text
     for setting in ('RUSTUP_TOOLCHAIN=1.95.0','AWS_LC_SYS_NO_JITTER_ENTROPY=1','LIBCLANG_PATH=/usr/lib/llvm21/lib','CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER'):
         assert setting in text
@@ -193,3 +202,92 @@ def test_native_recipe_authenticates_current_source_and_license_inputs():
     # a changed license manifest whose recipe digest was left stale.
     from prepare import recipe
     recipe()
+
+
+def _maintained_sqlite_fixture(tmp_path):
+    """A complete small crate and ZIP exercise the opt-in replacement path."""
+    import io
+    import tarfile
+    import zipfile
+    import prepare_backports
+
+    digest_bytes = lambda value, algorithm='sha256': hashlib.new(algorithm, value).hexdigest()
+    rules = tmp_path / 'rules'; rules.mkdir()
+    source = tmp_path / 'source'; workspace = source / 'codex-rs'; workspace.mkdir(parents=True)
+    manifest = workspace / 'Cargo.toml'; manifest.write_text('[patch.crates-io]\n')
+    archive_input = tmp_path / 'inputs'; archive_input.mkdir()
+    initial = {'sqlite3/sqlite3.c': b'old c\n', 'sqlite3/sqlite3.h': b'old h\n',
+               'sqlite3/sqlite3ext.h': b'old ext\n', 'build.rs': b'cargo:rustc-cfg=sqlite\n',
+               'sqlite3/bindgen_bundled_version.rs': b'pub const SQLITE_VERSION: &str = "3.51.3";\n'}
+    crate = archive_input / 'libsqlite3-sys-0.37.0.crate'
+    with tarfile.open(crate, 'w:gz') as stream:
+        for name, data in initial.items():
+            member = tarfile.TarInfo('libsqlite3-sys-0.37.0/' + name)
+            member.size = len(data); stream.addfile(member, io.BytesIO(data))
+    lock = workspace / 'Cargo.lock'
+    lock.write_text('[[package]]\nname = "libsqlite3-sys"\nversion = "0.37.0"\n'
+                    'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                    f'checksum = "{digest_bytes(crate.read_bytes())}"\n')
+    source_id = '2026-07-24 19:02:57 test-source-id'
+    replacement = {
+        'sqlite3.c': f'#define SQLITE_SOURCE_ID      "{source_id}"\nnew c\n'.encode(),
+        'sqlite3.h': f'#define SQLITE_SOURCE_ID      "{source_id}"\nnew h\n'.encode(),
+        'sqlite3ext.h': b'new ext\n'}
+    sqlite_archive = tmp_path / 'sqlite.zip'
+    with zipfile.ZipFile(sqlite_archive, 'w') as stream:
+        stream.writestr('sqlite-amalgamation-test/', b'')
+        for name, data in replacement.items():
+            stream.writestr('sqlite-amalgamation-test/' + name, data)
+        stream.writestr('sqlite-amalgamation-test/shell.c', b'shell\n')
+    member_rows = {name: {'sha256': digest_bytes(data),
+                          'sha3_256': digest_bytes(data, 'sha3_256'), 'bytes': len(data)}
+                   for name, data in replacement.items()}
+    maintained = {'version': '3.53.4', 'apiVersionNumber': 3053004, 'sourceId': source_id,
+                  'archive': {'root': 'sqlite-amalgamation-test', 'sha256': digest_bytes(sqlite_archive.read_bytes()),
+                              'bytes': sqlite_archive.stat().st_size}, 'members': member_rows,
+                  'bindingConstants': {'crateVersion': '0.37.0', 'bundledSqliteVersion': '3.51.3',
+                                       'bundledSqliteApiVersionNumber': 3051003, 'status': 'not_updated'}}
+    (rules / 'maintained-sqlite.json').write_text(json.dumps(maintained))
+    pins = {'consumerInputs': {str(p.relative_to(source)): digest_bytes(p.read_bytes())
+                               for p in (manifest, lock)},
+            'regressionInputs': [{'file': 'sqlite-upstream-regression.test', 'sha256': '0' * 64}],
+            'packages': [{'name': 'libsqlite3-sys', 'version': '0.37.0', 'crateFile': crate.name,
+                          'crateSha256': digest_bytes(crate.read_bytes()), 'patchFile': 'not-used.patch',
+                          'patchSha256': '0' * 64, 'patchWorkingDirectory': '.',
+                          'sourcePath': 'sqlite3/sqlite3.c', 'beforeSha256': digest_bytes(initial['sqlite3/sqlite3.c']),
+                          'afterSha256': '0' * 64}]}
+    (rules / 'pins.json').write_text(json.dumps(pins))
+    return prepare_backports, rules, source, archive_input, sqlite_archive, replacement, initial
+
+
+def test_maintained_sqlite_replaces_only_amalgamation_and_records_unrun_receipt(tmp_path, monkeypatch):
+    prepare_backports, rules, source, inputs, sqlite_archive, replacement, initial = _maintained_sqlite_fixture(tmp_path)
+    monkeypatch.setattr(prepare_backports, 'HERE', rules)
+    output = tmp_path / 'output'
+    receipt = prepare_backports.prepare(source, inputs, output, sqlite_archive)
+    crate = output / 'codex-rs/stateport-native-overrides/libsqlite3-sys-0.37.0'
+    for name, data in replacement.items():
+        assert (crate / 'sqlite3' / name).read_bytes() == data
+    assert (crate / 'build.rs').read_bytes() == initial['build.rs']
+    assert (crate / 'sqlite3/bindgen_bundled_version.rs').read_bytes() == initial['sqlite3/bindgen_bundled_version.rs']
+    assert receipt['status'] == 'source-prepared-maintained-sqlite-3.53.4'
+    assert receipt['maintainedSqlite']['sourceId'] == '2026-07-24 19:02:57 test-source-id'
+    assert receipt['maintainedSqlite']['apiVersionNumber'] == 3053004
+    assert receipt['maintainedSqlite']['bindingConstants']['bundledSqliteVersion'] == '3.51.3'
+    assert receipt['maintainedSqlite']['bindingConstants']['bundledSqliteApiVersionNumber'] == 3051003
+    assert receipt['maintainedSqlite']['nativeCompilation'] == 'not_run'
+    assert receipt['maintainedSqlite']['standardUpstreamSuites'] == 'not_run'
+    assert receipt['maintainedSqlite']['releaseQualification'] == 'not_run'
+
+
+def test_maintained_sqlite_refuses_bad_archive_before_copying_output(tmp_path, monkeypatch):
+    prepare_backports, rules, source, inputs, sqlite_archive, _, initial = _maintained_sqlite_fixture(tmp_path)
+    monkeypatch.setattr(prepare_backports, 'HERE', rules)
+    sqlite_archive.write_bytes(b'not the pinned archive')
+    output = tmp_path / 'output'
+    with pytest.raises(ValueError, match='archive integrity differs'):
+        prepare_backports.prepare(source, inputs, output, sqlite_archive)
+    assert not output.exists()
+    assert (source / 'codex-rs/Cargo.toml').read_text() == '[patch.crates-io]\n'
+    assert (source / 'codex-rs').exists()
+    assert initial['sqlite3/sqlite3.c'] == b'old c\n'

@@ -6,7 +6,7 @@ RUN apk add --no-cache build-base=0.5-r3 cmake=4.1.3-r0 \
       git=2.52.0-r0 linux-headers=6.16.12-r0 openssl-dev=3.5.8-r0 \
       perl=5.42.2-r0 pkgconf=2.5.1-r0 python3=3.12.14-r0 \
       openssl-libs-static=3.5.8-r0 zlib-static=1.3.2-r0 bzip2-static=1.0.8-r6 \
-      xz-static=5.8.3-r0 brotli-static=1.2.0-r0 zstd-static=1.5.7-r2
+      xz-libs=5.8.4-r0 xz-static=5.8.4-r0 xz-dev=5.8.4-r0 brotli-static=1.2.0-r0 zstd-static=1.5.7-r2
 WORKDIR /build
 COPY . /build/context/
 WORKDIR /build/context/codex-rs
@@ -26,6 +26,13 @@ ENV CARGO_BUILD_JOBS=1 OPENSSL_STATIC=1 OPENSSL_NO_VENDOR=1 PKG_CONFIG_ALL_STATI
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/usr/local/bin/stateport-musl-linker
 RUN printf '%s\n' '#!/bin/sh' 'exec /usr/bin/cc "$@" -B/usr/bin -fuse-ld=lld -Wl,--threads=1' \
       > /usr/local/bin/stateport-musl-linker && chmod 0755 /usr/local/bin/stateport-musl-linker
+# lzma-sys probes liblzma before its bundled fallback. The development package
+# supplies liblzma.pc; xz-static alone leaves that probe unable to select XZ.
+RUN test "$(pkg-config --modversion liblzma)" = 5.8.4 \
+    && test -s /usr/lib/liblzma.a \
+    && test -z "${LZMA_API_STATIC+x}" && test -z "${LIBLZMA_NO_PKG_CONFIG+x}" \
+    && test -z "${LIBLZMA_DYNAMIC+x}" \
+    && pkg-config --static --libs liblzma
 RUN test -s "$RUSTY_V8_ARCHIVE" && test -s "$RUSTY_V8_SRC_BINDING_PATH" \
     && cargo build --locked --release --target x86_64-unknown-linux-musl --bin codex
 RUN mkdir -p /out \

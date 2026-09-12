@@ -1,0 +1,37 @@
+{
+  "formatVersion": "stateport.maintained-sqlite/v1",
+  "status": "optional source preparation only; compilation, standard upstream suites, and release qualification are not run",
+  "version": "3.53.4",
+  "apiVersionNumber": 3053004,
+  "sourceId": "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc",
+  "archive": {
+    "url": "https://sqlite.org/2026/sqlite-amalgamation-3530400.zip",
+    "fileName": "sqlite-amalgamation-3530400.zip",
+    "root": "sqlite-amalgamation-3530400",
+    "sha256": "1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d",
+    "bytes": 2946650
+  },
+  "members": {
+    "sqlite3.c": {
+      "sha256": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189",
+      "sha3_256": "67f423e9ebbbdc473cbc4772c872ee6b89f31fde4ed0279a5c25d5f65c043a16",
+      "bytes": 9515341
+    },
+    "sqlite3.h": {
+      "sha256": "919e7f2e8ed1d8f56ac17b412b8971c76aa5d1a879752cc6058f75e7d5910e1d",
+      "sha3_256": "89d0de498b1012938bb78dc18b68fea52e26f7f7b6db6347d126a2e58b86a05c",
+      "bytes": 690838
+    },
+    "sqlite3ext.h": {
+      "sha256": "ac9645e5c9ff0cf176efdd6e75cb5e98f46295d38e02db5c4d208826a39ab4be",
+      "sha3_256": "1b7a0ee438bb5c2896d0609c537e917d8057b3340f6ad004d2de44f03e3d3cca",
+      "bytes": 39175
+    }
+  },
+  "bindingConstants": {
+    "crateVersion": "0.37.0",
+    "bundledSqliteVersion": "3.51.3",
+    "bundledSqliteApiVersionNumber": 3051003,
+    "status": "not_updated; generated binding constants remain at the crate's bundled 3.51.3 / 3051003 identity"
+  }
+}

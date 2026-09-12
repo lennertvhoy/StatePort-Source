@@ -9,6 +9,7 @@ cached tree as provenance and never inspects or reuses generated targets.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -184,6 +185,120 @@ def _normalise_mount(value: str) -> tuple[str, str, str] | None:
     return match.groups() if match else None
 
 
+def _read_receipt_object(path: Path, label: str) -> dict:
+    """Read a bounded, canonical receipt without following a link."""
+    if path.is_symlink() or not path.is_file() or path.absolute() != path.resolve():
+        raise VerificationError(f"{label} must be a canonical regular file")
+    if path.stat().st_size > 524288:
+        raise VerificationError(f"{label} is too large")
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"{label} is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise VerificationError(f"{label} must be a JSON object")
+    return value
+
+
+_GOVERNOR_SCOPE = re.compile(
+    r"/user\.slice/user-(?P<uid>[0-9]+)\.slice/user@(?P=uid)\.service/"
+    r"stateport\.slice/stateport-heavy\.slice/stateport-heavy-[0-9]+-[0-9]+\.service"
+)
+
+
+def _verify_planned_owner_interruption(
+    cached_run: Path, build: dict, interruption_path: Path, governor_scope: str | None,
+) -> dict:
+    """Admit only the recorded owner-directed SIGTERM terminal state.
+
+    An interrupted build is resumable only when the coordinator's explicit
+    interruption receipt and the stopped/cleaned native pilot agree with the
+    build receipt.  This is cache admission evidence, never artifact or release
+    provenance.
+    """
+    owner = _read_receipt_object(interruption_path, "planned owner interruption receipt")
+    expected_keys = {"at", "reason", "action", "pid", "pgid", "scope", "limitation"}
+    if set(owner) != expected_keys:
+        raise VerificationError("planned owner interruption receipt has an unsupported schema")
+    timestamp = owner["at"]
+    if not isinstance(timestamp, str):
+        raise VerificationError("planned owner interruption timestamp is malformed")
+    try:
+        observed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise VerificationError("planned owner interruption timestamp is malformed") from error
+    if observed_at.tzinfo is None:
+        raise VerificationError("planned owner interruption timestamp lacks a timezone")
+    if (not isinstance(owner["reason"], str)
+            or not owner["reason"].startswith("Owner explicitly requests")
+            or "stop new work" not in owner["reason"]):
+        raise VerificationError("planned owner interruption reason is not explicit")
+    if owner["action"] != (
+            "SIGTERM to verified owned Cargo process group, leaving pilot alive to write honest terminal receipt"):
+        raise VerificationError("planned owner interruption action is not the reviewed SIGTERM")
+    for name in ("pid", "pgid"):
+        if type(owner[name]) is not int or owner[name] <= 0:
+            raise VerificationError(f"planned owner interruption {name} is invalid")
+    scope = owner["scope"]
+    if not isinstance(scope, str) or _GOVERNOR_SCOPE.fullmatch(scope) is None:
+        raise VerificationError("planned owner interruption scope is not a bounded governor service")
+    if governor_scope != scope:
+        raise VerificationError("planned owner interruption scope differs from cached command")
+    if (not isinstance(owner["limitation"], str)
+            or "not a planned timeout" not in owner["limitation"]
+            or "Preserve" not in owner["limitation"]):
+        raise VerificationError("planned owner interruption limitation is not recorded")
+
+    if (build.get("status") != "failed" or build.get("exitCode") != -15
+            or build.get("error") != "native Cargo build failed with exit -15; see build.log"):
+        raise VerificationError("planned owner interruption does not match the native build receipt")
+
+    terminal = _read_receipt_object(cached_run / "terminal-state.json", "native terminal receipt")
+    observed_containment = _read_receipt_object(cached_run / "containment.json", "native containment receipt")
+    approved_containment = _read_receipt_object(
+        cached_run / "work/containment-approved.json", "approved containment receipt")
+    state = terminal.get("state")
+    terminal_build = terminal.get("build")
+    if (not isinstance(state, dict) or not isinstance(terminal_build, dict)
+            or not isinstance(terminal.get("containerId"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", terminal["containerId"]) is None):
+        raise VerificationError("native terminal receipt lacks a stable container identity")
+    if (state.get("Status") != "stopped" or state.get("Running") is not False
+            or state.get("OOMKilled") is not False or state.get("Pid") != 0
+            or state.get("ExitCode") != 1):
+        raise VerificationError("native terminal receipt does not prove a stopped non-OOM pilot")
+    if (terminal_build.get("status") != "failed"
+            or terminal_build.get("exitCode") != -15
+            or terminal_build.get("error") != build.get("error")):
+        raise VerificationError("native terminal receipt does not match the interrupted build")
+    if terminal.get("unit") != "ActiveState=inactive\n":
+        raise VerificationError("native terminal receipt does not prove an inactive service")
+    if (observed_containment.get("status") != "passed"
+            or observed_containment.get("containerId") != terminal["containerId"]
+            or observed_containment != approved_containment):
+        raise VerificationError("native terminal identity differs from measured containment")
+    if (observed_containment.get("bookedScope") != scope
+            or governor_scope != observed_containment.get("bookedScope")):
+        raise VerificationError("native containment scope differs from owner interruption")
+
+    cleanup = _read_receipt_object(cached_run / "cleanup.json", "native cleanup receipt")
+    container_id = terminal["containerId"]
+    if (cleanup.get("command") != ["podman", "rm", container_id]
+            or cleanup.get("exitCode") != 0
+            or cleanup.get("stdout") != container_id + "\n"
+            or cleanup.get("stderr") != ""
+            or cleanup.get("preserved") != "all host source/tools/vendor/target/receipts/logs"):
+        raise VerificationError("native cleanup receipt does not prove exact non-force removal")
+    return {
+        "kind": "planned-owner-interruption",
+        "receiptPath": str(interruption_path),
+        "receiptSha256": _regular_digest(interruption_path),
+        "terminalContainerId": container_id,
+        "buildExitCode": -15,
+        "qualification": "not_run; continuation remains unqualified",
+    }
+
+
 def _verify_outer_command(cached_run: Path, expected_image: str, inputs: Path,
                           vendor_inputs: Path, *, historical_runner: Path | None = None) -> dict:
     # These helpers exist on the coordinator, not in the original pinned builder.
@@ -340,10 +455,13 @@ def _verify_outer_command(cached_run: Path, expected_image: str, inputs: Path,
         expected_command += ['--resume-admission', '/resume-admission.json']
     if command != expected_command:
         raise VerificationError("outer command differs from exact booked_pilot native argv")
-    return {"timeoutArgument": timeout, "mounts": sorted(seen)}
+    return {"timeoutArgument": timeout, "mounts": sorted(seen),
+            "governorCgroup": (parent if cgroup_arguments[0] == '--cgroups=no-conmon' else None)}
 
 
-def _verify_receipts(cached_run: Path, expected_image: str, value: dict) -> dict:
+def _verify_receipts(cached_run: Path, expected_image: str, value: dict, *,
+                     planned_owner_interruption: Path | None = None,
+                     governor_scope: str | None = None) -> dict:
     work = cached_run / "work"
     try:
         build = json.loads((work / "native-build-receipt.json").read_text())
@@ -361,8 +479,19 @@ def _verify_receipts(cached_run: Path, expected_image: str, value: dict) -> dict
         raise VerificationError("cached Chromium vendor manifest identity differs")
     if preparation.get("restoredIcuDataSha256") != source["missingIcuData"]["sha256"]:
         raise VerificationError("cached ICU data identity differs")
-    if build.get("status") != "failed" or build.get("error") != "bounded native pilot timed out":
-        raise VerificationError("cached work is not the explicitly resumable timeout state")
+    cache_admission = None
+    if (build.get("status") == "failed"
+            and build.get("error") == "bounded native pilot timed out"):
+        if planned_owner_interruption is not None:
+            raise VerificationError("planned owner interruption receipt cannot accompany a timeout")
+        cache_admission = {"kind": "planned-timeout"}
+    elif planned_owner_interruption is not None:
+        cache_admission = _verify_planned_owner_interruption(
+            cached_run, build, planned_owner_interruption, governor_scope)
+    else:
+        raise VerificationError(
+            "cached work is not an explicitly resumable timeout; an interrupted build requires "
+            "a planned owner interruption receipt")
     if build.get("nativeTests") != "not_run" or build.get("releaseQualification") != "not_run":
         raise VerificationError("cached work already claims qualification")
     expected_command = ["/work/tools/rust/bin/cargo", "build", "--offline", "--locked", "--release", "--target", value["pilot"]["target"], "--lib"]
@@ -370,10 +499,16 @@ def _verify_receipts(cached_run: Path, expected_image: str, value: dict) -> dict
         raise VerificationError("cached Cargo command differs from this recipe")
     if containment.get("status") != "passed":
         raise VerificationError("cached work lacks a passed containment admission")
-    return {"recipeSha256": recipe_hash, "builderImage": expected_image, "cachedBuildStatus": build["status"]}
+    result = {"recipeSha256": recipe_hash, "builderImage": expected_image,
+              "cachedBuildStatus": build["status"]}
+    if cache_admission is not None:
+        result["cacheAdmission"] = cache_admission
+    return result
 
 
-def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: Path, staging: Path, *, historical_runner: Path | None = None) -> dict:
+def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: Path, staging: Path, *,
+           historical_runner: Path | None = None,
+           planned_owner_interruption: Path | None = None) -> dict:
     # Host-only governor integration; the inner image startup must depend only
     # on the recipe/pilot modules available in the pinned image.
     from booked_pilot import observed_native, governor_cgroup_parent
@@ -385,7 +520,11 @@ def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: P
         raise VerificationError("builder image identity is not an exact SHA-256")
     verify_inputs(inputs)
     outer = _verify_outer_command(cached_run, image, inputs, vendor_inputs, historical_runner=historical_runner)
-    receipt = _verify_receipts(cached_run, image, value)
+    receipt = _verify_receipts(
+        cached_run, image, value,
+        planned_owner_interruption=planned_owner_interruption,
+        governor_scope=outer.get("governorCgroup"),
+    )
     staging.mkdir(parents=False, exist_ok=False)
     # Archive installers (and dpkg) are executable only in the pinned builder
     # image.  Never perform that correspondence reconstruction on the host.
@@ -426,6 +565,7 @@ def verify(cached_run: Path, inputs: Path, vendor_inputs: Path, image_id_file: P
         "vendorInputs": str(vendor_inputs),
         "verifierSha256": sha256(Path(__file__).resolve()),
         "outerCommand": outer,
+        "cacheAdmission": receipt["cacheAdmission"],
         "historicalRunner": ({"path": str(historical_runner.absolute()),
                               "sha256": _regular_digest(historical_runner)}
                              if historical_runner is not None else None),
@@ -445,6 +585,10 @@ def main() -> int:
     parser.add_argument("--image-id-file", type=Path)
     parser.add_argument("--staging", type=Path)
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument(
+        "--planned-owner-interruption", type=Path,
+        help="reviewed owner-directed SIGTERM receipt for an explicitly interrupted cache",
+    )
     parser.add_argument("--inside", action="store_true")
     parser.add_argument("--cached", type=Path)
     parser.add_argument("--expected-recipe-sha")
@@ -482,7 +626,15 @@ def main() -> int:
             return 0
         if not all((args.cached_run, args.inputs, args.vendor_inputs, args.image_id_file, args.staging)):
             raise VerificationError("host verification requires cached-run, inputs, vendor-inputs, image-id-file and staging")
-        result = verify(args.cached_run.resolve(), args.inputs.resolve(strict=True), args.vendor_inputs.resolve(strict=True), args.image_id_file.resolve(strict=True), args.staging.resolve(), historical_runner=args.historical_runner)
+        result = verify(
+            args.cached_run.resolve(), args.inputs.resolve(strict=True),
+            args.vendor_inputs.resolve(strict=True), args.image_id_file.resolve(strict=True),
+            args.staging.resolve(), historical_runner=args.historical_runner,
+            planned_owner_interruption=(
+                args.planned_owner_interruption.absolute()
+                if args.planned_owner_interruption is not None else None
+            ),
+        )
     except (OSError, VerificationError, ValueError, RuntimeError) as error:
         print(json.dumps({"status": "cached-work-refused", "error": str(error)}, indent=2))
         return 1

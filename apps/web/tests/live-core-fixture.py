@@ -671,6 +671,20 @@ def main(argv: list[str] | None = None) -> int:
             project,
             add_editable_file=True,
         )
+        # The raw ProjectState checkout keeps its real Git history for source
+        # and repository assertions, but its fixture lock must use the same
+        # package identity as the production fixture installer. The editable
+        # file belongs to the instance and is therefore excluded from this
+        # immutable source digest.
+        from stateport_portable_execution import PortableExecutionService
+        project_package_digest = PortableExecutionService._fixture_tree_digest(
+            repo_root / "fixtures" / "apps" / "development-reference"
+        )
+        project_source.update({
+            "resolvedCommit": "fixture:" + project_package_digest[7:],
+            "resolvedTree": project_package_digest[7:],
+            "manifestDigest": project_package_digest,
+        })
         # A real materialized instance carries canonical StateSpec identity files;
         # without them the backup subsystem correctly refuses to run.
         _canonical_instance_files(
@@ -693,7 +707,6 @@ def main(argv: list[str] | None = None) -> int:
 
         # Use the production fixture installer so revision ownership and lock identity
         # match the runtime's trusted-action checks. A raw directory copy omits them.
-        from stateport_portable_execution import PortableExecutionService
         PortableExecutionService(app, repo_root).install_fixture_instance(
             "studystate.sample", "live-core-study", name="Live Core Study"
         )

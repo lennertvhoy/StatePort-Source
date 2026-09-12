@@ -1,4 +1,4 @@
-FROM docker.io/library/python:3.13-alpine3.23@sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76
+FROM docker.io/library/python:3.13-alpine3.23@sha256:75f27d686432419c9d42420b2b9ef605868c7a0682a6be10a6601fad46c2df01
 
 ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
 ARG STATEPORT_BUILD_SOURCE_TREE=unknown
@@ -32,6 +32,7 @@ COPY images/bin/stateport-healthcheck /usr/local/bin/stateport-healthcheck
 RUN apk add --no-cache \
       libcrypto3=3.5.8-r0 \
       libssl3=3.5.8-r0 \
+      libuuid=2.41.6-r1 \
       sqlite-libs=3.53.4-r0 \
     && rm -f /var/log/apk.log
 

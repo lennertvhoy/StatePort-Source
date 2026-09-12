@@ -1835,7 +1835,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--candidate-id")
     parser.add_argument("--policy", default="config/public-export-allowlist.v1.yaml")
+    parser.add_argument(
+        "--qualification-local",
+        action="store_true",
+        help=(
+            "build a local qualification candidate: keep the local materialization "
+            "commit and skip live public-ref binding (local qualification only)"
+        ),
+    )
+    parser.add_argument(
+        "--qualification-ref",
+        help="exact refs/heads/... ref recorded by a --qualification-local candidate",
+    )
     args = parser.parse_args(arguments)
+    if args.qualification_ref is not None and not args.qualification_local:
+        parser.error("--qualification-ref is only valid together with --qualification-local")
+    if args.qualification_local and args.qualification_ref is None:
+        parser.error("--qualification-local requires --qualification-ref")
     try:
         require_guard(
             "candidate_construction",
@@ -1854,6 +1870,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output=args.output,
             policy_path=args.policy,
             candidate_id=args.candidate_id,
+            qualification_local=args.qualification_local,
+            qualification_ref=args.qualification_ref,
         )
     except (ReleaseGuardError, OSError, PublicReleaseBuildError, SnapshotBuildError, subprocess.CalledProcessError, yaml.YAMLError) as exc:
         print(json.dumps({"status": "blocked", "error": str(exc)}, sort_keys=True), file=sys.stderr)

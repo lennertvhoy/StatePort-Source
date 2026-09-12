@@ -1,8 +1,25 @@
 # Provider runtime inputs
 
-The npm lock remains the input for the currently shipped official Codex runtime.
-The source build in this directory is **preparation only**. Release images do
-not yet consume it.
+The npm lock remains the default input for both production consumers. Both
+consumer recipes also implement an optional, locked custom OCI input, currently
+**disabled with null identities** in `config/provider-runtime-inputs.yaml`.
+The source build in this directory is **preparation only**; no reviewed custom
+producer has been admitted to a release image. Enabling the input requires
+independent reproduction, exact provenance and security qualification first.
+
+The current repaired preparation target is `0.146.0+stateport.3`, described by
+`v8-repair/recipe.json`; the `.2` recipe and experiments below are earlier work.
+Required native security proof remains paused, and independent reproduction of
+the current target is incomplete. Preserve partial builds and read the current
+slice evidence before admitting a new build.
+
+A September 10 source assessment of upstream Codex `0.154.0` found that its
+immutable Cargo lock still selects the same `libsqlite3-sys 0.37.0` and
+`lzma-sys 0.1.20` archive checksums as the pre-backport inputs in
+`v8-repair/native-backports/pins.json` (bundled SQLite 3.51.3 and XZ 5.2.5).
+Updating Codex alone is therefore not an established resolution of those source
+blockers. This source comparison does not establish upstream binary linkage
+or replace required security proof.
 
 The upstream Codex 0.146.0 proc-mount classifier recognizes Bubblewrap's former
 `/newroot/proc` diagnostic but misses the `/proc` spelling in Bubblewrap 0.12.
@@ -82,8 +99,10 @@ AMD64 ELF checks. The recovered binary now passes the normal sandbox journey
 in retained web and Ubuntu workspace images, including separate namespaces and
 filesystem/network refusals. The workspace probe keeps its outside fixture out
 of `/tmp`, which the normal workspace-write policy permits. The fresh scan and
-its unresolved coverage limits are recorded above. An uncached full recipe
-build is running; a second full build must establish binary and OCI equality. These linker packages are build tools; the output remains a scratch
+its unresolved coverage limits are recorded above. The independent current-target
+build was stopped at the owner's request; its partial work is preserved.
+No build is running at this checkpoint. Binary and OCI reproduction remain
+required. These linker packages are build tools; the output remains a scratch
 artifact image. The output includes the observed linker version.
 
 `bubblewrap.Containerfile` prepares the matching static, position-independent

@@ -1,4 +1,5 @@
-FROM docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+ARG STATEPORT_PROVIDER_IMAGE=stateport-provider-empty
+FROM docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS workspace
 
 ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
 ARG STATEPORT_BUILD_SOURCE_TREE=unknown
@@ -181,6 +182,62 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
     && rm -rf /tmp/node-compile-cache \
     && rm -f /tmp/npm-12.0.2.tgz /tmp/brace-expansion-5.0.9.tgz /tmp/ip-address-10.3.1.tgz /tmp/tar-7.5.21.tgz
 
+FROM docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS stateport-provider-empty
+RUN mkdir -p /out
+ARG STATEPORT_PROVIDER_IMAGE=stateport-provider-empty
+FROM ${STATEPORT_PROVIDER_IMAGE} AS stateport-provider
+FROM docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS provider-build
+WORKDIR /provider
+ARG STATEPORT_PROVIDER_MODE=official-npm
+ARG STATEPORT_PROVIDER_MANIFEST_DIGEST=
+ARG STATEPORT_PROVIDER_PLATFORM_MANIFEST_DIGEST=
+ARG STATEPORT_PROVIDER_VERSION=
+ARG STATEPORT_PROVIDER_BUBBLEWRAP_VERSION=
+ARG STATEPORT_PROVIDER_RIPGREP_VERSION=
+ARG STATEPORT_PROVIDER_SOURCE_COMMIT=
+ARG STATEPORT_PROVIDER_SOURCE_ARCHIVE_DIGEST=
+ARG STATEPORT_PROVIDER_BUILD_CONTEXT_DIGEST=
+ARG STATEPORT_PROVIDER_CODEX_DIGEST=
+ARG STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST=
+ARG STATEPORT_PROVIDER_RIPGREP_DIGEST=
+RUN --mount=type=bind,from=stateport-provider,source=/out,target=/provider-input,readonly \
+    set -eu \
+    && mkdir -p /out \
+    && if [ "$STATEPORT_PROVIDER_MODE" = official-npm ]; then :; \
+       elif [ "$STATEPORT_PROVIDER_MODE" = custom-oci ]; then \
+         export STATEPORT_PROVIDER_MANIFEST_DIGEST STATEPORT_PROVIDER_PLATFORM_MANIFEST_DIGEST STATEPORT_PROVIDER_VERSION \
+           STATEPORT_PROVIDER_BUBBLEWRAP_VERSION STATEPORT_PROVIDER_RIPGREP_VERSION \
+           STATEPORT_PROVIDER_SOURCE_COMMIT STATEPORT_PROVIDER_SOURCE_ARCHIVE_DIGEST \
+           STATEPORT_PROVIDER_BUILD_CONTEXT_DIGEST STATEPORT_PROVIDER_CODEX_DIGEST \
+           STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST STATEPORT_PROVIDER_RIPGREP_DIGEST; \
+         test -f /provider-input/provider-metadata.json \
+           && test -x /provider-input/codex \
+           && test -x /provider-input/bwrap \
+           && test -x /provider-input/rg \
+           && node -e 'const fs=require("fs"),m=JSON.parse(fs.readFileSync("/provider-input/provider-metadata.json")),d=/^sha256:[0-9a-f]{64}$/; const a=m.artifacts||{},s=m.source||{}; if(m.formatVersion!=="stateport.provider-runtime-metadata/v1"||m.version!==process.env.STATEPORT_PROVIDER_VERSION||m.bubblewrapVersion!==process.env.STATEPORT_PROVIDER_BUBBLEWRAP_VERSION||m.ripgrepVersion!==process.env.STATEPORT_PROVIDER_RIPGREP_VERSION||s.repository!=="https://github.com/openai/codex"||s.commit!==process.env.STATEPORT_PROVIDER_SOURCE_COMMIT||s.sourceArchiveDigest!==process.env.STATEPORT_PROVIDER_SOURCE_ARCHIVE_DIGEST||s.buildContextDigest!==process.env.STATEPORT_PROVIDER_BUILD_CONTEXT_DIGEST||!d.test(a.codex?.digest)||!d.test(a.bubblewrap?.digest)||!d.test(a.ripgrep?.digest)||a.codex?.digest!==process.env.STATEPORT_PROVIDER_CODEX_DIGEST||a.bubblewrap?.digest!==process.env.STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST||a.ripgrep?.digest!==process.env.STATEPORT_PROVIDER_RIPGREP_DIGEST||!Array.isArray(m.licenses)||m.licenses.join(",")!=="LICENSE,NOTICE,BUBBLEWRAP-LICENSE,BUBBLEWRAP-NOTICE") process.exit(1)' \
+           && test "$(sha256sum /provider-input/codex | cut -d' ' -f1)" = "${STATEPORT_PROVIDER_CODEX_DIGEST#sha256:}" \
+           && test "$(sha256sum /provider-input/bwrap | cut -d' ' -f1)" = "${STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST#sha256:}" \
+           && test "$(sha256sum /provider-input/rg | cut -d' ' -f1)" = "${STATEPORT_PROVIDER_RIPGREP_DIGEST#sha256:}" \
+           && test "$(/provider-input/codex --version)" = "$STATEPORT_PROVIDER_VERSION" \
+           && test "$(/provider-input/bwrap --version | head -n1)" = "$STATEPORT_PROVIDER_BUBBLEWRAP_VERSION" \
+           && test "$(/provider-input/rg --version | head -n1)" = "$STATEPORT_PROVIDER_RIPGREP_VERSION" \
+           && for license in LICENSE NOTICE BUBBLEWRAP-LICENSE BUBBLEWRAP-NOTICE; do test -f "/provider-input/$license"; cp "/provider-input/$license" "/out/$license"; done \
+           && cp /provider-input/codex /out/codex \
+           && cp /provider-input/bwrap /out/bwrap \
+           && cp /provider-input/rg /out/rg \
+           && chmod 0555 /out/codex /out/bwrap /out/rg; \
+       else echo "unsupported provider input mode" >&2; exit 1; fi
+
+FROM workspace
+ARG STATEPORT_PROVIDER_MODE=official-npm
+ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
+ARG STATEPORT_BUILD_SOURCE_TREE=unknown
+ARG STATEPORT_BUILD_SOURCE_REF=unknown
+ARG STATEPORT_BUILD_SOURCE_DIRTY=true
+ARG STATEPORT_BUILD_SOURCE_DATE_EPOCH=unknown
+ARG STATEPORT_BUILD_VERSION=0.0.0-unknown
+ARG STATEPORT_BUILD_CREATED=1970-01-01T00:00:00Z
+ARG STATEPORT_BUILD_ADAPTER=unknown
 COPY config/codex-runtime/package.json config/codex-runtime/package-lock.json /opt/stateport-codex/
 COPY images/bin/stateport-healthcheck /usr/local/bin/stateport-healthcheck
 # npm and the codex smoke test write wall-clock-named logs, cache index
@@ -193,14 +250,32 @@ RUN export HOME=/tmp/stateport-build-home \
     && export CODEX_HOME=/tmp/stateport-build-home/.codex \
     && export NODE_DISABLE_COMPILE_CACHE=1 \
     && mkdir -p "$HOME" \
-    && cd /opt/stateport-codex \
-    && npm ci --ignore-scripts --omit=dev --audit=false --fund=false \
-      --cache /tmp/stateport-npm-cache \
+    && if [ "$STATEPORT_PROVIDER_MODE" = official-npm ]; then \
+         cd /opt/stateport-codex \
+         && npm ci --ignore-scripts --omit=dev --audit=false --fund=false \
+           --cache /tmp/stateport-npm-cache \
+         && ln -s /opt/stateport-codex/node_modules/.bin/codex /usr/local/bin/codex \
+         && codex --version | grep -Fx "codex-cli 0.146.0"; \
+       elif [ "$STATEPORT_PROVIDER_MODE" != custom-oci ]; then \
+         echo "unsupported provider input mode" >&2; exit 1; \
+       fi \
     && chmod 0555 /usr/local/bin/stateport-healthcheck \
-    && ln -s /opt/stateport-codex/node_modules/.bin/codex /usr/local/bin/codex \
-    && codex --version | grep -Fx "codex-cli 0.146.0" \
     && test ! -e /home/stateport/.codex/auth.json \
     && rm -rf /tmp/stateport-build-home /tmp/stateport-npm-cache /tmp/node-compile-cache
+
+COPY --from=provider-build /out /tmp/stateport-provider-inputs
+RUN if [ "$STATEPORT_PROVIDER_MODE" = custom-oci ]; then \
+      rm -f /usr/local/bin/codex /usr/local/bin/rg /usr/bin/bwrap \
+      && install -m 0555 /tmp/stateport-provider-inputs/codex /usr/local/bin/codex \
+      && install -m 0555 /tmp/stateport-provider-inputs/rg /usr/local/bin/rg \
+      && install -m 0555 /tmp/stateport-provider-inputs/bwrap /usr/bin/bwrap \
+      && install -d -m 0555 /usr/share/licenses/stateport-provider \
+      && install -m 0444 /tmp/stateport-provider-inputs/LICENSE /usr/share/licenses/stateport-provider/LICENSE \
+      && install -m 0444 /tmp/stateport-provider-inputs/NOTICE /usr/share/licenses/stateport-provider/NOTICE \
+      && install -m 0444 /tmp/stateport-provider-inputs/BUBBLEWRAP-LICENSE /usr/share/licenses/stateport-provider/BUBBLEWRAP-LICENSE \
+      && install -m 0444 /tmp/stateport-provider-inputs/BUBBLEWRAP-NOTICE /usr/share/licenses/stateport-provider/BUBBLEWRAP-NOTICE; \
+    fi \
+    && rm -rf /tmp/stateport-provider-inputs
 
 ENV HOME=/home/stateport \
     CODEX_HOME=/home/stateport/.codex \

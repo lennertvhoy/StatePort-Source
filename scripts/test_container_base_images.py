@@ -28,7 +28,7 @@ DIGEST_REFERENCE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 def test_base_image_manifest_is_exact_and_amd64_only() -> None:
     value = yaml.safe_load((ROOT / "config/container-base-images.yaml").read_text())
     assert value["formatVersion"] == "stateport.container-base-images/v1"
-    assert value["resolvedOn"] == "2026-08-14"
+    assert value["resolvedOn"] == "2026-09-12"
     assert value["architecture"] == "linux/amd64"
     references = []
     for image in value["images"].values():
@@ -49,6 +49,13 @@ def test_every_containerfile_from_is_in_the_pinned_base_manifest() -> None:
         for line in path.read_text().splitlines():
             if line.startswith("FROM "):
                 reference = line.split()[1]
+                # The provider stage FROM is a build-arg reference injected by
+                # build_release_images from the admitted custom-OCI record
+                # (config/provider-runtime-inputs.yaml), verified separately
+                # by load_provider_oci_input and the consumer build's own
+                # provider verification; it is not a pinned registry base.
+                if reference == "${STATEPORT_PROVIDER_IMAGE}":
+                    continue
                 assert reference in allowed, (path, reference)
 
 

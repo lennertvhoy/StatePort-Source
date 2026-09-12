@@ -245,6 +245,14 @@ passed cache check alone does not justify another timed-out compile or qualify
 a provider. The official-upstream alternative remains a separate compatibility
 experiment until its complete native/security/runtime requirements pass.
 
+An explicitly owner-interrupted pilot may be checked with
+`--planned-owner-interruption <owner-interruption.json>`. The verifier accepts
+that state only when the external receipt records the reviewed owner-directed
+SIGTERM, the cached build has the matching `exitCode=-15`, measured containment
+and governor scope agree, and the retained terminal and cleanup receipts prove
+non-OOM stop and exact removal. It never rewrites the build receipt or treats
+the result as an artifact or release qualification.
+
 
 ## Ordinary upstream compatibility experiment (2026-09-09)
 

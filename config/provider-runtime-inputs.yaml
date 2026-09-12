@@ -21,3 +21,30 @@ codex:
     authenticationBoundary: operator-owned CODEX_HOME volume
     credentialsInImage: false
     installedOnlyIn: [stateport-dev-workspace, stateport-web]
+  # Custom OCI producer admitted for local qualification builds only. The
+  # image identity below is pinned from the verifier-reviewed producer build
+  # (stage1-lane4-20260912/producer-build-r1/producer-build-receipt.json,
+  # result succeeded, reproducible true, double-build digests identical):
+  # FROM-scratch context verified 9/9 against
+  # maintained-consumer-20260910/provider-real-context-receipt.json. The
+  # loopback reference requires the retained task-owned TLS registry
+  # (127.0.0.1:5001) during custom-oci builds; the final public candidate
+  # assembly must pin the public anonymous-verified reference instead before
+  # publication. No security scan, signing, or release qualification of this
+  # image is claimed yet.
+  oci:
+    enabled: true
+    image: 127.0.0.1:5001/stateport-alpha/stateport-provider@sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
+    manifestDigest: sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
+    platformManifestDigest: sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
+    version: codex-cli 0.146.0+stateport.3
+    bubblewrapVersion: bubblewrap 0.12.0
+    ripgrepVersion: ripgrep 15.2.0 (rev e89fff89ac)
+    sourceCommit: e363b08c9175ac1cbe5893615dd2cb9ddf95043b
+    sourceArchiveDigest: sha256:0b789281dc96d60f05c28ddaabc3108a7c3e2f99a9be6cae68bb1c03d5db01c6
+    buildContextDigest: sha256:2eee4bea2a9a729cf8cd53da199b745fd0b6efef0f122a91d959c626906dd7db
+    artifacts:
+      codexDigest: sha256:5f9f40072debd21bbdce864ab8c07d16594cc29657dc368110e2f87610cf3c6f
+      bubblewrapDigest: sha256:2077584e3cc3b1f5f35035257f8f8f202b0046fa7f0e4efec198beb9a9f43d73
+      ripgrepDigest: sha256:e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849
+    licenses: [LICENSE, NOTICE, BUBBLEWRAP-LICENSE, BUBBLEWRAP-NOTICE]

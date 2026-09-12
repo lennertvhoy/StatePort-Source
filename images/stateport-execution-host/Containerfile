@@ -24,7 +24,7 @@ RUN apk add --no-cache git=2.52.0-r0 \
        fi \
     && /out/podman-remote --version | grep -Fx "podman-remote version 5.8.3"
 
-FROM docker.io/library/python:3.13-alpine3.23@sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76
+FROM docker.io/library/python:3.13-alpine3.23@sha256:75f27d686432419c9d42420b2b9ef605868c7a0682a6be10a6601fad46c2df01
 
 ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
 ARG STATEPORT_BUILD_SOURCE_TREE=unknown
@@ -64,6 +64,7 @@ LABEL org.opencontainers.image.title="StatePort Execution Host" \
 RUN apk add --no-cache \
         libcrypto3=3.5.8-r0 \
         libssl3=3.5.8-r0 \
+        libuuid=2.41.6-r1 \
         sqlite-libs=3.53.4-r0 \
     && rm -f /var/log/apk.log
 RUN apk add --no-cache \
@@ -72,20 +73,20 @@ RUN apk add --no-cache \
         aardvark-dns=2.1.0-r0 \
         catatonit=0.2.1-r0 \
         conmon=2.2.1-r0 \
-        containers-common=0.69.1-r0 \
+        container-libs=0.69.1-r0 \
         crun=1.28-r0 \
         glib=2.88.3-r0 \
         json-c=0.19-r1 \
-        libblkid=2.42.2-r1 \
+        libblkid=2.42.3-r1 \
         libbsd=0.12.2-r0 \
         libcap2=2.78-r0 \
         libeconf=0.8.4-r0 \
         libgcc=15.2.0-r9 \
         libintl=1.0-r0 \
         libmd=1.2.0-r0 \
-        libmount=2.42.2-r1 \
+        libmount=2.42.3-r1 \
         libseccomp=2.6.0-r2 \
-        linux-pam=1.7.1-r2 \
+        linux-pam=1.7.1-r3 \
         netavark=2.1.0-r0 \
         passt=2026.07.28-r0 \
         pcre2=10.48-r0 \

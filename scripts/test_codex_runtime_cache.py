@@ -18,8 +18,11 @@ sys.path.insert(0, str(REPAIR))
 from verify_cached_work import (  # noqa: E402
     VerificationError,
     _verify_outer_command,
+    _verify_planned_owner_interruption,
+    _verify_receipts,
     compare_tree,
 )
+from prepare import recipe, sha256  # noqa: E402
 
 
 def _tree(root: Path, *, content: str = "ok") -> None:
@@ -159,6 +162,206 @@ def test_outer_command_rejects_unparsed_extra_mount(tmp_path: Path) -> None:
     (tmp_path / "command.json").write_text(json.dumps({"command": command}))
     with pytest.raises(VerificationError):
         _verify_outer_command(tmp_path, image, inputs, vendor)
+
+
+def _interrupted_receipts(tmp_path: Path) -> tuple[Path, Path, dict, str]:
+    cached = tmp_path / "cached"
+    work = cached / "work"
+    work.mkdir(parents=True)
+    scope = "/user.slice/user-1000.slice/user@1000.service/stateport.slice/stateport-heavy.slice/stateport-heavy-1-2.service"
+    container_id = "a" * 64
+    containment = {"status": "passed", "containerId": container_id, "bookedScope": scope}
+    (work / "containment-approved.json").write_text(json.dumps(containment))
+    (cached / "containment.json").write_text(json.dumps(containment))
+    build = {
+        "status": "failed", "exitCode": -15,
+        "error": "native Cargo build failed with exit -15; see build.log",
+        "nativeTests": "not_run", "releaseQualification": "not_run",
+    }
+    terminal = {
+        "containerId": container_id,
+        "state": {"Status": "stopped", "Running": False, "OOMKilled": False,
+                   "Pid": 0, "ExitCode": 1},
+        "build": dict(build), "unit": "ActiveState=inactive\n",
+    }
+    (cached / "terminal-state.json").write_text(json.dumps(terminal))
+    (cached / "cleanup.json").write_text(json.dumps({
+        "command": ["podman", "rm", container_id], "exitCode": 0,
+        "stdout": container_id + "\n", "stderr": "",
+        "preserved": "all host source/tools/vendor/target/receipts/logs",
+    }))
+    interruption = {
+        "at": "2026-09-10T18:27:02.978202+00:00",
+        "reason": "Owner explicitly requests breaking monitoring pattern, public-release focus, stop new work and checkpoint owned build.",
+        "action": "SIGTERM to verified owned Cargo process group, leaving pilot alive to write honest terminal receipt",
+        "pid": 2680853, "pgid": 2680853, "scope": scope,
+        "limitation": "Owner interruption is not a planned timeout or successful build; Preserve R13 verified fallback and all R16 output.",
+    }
+    interruption_path = tmp_path / "owner-interruption.json"
+    interruption_path.write_text(json.dumps(interruption))
+    return cached, interruption_path, build, scope
+
+
+def test_planned_owner_interruption_admits_only_matching_terminal_receipts(tmp_path: Path) -> None:
+    cached, interruption_path, build, scope = _interrupted_receipts(tmp_path)
+    result = _verify_planned_owner_interruption(cached, build, interruption_path, scope)
+    assert result["kind"] == "planned-owner-interruption"
+    assert result["buildExitCode"] == -15
+    assert result["terminalContainerId"] == "a" * 64
+
+
+@pytest.mark.parametrize("mutation", [
+    "action", "scope", "build-exit", "terminal-oom", "cleanup-id", "missing-terminal",
+])
+def test_planned_owner_interruption_refuses_unbound_or_unsafe_state(
+    tmp_path: Path, mutation: str,
+) -> None:
+    cached, interruption_path, build, scope = _interrupted_receipts(tmp_path)
+    interruption = json.loads(interruption_path.read_text())
+    if mutation == "action":
+        interruption["action"] = "SIGTERM"
+        interruption_path.write_text(json.dumps(interruption))
+    elif mutation == "scope":
+        interruption["scope"] = scope + "/unrelated"
+        interruption_path.write_text(json.dumps(interruption))
+    elif mutation == "build-exit":
+        build["exitCode"] = -1
+    elif mutation == "terminal-oom":
+        terminal_path = cached / "terminal-state.json"
+        terminal = json.loads(terminal_path.read_text())
+        terminal["state"]["OOMKilled"] = True
+        terminal_path.write_text(json.dumps(terminal))
+    elif mutation == "cleanup-id":
+        cleanup_path = cached / "cleanup.json"
+        cleanup = json.loads(cleanup_path.read_text())
+        cleanup["command"][-1] = "b" * 64
+        cleanup_path.write_text(json.dumps(cleanup))
+    else:
+        (cached / "terminal-state.json").unlink()
+    with pytest.raises(VerificationError):
+        _verify_planned_owner_interruption(cached, build, interruption_path, scope)
+
+
+def _receipt_gate_fixture(tmp_path: Path, *, interrupted: bool) -> tuple[Path, dict]:
+    cached = tmp_path / "cached"
+    work = cached / "work"
+    (work / "native").mkdir(parents=True)
+    value = recipe()
+    source = value["source"]
+    (work / "native/source-preparation.json").write_text(json.dumps({
+        "recipeSha256": sha256(REPAIR / "recipe.json"),
+        "chromiumVendorManifestSha256": value["chromiumVendorManifestSha256"],
+        "restoredIcuDataSha256": source["missingIcuData"]["sha256"],
+    }))
+    build = {
+        "status": "failed",
+        "error": (
+            "native Cargo build failed with exit -15; see build.log"
+            if interrupted else "bounded native pilot timed out"
+        ),
+        "exitCode": -15 if interrupted else None,
+        "recipeSha256": sha256(REPAIR / "recipe.json"),
+        "fixedV8Commit": source["fixedV8Commit"],
+        "fixedV8Version": source["fixedV8Version"],
+        "nativeTests": "not_run", "releaseQualification": "not_run",
+        "command": ["/work/tools/rust/bin/cargo", "build", "--offline", "--locked",
+                    "--release", "--target", value["pilot"]["target"], "--lib"],
+    }
+    (work / "native-build-receipt.json").write_text(json.dumps(build))
+    (work / "containment-approved.json").write_text(json.dumps({"status": "passed"}))
+    return cached, value
+
+
+def test_receipt_gate_refuses_interrupted_build_without_explicit_owner_receipt(tmp_path: Path) -> None:
+    cached, value = _receipt_gate_fixture(tmp_path, interrupted=True)
+    with pytest.raises(VerificationError, match="planned owner interruption receipt"):
+        _verify_receipts(cached, "sha256:" + "a" * 64, value)
+
+
+def test_receipt_gate_refuses_timeout_with_owner_interruption_receipt(tmp_path: Path) -> None:
+    cached, value = _receipt_gate_fixture(tmp_path, interrupted=False)
+    owner = tmp_path / "owner-interruption.json"
+    owner.write_text("{}")
+    with pytest.raises(VerificationError, match="cannot accompany a timeout"):
+        _verify_receipts(
+            cached, "sha256:" + "a" * 64, value,
+            planned_owner_interruption=owner,
+        )
+
+
+def test_cli_preserves_owner_receipt_symlink_for_canonical_refusal(tmp_path: Path, monkeypatch) -> None:
+    import verify_cached_work
+
+    cached, inputs, vendor = (tmp_path / name for name in ("cached", "inputs", "vendor"))
+    cached.mkdir(); inputs.mkdir(); vendor.mkdir()
+    image = tmp_path / "image-id"
+    image.write_text("sha256:" + "a" * 64)
+    owner = tmp_path / "owner.json"
+    owner.write_text("{}")
+    link = tmp_path / "owner-link.json"
+    link.symlink_to(owner)
+    observed: dict[str, Path] = {}
+
+    def fake_verify(*args, **kwargs):
+        observed["path"] = kwargs["planned_owner_interruption"]
+        return {"status": "cached-work-verified"}
+
+    monkeypatch.setattr(verify_cached_work, "verify", fake_verify)
+    monkeypatch.setattr(verify_cached_work, "verify_inputs", lambda _path: None)
+    monkeypatch.setattr(sys, "argv", [
+        "verify_cached_work.py", "--cached-run", str(cached), "--inputs", str(inputs),
+        "--vendor-inputs", str(vendor), "--image-id-file", str(image),
+        "--staging", str(tmp_path / "staging"), "--planned-owner-interruption", str(link),
+    ])
+    assert verify_cached_work.main() == 0
+    assert observed["path"].is_symlink()
+    with pytest.raises(VerificationError, match="canonical regular file"):
+        _verify_planned_owner_interruption(cached, {}, observed["path"], None)
+
+
+def test_full_verifier_receipt_keeps_interruption_admission_when_mocked(tmp_path: Path, monkeypatch) -> None:
+    """The correspondence receipt consumed by later lineage review keeps its cache class."""
+    import verify_cached_work
+    import booked_pilot
+
+    cached = tmp_path / "cached"
+    inputs = tmp_path / "inputs"
+    vendor = tmp_path / "vendor"
+    cached.mkdir(); inputs.mkdir(); vendor.mkdir()
+    image = tmp_path / "image-id"
+    image.write_text("sha256:" + "a" * 64)
+    admission = {
+        "kind": "planned-owner-interruption",
+        "receiptSha256": "c" * 64,
+        "terminalContainerId": "d" * 64,
+        "buildExitCode": -15,
+        "qualification": "not_run; continuation remains unqualified",
+    }
+    monkeypatch.setattr(verify_cached_work, "verify_inputs", lambda _path: None)
+    monkeypatch.setattr(
+        verify_cached_work, "_verify_outer_command",
+        lambda *args, **kwargs: {"timeoutArgument": "--timeout-seconds=4800",
+                                 "mounts": [], "governorCgroup": None},
+    )
+    monkeypatch.setattr(
+        verify_cached_work, "_verify_receipts",
+        lambda *args, **kwargs: {"recipeSha256": sha256(REPAIR / "recipe.json"),
+                                 "builderImage": image.read_text(),
+                                 "cachedBuildStatus": "failed",
+                                 "cacheAdmission": admission},
+    )
+    monkeypatch.setattr(booked_pilot, "governor_cgroup_parent", lambda: "/booked/test")
+
+    def fake_observed(_command, output, _parent, _log):
+        (output / "work/correspondence-result.json").write_text(json.dumps({
+            "status": "cached-work-verified",
+            "trees": {"native": {}, "tools": {}, "vendor": {}},
+        }))
+        return 0
+
+    monkeypatch.setattr(booked_pilot, "observed_native", fake_observed)
+    result = verify_cached_work.verify(cached, inputs, vendor, image, tmp_path / "staging")
+    assert result["cacheAdmission"] == admission
 
 
 @pytest.mark.parametrize("mutation", [

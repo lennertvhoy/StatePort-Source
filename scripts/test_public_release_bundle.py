@@ -1148,3 +1148,96 @@ def test_stateport_crun_debian_package_is_deterministic_and_installs_exact_binar
     runtime = extracted / "usr/libexec/stateport/crun"
     assert runtime.read_bytes() == binary
     assert runtime.stat().st_mode & 0o111
+
+
+def _release_bundle_cli_arguments(tmp_path: Path) -> list[str]:
+    return [
+        "--source",
+        str(tmp_path / "source"),
+        "--commit",
+        "0" * 40,
+        "--version",
+        "0.1.0-alpha.17",
+        "--source-url",
+        "https://github.com/lennertvhoy/StatePort.git",
+        "--public-url",
+        "https://127.0.0.1:5443/stateport-qualification.git",
+        "--clone-parent",
+        str(tmp_path / "clone-parent"),
+        "--private-detectors",
+        str(tmp_path / "private-export-detectors.json"),
+        "--wheelhouse",
+        str(tmp_path / "wheelhouse"),
+        "--output",
+        str(tmp_path / "output"),
+    ]
+
+
+def test_cli_forwards_local_qualification_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forwarded: dict[str, object] = {}
+
+    def fake_build_release_bundle(**arguments: object) -> dict[str, object]:
+        forwarded.update(arguments)
+        return {"status": "ok"}
+
+    def fake_require_guard(*arguments: object) -> str:
+        return "guard-receipt"
+
+    monkeypatch.setattr(bundle, "build_release_bundle", fake_build_release_bundle)
+    monkeypatch.setattr(bundle, "require_guard", fake_require_guard)
+
+    exit_code = bundle.main(
+        [
+            *_release_bundle_cli_arguments(tmp_path),
+            "--qualification-local",
+            "--qualification-ref",
+            "refs/heads/qualification-local-alpha17",
+        ]
+    )
+
+    assert exit_code == 0
+    assert forwarded["qualification_local"] is True
+    assert forwarded["qualification_ref"] == "refs/heads/qualification-local-alpha17"
+
+
+def test_cli_refuses_qualification_ref_without_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unexpected(*arguments: object, **keywords: object) -> dict[str, object]:
+        raise AssertionError("release build must not run for refused arguments")
+
+    monkeypatch.setattr(bundle, "build_release_bundle", unexpected)
+    monkeypatch.setattr(bundle, "require_guard", unexpected)
+
+    with pytest.raises(SystemExit) as refusal:
+        bundle.main(
+            [
+                *_release_bundle_cli_arguments(tmp_path),
+                "--qualification-ref",
+                "refs/heads/qualification-local-alpha17",
+            ]
+        )
+
+    assert refusal.value.code == 2
+    assert (
+        "--qualification-ref is only valid together with --qualification-local"
+        in capsys.readouterr().err
+    )
+
+
+def test_cli_requires_qualification_ref_for_local_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unexpected(*arguments: object, **keywords: object) -> dict[str, object]:
+        raise AssertionError("release build must not run for refused arguments")
+
+    monkeypatch.setattr(bundle, "build_release_bundle", unexpected)
+    monkeypatch.setattr(bundle, "require_guard", unexpected)
+
+    with pytest.raises(SystemExit) as refusal:
+        bundle.main([*_release_bundle_cli_arguments(tmp_path), "--qualification-local"])
+
+    assert refusal.value.code == 2
+    assert "--qualification-local requires --qualification-ref" in capsys.readouterr().err

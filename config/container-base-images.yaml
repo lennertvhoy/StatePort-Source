@@ -1,5 +1,5 @@
 formatVersion: stateport.container-base-images/v1
-resolvedOn: "2026-08-14"
+resolvedOn: "2026-09-12"
 architecture: linux/amd64
 resolution:
   mechanism: skopeo-inspect-primary-registry
@@ -15,11 +15,11 @@ images:
     created: "2026-08-13T19:33:38Z"
     usedBy: [images/stateport-execution-host/Containerfile]
   python-3.13-alpine3.23:
-    reference: docker.io/library/python:3.13-alpine3.23@sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76
-    indexDigest: sha256:9fdbf2e3e82628351513560b121e2ee6ce31cac212be9e070c5a5e2769fb5e76
-    platformManifestDigest: sha256:72c39ab9dbf2227aa91ec2246e6492260ee2530c36bdf37b208394b42d757b60
-    observedVersion: 3.13.14-alpine3.23
-    created: "2026-06-22T20:08:13.556822525Z"
+    reference: docker.io/library/python:3.13-alpine3.23@sha256:75f27d686432419c9d42420b2b9ef605868c7a0682a6be10a6601fad46c2df01
+    indexDigest: sha256:75f27d686432419c9d42420b2b9ef605868c7a0682a6be10a6601fad46c2df01
+    platformManifestDigest: sha256:c694844958d415b76979bb3e0927273b013294ab36e715ca1fc4962713a8ee69
+    observedVersion: 3.13.15-alpine3.23
+    created: "2026-09-01T00:07:55.113870658Z"
     usedBy: [apps/web/Dockerfile, apps/api/Dockerfile, apps/worker/Dockerfile, apps/runner/Dockerfile, images/stateport-execution-host/Containerfile]
   node-22-alpine3.22:
     reference: docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8
