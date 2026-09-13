@@ -227,3 +227,167 @@ def test_control_process_group_is_owned_and_stopped_on_timeout(monkeypatch, time
     assert kwargs["stderr"] == bridge.subprocess.DEVNULL
     assert kwargs["start_new_session"] is True
     assert kwargs["env"] == host._ROOT_COMMAND_ENV and kwargs["cwd"] == "/"
+
+
+# --- Fresh genesis on topologies that ship no workspace-authority web unit ---
+# The workspace-issuer context file is absent; the root-owned provisioning
+# receipt must prove that absence is the installed truth.
+
+
+def _genesis_receipt(**overrides):
+    receipt = {
+        "schema": host.RECEIPT_SCHEMA,
+        "receiptPath": bridge.PROVISIONING_RECEIPT_PATH,
+        "planDigest": "sha256:" + "1" * 64,
+        "releaseId": "test-release",
+        "releaseIndexDigest": "sha256:" + "2" * 64,
+        "signedPayloadDigest": "sha256:" + "c" * 64,
+        "targetId": host.WSL2_TARGET_ID,
+        "topologyDigest": "sha256:" + "3" * 64,
+        "result": "succeeded",
+        "controlUid": host.CONTROL_UID,
+        "executionUid": host.EXEC_UID,
+        "steps": [
+            {"step": "create-accounts", "result": "applied", "commands": [], "detail": ""},
+            {"step": "record-provisioning-receipt", "result": "applied", "commands": [], "detail": ""},
+        ],
+    }
+    receipt.update(overrides)
+    return receipt
+
+
+def _genesis_fixture(monkeypatch, receipt, *, metadata=None, absent_receipt=False, symlink_receipt=False):
+    """Context file absent; the receipt is read through the real workspace
+    authority invariants (_workspace_json -> _read_regular_file fakes)."""
+    operator = {"user": "operator", "uid": 1000, "gid": 1000}
+    code = {"helperDigest": "sha256:" + "a" * 64, "moduleManifestDigest": "sha256:" + "b" * 64}
+    raw = json.dumps(receipt).encode()
+    observed = metadata or SimpleNamespace(st_uid=0, st_gid=0, st_nlink=1, st_mode=0o100644)
+
+    def read(layout, path, *, step, absent_ok=False, maximum_bytes=None, expected_filesystem_id=None):
+        if path == host.WORKSPACE_CONTEXT_PATH:
+            return b"", None  # genesis case: the issuer context file is absent
+        if path == bridge.PROVISIONING_RECEIPT_PATH:
+            if absent_receipt:
+                raise host.StepFailed(step, f"regular file is absent: {path}")
+            if symlink_receipt:
+                raise host.StepFailed(step, f"path is not a regular file: {path}")
+            return raw, observed
+        raise host.StepFailed(step, f"unexpected fixture read: {path}")
+
+    monkeypatch.setattr(host, "_read_regular_file", read)
+    monkeypatch.setattr(host, "_workspace_operator", lambda accounts: dict(operator))
+    monkeypatch.setattr(host, "_workspace_code_identity", lambda layout: code)
+    account = SimpleNamespace(uid=host.CONTROL_UID, gid=host.CONTROL_GID, home=host.CONTROL_HOME)
+    return operator, code, SimpleNamespace(user=lambda name: account)
+
+
+def _expected_genesis_context(operator, code):
+    return {
+        "operator": operator,
+        "releaseId": "test-release",
+        "signedPayloadDigest": "sha256:" + "c" * 64,
+        "controlUid": host.CONTROL_UID,
+        "executionUid": host.EXEC_UID,
+        "codeIdentity": code,
+        "operatorAuthority": "provisioning-receipt",
+    }
+
+
+def test_genesis_context_synthesizes_receipt_backed_operator_authority(monkeypatch):
+    operator, code, accounts = _genesis_fixture(monkeypatch, _genesis_receipt())
+    expected = _expected_genesis_context(operator, code)
+    assert bridge.operator_context(accounts=accounts, layout=host.HostLayout()) == expected
+    assert bridge.operator_context(accounts=accounts, layout=host.HostLayout(), require_accepted_unit=False) == expected
+    # initialize() re-reads durable authority and demands equality.
+    assert bridge.operator_context(accounts=accounts, layout=host.HostLayout()) == bridge.operator_context(
+        accounts=accounts, layout=host.HostLayout()
+    )
+
+
+def test_genesis_initialize_succeeds_through_receipt_backed_context(monkeypatch):
+    receipt = _genesis_receipt()
+    operator, code, accounts = _genesis_fixture(monkeypatch, receipt)
+    monkeypatch.setattr(bridge.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("STATEPORT_ROOT_HELPER", "1")
+    monkeypatch.setenv("STATEPORT_UPDATER_CONTROL_PLANE", "foreign:factory")
+    monkeypatch.setenv("PYTHONPATH", "/operator/code")
+    monkeypatch.setattr(host, "SystemAccounts", lambda: accounts)
+    index = SimpleNamespace(release_id=receipt["releaseId"], index_digest=receipt["releaseIndexDigest"],
+                            signed_digest=receipt["signedPayloadDigest"])
+    monkeypatch.setattr(host, "_verify_cli", lambda args: SimpleNamespace(index=index))
+    request = {"publicData": "fixture"}
+    monkeypatch.setattr(bridge, "bootstrap_request", lambda *args: request)
+    calls = []
+
+    def child(command, payload, **kwargs):
+        kwargs["input"] = payload
+        calls.append((command, kwargs))
+        response = {"schema": "stateport.control-updater-genesis/v1", "status": "initialized",
+                    "releaseId": receipt["releaseId"], "releaseIndexDigest": receipt["releaseIndexDigest"],
+                    "signedPayloadDigest": receipt["signedPayloadDigest"],
+                    "installedIdentityDigest": "sha256:" + "c" * 64, "admissionDigest": "sha256:" + "d" * 64}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(response).encode())
+
+    monkeypatch.setattr(bridge, "_run_control_command", child)
+    assert bridge.initialize(SimpleNamespace())["releaseId"] == receipt["releaseId"]
+    assert len(calls) == 1
+    assert json.loads(calls[0][1]["input"]) == request
+    assert calls[0][1]["timeout"] == 900
+
+
+def test_genesis_refuses_when_the_provisioning_receipt_is_absent(monkeypatch):
+    _, _, accounts = _genesis_fixture(monkeypatch, _genesis_receipt(), absent_receipt=True)
+    with pytest.raises(host.ProvisioningRefusal):
+        bridge.operator_context(accounts=accounts, layout=host.HostLayout())
+
+
+@pytest.mark.parametrize("result", ["applied", "failed", "not-reached"])
+def test_genesis_refuses_receipt_that_published_workspace_authority(monkeypatch, result):
+    receipt = _genesis_receipt()
+    receipt["steps"].append({"step": "publish-workspace-issuer-context", "result": result, "commands": [], "detail": ""})
+    _, _, accounts = _genesis_fixture(monkeypatch, receipt)
+    with pytest.raises(host.ProvisioningRefusal, match="migration or reprovision is required"):
+        bridge.operator_context(accounts=accounts, layout=host.HostLayout())
+
+
+@pytest.mark.parametrize("mutation", [
+    "absent_receipt", "symlink_receipt", "foreign_uid", "group_writable", "shared_inode",
+    "wrong_receipt_path", "failed_result", "bad_schema", "control_uid", "execution_uid",
+    "account_changed", "empty_release", "bad_signed_digest", "missing_steps", "malformed_steps",
+])
+def test_genesis_refuses_unprovable_or_untrusted_receipt(monkeypatch, mutation):
+    receipt = _genesis_receipt()
+    metadata = None
+    if mutation == "foreign_uid":
+        metadata = SimpleNamespace(st_uid=1000, st_gid=0, st_nlink=1, st_mode=0o100644)
+    elif mutation == "group_writable":
+        metadata = SimpleNamespace(st_uid=0, st_gid=0, st_nlink=1, st_mode=0o100664)
+    elif mutation == "shared_inode":
+        metadata = SimpleNamespace(st_uid=0, st_gid=0, st_nlink=2, st_mode=0o100644)
+    elif mutation == "wrong_receipt_path":
+        receipt["receiptPath"] = host.DEFAULT_RECEIPT_DIRECTORY + "/execution-host-other.json"
+    elif mutation == "failed_result":
+        receipt["result"] = "failed"
+    elif mutation == "bad_schema":
+        receipt["schema"] = "stateport.execution-host-provisioning-receipt/v0"
+    elif mutation == "control_uid":
+        receipt["controlUid"] = 1000
+    elif mutation == "execution_uid":
+        receipt["executionUid"] = 1000
+    elif mutation == "empty_release":
+        receipt["releaseId"] = ""
+    elif mutation == "bad_signed_digest":
+        receipt["signedPayloadDigest"] = "sha256:zz"
+    elif mutation == "missing_steps":
+        receipt["steps"] = None
+    elif mutation == "malformed_steps":
+        receipt["steps"] = [{"result": "applied"}]
+    _, _, accounts = _genesis_fixture(
+        monkeypatch, receipt, metadata=metadata,
+        absent_receipt=mutation == "absent_receipt", symlink_receipt=mutation == "symlink_receipt",
+    )
+    if mutation == "account_changed":
+        accounts.user = lambda name: None
+    with pytest.raises(host.ProvisioningRefusal):
+        bridge.operator_context(accounts=accounts, layout=host.HostLayout())

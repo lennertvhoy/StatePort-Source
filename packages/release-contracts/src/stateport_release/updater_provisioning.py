@@ -21,6 +21,11 @@ from .cosign import MAX_BUNDLE_BYTES, CosignVerifier, _check_bundle_bytes, bundl
 
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 CONTROL_UPDATER_ROOT = host.CONTROL_HOME + "/updater"
+# The canonical create-only receipt path the installer bootstrap passes as
+# --receipt-out; root-owned, 0644 below host.DEFAULT_RECEIPT_DIRECTORY.
+PROVISIONING_RECEIPT_PATH = (
+    host.DEFAULT_RECEIPT_DIRECTORY + "/execution-host-provisioning-receipt.json"
+)
 _CONTROL_PROGRAM = (
     'import runpy,sys; '
     'sys.path.insert(0,"/usr/local/lib/stateport/provisioning"); '
@@ -28,9 +33,79 @@ _CONTROL_PROGRAM = (
 )
 
 
+def _receipt_backed_operator_context(
+    *, accounts: host.Accounts, layout: host.HostLayout, operator: dict[str, Any],
+) -> dict[str, Any]:
+    """Fresh genesis when the installed topology provably ships no
+    workspace-authority web unit.
+
+    The workspace-issuer context file is absent. Refuse unless the root-owned
+    provisioning receipt at its canonical installed path proves that absence
+    is the installed truth: a succeeded provisioning run whose plan never
+    contained the workspace-authority publication step. Every invariant
+    failure is a refusal; nothing here creates operator authority beyond what
+    the receipt and the installed root-owned files prove.
+    """
+    try:
+        receipt, _ = host._workspace_json(layout, PROVISIONING_RECEIPT_PATH, uid=0)
+    except host.StepFailed as exc:
+        raise host.ProvisioningRefusal(
+            "provisioning receipt is unavailable to prove the installed workspace topology"
+        ) from exc
+    if (
+        receipt.get("schema") != host.RECEIPT_SCHEMA
+        or receipt.get("receiptPath") != PROVISIONING_RECEIPT_PATH
+        or receipt.get("result") != "succeeded"
+    ):
+        raise host.ProvisioningRefusal("provisioning receipt does not prove a succeeded installed topology")
+    steps = receipt.get("steps")
+    if (
+        not isinstance(steps, list)
+        or any(not isinstance(entry, dict) or not isinstance(entry.get("step"), str) for entry in steps)
+        or any(entry["step"] == "publish-workspace-issuer-context" for entry in steps)
+    ):
+        # A succeeded receipt lists every executed plan step. Publication in
+        # the plan means the absent context file is tamper, not genesis.
+        raise host.ProvisioningRefusal(
+            "updater initialization requires current installed operator authority; migration or reprovision is required"
+        )
+    if receipt.get("controlUid") != host.CONTROL_UID or receipt.get("executionUid") != host.EXEC_UID:
+        raise host.ProvisioningRefusal("installed control account identity changed")
+    control = accounts.user(host.CONTROL_USER)
+    if control is None or (control.uid, control.gid, control.home) != (
+        host.CONTROL_UID, host.CONTROL_GID, host.CONTROL_HOME,
+    ):
+        raise host.ProvisioningRefusal("installed control account identity changed")
+    release_id, signed_digest = receipt.get("releaseId"), receipt.get("signedPayloadDigest")
+    if (
+        not isinstance(release_id, str) or not release_id
+        or not isinstance(signed_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", signed_digest) is None
+    ):
+        raise host.ProvisioningRefusal("provisioning receipt release identity is incomplete")
+    # bootstrap_request() independently binds releaseId and signedPayloadDigest
+    # to the cosign-verified release index; the receipt supplies the installed
+    # release identity. No webUnit exists on this path, so the accepted-unit
+    # checks do not apply.
+    return {
+        "operator": operator,
+        "releaseId": release_id,
+        "signedPayloadDigest": signed_digest,
+        "controlUid": host.CONTROL_UID,
+        "executionUid": host.EXEC_UID,
+        "codeIdentity": host._workspace_code_identity(layout),
+        "operatorAuthority": "provisioning-receipt",
+    }
+
+
 def operator_context(*, accounts: host.Accounts, layout: host.HostLayout, require_accepted_unit: bool = True) -> dict[str, Any]:
     """Bind authenticated sudo identity to the durable accepted installation."""
     operator = host._workspace_operator(accounts)
+    _, observed = host._read_regular_file(
+        layout, host.WORKSPACE_CONTEXT_PATH, step="workspace-authority",
+        absent_ok=True, maximum_bytes=1024 * 1024,
+    )
+    if observed is None:
+        return _receipt_backed_operator_context(accounts=accounts, layout=layout, operator=operator)
     context, _ = host._workspace_json(layout, host.WORKSPACE_CONTEXT_PATH, uid=0, private=True)
     if (
         context.get("formatVersion") not in {
