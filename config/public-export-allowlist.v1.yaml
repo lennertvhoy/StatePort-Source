@@ -1280,6 +1280,7 @@ rules:
   - scripts/test_provider_operation_matrix.py
   - scripts/test_provider_router.py
   - scripts/test_provision_execution_host.py
+  - scripts/test_rehearsal_smoke_receipt.py
   - scripts/test_updater_provisioning.py
   - scripts/test_public_alpha_quickstart.py
   - scripts/test_public_release_bundle.py

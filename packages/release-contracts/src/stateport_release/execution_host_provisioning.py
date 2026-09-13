@@ -3398,7 +3398,13 @@ def _step_control_units(ctx: _Apply) -> dict[str, Any]:
             f"control unit content digest mismatch for {spec['path']}",
         )
         unit_text = spec["content"]
-        if "stateport-web" in str(spec["path"]) and b"STATEPORT_EXECUTION_SOCKET=" in content:
+        # The service is identified by its signed Label line, never the path:
+        # materialized control-plane unit filenames are content-addressed and
+        # carry no service name (the template placeholder is substituted).
+        if (
+            "Label=io.stateport.service.id=stateport-web" in unit_text
+            and b"STATEPORT_EXECUTION_SOCKET=" in content
+        ):
             # The per-install grant digest (computed by the grant step) is
             # injected into the web unit so the sanctioned proxy binds the
             # exact provisioned grant.

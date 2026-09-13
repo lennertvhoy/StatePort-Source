@@ -1528,7 +1528,11 @@ class VM:
             if name in {"install", "install-rerun"} and "images" in binding:
                 smoke_name = name + "-services"
                 receipt["phases"][smoke_name] = {"ok": False}
-                receipt["phases"][smoke_name] = installed_service_smoke(self, binding)
+                try:
+                    receipt["phases"][smoke_name] = installed_service_smoke(self, binding)
+                except Exception as exc:  # noqa: BLE001 — the failure IS the result
+                    self._record_smoke_failure(receipt, smoke_name, exc)
+                    return receipt
             if name == "install":
                 self.phase_gate("post-bootstrap-runtime-smoke")
                 package_check = (
@@ -1717,6 +1721,26 @@ exit 42
             check=False,
             timeout=30,
         )
+
+    def _record_smoke_failure(self, receipt: dict, smoke_name: str, exc: Exception) -> None:
+        """Record an installed-service smoke failure as a failed rehearsal.
+
+        A smoke exception must still produce a failed rehearsal receipt (with
+        failure snapshots as feasible) and honor the --keep-vm hold, instead
+        of crashing main() before either runs. Mirrors the typed
+        install-failure path above.
+        """
+        log(f"phase {smoke_name} FAILED: {type(exc).__name__}: {exc}")
+        receipt["phases"][smoke_name] = {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}"[:2000],
+        }
+        receipt["result"] = "failed"
+        try:
+            self._collect_failure_snapshots(receipt)
+        except Exception as snapshot_exc:  # noqa: BLE001 — snapshots are best-effort
+            receipt["failureSnapshotsError"] = f"{type(snapshot_exc).__name__}: {snapshot_exc}"[:2000]
+        self._collect_diagnostics(receipt)
 
     def _collect_failure_snapshots(self, receipt: dict) -> None:
         result = self.ssh(

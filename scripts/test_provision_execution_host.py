@@ -1511,12 +1511,18 @@ def test_apply_installs_control_plane_under_control_user(
         lambda: type("Substrate", (), {"substrate": "wsl2"})(),
     )
     daemon.start()
+    # Real installed guests carry content-addressed unit filenames with no
+    # service name; the service identity lives in the signed Label line.
+    # Fail-old (production): path-based detection ("stateport-web" in the path)
+    # matched only this synthetic template-shaped name and never the hashed
+    # installed name, so the grant digest env was never injected.
     materialization = {
-        "accepted/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/stateport-control/stateport-web.container": (
-            "[Container]\nContainerName=stateport-web\nImage=ghcr.io/lennertvhoy/"
+        "accepted/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/stateport-control/stateport-ae4a67f11969-accepted-eda14136885b3924e6745b79572b4012db8a7af63e282b03be53e1559a138f6d.container": (
+            "[Container]\nContainerName=stateport-ae4a67f11969-accepted-eda14136885b3924e6745b79572b4012db8a7af63e282b03be53e1559a138f6d\nImage=ghcr.io/lennertvhoy/"
             "stateport-web@sha256:967657d89a53014a6cb708964d77d8b9ee4913f8414da63a3135696b8b7e05b7\n"
             "User=65532\nUserNS=keep-id:uid=65532,gid=65532\n"
             "PodmanArgs=--group-add=keep-groups\n"
+            "Label=io.stateport.service.id=stateport-web\n"
             "Volume=/run/stateport/execution-control:/run/stateport-execution:ro\n"
             "Environment=STATEPORT_EXECUTION_SOCKET=/run/stateport-execution/control.sock\n"
             "Environment=STATEPORT_EXECUTION_PEER_POLICY=unix-peer-credentials-required\n"
@@ -1529,7 +1535,7 @@ def test_apply_installs_control_plane_under_control_user(
         control_plane_materialization=materialization,
     )
     assert receipt["result"] == "succeeded"
-    control_unit = host.root / "var/lib/stateport-control/.config/containers/systemd/stateport-web.container"
+    control_unit = host.root / "var/lib/stateport-control/.config/containers/systemd/stateport-ae4a67f11969-accepted-eda14136885b3924e6745b79572b4012db8a7af63e282b03be53e1559a138f6d.container"
     assert control_unit.is_file()
     unit_text = control_unit.read_text(encoding="utf-8")
     assert "STATEPORT_EXECUTION_SOCKET=" in unit_text
