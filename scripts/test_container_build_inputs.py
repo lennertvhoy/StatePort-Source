@@ -17,7 +17,7 @@ def _digest(path: Path) -> str:
 
 def test_locked_build_inputs_match_exact_repository_bytes() -> None:
     value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
-    assert value["resolvedOn"] == "2026-09-12"
+    assert value["resolvedOn"] == "2026-09-16"
     for lock in value["locks"].values():
         assert _digest(ROOT / lock["path"]) == lock["digest"]
     for path, expected in value["definitions"].items():
@@ -40,7 +40,7 @@ def test_upstream_tools_are_pinned_in_containerfile() -> None:
     tools = value["upstreamTools"]
     assert tools, "upstreamTools must not be empty"
     go = value["buildToolchains"]["go"]
-    assert go["version"] == "1.26.7"
+    assert go["version"] == "1.27.1"
     assert go["uri"] in containerfile
     assert go["digest"].removeprefix("sha256:") in containerfile
     for name, tool in tools.items():
@@ -56,17 +56,17 @@ def test_upstream_tools_are_pinned_in_containerfile() -> None:
             assert install_path.rsplit("/", 1)[-1] == name
         if "sourceCommit" in tool:
             assert tool["sourceCommit"] in containerfile
-            assert tool["buildToolchain"] == "go1.26.7"
+            assert tool["buildToolchain"] == "go1.27.1"
     assert tools["gh"] == {
-        "version": "2.98.0",
-        "sourceCommit": "a255baf71d13fe5947a4eb7ad521ffd412d64cee",
+        "version": "2.101.0",
+        "sourceCommit": "0cf1092493af067646fc5f3db9421c6a6ec9c938",
         "uri": "https://github.com/cli/cli.git",
-        "digest": "sha256:8774dabd7d3d1a0ee6c8b8231f659d6b8d64a8da8803d63e2a95fba66f2f518f",
-        "buildToolchain": "go1.26.7",
+        "digest": "sha256:4632cfbb1c66183ef50aba9773f973dfb9e5a00e9446e629a864003d71339240",
+        "buildToolchain": "go1.27.1",
         "installPath": "/usr/local/bin/gh",
     }
     assert containerfile.count('go version -m /usr/local/bin/') == 2
-    assert containerfile.count('grep -F "go1.26.7"') == 2
+    assert containerfile.count('grep -F "go1.27.1"') == 2
     assert 'grep -aqF "golang.org/x/mod/sumdb/note" /usr/local/bin/gh' in containerfile
     assert "sumdb\\.Client|sumdb/client|sumdb/tlog|tlog\\." in containerfile
     assert "GOTOOLCHAIN=local" in containerfile

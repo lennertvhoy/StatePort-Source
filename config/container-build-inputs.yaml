@@ -1,5 +1,5 @@
 formatVersion: stateport.container-build-inputs/v1
-resolvedOn: "2026-09-12"
+resolvedOn: "2026-09-16"
 platform: linux/amd64
 
 builder:
@@ -135,9 +135,9 @@ ubuntuSnapshot:
 # Other tools remain pinned upstream assets.
 buildToolchains:
   go:
-    version: 1.26.7
-    uri: https://dl.google.com/go/go1.26.7.linux-amd64.tar.gz
-    digest: sha256:ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
+    version: 1.27.1
+    uri: https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz
+    digest: sha256:63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 
 sourceBuiltTools:
   podman-remote:
@@ -150,18 +150,18 @@ sourceBuiltTools:
 
 upstreamTools:
   gh:
-    version: 2.98.0
-    sourceCommit: a255baf71d13fe5947a4eb7ad521ffd412d64cee
+    version: 2.101.0
+    sourceCommit: 0cf1092493af067646fc5f3db9421c6a6ec9c938
     uri: https://github.com/cli/cli.git
-    digest: sha256:8774dabd7d3d1a0ee6c8b8231f659d6b8d64a8da8803d63e2a95fba66f2f518f
-    buildToolchain: go1.26.7
+    digest: sha256:4632cfbb1c66183ef50aba9773f973dfb9e5a00e9446e629a864003d71339240
+    buildToolchain: go1.27.1
     installPath: /usr/local/bin/gh
   fzf:
     version: 0.74.2
     sourceCommit: 3337be9d450cd349e99273a2d3985ceaf5f3753f
     uri: https://github.com/junegunn/fzf.git
     digest: sha256:8d8dd8e1ddb33aad685713be4cdae48030ce4ecd57f8558db242aafe4f81be8e
-    buildToolchain: go1.26.7
+    buildToolchain: go1.27.1
     installPath: /usr/local/bin/fzf
   node:
     version: 22.23.2
@@ -201,7 +201,7 @@ definitions:
   apps/web/Dockerfile: sha256:97936e5625fc5a75a3e4c9c6264fbe7daf098ccc12f61b9d6520a9166d41a52b
   apps/worker/Dockerfile: sha256:4fc27944b9f35c9604b596baf4424659b3ed1a6e7c18a406d82e399ff0de317a
   apps/runner/Dockerfile: sha256:3bb9c0535d80d683dfe289958020825d78c7f4cd777e39ab49797ebd3902d881
-  images/stateport-dev-workspace/Containerfile: sha256:e975cc7586dd1f5f1d4e10c1e67dc0cfc901f1f03185b2f9052396b3689eed5b
+  images/stateport-dev-workspace/Containerfile: sha256:818f92e2811f92bb6269287390e9d7e172e44b0bca2befd64de74289c28821d0
   images/stateport-execution-host/Containerfile: sha256:fe3613986e3cda87e49d73716a0489147e2fc1fb336c2f8084e18eca33ca2823
   images/stateport-playwright/Containerfile: sha256:1e305b76d9a6ead773883da14b1a57b08d2df8057f1ce8cb4d5ea9e7555f3906
   images/packaged-content.v1.yaml: sha256:1014e6e05083703b45c4f89b26322ff1bbe40d5a1a95891530195cf907531f48

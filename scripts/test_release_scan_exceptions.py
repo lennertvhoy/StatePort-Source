@@ -128,12 +128,7 @@ def test_gh_module_exceptions_are_exact_and_do_not_mask_xcrypto() -> None:
         )
         for record in gh_modules
         if record["package"] == "golang.org/x/mod"
-    ] == [
-        ("RX-2026-047", "GO-2026-6179", "v0.37.0", None),
-        ("RX-2026-048", "GO-2026-6180", "v0.37.0", None),
-        ("RX-2026-164", "GO-2026-6179", "v0.38.0", "/usr/local/bin/gh"),
-        ("RX-2026-165", "GO-2026-6180", "v0.38.0", "/usr/local/bin/gh"),
-    ]
+    ] == []
     assert not [
         record
         for record in config["exceptions"]
