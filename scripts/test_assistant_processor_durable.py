@@ -15,9 +15,11 @@ sys.path.insert(0, str(ROOT / "packages" / "conversation-service" / "src"))
 sys.path.insert(0, str(ROOT / "packages" / "execution-host" / "src"))
 sys.path.insert(0, str(ROOT / "packages" / "external-engine-runtime" / "src"))
 sys.path.insert(0, str(ROOT / "packages" / "codex-adapter" / "src"))
+sys.path.insert(0, str(ROOT / "packages" / "opencode-adapter" / "src"))
 sys.path.insert(0, str(ROOT / "packages" / "persistent-app" / "src"))
 
 from external_engine_runtime import ProcessIdentity  # noqa: E402
+from opencode_adapter import DEFAULT_MODEL  # noqa: E402
 from stateport_persistent_app.assistant_processor import AssistantProcessor  # noqa: E402
 from stateport_persistent_app.assistant_reconciliation import (  # noqa: E402
     AssistantReconciliationState,
@@ -688,3 +690,35 @@ def test_atm10_context_has_no_attachment_bytes(monkeypatch) -> None:
         context = AssistantProcessor._read_instance_context(claim)
         assert "\x89PNG" not in context
         assert "attachment.png" not in context
+
+
+def test_processor_bootstraps_the_shipped_opencode_provider(tmp_path, monkeypatch) -> None:
+    """A fresh install selects OpenCode; no Codex-only model env is required."""
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("STATEPORT_OPENCODE_MODEL", raising=False)
+    processor = AssistantProcessor(FakeConversations(), worker_id="assistant.bootstrap")
+    profile_path = tmp_path / "config" / "stateport" / "provider-router.json"
+    assert profile_path.is_file()
+    document = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert document["provider"]["backendId"] == "opencode"
+    assert document["model"]["id"] == DEFAULT_MODEL
+    assert document["formatVersion"] == "stateport.provider-router/v1"
+    # The durable selection is what the processor actually routes with.
+    assert processor._router.runtime_profile["provider"]["backendId"] == "opencode"
+
+
+def test_opencode_refusal_codes_map_to_truthful_messages() -> None:
+    executable = AssistantProcessor._failure_message(
+        "provider_invocation_failed", "provider_executable_unavailable"
+    )
+    authentication = AssistantProcessor._failure_message(
+        "provider_invocation_failed", "provider_authentication_unverified"
+    )
+    # Known typed refusals must not collapse into the generic fallback.
+    assert "executable" in executable and "install" in executable
+    assert authentication != AssistantProcessor._failure_message(
+        "provider_invocation_failed", ""
+    )
+    assert "verified" in authentication and "Sign in" in authentication

@@ -67,7 +67,12 @@ export function unwrapEnvelope(body: unknown): { ok: true; payload: unknown } | 
         ok: false,
         error: {
           code: typeof raw.code === 'string' ? raw.code : undefined,
-          message: typeof raw.message === 'string' ? raw.message : 'The service reported an error',
+          // Existing envelopes carry `message`; the control-plane agent
+          // contract documents `detail`. Prefer message, fall back to detail
+          // so the operator sees the exact server refusal either way.
+          message: typeof raw.message === 'string' ? raw.message
+            : typeof raw.detail === 'string' ? raw.detail
+            : 'The service reported an error',
         },
       }
     }

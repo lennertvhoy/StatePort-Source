@@ -103,14 +103,19 @@ class AssistantProcessor:
         if router is None:
             profile_path = config_root / "provider-router.json"
             if not profile_path.exists():
-                model = os.environ.get("STATEPORT_CODEX_MODEL", "").strip()
-                if not model:
-                    raise ProviderRouterError(
-                        "STATEPORT_CODEX_MODEL must be explicitly configured "
-                        "before enabling the assistant processor"
-                    )
-                ProviderRouter.configure_codex(
+                # Bootstrap the shipped default provider: OpenCode is the agent
+                # StatePort installs and maintains upstream. A persisted
+                # selection (including Codex) is loaded from the profile below
+                # and is never overridden by, or require, a model environment
+                # variable; the model may still be pinned explicitly.
+                from opencode_adapter import DEFAULT_MODEL
+                model = (
+                    os.environ.get("STATEPORT_OPENCODE_MODEL", "").strip()
+                    or DEFAULT_MODEL
+                )
+                ProviderRouter.configure(
                     profile_path,
+                    provider_id="opencode",
                     model_identifier=model,
                 )
             router = ProviderRouter(profile_path)
@@ -863,6 +868,8 @@ class AssistantProcessor:
                 "provider_cancelled": "The provider request was cancelled. No automatic retry was scheduled.",
                 "provider_output_limited": "The provider exceeded its output bound. Reduce the request before retrying.",
                 "provider_execution_unavailable": "The provider could not execute in this runtime. Check Coding provider settings and runtime permissions.",
+                "provider_executable_unavailable": "The selected provider executable is not installed in this runtime. Install the pinned provider runtime in Coding provider settings, then retry.",
+                "provider_authentication_unverified": "The provider did not accept the request and its authentication could not be verified. Sign in with the provider itself, then retry.",
                 "provider_failed": "The provider request failed. Verify the connection and model in Coding provider settings before retrying.",
             }.get(provider_reason, "The provider request failed. Check Coding provider settings and the work status before retrying.")
         return {

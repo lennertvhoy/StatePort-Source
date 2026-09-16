@@ -7,6 +7,6 @@ now refuses every invocation before any process or filesystem mutation. The Open
 is unaffected. Do not use run_opencode_in_container in production.
 """
 
-from .adapter import OpenCodeProbe, OpenCodeAdapter, OpenCodeRunResult, opencode_probe
+from .adapter import DEFAULT_MODEL, OpenCodeProbe, OpenCodeAdapter, OpenCodeRunResult, opencode_probe
 
-__all__ = ["OpenCodeProbe", "OpenCodeAdapter", "OpenCodeRunResult", "opencode_probe"]
+__all__ = ["DEFAULT_MODEL", "OpenCodeProbe", "OpenCodeAdapter", "OpenCodeRunResult", "opencode_probe"]

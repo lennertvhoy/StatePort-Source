@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from . import daemon_contract as contract
 from .engine import (
+    AGENT_PROVIDER_CONTAINER_PATH,
     EngineError,
     KIND_LABEL,
     MANAGED_LABEL_KEY,
@@ -2470,6 +2471,16 @@ class ExecutionHostDaemon:
             raise _Refusal("workspace-seed-unavailable", "the engine does not implement verified fresh-volume source seeding")
         if "sourceArchive" in spec["parameters"] and getattr(self._engine, "agent_source_commands_supported", False) is not True:
             raise _Refusal("agent-command-unavailable", "the engine does not implement sealed source commands")
+        if spec["parameters"].get("agentProviderProfile") is not None:
+            validate_provider = getattr(self._engine, "validate_agent_provider_capability", None)
+            if getattr(self._engine, "agent_provider_mount_supported", False) is not True or not callable(validate_provider):
+                raise _Refusal("agent-provider-unavailable", "the engine does not implement the sealed agent provider profile")
+            try:
+                # Create-time re-validation of the fixed daemon-owned provider
+                # directory; the marker alone never mounts anything.
+                validate_provider(spec)
+            except EngineError as exc:
+                raise _Refusal("agent-provider-unavailable", str(exc)) from exc
         grant = grant or {}
         grant_id = str(grant.get("grantId", request["requester"]["grantId"]))
         budgets = grant.get("budgets", {})
@@ -2679,6 +2690,15 @@ class ExecutionHostDaemon:
             "specDigest": finalized["specDigest"],
             "resourceEnforcement": resource_enforcement,
         }
+        if spec["parameters"].get("agentProviderProfile") is not None:
+            # The create receipt records the sealed profile and its exact
+            # read-only container path.  The daemon-owned host source path is
+            # deliberately not disclosed to the client.
+            result["agentProviderProfile"] = {
+                "profile": spec["parameters"]["agentProviderProfile"],
+                "containerPath": AGENT_PROVIDER_CONTAINER_PATH,
+                "readOnly": True,
+            }
         if snapshot is not None:
             result["source"] = {"archiveDigest": snapshot["archiveDigest"], "contextDigest": snapshot["contextDigest"], "files": snapshot["files"], "bytes": snapshot["bytes"], "candidateStorage": "bounded-ephemeral-tmpfs", "durableChangedFiles": False}
         if seed is not None:

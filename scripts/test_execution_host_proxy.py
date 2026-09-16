@@ -759,6 +759,7 @@ def test_application_terminal_uses_bound_capsule_client_and_preserves_catalog_ga
     server.actor_role = "platform_operator"
     server.actor_id = "operator"
     server.server_address = ("127.0.0.1", 12345)
+    server.external_loopback_port = None
     server.terminal_brokers = {}
     server.terminal_tickets = {}
     server._terminal_mutex = threading.RLock()
@@ -1241,25 +1242,59 @@ def test_v2_private_grant_auth_precedes_catalog_and_marker_and_routes_exact_crea
 
 
 @pytest.mark.parametrize("transport", ["valid-without-terminal", "empty", "removed"])
-def test_v2_terminal_refuses_before_catalog_or_marker_and_never_host_fallback(short_tmp, transport):
+def test_v2_terminal_fresh_application_falls_back_to_local_pty_while_workspace_and_broken_transport_refuse(short_tmp, transport):
+    """A v2 bindings document with no row for an instance means "no workspace yet".
+
+    A freshly imported application keeps its ordinary local terminal; a
+    workspace-only terminal still refuses before any catalog read, and a
+    removed bindings document still fails closed. A previously bound
+    application whose authority disappeared keeps the strict host-fallback
+    refusal in the catalog-gate test above.
+    """
+    from types import SimpleNamespace
+    for source in (ROOT / "packages").glob("*/src"):
+        sys.path.insert(0, str(source))
     from execution_host.application_workspaces import TRANSPORT_FORMAT
     from stateport_persistent_app.service_process import AppServer
     proxy, peer, entry, row, public, calls = _v2_fixture(short_tmp / "v2")
     if transport == "empty": public.write_text(json.dumps({"formatVersion": TRANSPORT_FORMAT, "bindings": []}))
     if transport == "removed": public.unlink()
+    project = short_tmp / "project"
+    project.mkdir()
+    info = project.stat()
+    entry.update(path=str(project), pathState="present", status="active", filesystem={"device": info.st_dev, "inode": info.st_ino, "kind": "directory"})
+    runtime = short_tmp / "runtime"
+    runtime.mkdir()
     server = object.__new__(AppServer)
     server.execution_host = proxy
-    from types import SimpleNamespace
     server.actor_role = "platform_operator"
     server.experience_policy = SimpleNamespace(permissions_for=lambda role: {"application.terminal.use"})
     server.require_actor_permission = lambda permission: None
     server._drop_terminal_broker = lambda iid: None
-    server.source_app = lambda: pytest.fail("catalog opened before terminal authority")
-    server._remember_application_workspace = lambda *args: pytest.fail("marker written before terminal authority")
+    server._remember_application_workspace = lambda *args: pytest.fail("workspace marker written without a binding")
+    server.source_app = lambda: SimpleNamespace(catalog=SimpleNamespace(get=lambda iid: entry))
+    server.application_experience = lambda app, iid: {"capabilities": [{"id": item, "status": "available"} for item in ("workbench", "terminal")]}
+    server.terminal_brokers = {}
+    server.layout = SimpleNamespace(runtime_root=runtime)
+    server.server_address = ("127.0.0.1", 12345)
+    server.external_loopback_port = None
     try:
-        for platform in [False, True]:
-            with pytest.raises(PermissionError): server._terminal_binding_locked(entry["instanceId"], workspace_only=platform)
-        assert calls == []
+        if transport == "empty":
+            with pytest.raises(PermissionError, match="exact application workspace binding"):
+                server._terminal_binding_locked(entry["instanceId"], workspace_only=True)
+        else:
+            with pytest.raises(PermissionError):
+                server._terminal_binding_locked(entry["instanceId"], workspace_only=True)
+        assert calls == [], "workspace terminal opened the catalog before transport authority"
+        if transport == "empty":
+            binding = server._terminal_binding_locked(entry["instanceId"], workspace_only=False)
+            assert binding[5].target_class == "local_pty", "fresh application must keep its local terminal"
+            assert binding[3] == project, "local terminal must target the cataloged project root"
+            assert calls == [], "local fallback must not consult workspace authority"
+        else:
+            with pytest.raises(PermissionError):
+                server._terminal_binding_locked(entry["instanceId"], workspace_only=False)
+            assert calls == []
     finally:
         peer._listener.close()
 

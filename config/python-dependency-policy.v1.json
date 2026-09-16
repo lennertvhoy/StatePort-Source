@@ -24,7 +24,6 @@
     "input": "requirements/provider-extras.in",
     "pythonPackagesShipped": [],
     "externalExecutables": [
-      "codex",
       "opencode"
     ],
     "missingBehavior": "typed_unavailable"

@@ -47,8 +47,6 @@ BASE_IMAGES = ROOT / "config/container-base-images.yaml"
 BUILD_INPUTS = ROOT / "config/container-build-inputs.yaml"
 PODMAN = Path(os.environ.get("STATEPORT_PODMAN_PATH", shutil.which("podman") or "podman"))
 BUILDER_DESCRIPTOR_ENV = "STATEPORT_RELEASE_BUILDER_DESCRIPTOR"
-PROVIDER_MODE_ENV = "STATEPORT_PROVIDER_MODE"
-PROVIDER_INPUTS = ROOT / "config/provider-runtime-inputs.yaml"
 REGISTRY_IMAGE = (
     "docker.io/library/registry:2@"
     "sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
@@ -57,109 +55,10 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DIGEST_REFERENCE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 _LOOPBACK_REGISTRY = re.compile(r"^127\.0\.0\.1:([0-9]{1,5})$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
-_PROVIDER_VERSION = re.compile(r"^codex-cli [0-9]+\.[0-9]+\.[0-9]+\+[0-9A-Za-z.-]+$")
 
 
 class ReleaseBuildError(RuntimeError):
     pass
-
-
-def load_provider_oci_input() -> dict[str, Any]:
-    """Resolve the locked provider mode before builder or registry admission."""
-
-    mode = os.environ.get(PROVIDER_MODE_ENV, "official-npm")
-    if mode == "official-npm":
-        return {"mode": mode, "image": "stateport-provider-empty"}
-    if mode != "custom-oci":
-        raise ReleaseBuildError(f"{PROVIDER_MODE_ENV} must be official-npm or custom-oci")
-    try:
-        codex = _load_yaml(PROVIDER_INPUTS)["codex"]
-        oci = codex["oci"]
-        if oci.get("enabled") is not True:
-            raise ValueError("custom provider OCI input is not admitted")
-        image = oci["image"]
-        if not isinstance(image, str) or _DIGEST_REFERENCE.fullmatch(image) is None:
-            raise ValueError("custom provider image must be an exact digest reference")
-        fields = {
-            "manifestDigest": oci["manifestDigest"],
-            "platformManifestDigest": oci["platformManifestDigest"],
-            "version": oci["version"],
-            "bubblewrapVersion": oci["bubblewrapVersion"],
-            "ripgrepVersion": oci["ripgrepVersion"],
-            "sourceCommit": oci["sourceCommit"],
-            "sourceArchiveDigest": oci["sourceArchiveDigest"],
-            "buildContextDigest": oci["buildContextDigest"],
-        }
-        for key, value in fields.items():
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"custom provider input lacks {key}")
-        if _DIGEST.fullmatch(fields["manifestDigest"]) is None:
-            raise ValueError("custom provider manifest digest is invalid")
-        if _DIGEST.fullmatch(fields["platformManifestDigest"]) is None:
-            raise ValueError("custom provider platform manifest digest is invalid")
-        if _PROVIDER_VERSION.fullmatch(fields["version"]) is None:
-            raise ValueError("custom provider version is invalid")
-        for key in ("sourceArchiveDigest", "buildContextDigest"):
-            if _DIGEST.fullmatch(fields[key]) is None:
-                raise ValueError(f"custom provider {key} is invalid")
-        if re.fullmatch(r"[0-9a-f]{40}", fields["sourceCommit"]) is None:
-            raise ValueError("custom provider source commit is invalid")
-        if fields["sourceCommit"] != str(codex["source"]["commit"]):
-            raise ValueError("custom provider source commit differs from pinned upstream")
-        if image.rsplit("@", 1)[1] != fields["manifestDigest"]:
-            raise ValueError("custom provider image digest differs from manifestDigest")
-        artifacts = oci["artifacts"]
-        if not isinstance(artifacts, Mapping):
-            raise ValueError("custom provider artifact pins are missing")
-        artifact_args = {
-            "codexDigest": artifacts["codexDigest"],
-            "bubblewrapDigest": artifacts["bubblewrapDigest"],
-            "ripgrepDigest": artifacts["ripgrepDigest"],
-        }
-        for key, value in artifact_args.items():
-            if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
-                raise ValueError(f"custom provider artifact digest is invalid: {key}")
-        licenses = oci["licenses"]
-        if not isinstance(licenses, list):
-            raise ValueError("custom provider license contract is missing")
-        if tuple(licenses) != ("LICENSE", "NOTICE", "BUBBLEWRAP-LICENSE", "BUBBLEWRAP-NOTICE"):
-            raise ValueError("custom provider license contract is incomplete")
-        return {
-            "mode": mode,
-            "image": image,
-            **fields,
-            **artifact_args,
-            "licenses": list(licenses),
-        }
-    except (KeyError, TypeError, ValueError, OSError, yaml.YAMLError) as exc:
-        raise ReleaseBuildError(f"custom provider OCI input is not admissible: {exc}") from exc
-
-
-def provider_build_args(provider_input: Mapping[str, Any] | None) -> list[str]:
-    """Return exact build args shared by both real provider consumers."""
-
-    selected = provider_input or {"mode": "official-npm", "image": "stateport-provider-empty"}
-    args = [
-        "--build-arg", f"STATEPORT_PROVIDER_MODE={selected['mode']}",
-        "--build-arg", f"STATEPORT_PROVIDER_IMAGE={selected['image']}",
-    ]
-    if selected["mode"] == "custom-oci":
-        names = {
-            "manifestDigest": "MANIFEST_DIGEST",
-            "platformManifestDigest": "PLATFORM_MANIFEST_DIGEST",
-            "version": "VERSION",
-            "bubblewrapVersion": "BUBBLEWRAP_VERSION",
-            "ripgrepVersion": "RIPGREP_VERSION",
-            "sourceCommit": "SOURCE_COMMIT",
-            "sourceArchiveDigest": "SOURCE_ARCHIVE_DIGEST",
-            "buildContextDigest": "BUILD_CONTEXT_DIGEST",
-            "codexDigest": "CODEX_DIGEST",
-            "bubblewrapDigest": "BUBBLEWRAP_DIGEST",
-            "ripgrepDigest": "RIPGREP_DIGEST",
-        }
-        for key, name in names.items():
-            args.extend(["--build-arg", f"STATEPORT_PROVIDER_{name}={selected[key]}"])
-    return args
 
 
 @dataclass(frozen=True)
@@ -432,14 +331,7 @@ def validate_definitions() -> Mapping[str, Any]:
                 continue
             parts = line.split()
             reference = parts[1]
-            if reference == "${STATEPORT_PROVIDER_IMAGE}" and (
-                image_id not in {"stateport-web", "stateport-dev-workspace"}
-                or parts != ["FROM", reference, "AS", "stateport-provider"]
-                or "stateport-provider-empty" not in stages
-                or not text.startswith("ARG STATEPORT_PROVIDER_IMAGE=stateport-provider-empty\n")
-            ):
-                raise ReleaseBuildError(f"{image_id} contains an invalid provider stage: {line}")
-            if reference not in allowed_bases and reference not in stages and reference != "${STATEPORT_PROVIDER_IMAGE}":
+            if reference not in allowed_bases and reference not in stages:
                 raise ReleaseBuildError(f"{image_id} contains an unapproved FROM: {line}")
             if len(parts) >= 4 and parts[2].upper() == "AS":
                 stages.add(parts[3])
@@ -609,9 +501,16 @@ def governor_cgroup_parent(
     """Bind container children to the actual bounded governor service, not a slice."""
     try:
         lines = proc_cgroup.read_text().splitlines()
-        if len(lines) != 1 or not lines[0].startswith("0::/"):
+        unified = [line for line in lines if line.startswith("0::/")]
+        rest = [line for line in lines if not line.startswith("0::/")]
+        # A separate legacy cgroup-v1 controller (for example a net_cls mount
+        # created by a running VPN daemon) adds an additive controller line;
+        # only the unified 0:: membership decides the bounded governor path.
+        if len(unified) != 1 or any(
+            re.fullmatch(r"[0-9]+:[a-z_,]+:.*", line) is None for line in rest
+        ):
             raise ValueError("not a unified cgroup v2 membership")
-        membership = lines[0][3:]
+        membership = unified[0][3:]
         match = re.fullmatch(
             r"(/user\.slice/user-[0-9]+\.slice/user@[0-9]+\.service/"
             r"stateport\.slice/stateport-heavy\.slice/stateport-heavy-[0-9]+-[0-9]+\.service)(/[^.][^:]*)?",
@@ -643,17 +542,12 @@ def build_cgroup_path(parent: str, *, digest_file: Path) -> str:
     return f"{parent}/stateport-build-{key}"
 
 
-def base_pull_commands(provider_input: Mapping[str, Any] | None = None) -> list[list[str]]:
+def base_pull_commands() -> list[list[str]]:
     base_manifest = _load_yaml(BASE_IMAGES)
-    commands = [
+    return [
         [str(PODMAN), "pull", "--platform", "linux/amd64", str(base["reference"])]
         for _, base in sorted(base_manifest["images"].items())
     ]
-    if provider_input and provider_input.get("mode") == "custom-oci":
-        commands.append([
-            str(PODMAN), "pull", "--platform", "linux/amd64", str(provider_input["image"])
-        ])
-    return commands
 
 
 def build_commands(
@@ -664,7 +558,6 @@ def build_commands(
     context_root: Path,
     digest_root: Path,
     cgroup_parent: str | None = None,
-    provider_input: Mapping[str, Any] | None = None,
 ) -> list[list[str]]:
     validate_registry_endpoint(registry)
     if not context_root.is_absolute() or not digest_root.is_absolute():
@@ -724,7 +617,6 @@ def build_commands(
                 f"STATEPORT_BUILD_CREATED={identity.created}",
                 "--build-arg",
                 "STATEPORT_BUILD_ADAPTER=podman-rootless-release-build",
-                *provider_build_args(provider_input),
                 "-f",
                 str(context_root / image["containerfile"]),
                 "-t",
@@ -816,9 +708,7 @@ def _image_observation(reference: str) -> dict[str, Any]:
     }
 
 
-def pull_and_verify_base_images(
-    provider_input: Mapping[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+def pull_and_verify_base_images() -> list[dict[str, Any]]:
     manifest = _load_yaml(BASE_IMAGES)
     observed: list[dict[str, Any]] = []
     for base_id, base in sorted(manifest["images"].items()):
@@ -858,35 +748,6 @@ def pull_and_verify_base_images(
                 "verification": "exact-index-and-platform-manifest",
             }
         )
-    if provider_input and provider_input.get("mode") == "custom-oci":
-        reference = str(provider_input["image"])
-        _run([str(PODMAN), "pull", "--platform", "linux/amd64", reference])
-        provider_observation = _image_observation(reference)
-        expected = str(provider_input["manifestDigest"])
-        platform_digest = str(provider_input["platformManifestDigest"])
-        if expected not in provider_observation["observedDigests"]:
-            raise ReleaseBuildError("custom provider index digest was not observed after pull")
-        platform_reference = reference.rsplit("@", 1)[0] + "@" + platform_digest
-        platform_observation = _image_observation(platform_reference)
-        if (
-            platform_observation["digest"] != platform_digest
-            or provider_observation["digest"] != expected
-            or provider_observation["imageId"] != platform_observation["imageId"]
-            or not {expected, platform_digest}.issubset(provider_observation["observedDigests"])
-            or not {expected, platform_digest}.issubset(platform_observation["observedDigests"])
-            or (provider_observation["os"], provider_observation["architecture"]) != ("linux", "amd64")
-            or platform_observation["os"] != "linux"
-            or platform_observation["architecture"] != "amd64"
-        ):
-            raise ReleaseBuildError("custom provider lacks the reviewed linux/amd64 platform manifest")
-        observed.append({
-            "baseId": "stateport-provider",
-            "reference": reference,
-            "indexDigest": expected,
-            "platformManifestDigest": platform_digest,
-            "imageId": provider_observation["imageId"],
-            "verification": "exact-reviewed-provider-manifest-digest",
-        })
     return observed
 
 
@@ -1209,7 +1070,6 @@ def _execute_image_builds(
     context: Path,
     output: Path,
     cgroup_parent: str | None = None,
-    provider_input: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     digest_root = safe_path(output, "digests")
     digest_root.mkdir(mode=0o700)
@@ -1222,7 +1082,6 @@ def _execute_image_builds(
         context_root=context,
         digest_root=digest_root,
         cgroup_parent=cgroup_parent,
-        provider_input=provider_input,
     )
     command_iterator = iter(commands)
     images: dict[str, Any] = {}
@@ -1418,14 +1277,13 @@ def build_release(
     identity, controller_identity = _release_identities(version, source_commit)
     verify_frozen_payload_build_contract(identity.commit, inputs)
     controller = _controller_attestation(controller_identity)
-    provider_input = load_provider_oci_input()
     image_set = validate_definitions()
     builder = verify_podman_builder()
     builder["containerCgroup"] = {"manager": "cgroupfs", "parent": cgroup_parent}
     output = prepare_output_root(output_root, repository=ROOT)
     output_identity = directory_identity(output)
     context, context_receipt = materialize_committed_context(output, identity)
-    base_images = pull_and_verify_base_images(provider_input)
+    base_images = pull_and_verify_base_images()
     digest_root = output / "digests"
     plan = {
         "formatVersion": "stateport.release-image-build-plan/v1",
@@ -1434,8 +1292,7 @@ def build_release(
         "registry": registry,
         "registryImage": REGISTRY_IMAGE,
         "context": context_receipt,
-        "providerInput": provider_input,
-        "basePullCommands": base_pull_commands(provider_input),
+        "basePullCommands": base_pull_commands(),
         "imageCommands": build_commands(
             image_set,
             identity,
@@ -1443,7 +1300,6 @@ def build_release(
             context_root=context,
             digest_root=digest_root,
             cgroup_parent=cgroup_parent,
-            provider_input=provider_input,
         ),
         "compatibilityFloor": "podman-5.0.0",
         "outputRootIdentity": output_identity,
@@ -1473,7 +1329,6 @@ def build_release(
             context=context,
             output=output,
             cgroup_parent=cgroup_parent,
-            provider_input=provider_input,
         )
     except BaseException as failure:
         if registry_record is not None:
@@ -1532,7 +1387,6 @@ def build_release(
         "outputRootIdentity": output_identity,
         "builder": builder,
         "context": context_receipt,
-        "providerInput": provider_input,
         "registry": registry_record,
         "baseImages": base_images,
         "images": images,
@@ -1645,7 +1499,6 @@ def plan_release(
     identity, controller_identity = _release_identities(version, source_commit)
     verify_frozen_payload_build_contract(identity.commit, inputs)
     controller = _controller_attestation(controller_identity)
-    provider_input = load_provider_oci_input()
     image_set = validate_definitions()
     placeholder = Path("/EXTERNAL_STATEPORT_RELEASE_OUTPUT")
     return {
@@ -1655,15 +1508,13 @@ def plan_release(
         "registry": registry,
         "registryImage": REGISTRY_IMAGE,
         "context": {"materialization": "git-archive-exact-commit", "commit": identity.commit},
-        "basePullCommands": base_pull_commands(provider_input),
-        "providerInput": provider_input,
+        "basePullCommands": base_pull_commands(),
         "imageCommands": build_commands(
             image_set,
             identity,
             registry=registry,
             context_root=placeholder / "source-context",
             digest_root=placeholder / "digests",
-            provider_input=provider_input,
         ),
         "compatibilityFloor": "podman-5.0.0",
     }

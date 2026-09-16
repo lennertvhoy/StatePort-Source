@@ -34,8 +34,16 @@ def sealed_workspace_workload(
     *,
     image_reference: str,
     base_revision: str | None = None,
+    agent_provider_profile: str | None = None,
 ) -> dict[str, Any]:
-    """Translate one WorkspaceSpec into a validated sealed daemon workload."""
+    """Translate one WorkspaceSpec into a validated sealed daemon workload.
+
+    ``agent_provider_profile`` is an optional daemon-level profile selection.
+    When it is exactly the sealed marker and the WorkspaceSpec already selects
+    the developer network profile, the sealed workload carries the
+    ``agentProviderProfile`` marker; otherwise the workload is byte-identical
+    to the default application workspace and no provider mount is reachable.
+    """
 
     try:
         spec = WorkspaceSpec.from_dict(spec_value)
@@ -73,6 +81,14 @@ def sealed_workspace_workload(
     }
     if base_revision is not None:
         parameters["baseRevision"] = base_revision
+    if agent_provider_profile is not None:
+        if agent_provider_profile != contract.AGENT_PROVIDER_PROFILE:
+            raise WorkspaceRuntimeError("agent provider profile is not the sealed value")
+        if parameters["networkMode"] != "developer":
+            raise WorkspaceRuntimeError(
+                "agent provider profile requires the developer network mode"
+            )
+        parameters["agentProviderProfile"] = agent_provider_profile
     workload = {
         "kind": "workspace",
         "workloadId": validated["workspaceId"],
@@ -106,9 +122,18 @@ class WorkspaceRuntime:
         self._client = client
         self._image_reference = image_reference
 
-    def create(self, spec: Mapping[str, Any], *, base_revision: str | None = None) -> dict[str, Any]:
+    def create(
+        self,
+        spec: Mapping[str, Any],
+        *,
+        base_revision: str | None = None,
+        agent_provider_profile: str | None = None,
+    ) -> dict[str, Any]:
         workload = sealed_workspace_workload(
-            spec, image_reference=self._image_reference, base_revision=base_revision
+            spec,
+            image_reference=self._image_reference,
+            base_revision=base_revision,
+            agent_provider_profile=agent_provider_profile,
         )
         return self._client.create_workspace(workload)
 

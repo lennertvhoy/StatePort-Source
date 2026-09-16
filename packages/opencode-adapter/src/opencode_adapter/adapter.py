@@ -6,11 +6,9 @@ import re
 from pathlib import Path
 import shlex
 import shutil
-import signal
 import subprocess
 import threading
-import time
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from execution_host.contracts import AgentRunSpec, BackendCapabilities
 
@@ -25,6 +23,8 @@ _CAPABILITY_NAMES = (
 _OPENCODE_DEEPSEEK_V4_FLASH = "opencode/deepseek-v4-flash"
 _OPENCODE_DEEPSEEK_V4_FLASH_FREE = "opencode/deepseek-v4-flash-free"
 _DEFAULT_MODEL = _OPENCODE_DEEPSEEK_V4_FLASH_FREE
+# Public alias: the shipped default model for managed OpenCode invocations.
+DEFAULT_MODEL = _DEFAULT_MODEL
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 _SUPPORTED_RUN_FORMATS = frozenset({"default", "json"})
@@ -207,72 +207,67 @@ class OpenCodeAdapter:
         staging_root: Path,
         *,
         model: str | None = None,
-        cancel_event: threading.Event | None = None,
-        timeout_seconds: int = 300,
-    ) -> OpenCodeRunResult:
+        cancel_event: Any | None = None,
+        environment: Mapping[str, str] | None = None,
+        on_started: Callable[[ProcessIdentity], None] | None = None,
+        on_finished: Callable[[ProcessIdentity], None] | None = None,
+        process_generation: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> ProcessResult:
+        """Run one staging-only OpenCode invocation under the shared supervisor.
+
+        The managed provider path must not invent its own process lifecycle.
+        Using the same hardened supervisor as the Codex adapter keeps bounded
+        output, process-group termination, cancellation and the generated
+        process identity used for restart reconciliation in one place. The raw
+        stdout JSONL stream is preserved for event decoding by the caller.
+        """
+        # Imported here so merely importing the adapter does not require the
+        # execution-runtime package on the caller's path.
+        from external_engine_runtime import (
+            ProcessSpec,
+            filtered_environment,
+            run_process,
+        )
+
         command = self.build_command(spec, staging_root, model=model)
-        start = time.monotonic()
-        process: subprocess.Popen | None = None
-        cancelled = False
-        stdout_chunks: list[str] = []
-        stderr_chunks: list[str] = []
-        try:
-            process = subprocess.Popen(
+        budgets = spec.budgets if isinstance(spec.budgets, Mapping) else {}
+        configured_timeout = budgets.get("timeSeconds")
+        if timeout_seconds is not None:
+            timeout = float(timeout_seconds)
+        elif (
+            isinstance(configured_timeout, int)
+            and not isinstance(configured_timeout, bool)
+            and configured_timeout > 0
+        ):
+            timeout = float(configured_timeout)
+        else:
+            timeout = 300.0
+        configured_steps = budgets.get("steps")
+        if (
+            isinstance(configured_steps, int)
+            and not isinstance(configured_steps, bool)
+            and configured_steps > 0
+        ):
+            max_output_bytes = min(configured_steps * 256 * 1024, 4 * 1024 * 1024)
+        else:
+            max_output_bytes = 1024 * 1024
+        return run_process(
+            ProcessSpec(
                 command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
-            deadline = start + timeout_seconds
-            poll_interval = 0.1
-            while process.poll() is None:
-                if cancel_event is not None and cancel_event.is_set():
-                    process.send_signal(signal.SIGTERM)
-                    cancelled = True
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-                    break
-                if time.monotonic() >= deadline:
-                    process.send_signal(signal.SIGTERM)
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-                    break
-                time.sleep(poll_interval)
-            stdout_text, stderr_text = process.communicate(timeout=10)
-            stdout_chunks.append(stdout_text)
-            stderr_chunks.append(stderr_text)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            duration = time.monotonic() - start
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
-            return OpenCodeRunResult(
-                success=False, returncode=-1,
-                error=str(exc), duration_seconds=duration,
-                cancelled=cancelled,
-            )
-        duration = time.monotonic() - start
-        full_stdout = "".join(stdout_chunks)
-        full_stderr = "".join(stderr_chunks)
-        events = self._parse_events(full_stdout)
-        changed_files = self._extract_changed_files(events, full_stdout)
-        returncode = process.poll() if process else -1
-        return OpenCodeRunResult(
-            success=returncode == 0,
-            returncode=returncode or 0,
-            events=events,
-            stdout=full_stdout,
-            stderr=full_stderr,
-            duration_seconds=duration,
-            changed_files=changed_files,
-            cancelled=cancelled,
+                staging_root,
+                timeout_seconds=timeout,
+                max_output_bytes=max_output_bytes,
+                environment=(
+                    environment
+                    if environment is not None
+                    else filtered_environment()
+                ),
+                on_started=on_started,
+                on_finished=on_finished,
+                process_generation=process_generation,
+            ),
+            cancel_event=cancel_event,
         )
 
     @staticmethod

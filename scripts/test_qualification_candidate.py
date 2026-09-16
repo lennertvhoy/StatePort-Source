@@ -787,7 +787,10 @@ def test_full_journey_needs_no_separate_phase0_but_rejects_stale_receipt(
 ])
 def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatch, missing_binary, sandbox_result):
     from qualification import journey_common
-    observed = dict(executableInstalled=not missing_binary, configured=False, connected=False,
+    # The product executes nothing on GET: a fresh install reports the CLI as
+    # unverified until the sandbox probe actually runs it. CLI absence must
+    # therefore fail through the real sandbox boundary, not a GET boolean.
+    observed = dict(executableInstalled=False, executableStatus='unverified', configured=False, connected=False,
                     authenticationStatus='unverified', requestStatus='unverified', telemetryStatus='unavailable')
     requests = []
     sandbox_calls = []
@@ -818,6 +821,10 @@ def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatc
                     result['providerVersion'] = 'unknown'
                 elif sandbox_result == 'non_object':
                     result = []
+                if missing_binary:
+                    # CLI absent: the probe itself fails to execute it.
+                    result = {'result': 'failed'}
+                    return subprocess.CompletedProcess([], 1, json.dumps(result), 'sandbox refused')
                 return subprocess.CompletedProcess([], int(sandbox_result == 'failed'), json.dumps(result), 'sandbox refused')
             if command == 'cat /tmp/journey-resp.json':
                 return subprocess.CompletedProcess([], 0, json.dumps({'ok': True, 'result': self.payload}), '')
@@ -841,15 +848,12 @@ def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatc
     monkeypatch.setattr(journey_common, 'verify_installed_image_digests', lambda *a: {
         'mismatches': {}, 'containers': {'stateport-web': {'containerId': 'a' * 64}}})
     binding = {'images': {}, 'providerRuntimeRequired': True}
-    if missing_binary:
-        with pytest.raises(ValueError, match='provider observations'):
-            rehearsal.installed_service_smoke(guest, binding)
-    elif sandbox_result == 'passed':
-        assert rehearsal.installed_service_smoke(guest, binding)['providerFreshObservations'] == observed
-    else:
+    if missing_binary or sandbox_result != 'passed':
         with pytest.raises(ValueError, match='provider sandbox'):
             rehearsal.installed_service_smoke(guest, binding)
-    assert len(sandbox_calls) == (0 if missing_binary else 1)
+    else:
+        assert rehearsal.installed_service_smoke(guest, binding)['providerFreshObservations'] == observed
+    assert len(sandbox_calls) == 1
     assert requests == [('GET', '/session'), ('GET', '/v1/execution-host'), ('GET', '/v1/provider/status')]
 
 
@@ -978,7 +982,9 @@ def test_native_install_transport_uses_exact_wsl_distro_and_user(tmp_path: Path)
     native.exec_user = "rehearsal"
     command = "printf '%s' 'literal $HOME; $(false)'"
     argv = native._install_argv(command)
-    assert argv[:6] == ["wsl.exe", "--distribution", native.distro_name, "--user", "rehearsal", "--"]
+    # --exec executes argv directly; the literal $HOME/$(false) payload below
+    # must survive unmangled (the default-shell routing re-expands it).
+    assert argv[:6] == ["wsl.exe", "--distribution", native.distro_name, "--user", "rehearsal", "--exec"]
     assert argv[6:8] == ["script", "-qefc"]
     assert shlex.split(argv[8]) == ["sh", "-lc", command]
     assert argv[9] == "/dev/null"

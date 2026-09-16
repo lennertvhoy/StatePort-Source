@@ -1,54 +1,46 @@
 formatVersion: stateport.provider-runtime-inputs/v1
 resolvedOn: "2026-08-01"
 
-codex:
-  package: "@openai/codex"
-  version: 0.146.0
+opencode:
+  package: opencode-ai
+  version: 1.18.31
   source:
-    repository: https://github.com/openai/codex
-    annotatedTag: rust-v0.146.0
-    tagObject: be449751a978f02e5bbba886999662956c7f38f5
-    commit: e363b08c9175ac1cbe5893615dd2cb9ddf95043b
+    repository: https://github.com/anomalyco/opencode
+    tag: v1.18.31
+    tagType: lightweight
+    commit: 014614d35b397775e5d397a490fc72368c894ec2
+    releasedAt: "2026-09-14T17:47:16Z"
   npm:
     registry: https://registry.npmjs.org
-    packageIntegrity: sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
-    linuxAmd64Integrity: sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
-    packageJson: config/codex-runtime/package.json
-    packageLock: config/codex-runtime/package-lock.json
+    packageTarball: https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.18.31.tgz
+    packageIntegrity: sha512-J95feefeWwtIaw3irx76WjzWcgQXxmuHmDVphvs5ep9X30fBJ6T6bFhw50i9Kx50MG/xPn5w2pafXIfNtdry9w==
+    packageUnpackedSize: 7865
+    packageJson: config/opencode-runtime/package.json
+    packageLock: config/opencode-runtime/package-lock.json
+  platforms:
+    glibc:
+      package: opencode-linux-x64
+      tarball: https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.31.tgz
+      integrity: sha512-gTJ5nGNq+KJblwmeusEdz8YFwvkV7a3xTOV9EKKEmsv0Lkbajq/oQO9jEC0sMiS66mjHDOrhLgIUxSVqfLBM8g==
+      unpackedSize: 185030922
+      os: linux
+      cpu: x64
+      binaryMember: package/bin/opencode
+      observedBinarySha256: sha256:f9dab32248695e9ebd56b16a1921798fd85112cf5a69c7dfd0cabc1e17be4a11
+    musl:
+      package: opencode-linux-x64-musl
+      tarball: https://registry.npmjs.org/opencode-linux-x64-musl/-/opencode-linux-x64-musl-1.18.31.tgz
+      integrity: sha512-TxKfcJII53MZ17NSrJ0p51wx0dJtZrX8By60N5O5/M+eP0oO4jCXKIkdBpP/Bku44gm8QZkTNLBWpPc2OTJweg==
+      unpackedSize: 195447243
+      os: linux
+      cpu: x64
+      binaryMember: package/bin/opencode
+      # Musl build; the Alpine web image supplies libstdc++/libgcc for it.
+      observedBinarySha256: sha256:b4a7415a1f8410c58e099d3bed7c2d78fbc06d2fef3bd7a4ba39fec7f40af48f
+  license:
+    spdx: MIT
+    packagePath: LICENSE
   verification:
-    observedVersion: codex-cli 0.146.0
-    requiredExecFlags: [--json, --ephemeral, --sandbox]
-    authenticationBoundary: operator-owned CODEX_HOME volume
-    credentialsInImage: false
-    installedOnlyIn: [stateport-dev-workspace, stateport-web]
-  # Custom OCI producer admitted for local qualification builds only. The
-  # image identity below is pinned from the verifier-reviewed producer build
-  # (stage1-lane4-20260912/producer-build-r1/producer-build-receipt.json,
-  # result succeeded, reproducible true, double-build digests identical):
-  # FROM-scratch context verified 9/9 against
-  # maintained-consumer-20260910/provider-real-context-receipt.json. The
-  # public anonymous-verified reference is now pinned from transport probe r4
-  # (stage1-lane4-20260912/lane5-transport-receipt-r4.json, sha256
-  # 58574bd66c9d9a5862216f337aec69aa2bca06e8ffc6ed09bbcbbc15638b6c88,
-  # observed 2026-09-12T16:54:44Z, result passed, credentials none, 8/8
-  # images anonymously verified); the 14/14 legacy private digests remain
-  # unreachable (token-denied HTTP 401). The former loopback reference
-  # (retained task-owned TLS registry 127.0.0.1:5001) is no longer used by
-  # this record. No security scan, signing, or release qualification of this
-  # image is claimed yet.
-  oci:
-    enabled: true
-    image: ghcr.io/lennertvhoy/stateport-provider@sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
-    manifestDigest: sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
-    platformManifestDigest: sha256:95c28133db0adbb619f9af5281ad9d18d8e2a26b53edaca2635f9a27a1ed1b17
-    version: codex-cli 0.146.0+stateport.3
-    bubblewrapVersion: bubblewrap 0.12.0
-    ripgrepVersion: ripgrep 15.2.0 (rev e89fff89ac)
-    sourceCommit: e363b08c9175ac1cbe5893615dd2cb9ddf95043b
-    sourceArchiveDigest: sha256:0b789281dc96d60f05c28ddaabc3108a7c3e2f99a9be6cae68bb1c03d5db01c6
-    buildContextDigest: sha256:2eee4bea2a9a729cf8cd53da199b745fd0b6efef0f122a91d959c626906dd7db
-    artifacts:
-      codexDigest: sha256:5f9f40072debd21bbdce864ab8c07d16594cc29657dc368110e2f87610cf3c6f
-      bubblewrapDigest: sha256:2077584e3cc3b1f5f35035257f8f8f202b0046fa7f0e4efec198beb9a9f43d73
-      ripgrepDigest: sha256:e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849
-    licenses: [LICENSE, NOTICE, BUBBLEWRAP-LICENSE, BUBBLEWRAP-NOTICE]
+    observedVersion: "1.18.31"
+    versionSource: opencode --version
+    installMode: npm-ci-ignore-scripts-omit-dev

@@ -1523,6 +1523,63 @@ def wspec(workload_id: str, **changes: Any) -> dict[str, Any]:
     return value
 
 
+class AgentProviderWorkspaceEngine(WorkspaceFakeEngine):
+    """Workspace engine advertising the sealed agent provider mount."""
+
+    agent_provider_mount_supported = True
+
+    def __init__(self, provider_directory: str) -> None:
+        super().__init__()
+        self.provider_directory = provider_directory
+        self.reject_provider = False
+
+    def validate_agent_provider_capability(self, spec: Mapping[str, Any]) -> None:
+        from execution_host.engine import agent_provider_mount_argument
+
+        if self.reject_provider:
+            raise EngineError("agent provider directory is unavailable")
+        agent_provider_mount_argument(spec["parameters"], self.provider_directory)
+
+
+def test_agent_provider_profile_is_recorded_and_fails_closed(tmp_path: Path) -> None:
+    directory = tmp_path / "provider"
+    directory.mkdir(mode=0o700)
+    engine = AgentProviderWorkspaceEngine(str(directory))
+    daemon = _boot(tmp_path, engine)
+    try:
+        marked = wspec(
+            "ws-provider",
+            parameters={
+                "networkMode": "developer",
+                "agentProviderProfile": contract.AGENT_PROVIDER_PROFILE,
+            },
+        )
+        doc = grant_document([marked])
+        provision_grants(tmp_path, doc)
+        created = _client(tmp_path, doc).create_workspace(marked)
+        assert created["result"]["agentProviderProfile"] == {
+            "profile": contract.AGENT_PROVIDER_PROFILE,
+            "containerPath": "/stateport-provider",
+            "readOnly": True,
+        }
+        # A refused provider directory is a typed refusal and creates nothing.
+        engine.reject_provider = True
+        refused = wspec(
+            "ws-provider-two",
+            parameters={
+                "networkMode": "developer",
+                "agentProviderProfile": contract.AGENT_PROVIDER_PROFILE,
+            },
+        )
+        doc2 = grant_document([refused], grantId="grant-two")
+        provision_grants(tmp_path, doc2)
+        with pytest.raises(ExecutionHostRefusal, match="agent-provider-unavailable"):
+            _client(tmp_path, doc2).create_workspace(refused)
+        assert "ws-provider-two" not in engine.containers
+    finally:
+        daemon.shutdown()
+
+
 def _wait_client_state(client: ExecutionHostClient, workload_id: str, state: str, timeout: float = 10.0) -> str:
     deadline = time.time() + timeout
     current = "unknown"

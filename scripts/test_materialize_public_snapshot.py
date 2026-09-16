@@ -25,8 +25,6 @@ from materialize_public_snapshot import (  # noqa: E402
     _gateway_receipt,
     _init_candidate_git,
     _reviewed_cgroup_fixture,
-    _reviewed_cipd_version,
-    _reviewed_upstream_attribution,
     materialize_snapshot,
 )
 
@@ -302,64 +300,3 @@ def test_gateway_disposes_npm_specifiers_only_inside_lockfiles(tmp_path: Path) -
         _gateway_receipt(candidate)
 
 
-def test_gateway_disposes_only_pinned_cipd_version_grammar_in_reviewed_files(tmp_path: Path) -> None:
-    candidate = tmp_path / "cipd-candidate"
-    candidate.mkdir()
-    _write(candidate / "config/codex-runtime/v8-repair/recipe.json", '"version": "3@' + "1.12.1.chromium.4" + '"\n')
-    _write(candidate / "config/codex-runtime/v8-repair/upstream-deps.json", '"version": "2@' + "30.0.15729638" + '"\n')
-
-    receipt = _gateway_receipt(candidate)
-
-    assert receipt["status"] == "passed"
-    assert receipt["reviewedCipdVersionCount"] == 2
-    assert receipt["highRiskFindingCount"] == 0
-    assert _reviewed_cipd_version(
-        PurePosixPath("config/codex-runtime/v8-repair/recipe.json"), "3@" + "1.12.1.chromium.4"
-    )
-    assert not _reviewed_cipd_version(PurePosixPath("other.json"), "3@" + "1.12.1.chromium.4")
-    assert not _reviewed_cipd_version(
-        PurePosixPath("config/codex-runtime/v8-repair/recipe.json"), "person@" + "company.be"
-    )
-
-
-@pytest.mark.parametrize("fixture_file", ["scripts/test_release_images.py", "scripts/test_codex_runtime_resume.py", "scripts/test_codex_runtime_cache.py"])
-def test_gateway_disposes_only_cgroup_fixture_user_path_in_test_source(tmp_path: Path, fixture_file: str) -> None:
-    candidate = tmp_path / "cgroup-candidate"
-    candidate.mkdir()
-    _write(
-        candidate / fixture_file,
-        "parent = \"/user.slice/user-1000.slice/user" + "@1000.service\"\n",
-    )
-
-    receipt = _gateway_receipt(candidate)
-
-    assert receipt["status"] == "passed"
-    assert receipt["reviewedCgroupFixtureCount"] == 1
-    assert receipt["highRiskFindingCount"] == 0
-    assert _reviewed_cgroup_fixture(
-        PurePosixPath(fixture_file), "/user.slice/user-1000.slice/user" + "@1000.service"
-    )
-    assert not _reviewed_cgroup_fixture(
-        PurePosixPath("other.py"), "/user.slice/user-1000.slice/user" + "@1000.service"
-    )
-    assert not _reviewed_cgroup_fixture(
-        PurePosixPath(fixture_file), "person@" + "company.be"
-    )
-
-
-def test_gateway_disposes_only_verified_upstream_attribution_paths(tmp_path: Path) -> None:
-    from materialize_public_snapshot import _UPSTREAM_ATTRIBUTION_BINDINGS
-
-    path = next(iter(_UPSTREAM_ATTRIBUTION_BINDINGS))
-    data = (ROOT / path.as_posix()).read_bytes()
-    value = next(iter(_UPSTREAM_ATTRIBUTION_BINDINGS[path][1]))
-    assert _reviewed_upstream_attribution(
-        path, data, value,
-    )
-    assert not _reviewed_upstream_attribution(path, data + b"\n", value)
-    assert not _reviewed_upstream_attribution(
-        PurePosixPath("other.patch"), data, value
-    )
-    assert not _reviewed_upstream_attribution(
-        path, b"From: " + value.encode() + b"\n", value
-    )

@@ -1,9 +1,12 @@
 """One durable provider authority for the first StatePort AI vertical slice.
 
-The router persists one selected provider profile. Only Codex invocation is enabled. It does not own
-credentials, fallback chains, or agent state. Those remain outside canonical
-application state and are only widened after the first application outcome is
-qualified.
+The router persists one selected provider profile and routes it to the matching
+managed CLI adapter. Both Codex and OpenCode invocation use the same hardened
+process supervisor, so cancellation, output bounds and restart reconciliation
+are shared. The router does not own credentials, fallback chains, or agent
+state. For the managed OpenCode provider it reads the operator-owned provider
+credential only to construct the subprocess environment; the value is never
+persisted in the profile, logged or returned. Codex invocations are unchanged.
 """
 
 from __future__ import annotations
@@ -20,6 +23,11 @@ from typing import Any, Callable, Mapping
 from codex_adapter import CodexAdapter
 from execution_host.contracts import AgentRunSpec, CapabilityRequest, require_accepted
 from external_engine_runtime import ProcessIdentity, ProcessRuntimeError, decode_jsonl
+from .provider_credentials import (
+    ProviderCredentialStore,
+    opencode_subprocess_environment,
+    resolve_provider_home,
+)
 
 
 FORMAT = "stateport.provider-router/v1"
@@ -28,7 +36,6 @@ PROVIDERS = {
           "authenticationRouteClass": "operator_authenticated_unverified"}
     for key in ("codex", "opencode")
 }
-OPENCODE_REFUSAL = "sandboxed_validation_not_implemented"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -116,10 +123,17 @@ class ProviderRouter:
         profile_path: Path | str,
         *,
         adapter: CodexAdapter | None = None,
+        credential_store: ProviderCredentialStore | None = None,
     ) -> None:
         self.profile_path = _safe_path(profile_path)
         self._profile = self._load_profile()
         self._adapter = adapter
+        self._credential_store = credential_store
+
+    def _provider_credentials(self) -> ProviderCredentialStore:
+        if self._credential_store is None:
+            self._credential_store = ProviderCredentialStore(resolve_provider_home())
+        return self._credential_store
 
     @property
     def adapter(self):
@@ -292,8 +306,6 @@ class ProviderRouter:
         self._profile = self._load_profile()
         if self._profile['provider']['backendId'] != previous_provider:
             self._adapter = None
-        if self._profile['provider']['backendId'] == 'opencode':
-            raise ProviderRouterError(OPENCODE_REFUSAL)
         if os.path.lexists(self.profile_path.with_suffix(".disabled")):
             raise ProviderRouterError("provider_disconnected")
         for value, label in (
@@ -322,6 +334,13 @@ class ProviderRouter:
         capabilities = self.adapter.capabilities()
         provider = self._profile["provider"]
         model = self._profile["model"]
+        if provider["backendId"] == "opencode" and not getattr(
+            getattr(self.adapter, "probe", None), "installed", False
+        ):
+            # Managed OpenCode execution requires the pinned executable. Report
+            # that honest refusal instead of letting capability negotiation
+            # abort with an untyped error before any process can start.
+            raise ProviderRouterError("provider_executable_unavailable")
         spec = AgentRunSpec(
             run_id=f"run.{work_id}.{attempt_ordinal}",
             instance_id=instance_id,
@@ -352,6 +371,13 @@ class ProviderRouter:
         generation = "generation." + hashlib.sha256(
             f"{work_id}:{attempt_id}".encode()
         ).hexdigest()
+        environment: dict[str, str] | None = None
+        if provider["backendId"] == "opencode":
+            # The XDG locations always point at the operator-owned provider home
+            # so OpenCode reads its own auth there; the operator-provided API
+            # key is added only when configured. Codex invocations pass no
+            # environment override and keep their existing filtered environment.
+            environment = opencode_subprocess_environment(self._provider_credentials())
         try:
             result = self.adapter.execute(
                 spec,
@@ -360,6 +386,7 @@ class ProviderRouter:
                 on_started=on_started,
                 on_finished=on_finished,
                 process_generation=generation,
+                **({"environment": environment} if environment is not None else {}),
             )
         except Exception:
             raise ProviderRouterError("provider_execution_unavailable") from None
@@ -377,6 +404,9 @@ class ProviderRouter:
             events = decode_jsonl(result.stdout)
         except ProcessRuntimeError as exc:
             raise ProviderRouterError("provider output was not valid JSONL") from exc
+        refusal = self._opencode_refusal(events) if provider["backendId"] == "opencode" else None
+        if refusal is not None:
+            raise ProviderRouterError(refusal)
         assistant_text = self._assistant_text(events)
         usage = self._usage(events)
         return ProviderInvocation(
@@ -392,11 +422,31 @@ class ProviderRouter:
         )
 
     @staticmethod
+    def _opencode_refusal(events: tuple[dict[str, Any], ...]) -> str | None:
+        """Map only an OpenCode authentication error to a typed refusal.
+
+        OpenCode can exit 0 after emitting a run-level ``error`` event. Only an
+        authentication-named error is classified here; every other error keeps
+        the generic provider-failed mapping so unknown names are never
+        mislabelled. The emitted message is never read or persisted.
+        """
+        for event in events:
+            if event.get("type") != "error":
+                continue
+            error = event.get("error")
+            if isinstance(error, dict):
+                name = error.get("name")
+                if isinstance(name, str) and "auth" in name.lower():
+                    return "provider_authentication_unverified"
+        return None
+
+    @staticmethod
     def _assistant_text(events: tuple[dict[str, Any], ...]) -> str:
         texts: list[str] = []
         for event in events:
             event_type = event.get("type")
             item = event.get("item")
+            part = event.get("part")
             if (
                 event_type == "item.completed"
                 and isinstance(item, dict)
@@ -412,6 +462,16 @@ class ProviderRouter:
                 and event["content"].strip()
             ):
                 texts.append(ProviderRouter._normalise_assistant_message(event["content"]))
+            elif (
+                event_type == "text"
+                and isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+                and part["text"].strip()
+            ):
+                # OpenCode `run --format json` emits one completed text part per
+                # final assistant message.
+                texts.append(ProviderRouter._normalise_assistant_message(part["text"]))
         if not texts:
             raise ProviderRouterError("provider completed without an assistant message")
         text = "\n\n".join(texts)

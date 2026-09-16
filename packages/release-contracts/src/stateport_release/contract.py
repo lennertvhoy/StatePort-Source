@@ -93,13 +93,21 @@ _ALPHA10_ARTIFACT_IDS = _LEGACY_ARTIFACT_IDS | {"executionHostProvisioner"}
 _ARTIFACT_IDS = _ALPHA10_ARTIFACT_IDS | {"podmanPackageBundle"}
 CONFINED_GROUP_OCI_RUNTIME_PATH = "/usr/libexec/stateport/crun"
 PROVIDER_HOME_CONTRACT = {
-    "provider": "codex",
-    "hostPath": "/var/lib/stateport-control/provider-auth/codex",
-    "mountPath": "/var/lib/stateport-provider/codex",
+    "provider": "opencode",
+    "hostPath": "/var/lib/stateport-control/provider-auth/opencode",
+    "mountPath": "/var/lib/stateport-provider/opencode",
     "owner": "stateport-control",
     "mode": "0700",
-    "environmentVariable": "CODEX_HOME",
+    "environmentVariable": "STATEPORT_OPENCODE_HOME",
     "validation": "ephemeral-empty",
+}
+AGENT_PROVIDER_DIRECTORY_CONTRACT = {
+    "hostPath": "/var/lib/stateport-exec/stateport-execution-host/agent-provider",
+    "mountPath": "/var/lib/stateport-exec/stateport-execution-host/agent-provider",
+    "owner": "stateport-exec",
+    "mode": "0755",
+    "environmentVariable": "STATEPORT_EXECUTION_PROVIDER_DIR",
+    "validation": "operator-materialized",
 }
 CONFINED_GROUP_OCI_RUNTIME_VERSION = "1.28"
 CONFINED_GROUP_OCI_RUNTIME_SHA256 = (
@@ -1116,7 +1124,7 @@ def render_quadlet_bundle(
                         lines.append("Environment=STATEPORT_WORKSPACE_AUTHORITY_PROFILE=" + mount["profileId"])
             provider_home = service.get("providerHome")
             if provider_home is not None:
-                lines.append(f"Environment=CODEX_HOME={provider_home['mountPath']}")
+                lines.append(f"Environment=STATEPORT_OPENCODE_HOME={provider_home['mountPath']}")
                 if profile == "accepted":
                     # Provider-owned auth is outside all copied StatePort data
                     # generations. Do not use :U or inspect its file contents.
@@ -1371,6 +1379,17 @@ def render_stable_host_quadlet_bundle(
             )
         if service["serviceId"] == (target.get("executionContract") or {}).get("serviceId"):
             lines.extend(workspace_image_environment(target, images))
+        agent_provider = service.get("agentProviderDirectory")
+        if agent_provider is not None:
+            # The engine re-validates this daemon-owned directory and passes it
+            # to the host Podman as the read-only agent workspace mount source.
+            lines.extend(
+                [
+                    f"Volume={agent_provider['hostPath']}:{agent_provider['mountPath']}:ro",
+                    f"Environment={agent_provider['environmentVariable']}="
+                    f"{agent_provider['mountPath']}",
+                ]
+            )
         for volume in sorted(service["writableVolumes"], key=lambda item: item["name"]):
             lines.append(f"Volume={volume['hostPath']}:{volume['mountPath']}:rw")
         for port in sorted(service["ports"], key=lambda item: item["name"]):
@@ -5171,6 +5190,17 @@ def _validate_cross_fields(
                     f"stable service {service_id} host port overlaps revision allocation range"
                 )
             stable_host_ports.update(host_port_numbers)
+            agent_provider = host_service.get("agentProviderDirectory")
+            if agent_provider is not None and (
+                agent_provider != AGENT_PROVIDER_DIRECTORY_CONTRACT
+                or service_id != (target.get("executionContract") or {}).get("serviceId")
+            ):
+                # The block is bound to the exact contract and the execution
+                # host service; its trust domain, owner, identity and engine
+                # authority stay governed by the existing stable-service checks.
+                raise ReleaseContractError(
+                    f"stable service {service_id} has an unauthorized agent provider directory"
+                )
             engine_access = host_service["engineAccess"]
             if host_service["trustDomain"] == "execution":
                 if host_service["quadletOwner"] != "stateport-exec":

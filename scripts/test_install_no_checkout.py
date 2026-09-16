@@ -3937,7 +3937,7 @@ def test_provider_auth_is_disclosed_as_preserved_without_access_or_deletion(tmp_
     unit_relative = "accepted/stateport-control/provider.container"
     unit = stage / unit_relative
     unit.parent.mkdir(parents=True)
-    unit.write_text("[Container]\nContainerName=provider-test\n" + installer._PROVIDER_AUTH_MOUNT + "\nEnvironment=CODEX_HOME=/var/lib/stateport-provider/codex\n")
+    unit.write_text("[Container]\nContainerName=provider-test\n" + installer._PROVIDER_AUTH_MOUNT + "\nEnvironment=STATEPORT_OPENCODE_HOME=/var/lib/stateport-provider/opencode\n")
     (stage / "materialization.json").write_text(json.dumps({
         "formatVersion": "stateport.quadlet-materialization/v2",
         "signedPayloadDigest": "sha256:" + signed_hex,
@@ -3958,10 +3958,82 @@ def test_provider_auth_is_disclosed_as_preserved_without_access_or_deletion(tmp_
     receipt = json.loads(result.receipt_path.read_text())
     assert installer._PROVIDER_AUTH_HOME in receipt["preserved"]["paths"]
     assert receipt["providerAuthentication"]["preservedPaths"] == [installer._PROVIDER_AUTH_HOME]
-    assert "codex logout" in receipt["providerAuthentication"]["guidance"]
+    assert "OpenCode itself" in receipt["providerAuthentication"]["guidance"]
     assert "including after purge" in result.message
     assert not any(installer._PROVIDER_AUTH_HOME in str(call) for call in runner.calls)
     assert installer._PROVIDER_AUTH_HOME not in json.dumps(receipt["removed"])
+
+
+def test_agent_provider_material_is_disclosed_as_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The daemon-owned agent provider material is preserved and disclosed.
+
+    The removal set never deletes host directories; the receipt must name the
+    operator-material directory recorded in the provisioning plan, exactly as
+    it does for the control-plane provider home.
+    """
+    state = tmp_path / "installed"
+    live = tmp_path / "quadlets"
+    live.mkdir()
+    signed_hex = "a" * 64
+    trust_path = state / "updater/trust/install-trust.json"
+    trust_path.parent.mkdir(parents=True)
+    trust_path.write_text(json.dumps({
+        "schema": installer.INSTALL_TRUST_SCHEMA,
+        "releaseId": "test-agent-provider-release",
+        "signedPayloadDigest": "sha256:" + signed_hex,
+        "releaseIndexDigest": "sha256:" + "b" * 64,
+        "installedIdentityId": "test-agent-provider-installation",
+    }))
+    stage = state / "releases/staged" / signed_hex
+    unit_relative = "accepted/stateport-control/provider.container"
+    unit = stage / unit_relative
+    unit.parent.mkdir(parents=True)
+    unit.write_text(
+        "[Container]\nContainerName=provider-test\n"
+        + installer._PROVIDER_AUTH_MOUNT
+        + "\nEnvironment=STATEPORT_OPENCODE_HOME=/var/lib/stateport-provider/opencode\n"
+    )
+    (stage / "materialization.json").write_text(json.dumps({
+        "formatVersion": "stateport.quadlet-materialization/v2",
+        "signedPayloadDigest": "sha256:" + signed_hex,
+        "validationVolumeBindings": {},
+        "artifacts": [{
+            "kind": "container", "profile": "accepted", "owner": "stateport-control",
+            "liveRelativePath": "provider.container",
+            "stagedPath": f"staged/{signed_hex}/{unit_relative}",
+        }],
+    }))
+    (state / "execution-host-provisioning-plan.json").write_text(json.dumps({
+        "formatVersion": "stateport.execution-host-provisioning-plan/v1",
+        "planDigest": "sha256:" + "c" * 64,
+        "directories": [
+            {"path": "/var/lib/stateport-exec", "mode": "0750", "owner": "stateport-exec:stateport-exec"},
+            {
+                "path": installer._AGENT_PROVIDER_DIR,
+                "mode": "0755",
+                "owner": "stateport-exec:stateport-exec",
+            },
+        ],
+    }))
+    read = installer._read_bounded
+
+    def confined_read(path, **kwargs):
+        assert not str(path).startswith(installer._PROVIDER_AUTH_HOME)
+        assert not str(path).startswith(installer._AGENT_PROVIDER_DIR)
+        return read(path, **kwargs)
+
+    monkeypatch.setattr(installer, "_read_bounded", confined_read)
+    runner = FakeRunner()
+    result = _run_uninstall(installer.UninstallConfig(
+        state_root=state, live_quadlet_root=live, actor_id="test-operator",
+    ), runner=runner)
+    assert result.status == "succeeded", result.message
+    receipt = json.loads(result.receipt_path.read_text())
+    assert receipt["providerAuthentication"]["preservedPaths"] == sorted(
+        [installer._PROVIDER_AUTH_HOME, installer._AGENT_PROVIDER_DIR]
+    )
+    assert installer._AGENT_PROVIDER_DIR in receipt["preserved"]["paths"]
+    assert not any(installer._AGENT_PROVIDER_DIR in str(call) for call in runner.calls)
 
 
 def test_reinstall_after_non_purge_uninstall_reinstalls(

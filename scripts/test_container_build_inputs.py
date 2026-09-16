@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import re
 
@@ -139,3 +140,37 @@ def test_control_plane_runtime_lock_has_no_provider_sdk_or_best_effort_install()
         assert "podman" not in text.lower()
         assert "/var/run/docker.sock" not in text.lower()
         assert not re.search(r"(?:apk|apt-get)\s+[^\n]*(?:podman|docker|git)", text, re.I)
+
+
+def test_opencode_platform_pins_are_exact_and_containerfile_bound() -> None:
+    inputs = yaml.safe_load((ROOT / "config/provider-runtime-inputs.yaml").read_text())
+    opencode = inputs["opencode"]
+    assert opencode["package"] == "opencode-ai"
+    assert opencode["version"] == "1.18.31"
+    lock = json.loads((ROOT / "config/opencode-runtime/package-lock.json").read_text())
+    for flavor, recipe in (
+        ("musl", "apps/web/Dockerfile"),
+        ("glibc", "images/stateport-dev-workspace/Containerfile"),
+    ):
+        platform = opencode["platforms"][flavor]
+        assert re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==$", platform["integrity"])
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", platform["observedBinarySha256"])
+        # The audited lock entry consumed by the build must equal the pin.
+        entry = lock["packages"]["node_modules/" + platform["package"]]
+        assert entry["resolved"] == platform["tarball"]
+        assert entry["integrity"] == platform["integrity"]
+        text = (ROOT / recipe).read_text()
+        assert platform["tarball"] in text
+        assert platform["integrity"] in text
+        assert platform["binaryMember"] in text
+        assert platform["observedBinarySha256"] in text
+        assert "opencode --version" in text
+        assert "config/opencode-runtime/package-lock.json" in text
+    # The musl web image needs the C++ runtime the OpenCode binary links.
+    alpine = yaml.safe_load(
+        (ROOT / "config/container-build-inputs.yaml").read_text()
+    )["alpinePackages"]["packages"]
+    assert alpine["libgcc"] == "15.2.0-r2"
+    assert alpine["libstdc++"] == "15.2.0-r2"
+    assert "libgcc=15.2.0-r2" in (ROOT / "apps/web/Dockerfile").read_text()
+    assert "libstdc++=15.2.0-r2" in (ROOT / "apps/web/Dockerfile").read_text()

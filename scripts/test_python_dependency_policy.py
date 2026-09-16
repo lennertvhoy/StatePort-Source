@@ -17,8 +17,8 @@ def _fixture(tmp_path: Path) -> Path:
     for relative in (
         "config/python-dependency-policy.v1.json",
         "config/provider-runtime-inputs.yaml",
-        "config/codex-runtime/package.json",
-        "config/codex-runtime/package-lock.json",
+        "config/opencode-runtime/package.json",
+        "config/opencode-runtime/package-lock.json",
         "config/python-dependency-licenses.v1.json",
         "requirements/runtime-linux-amd64.in",
         "requirements/runtime-linux-amd64.txt",
@@ -82,26 +82,28 @@ def test_obsolete_pypi_codex_install_is_rejected(tmp_path: Path, install: str) -
 
 
 @pytest.mark.parametrize("mutation", ["wrong-provider", "unhashed-native", "wrong-native-digest", "unverified-copy"])
-def test_native_provider_requires_declared_integrity_locked_import(tmp_path: Path, mutation: str) -> None:
+def test_native_agent_requires_declared_integrity_locked_import(tmp_path: Path, mutation: str) -> None:
     root = _fixture(tmp_path)
-    if mutation == "wrong-provider":
-        path = root / "config/codex-runtime/package.json"
+    if mutation in ("wrong-provider", "unhashed-native", "wrong-native-digest"):
+        path = root / "config/opencode-runtime/package-lock.json"
         value = json.loads(path.read_text())
-        value["dependencies"] = {"@other/provider": "0.146.0"}
-        path.write_text(json.dumps(value))
-    elif mutation in ("unhashed-native", "wrong-native-digest"):
-        path = root / "config/codex-runtime/package-lock.json"
-        value = json.loads(path.read_text())
-        entry = value["packages"]["node_modules/@openai/codex-linux-x64"]
-        if mutation == "unhashed-native":
+        entry = value["packages"]["node_modules/opencode-linux-x64-musl"]
+        if mutation == "wrong-provider":
+            entry["resolved"] = "https://registry.npmjs.org/other/-/other-1.18.31.tgz"
+        elif mutation == "unhashed-native":
             del entry["integrity"]
         else:
             entry["integrity"] = "sha512-" + "A" * 86 + "=="
         path.write_text(json.dumps(value))
     else:
         path = root / "apps/web/Dockerfile"
-        path.write_text(path.read_text().replace("cp node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex /out/codex", "cp /tmp/unverified-codex /out/codex"))
-    with pytest.raises(PythonDependencyPolicyError, match="unverified native provider"):
+        path.write_text(
+            path.read_text().replace(
+                '"${STATEPORT_OPENCODE_BINARY_SHA256#sha256:}',
+                '"${STATEPORT_OPENCODE_BINARY_SHA256_UNVERIFIED}',
+            )
+        )
+    with pytest.raises(PythonDependencyPolicyError, match="unverified native agent"):
         validate(root)
 
 

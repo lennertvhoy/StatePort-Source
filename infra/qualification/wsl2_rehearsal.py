@@ -2016,7 +2016,9 @@ class NativeWSL(VM):
             "command -v sudo >/dev/null;"
             f"if getent passwd {VM_USER} >/dev/null || getent passwd 1000 >/dev/null; then exit 41; fi;"
             f"useradd --create-home --uid 1000 --shell /bin/bash {VM_USER};"
-            f"usermod --append --groups sudo {VM_USER};"
+            # No supplementary sudo group: its %sudo password rule would
+            # override the NOPASSWD drop-in below (proven live on the native
+            # lane: sudo -v demanded a password until the group was removed).
             f"printf '%s ALL=(ALL) NOPASSWD:ALL\\n' {VM_USER} > /etc/sudoers.d/stateport-rehearsal;"
             "chmod 0440 /etc/sudoers.d/stateport-rehearsal",
             check=False, timeout=120,
@@ -2044,15 +2046,18 @@ class NativeWSL(VM):
             tty: bool = False, stdin_text: str | None = None) -> subprocess.CompletedProcess:
         shell = (["script", "-qefc", f"sh -lc {shlex.quote(cmd)}", "/dev/null"]
                  if tty else ["sh", "-lc", cmd])
+        # `--` routes the command line through the distribution's default
+        # shell, which re-expands every $var/$(...) inside the argv string and
+        # corrupts quoted payloads; `--exec` executes the argv directly.
         argv = ["wsl.exe", "--distribution", self.distro_name, "--user", self.exec_user,
-                "--", *shell]
+                "--exec", *shell]
         return subprocess.run(argv, check=check, capture_output=True, text=True, input=stdin_text,
                               timeout=timeout or int(os.environ.get("STATEPORT_REHEARSAL_WSL_TIMEOUT", "1800")),
                               shell=False)
 
     def _install_argv(self, cmd: str) -> list[str]:
         return ["wsl.exe", "--distribution", self.distro_name, "--user", self.exec_user,
-                "--", "script", "-qefc", f"sh -lc {shlex.quote(cmd)}", "/dev/null"]
+                "--exec", "script", "-qefc", f"sh -lc {shlex.quote(cmd)}", "/dev/null"]
 
     def scp_in(self, src: str, dst: str) -> None:
         raise SystemExit(f"native public qualification forbids local transfer: {src} -> {dst}")
@@ -2166,7 +2171,13 @@ def installed_service_smoke(vm: VM, binding: dict) -> dict:
     sandbox = None
     if binding.get("providerRuntimeRequired"):
         observed = web.request("GET", "/v1/provider/status")
-        expected = {"executableInstalled": True, "configured": False, "connected": False,
+        # The product contract executes nothing on GET: a fresh install
+        # reports the executable as installed-but-unverified only after the
+        # sandbox probe below actually runs it. Presence of the shipped CLI is
+        # proven by that probe (it reports the exact CLI version), so the
+        # fresh-GET expectation must match the no-exec-on-read design.
+        expected = {"executableInstalled": False, "executableStatus": "unverified",
+                    "configured": False, "connected": False,
                     "authenticationStatus": "unverified", "requestStatus": "unverified",
                     "telemetryStatus": "unavailable"}
         if any(observed.get(key) != value for key, value in expected.items()):

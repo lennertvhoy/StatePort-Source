@@ -98,6 +98,14 @@ export const endpoints = {
   executionHostWorkloadCancel: '/v1/execution-host/workloads/cancel',
   executionHostWorkloadRemove: '/v1/execution-host/workloads/remove',
   executionHostWorkloadExec: '/v1/execution-host/workloads/exec',
+
+  // ── Operator-authorized control-plane agent run ────────────────────────────
+  agentStatus: '/v1/agent/status',
+  agentRuns: '/v1/agent/runs',
+  agentRun: (runId: string) => `/v1/agent/runs/${enc(runId)}`,
+  agentRunOutput: (runId: string) => `/v1/agent/runs/${enc(runId)}/output`,
+  agentRunStart: '/v1/agent/run',
+
   runApprove: (runId: string) => `/v1/runs/${enc(runId)}/approve`,
   runExecute: (runId: string) => `/v1/runs/${enc(runId)}/execute`,
   runCancel: (runId: string) => `/v1/runs/${enc(runId)}/cancel`,

@@ -1,8 +1,13 @@
-"""Nonsecret provider selection; enabled Codex authentication stays CLI-owned.
+"""Nonsecret provider selection; provider-owned authentication stays CLI-owned.
 
-Official contract checked 2026-09-05: https://learn.chatgpt.com/docs/auth
+Official Codex contract checked 2026-09-05: https://learn.chatgpt.com/docs/auth
 and https://learn.chatgpt.com/docs/developer-commands?surface=cli .
 Login status observes credential presence, never remote freshness or quota.
+OpenCode is a managed selectable provider: StatePort verifies its installed
+executable and never inspects or runs OpenCode's own authentication flow. An
+operator may store one documented provider API key in the private provider home
+(see provider_credentials); that stored key is injected only into managed
+OpenCode invocations and is never returned by a status projection.
 """
 from __future__ import annotations
 
@@ -20,7 +25,8 @@ from uuid import uuid4
 
 from codex_adapter import CodexAdapter
 from external_engine_runtime import ProcessSpec, TemporaryWorkspace, filtered_environment, run_process
-from .provider_router import ProviderRouter, ProviderRouterError, PROVIDERS, OPENCODE_REFUSAL
+from .provider_credentials import ProviderCredentialStore, resolve_provider_home
+from .provider_router import ProviderRouter, ProviderRouterError, PROVIDERS
 
 # Device-login observation is a narrow extraction from an untrusted stream:
 # only the verification URL and the one-time user code are retained; every
@@ -80,11 +86,13 @@ def _reap_login_process(process: subprocess.Popen) -> int | None:
 
 class ProviderSetup:
     def __init__(self, config_root: Path, state_root: Path, *, adapter_factory=CodexAdapter,
-                 login_code_wait_seconds: float = 60.0, login_flow_timeout_seconds: float = 900.0):
+                 login_code_wait_seconds: float = 60.0, login_flow_timeout_seconds: float = 900.0,
+                 credential_store: ProviderCredentialStore | None = None):
         self.profile_path = config_root / 'provider-router.json'
         self.disabled_path = self.profile_path.with_suffix('.disabled')
         self.staging_root = state_root / 'provider-verification'
         self.adapter_factory = adapter_factory
+        self.credential_store = credential_store or ProviderCredentialStore(resolve_provider_home())
         self.login_code_wait_seconds = float(login_code_wait_seconds)
         self.login_flow_timeout_seconds = float(login_flow_timeout_seconds)
         if self.login_code_wait_seconds <= 0 or self.login_flow_timeout_seconds <= 0:
@@ -102,20 +110,35 @@ class ProviderSetup:
             'cancel_requested': False, 'process': None}
         self.authentication = 'unverified'
         self.request = 'unverified'
-        self.detail = 'Select a model, authenticate using Codex in this runtime, then verify.'
+        self.detail = 'Select a provider and model, then verify in this runtime.'
 
     def selected_provider(self):
         if not os.path.lexists(self.profile_path):
-            return 'codex'
+            # OpenCode is the agent StatePort ships and maintains upstream; a
+            # persisted selection (including Codex) is loaded from the profile
+            # below and is never overridden.
+            return 'opencode'
         return ProviderRouter.read_profile(self.profile_path)['provider']['backendId']
 
     def startup_allowed(self):
         if os.path.lexists(self.disabled_path):
             return False
         try:
-            return self.selected_provider() == 'codex'
+            provider_id = self.selected_provider()
         except ProviderRouterError:
             return False
+        if provider_id == 'codex':
+            return True
+        if provider_id == 'opencode':
+            # Managed OpenCode startup is allowed exactly when its real
+            # executable probe succeeds; a missing or unusable binary refuses
+            # startup instead of scheduling work that cannot run.
+            try:
+                from opencode_adapter import opencode_probe
+                return opencode_probe().installed
+            except Exception:  # noqa: BLE001 - a failed probe stays a refusal
+                return False
+        return False
 
     def _observation_identity(self, provider_id):
         if provider_id == 'codex':
@@ -159,7 +182,7 @@ class ProviderSetup:
         with self.lock:
             model = None
             configured = False
-            provider_id = 'codex'
+            provider_id = 'opencode'
             try:
                 profile = ProviderRouter.read_profile(self.profile_path)
                 model = profile['model']['id']
@@ -172,15 +195,24 @@ class ProviderSetup:
             adapter = self.observed_adapter if self.observed_provider == provider_id else None
             installed = bool(adapter and adapter.probe.installed)
             observed = adapter is not None
-            blocked = provider_id == 'opencode'
-            detail = ("OpenCode selection is saved, but execution is refused: isolated post-agent validation is not implemented. No Codex fallback is enabled."
-                      if blocked else self.detail)
+            executable_version = adapter.probe.version if observed else None
+            disabled = os.path.lexists(self.disabled_path)
+            detail = self.detail
+            if configured and provider_id == 'opencode' and not disabled:
+                # Never claim a checked executable before an explicit
+                # Configure/Verify probed it in this service session.
+                if not observed:
+                    detail = 'OpenCode is the saved provider. Its executable and authentication are checked only when you configure or verify in this service session.'
+                elif not installed:
+                    detail = 'OpenCode executable is not installed in this runtime. Install the pinned OpenCode runtime, then verify again.'
             return dict(configured=configured, executableInstalled=installed,
                         executableStatus=('installed' if installed else 'missing') if observed else 'unverified',
-                        providerId=provider_id, executionRefusal=OPENCODE_REFUSAL if blocked else None,
-                        connected=configured and not blocked and not os.path.lexists(self.disabled_path), model=model,
-                        authenticationStatus='unavailable' if blocked or (observed and not installed) else self.authentication,
-                        requestStatus=self.request, telemetryStatus='unavailable', detail=detail)
+                        executableVersion=executable_version,
+                        providerId=provider_id, executionRefusal=None,
+                        connected=configured and not disabled, model=model,
+                        authenticationStatus='unavailable' if (observed and not installed) else self.authentication,
+                        requestStatus=self.request, telemetryStatus='unavailable', detail=detail,
+                        **self.credential_store.status())
 
     def configure(self, model, provider_id=None):
         with self.lock:
@@ -188,13 +220,38 @@ class ProviderSetup:
             if not isinstance(model, str) or not isinstance(provider_id, str) or provider_id not in PROVIDERS:
                 raise ProviderRouterError('provider configuration is invalid')
             ProviderRouter.configure(self.profile_path, provider_id=provider_id, model_identifier=model, time_seconds=30, steps=2)
-            if provider_id == 'opencode':
-                self.disconnect()
-            else:
-                self.disabled_path.unlink(missing_ok=True)
+            self.disabled_path.unlink(missing_ok=True)
             self.probe(provider_id)
             self.authentication = self.request = 'unverified'
-            self.detail = 'Model saved. Authenticate using Codex in this runtime, then verify. StatePort never reads or copies credentials.'
+            self.detail = (
+                'OpenCode model saved. StatePort runs the pinned OpenCode executable and reports it. '
+                'An operator-provided provider API key can be stored here and is injected only into '
+                'OpenCode invocations; StatePort never reads OpenCode\'s own authentication.'
+                if provider_id == 'opencode'
+                else 'Model saved. Authenticate using Codex in this runtime, then verify. StatePort never reads or copies credentials.'
+            )
+            return self.status()
+
+    def set_credential(self, provider_id, api_key):
+        """Store one operator-provided provider key; return names-only status."""
+        with self.lock:
+            self.credential_store.store(provider_id, api_key)
+            if self.selected_provider() == 'opencode':
+                self.detail = (
+                    'Credential stored in the private provider home. It is injected only into managed '
+                    'OpenCode invocations and is never returned by this service.'
+                )
+            return self.status()
+
+    def remove_credential(self, provider_id):
+        """Delete the stored provider key; return names-only status."""
+        with self.lock:
+            self.credential_store.remove(provider_id)
+            if self.selected_provider() == 'opencode':
+                self.detail = (
+                    'Stored provider credential removed. Managed OpenCode invocations run without it '
+                    'and report their own authentication result.'
+                )
             return self.status()
 
     def disconnect(self):
@@ -205,7 +262,7 @@ class ProviderSetup:
             with os.fdopen(descriptor, 'w') as handle:
                 handle.write('StatePort provider work disabled\n')
             self.authentication = self.request = 'unverified'
-            self.detail = 'Disconnected from StatePort. New provider work is refused; Codex owns account sign-out (codex logout).'
+            self.detail = 'Disconnected from StatePort. New provider work is refused; account sign-out stays owned by the selected provider CLI.'
             return self.status()
 
     def verify(self):
@@ -216,6 +273,8 @@ class ProviderSetup:
             if not status['connected'] or not status['executableInstalled']:
                 self.request = 'failed'
                 return self.status()
+            if provider_id == 'opencode':
+                return self._verify_opencode(adapter)
             # Discard all status stdout/stderr: CLI output may contain account metadata.
             try:
                 result = run_process(ProcessSpec((adapter.probe.executable, 'login', 'status'),
@@ -249,6 +308,32 @@ class ProviderSetup:
                 self.request = 'failed'
                 self.detail = 'Login is present but the request failed. Check account access, model availability, network and quota using Codex, then retry.'
             return self.status()
+
+    def _verify_opencode(self, adapter):
+        # Managed OpenCode verification runs its real executable probe, never a
+        # Codex command. Authentication stays explicitly unverified: StatePort
+        # has no OpenCode login inspection and must not fabricate one.
+        try:
+            result = run_process(ProcessSpec((adapter.probe.executable, '--version'),
+                self.profile_path.parent, timeout_seconds=5, max_output_bytes=16384,
+                environment=filtered_environment(allow=('PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR'))))
+        except Exception:
+            self.authentication = 'unavailable'
+            self.request = 'failed'
+            self.detail = 'OpenCode executable check could not run in this runtime. Check the installed binary and runtime permissions.'
+            return self.status()
+        if not result.ok:
+            # Version output is provider metadata and is discarded; only the
+            # process outcome is observed.
+            self.authentication = 'unavailable'
+            self.request = 'failed'
+            self.detail = 'OpenCode did not answer the version probe in this runtime. Reinstall the pinned runtime, then verify again.'
+            return self.status()
+        self.authentication = 'unverified'
+        self.request = 'unverified'
+        self.detail = ('OpenCode executable verified in this runtime. Authentication is not verified by this control; '
+                       'sign in with OpenCode itself, then send conversation work.')
+        return self.status()
 
     def login_status(self):
         # Pure projection of observed login state: a status read never probes,
@@ -336,6 +421,15 @@ class ProviderSetup:
         # discard every byte of output, exactly like the verify status probe.
         with self.lock:
             provider_id = self.selected_provider()
+            if provider_id != 'codex':
+                # OpenCode owns its own credentials and sign-out command. A
+                # typed, honest status is returned instead of faking a flow or
+                # inventing a credential format this control cannot verify.
+                self.request = 'unverified'
+                self.detail = ('OpenCode owns its own sign-out. StatePort does not run or simulate an OpenCode '
+                               'sign-in flow; remove the operator-provided provider credential with the '
+                               'credential control, and use the OpenCode CLI for its own account sign-out.')
+                return self.status()
             adapter = self.probe(provider_id)
             status = self.status()
             if not status['connected'] or not status['executableInstalled']:

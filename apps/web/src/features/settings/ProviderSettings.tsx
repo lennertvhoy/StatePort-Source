@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { ClientError } from '@/client/types'
-import { providerClient, type LoginFlow, type ProviderStatus } from '@/client/providerClient'
+import {
+  OPENCODE_CREDENTIAL_PROVIDER_LABELS,
+  OPENCODE_CREDENTIAL_PROVIDERS,
+  providerClient,
+  type LoginFlow,
+  type OpenCodeCredentialProvider,
+  type ProviderStatus,
+} from '@/client/providerClient'
 import { ConfirmDialog, CopyButton } from '@/components'
 import { Button } from '@/components/ui/button'
 import { useSessionStore } from '@/state'
@@ -64,7 +71,7 @@ export function ProviderSettings() {
     && service.actor?.role === 'platform_operator' && service.actor.platformOperationsAllowed === true
   const [status, setStatus] = useState<ProviderStatus | null>(null)
   const [model, setModel] = useState('')
-  const [providerId, setProviderId] = useState<'codex' | 'opencode'>('codex')
+  const [providerId, setProviderId] = useState<'codex' | 'opencode'>('opencode')
   const [busy, setBusy] = useState(false)
   const [showLoginCommand, setShowLoginCommand] = useState(false)
   const loginCommandRef = useRef<HTMLPreElement>(null)
@@ -73,15 +80,24 @@ export function ProviderSettings() {
   const [error, setError] = useState<string | null>(null)
   const [loginFlow, setLoginFlow] = useState<LoginFlow | null>(null)
   const [signOutPrompted, setSignOutPrompted] = useState(false)
-  const codexSelected = (status?.providerId ?? 'codex') === 'codex'
+  const [credentialProvider, setCredentialProvider] = useState<OpenCodeCredentialProvider>('anthropic')
+  const [apiKey, setApiKey] = useState('')
+  const credentialEdited = useRef(false)
+  const codexSelected = (status?.providerId ?? 'opencode') === 'codex'
+  const opencodeSelected = (status?.providerId ?? 'opencode') === 'opencode'
+  const credentialConfigured = status?.credentialStatus === 'configured'
   const flowLive = loginFlow !== null && codexSelected && !isTerminalLoginPhase(loginFlow.phase)
+  const applyCredentialProvider = (value: ProviderStatus) => {
+    if (!credentialEdited.current) setCredentialProvider(value.credentialProvider ?? 'anthropic')
+  }
   useEffect(() => {
     let alive = true
     const version = ++requestVersion.current
     providerClient.getStatus().then(value => {
       if (alive && requestVersion.current === version) {
         setStatus(value)
-        if (!draftEdited.current) { setModel(value.model ?? ''); setProviderId(value.providerId ?? 'codex') }
+        applyCredentialProvider(value)
+        if (!draftEdited.current) { setModel(value.model ?? ''); setProviderId(value.providerId ?? 'opencode') }
       }
     }).catch(() => { if (alive && requestVersion.current === version) setError('Provider status is unavailable. Check that the local service is running.') })
     return () => { alive = false; requestVersion.current++ }
@@ -149,8 +165,9 @@ export function ProviderSettings() {
       const value = await action()
       if (requestVersion.current !== version) return
       setStatus(value)
+      applyCredentialProvider(value)
       if (saveDraft || !draftEdited.current) {
-        setProviderId(value.providerId ?? 'codex'); setModel(value.model ?? '')
+        setProviderId(value.providerId ?? 'opencode'); setModel(value.model ?? '')
         draftEdited.current = false
       }
     }
@@ -162,6 +179,28 @@ export function ProviderSettings() {
     }
     finally { if (requestVersion.current === version) setBusy(false) }
   }
+  async function runCredential(action: () => Promise<ProviderStatus>) {
+    if (!operator) {
+      setError('Provider changes require an authorized platform operator session. Open StatePort through the operator session, then refresh the page.')
+      return
+    }
+    const version = ++requestVersion.current
+    setBusy(true); setError(null)
+    try {
+      const value = await action()
+      if (requestVersion.current !== version) return
+      setStatus(value)
+      credentialEdited.current = false
+      applyCredentialProvider(value)
+    }
+    catch (failure) {
+      if (requestVersion.current !== version) return
+      setError(failure instanceof ClientError && (failure.status === 401 || failure.status === 403)
+        ? 'The service did not authorize this request. Open StatePort through an authorized platform operator session, then refresh the page. No provider change was confirmed.'
+        : 'The provider credential operation could not be confirmed. Refresh status before retrying; if it remains unavailable, review the service connection in Platform diagnostics.')
+    }
+    finally { if (requestVersion.current === version) setBusy(false) }
+  }
   return <div className="mx-auto h-full w-full min-w-0 max-w-3xl space-y-6 overflow-auto break-words p-4 sm:p-6" aria-labelledby="provider-heading">
     <div><h1 id="provider-heading" className="text-xl font-semibold">Coding provider</h1>
       <p className="mt-2 text-sm text-muted-foreground">Select the coding provider for this StatePort runtime. Configuration, login presence and a successful request are separate checks.</p></div>
@@ -169,8 +208,8 @@ export function ProviderSettings() {
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {status ? <section aria-label="Provider observations" className="space-y-3 rounded-lg border p-4">
       <dl className="grid grid-cols-1 gap-x-3 gap-y-2 text-sm sm:grid-cols-2 [&>dd]:min-w-0 [&>dd]:break-words">
-        <dt>Selected provider</dt><dd>{(status.providerId ?? 'codex') === 'codex' ? 'Codex' : 'OpenCode'}</dd>
-        <dt>Executable in this runtime</dt><dd>{status.executableStatus === 'unverified' ? 'Not checked in this service session' : status.executableInstalled ? 'Installed' : 'Missing'}</dd>
+        <dt>Selected provider</dt><dd>{(status.providerId ?? 'opencode') === 'codex' ? 'Codex' : 'OpenCode'}</dd>
+        <dt>Executable in this runtime</dt><dd>{status.executableStatus === 'unverified' ? 'Not checked in this service session' : status.executableInstalled ? `Installed${status.executableVersion ? ` (${status.executableVersion})` : ''}` : 'Missing'}</dd>
         <dt>Model configuration</dt><dd>{status.configured ? status.model : 'Not configured'}</dd>
         <dt>StatePort connection</dt><dd>{status.connected ? 'Enabled' : 'Disconnected'}</dd>
         <dt>Login presence</dt><dd>{status.authenticationStatus === 'authenticated' ? 'Present (expiry not guaranteed)' : status.authenticationStatus}</dd>
@@ -189,9 +228,44 @@ export function ProviderSettings() {
       <input id="provider-model" value={model} onChange={event => { draftEdited.current = true; setModel(event.target.value) }} autoComplete="off"
         required maxLength={256} pattern="[A-Za-z0-9][A-Za-z0-9._:/+\-]*" disabled={busy || !operator}
         className="min-w-0 w-full rounded-md border bg-background px-3 py-2 text-sm" aria-describedby="provider-model-help" />
-      <p id="provider-model-help" className="text-sm text-muted-foreground">{providerId === 'codex' ? 'Use a model available to your Codex account. Saving enables new conversation work with this model; it does not authenticate the account.' : 'Saving OpenCode stops current provider work and stores this selection. Execution remains refused until isolated post-agent validation is implemented. No Codex fallback will run.'}</p>
-      <Button className="h-auto min-h-10 whitespace-normal" type="submit" disabled={busy || !operator || !model.trim()}>{providerId === 'codex' ? 'Save model and enable' : 'Save provider selection'}</Button>
+      <p id="provider-model-help" className="text-sm text-muted-foreground">{providerId === 'codex' ? 'Use a model available to your Codex account. Saving enables new conversation work with this model; it does not authenticate the account.' : 'Use a model available to your OpenCode runtime. Saving enables new conversation work through the installed OpenCode executable. Connect a provider API key below or sign in with OpenCode itself; StatePort never reads OpenCode\'s own authentication.'}</p>
+      <Button className="h-auto min-h-10 whitespace-normal" type="submit" disabled={busy || !operator || !model.trim()}>Save model and enable</Button>
     </form>
+    {opencodeSelected && <section aria-label="OpenCode provider credential" className="space-y-3 rounded-lg border p-4">
+      <h2 className="font-medium">OpenCode provider API key</h2>
+      <p className="text-sm">Connect one documented provider API key for the OpenCode runtime. StatePort stores it in the private provider home with owner-only permissions, injects it only into managed OpenCode invocations, and never returns it or shows it again.</p>
+      <p role="status" className="text-sm">{credentialConfigured
+        ? `Credential configured${status?.credentialProvider ? ` for ${OPENCODE_CREDENTIAL_PROVIDER_LABELS[status.credentialProvider]}` : ''}${status?.credentialEnvVar ? ` (${status.credentialEnvVar})` : ''}.`
+        : 'No credential.'}</p>
+      <form aria-label="OpenCode credential" aria-describedby={!operator ? 'provider-permission-help' : undefined} className="min-w-0 space-y-3"
+        onSubmit={event => {
+          event.preventDefault()
+          const key = apiKey
+          if (!key) return
+          void runCredential(async () => {
+            const value = await providerClient.setCredential(credentialProvider, key)
+            setApiKey('')
+            return value
+          })
+        }}>
+        <label htmlFor="opencode-credential-provider" className="block text-sm font-medium">OpenCode provider</label>
+        <select id="opencode-credential-provider" value={credentialProvider}
+          onChange={event => { credentialEdited.current = true; setCredentialProvider(event.target.value as OpenCodeCredentialProvider) }}
+          disabled={busy || !operator} className="w-full rounded-md border bg-background px-3 py-2 text-sm">
+          {OPENCODE_CREDENTIAL_PROVIDERS.map(id => <option key={id} value={id}>{OPENCODE_CREDENTIAL_PROVIDER_LABELS[id]}</option>)}
+        </select>
+        <label htmlFor="opencode-api-key" className="block text-sm font-medium">Provider API key</label>
+        <input id="opencode-api-key" type="password" value={apiKey} onChange={event => setApiKey(event.target.value)}
+          autoComplete="off" maxLength={4096} disabled={busy || !operator}
+          className="min-w-0 w-full rounded-md border bg-background px-3 py-2 text-sm" aria-describedby="opencode-api-key-help" />
+        <p id="opencode-api-key-help" className="text-sm text-muted-foreground">The key is stored only in the operator-owned provider home and injected into managed OpenCode invocations. It is never returned by the service or shown again; leave the field empty unless you are connecting a new key.</p>
+        <div className="flex flex-wrap gap-3">
+          <Button className="h-auto min-h-10 whitespace-normal" type="submit" disabled={busy || !operator || !apiKey.trim()}>Connect API key</Button>
+          <Button className="h-auto min-h-10 whitespace-normal" type="button" variant="outline" disabled={busy || !operator || !credentialConfigured}
+            onClick={() => void runCredential(() => providerClient.removeCredential(credentialProvider))}>Remove credential</Button>
+        </div>
+      </form>
+    </section>}
     <section className="space-y-3" aria-label="Authentication and verification">
       {codexSelected ? <section aria-label="Account sign-in (device login)" className="space-y-3 rounded-lg border p-4">
         <h2 className="font-medium">Account sign-in (device login)</h2>
@@ -240,11 +314,11 @@ export function ProviderSettings() {
       <p className="text-sm text-muted-foreground">Verify sends one short request with no application conversation or files. It may consume account usage. A successful check describes this runtime and moment; it does not establish production qualification.</p>
       </div>}
       <div className="flex flex-wrap gap-3">
-        <Button className="h-auto min-h-10 whitespace-normal" disabled={busy || !operator || !status?.configured || ((status.providerId ?? 'codex') === 'codex' && (!status.connected || (status.executableStatus !== 'unverified' && !status.executableInstalled)))} onClick={() => void perform(providerClient.verify)}>{busy ? 'Working…' : status?.providerId === 'opencode' ? 'Check selected adapter' : 'Verify bounded request'}</Button>
+        <Button className="h-auto min-h-10 whitespace-normal" disabled={busy || !operator || !status?.configured || ((status.providerId ?? 'opencode') === 'codex' && (!status.connected || (status.executableStatus !== 'unverified' && !status.executableInstalled)))} onClick={() => void perform(providerClient.verify)}>{busy ? 'Working…' : status?.providerId === 'opencode' ? 'Check selected adapter' : 'Verify bounded request'}</Button>
         <Button className="h-auto min-h-10 whitespace-normal" variant="outline" disabled={busy || !operator || !status?.connected} onClick={() => void perform(providerClient.disconnect)}>Disconnect StatePort</Button>
         <Button className="h-auto min-h-10 whitespace-normal" variant="outline" disabled={busy} onClick={() => void perform(providerClient.getStatus, false)}>Refresh status</Button>
       </div>
-      {(status?.providerId ?? 'codex') === 'codex' && <p className="text-sm text-muted-foreground">Disconnect stops the active assistant processor and cancels queued requests. Reconnecting accepts future messages; your earlier transcript stays intact. To sign out of Codex itself, use Sign out of Codex above; the terminal helper (<code>stateport_codex logout</code> after defining it above) remains as a fallback. <code>stateport_codex version</code> checks its installed executable without logging in.</p>}
+      {(status?.providerId ?? 'opencode') === 'codex' && <p className="text-sm text-muted-foreground">Disconnect stops the active assistant processor and cancels queued requests. Reconnecting accepts future messages; your earlier transcript stays intact. To sign out of Codex itself, use Sign out of Codex above; the terminal helper (<code>stateport_codex logout</code> after defining it above) remains as a fallback. <code>stateport_codex version</code> checks its installed executable without logging in.</p>}
     </section>
     <ConfirmDialog open={signOutPrompted} onOpenChange={setSignOutPrompted} title="Sign out of Codex?" description="This removes the provider-owned Codex login from this runtime. It is separate from Disconnect StatePort, which stops this app's assistant connection but leaves the Codex login in place." effect="The Codex login is removed from this runtime. New provider work fails authentication until you sign in again. Conversation history and StatePort settings are unaffected." reversibility="Sign in again with Start device sign-in to restore access." confirmLabel="Confirm sign-out" onConfirm={() => { void perform(providerClient.logout).then(() => setLoginFlow(null)) }} />
   </div>

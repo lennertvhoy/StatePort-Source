@@ -71,6 +71,7 @@ from .contract import (
     CONFINED_GROUP_OCI_RUNTIME_PATH,
     CONFINED_GROUP_OCI_RUNTIME_SHA256,
     CONFINED_GROUP_OCI_RUNTIME_VERSION,
+    AGENT_PROVIDER_DIRECTORY_CONTRACT,
     PROVIDER_HOME_CONTRACT,
     PinnedPublicKeyIdentity,
     ReleaseContractError,
@@ -106,6 +107,26 @@ CONTROL_SYSTEMD_USER_DIR = f"{CONTROL_CONFIG_DIR}/systemd/user"
 SERVICE_STATE_ROOT = f"{EXEC_HOME}/stateport-execution-host"
 STATE_DIR = f"{SERVICE_STATE_ROOT}/state"
 GRANTS_DIR = f"{STATE_DIR}/grants"
+# Daemon-owned agent workspace authority: the sealed developer-network
+# workspace the control plane runs bounded OpenCode objectives in.  The grant
+# and binding are provisioned together so a fresh install has the exact
+# authority the agent-run operation requires.
+AGENT_GRANT_ID = "agent-workspace-v1"
+AGENT_WORKSPACE_ID = "agent-workspace"
+AGENT_WORKSPACE_BINDING_FORMAT = "stateport.agent-workspace-binding/v1"
+_AGENT_GRANT_OPERATIONS = (
+    "createWorkload", "listWorkloads", "status", "logs", "start", "stop",
+    "cancel", "removeWorkload", "execWorkload",
+)
+_AGENT_GRANT_BUDGETS = {
+    "maxTimeoutSeconds": 3600,
+    "maxOutputBytes": 1024 * 1024,
+    "maxMemoryMaxBytes": 1024 * 1024 * 1024,
+    "maxPidsMax": 512,
+    "maxActiveWorkloads": 2,
+    "maxCpuQuotaPercent": 400,
+    "maxDiskMaxBytes": 4 * 1024 * 1024 * 1024,
+}
 TEMPLATE_IMPORT_PARENT = "/var/lib/stateport"
 TEMPLATE_IMPORT_ROOT = f"{TEMPLATE_IMPORT_PARENT}/imports"
 SUBUID_PATH = "/etc/subuid"
@@ -296,6 +317,104 @@ def _default_grant_document(
     }:
         document["deploymentScope"] = dict(_DEFAULT_DEPLOYMENT_SCOPE)
     return document
+def _agent_workspace_documents(
+    image_reference: str,
+    *,
+    peer_uid: int,
+    issued_at: str,
+    expires_at: str,
+    revocation_epoch: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Render the sealed agent workspace workload, its grant and its binding.
+
+    The workload is the developer-network workspace carrying the sealed
+    ``opencode-provider-v1`` marker for the exact installed dev-workspace
+    image; the grant binds its complete sealed spec digest and the operations
+    the agent-run path uses; the binding is the public control-plane document
+    the proxy validates before any daemon contact.
+    """
+    from execution_host import daemon_contract  # noqa: PLC0415
+
+    # The sealed workload is rendered directly from the daemon contract (the
+    # provisioner's own dependency) rather than importing the workspace
+    # adapter, whose runtime-contracts dependency is not part of the root
+    # provisioning module tree.  The result is byte-identical to
+    # ``execution_host.workspaces.sealed_workspace_workload`` for this
+    # declaration, which the provisioning tests re-verify.
+    declaration = {
+        "formatVersion": "stateport.workspace-spec/v1",
+        "workspaceId": AGENT_WORKSPACE_ID,
+        "imageDigest": image_reference.rsplit("@", 1)[1],
+        "workspacePath": "/workspace",
+        "shell": ["/bin/sh"],
+        "resources": {
+            "memoryMaxBytes": 1024 * 1024 * 1024,
+            "cpuQuotaPercent": 200,
+            "pidsMax": 256,
+            "diskMaxBytes": 1024 * 1024 * 1024,
+        },
+        "networkProfile": {"mode": "developer", "allowlist": []},
+        "cacheVolumes": [],
+        "lifecyclePolicy": {
+            "idleTimeoutSeconds": 3600,
+            "stopAfterIdle": True,
+            "preserveDataOnRemove": True,
+        },
+    }
+    workload = daemon_contract.validate_workload_spec(
+        {
+            "kind": "workspace",
+            "workloadId": AGENT_WORKSPACE_ID,
+            "image": {"reference": image_reference},
+            "parameters": {
+                "workspaceId": AGENT_WORKSPACE_ID,
+                "workspaceSpecDigest": daemon_contract.canonical_digest(declaration),
+                "volumeName": f"stateport-workspace-{AGENT_WORKSPACE_ID}",
+                "stopAfterIdle": True,
+                "shell": ["/bin/sh"],
+                "networkMode": "developer",
+                "cacheVolumes": [],
+                "cpuQuotaPercent": 200,
+                "diskMaxBytes": 1024 * 1024 * 1024,
+                "workSeconds": 0,
+                "emitBytes": 0,
+                "agentProviderProfile": daemon_contract.AGENT_PROVIDER_PROFILE,
+            },
+            "timeoutSeconds": 3600,
+            "outputByteBound": 65536,
+            "resources": {
+                "memoryMaxBytes": 1024 * 1024 * 1024,
+                "pidsMax": 256,
+            },
+        }
+    )
+    workload_id = str(workload["workloadId"])
+    grant = {
+        "formatVersion": "stateport.execution-host-grant/v2",
+        "grantId": AGENT_GRANT_ID,
+        "peerUid": peer_uid,
+        "operations": list(_AGENT_GRANT_OPERATIONS),
+        "workloadIds": [workload_id],
+        "workloadKinds": [str(workload["kind"])],
+        "workloadSpecDigests": {
+            workload_id: daemon_contract.canonical_digest(workload)
+        },
+        "imageReference": image_reference,
+        "baseRevision": None,
+        "issuedAt": issued_at,
+        "expiresAt": expires_at,
+        "revocationEpoch": revocation_epoch,
+        "budgets": dict(_AGENT_GRANT_BUDGETS),
+    }
+    binding = {
+        "formatVersion": AGENT_WORKSPACE_BINDING_FORMAT,
+        "grantId": AGENT_GRANT_ID,
+        "authorityGrantDigest": daemon_contract.canonical_digest(grant),
+        "workload": workload,
+    }
+    return grant, binding
+
+
 STABLE_EXECUTION_MODES = (
     "stable-host-daemon-client",
     "stable-host-daemon-bootstrap-only",
@@ -306,6 +425,7 @@ WORKSPACE_PUBLIC_DIR = "/etc/stateport/workspace-authority"
 WORKSPACE_CONTEXT_PATH = "/etc/stateport/workspace-issuer-context.json"
 WORKSPACE_PUBLIC_CONTEXT = WORKSPACE_PUBLIC_DIR + "/issuer.json"
 WORKSPACE_BINDINGS_PATH = WORKSPACE_PUBLIC_DIR + "/bindings.json"
+AGENT_WORKSPACE_BINDING_PATH = WORKSPACE_PUBLIC_DIR + "/agent-workspace.json"
 WORKSPACE_CONTEXT_FORMAT = "stateport.workspace-issuer-context/v1"
 WORKSPACE_PUBLIC_FORMAT = "stateport.workspace-issuer-public/v1"
 WORKSPACE_PROFILE_ID = "stateport.empty-workspace/v1"
@@ -890,6 +1010,33 @@ def render_provisioning_plan(
             {"path": "/var/lib/stateport-control/provider-auth", "mode": "0700", "owner": f"{CONTROL_USER}:{CONTROL_USER}"},
             {"path": PROVIDER_HOME_CONTRACT["hostPath"], "mode": "0700", "owner": f"{CONTROL_USER}:{CONTROL_USER}"},
         ])
+    agent_provider_directories = [
+        service["agentProviderDirectory"]
+        for service in target.get("hostServices", ())
+        if isinstance(service, Mapping) and "agentProviderDirectory" in service
+    ]
+    if agent_provider_directories:
+        if (
+            len(agent_provider_directories) != 1
+            or agent_provider_directories[0] != AGENT_PROVIDER_DIRECTORY_CONTRACT
+        ):
+            raise ReleaseContractError("installed agent provider directory contract is malformed")
+        directories.append(
+            {
+                "path": AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+                "mode": AGENT_PROVIDER_DIRECTORY_CONTRACT["mode"],
+                "owner": f"{EXEC_USER}:{EXEC_USER}",
+            }
+        )
+    agent_grant: dict[str, Any] | None = None
+    agent_binding: dict[str, Any] | None = None
+    if workspace_image is not None:
+        agent_grant, agent_binding = _agent_workspace_documents(
+            str(workspace_image["reference"]),
+            peer_uid=control_uid,
+            issued_at=_DETERMINISTIC_GRANT_ISSUED_AT,
+            expires_at=_DETERMINISTIC_GRANT_EXPIRES_AT,
+        )
     steps: list[dict[str, Any]] = [
         {
             "step": "verify-rootless-supplementary-group-contract",
@@ -1051,6 +1198,18 @@ def render_provisioning_plan(
                 issued_at=_DETERMINISTIC_GRANT_ISSUED_AT,
                 expires_at=_DETERMINISTIC_GRANT_EXPIRES_AT,
                 revocation_epoch=0,
+            ),
+            **(
+                {
+                    "agentWorkspace": {
+                        "grantPath": f"{GRANTS_DIR}/{AGENT_GRANT_ID}.json",
+                        "bindingPath": AGENT_WORKSPACE_BINDING_PATH,
+                        "grant": agent_grant,
+                        "binding": agent_binding,
+                    }
+                }
+                if agent_grant is not None
+                else {}
             ),
             "commands": [],
         },
@@ -2760,6 +2919,7 @@ def _step_directories(ctx: _Apply) -> dict[str, Any]:
                 step=step,
                 **({"refuse_existing_mismatch": True} if str(spec["path"]) in {
                     "/var/lib/stateport-control/provider-auth", PROVIDER_HOME_CONTRACT["hostPath"],
+                    AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
                 } else {}),
             )
             or changed
@@ -3022,6 +3182,44 @@ def _prepare_workspace_publication(ctx: _Apply) -> None:
     step = "install-control-plane-units"
     root_uid, root_gid = _resolve_owner(ctx, "root:root", step=step)
     _ensure_directory_converged(ctx, WORKSPACE_PUBLIC_DIR, mode=0o755, uid=root_uid, gid=root_gid, step=step)
+    agent_spec = next(
+        (
+            entry.get("agentWorkspace")
+            for entry in ctx.plan.get("steps", ())
+            if isinstance(entry, Mapping)
+            and entry.get("step") == "provision-execution-host-grant"
+        ),
+        None,
+    )
+    if agent_spec is not None:
+        binding_path = str(agent_spec["bindingPath"])
+        if binding_path != AGENT_WORKSPACE_BINDING_PATH:
+            raise StepFailed(step, "the agent workspace binding path is not the fixed path")
+        binding_content = (
+            json.dumps(agent_spec["binding"], indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        _write_file_converged(
+            ctx,
+            binding_path,
+            binding_content,
+            mode=0o644,
+            uid=root_uid,
+            gid=root_gid,
+            step=step,
+            journal_kind="agent-binding-written",
+        )
+        observed_binding, observed_binding_info = _read_regular_file(
+            ctx.layout, binding_path, step=step
+        )
+        _require(
+            observed_binding_info is not None
+            and observed_binding == binding_content
+            and observed_binding_info.st_uid == root_uid
+            and observed_binding_info.st_gid == root_gid
+            and stat.S_IMODE(observed_binding_info.st_mode) == 0o644,
+            step,
+            "agent workspace binding publication observation failed",
+        )
     raw, info = _read_regular_file(ctx.layout, WORKSPACE_BINDINGS_PATH, step=step, absent_ok=True)
     if info is None:
         _write_file_converged(ctx, WORKSPACE_BINDINGS_PATH,
@@ -4528,11 +4726,62 @@ def _step_grant(ctx: _Apply) -> dict[str, Any]:
         "control-plane grant publication observation failed",
     )
     ctx.grant_digest = daemon_contract.canonical_digest(validated)
+    detail = f"grant {DEFAULT_GRANT_ID} written with digest {ctx.grant_digest[:24]}…"
+    agent_spec = next(
+        (entry.get("agentWorkspace") for entry in spec if entry["step"] == step), None
+    )
+    if agent_spec is not None:
+        try:
+            agent_grant_spec = agent_spec["grant"]
+            agent_grant = daemon_contract.validate_grant_document(agent_grant_spec)
+            agent_binding_spec = agent_spec["binding"]
+            if agent_binding_spec.get("formatVersion") != AGENT_WORKSPACE_BINDING_FORMAT:
+                raise ValueError("agent binding format is not the sealed value")
+            if agent_binding_spec.get("grantId") != AGENT_GRANT_ID:
+                raise ValueError("agent binding names a different grant")
+            if agent_binding_spec.get("authorityGrantDigest") != daemon_contract.canonical_digest(agent_grant):
+                raise ValueError("agent binding digest differs from its grant")
+            agent_workload = daemon_contract.validate_workload_spec(agent_binding_spec["workload"])
+            if (
+                agent_workload["workloadId"] != AGENT_WORKSPACE_ID
+                or agent_grant["workloadSpecDigests"].get(AGENT_WORKSPACE_ID)
+                != daemon_contract.canonical_digest(agent_workload)
+            ):
+                raise ValueError("agent binding workload differs from its grant scope")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StepFailed(step, f"the agent workspace authority is invalid: {exc}") from exc
+        agent_grant_path = str(agent_spec["grantPath"])
+        if agent_grant_path != f"{grants_dir}/{AGENT_GRANT_ID}.json":
+            raise StepFailed(step, "the agent workspace grant path is not the fixed path")
+        agent_content = (json.dumps(agent_grant, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        _write_file_converged(
+            ctx,
+            agent_grant_path,
+            agent_content,
+            mode=0o600,
+            uid=ctx.exec_uid,
+            gid=ctx.exec_gid,
+            step=step,
+            journal_kind="agent-grant-written",
+        )
+        observed_agent, observed_agent_info = _read_regular_file(
+            ctx.layout, agent_grant_path, step=step
+        )
+        _require(
+            observed_agent_info is not None
+            and observed_agent == agent_content
+            and observed_agent_info.st_uid == ctx.exec_uid
+            and observed_agent_info.st_gid == ctx.exec_gid
+            and stat.S_IMODE(observed_agent_info.st_mode) == 0o600,
+            step,
+            "agent workspace grant publication observation failed",
+        )
+        detail += f"; agent grant {AGENT_GRANT_ID} written"
     return {
         "step": step,
         "result": "applied",
         "commands": [],
-        "detail": f"grant {DEFAULT_GRANT_ID} written with digest {ctx.grant_digest[:24]}…",
+        "detail": detail,
     }
 
 

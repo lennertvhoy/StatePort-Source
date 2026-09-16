@@ -1351,7 +1351,7 @@ def _preflight_topology(topology: Mapping[str, Any]) -> None:
     }
     host_service_fields = service_fields | {
         "engineAccess", "socket", "lifecycle", "userNamespace", "logging",
-        "updateCompatibility",
+        "updateCompatibility", "agentProviderDirectory",
     }
     for entry in targets:
         _require(isinstance(entry, Mapping), "topology target is not a mapping")

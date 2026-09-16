@@ -23,8 +23,14 @@ LABEL org.opencontainers.image.title="StatePort Playwright Browser" \
       io.stateport.playwright.version="1.62.1" \
       io.stateport.browser.default="headless"
 
+# useradd stamps the current date into /etc/shadow's password-aging field,
+# which breaks double-build OCI reproducibility when the two builds cross
+# midnight UTC. Pin the field to the build's SOURCE_DATE_EPOCH day (0 when
+# unlabelled) so the layer is byte-identical across builds.
 RUN groupadd --gid 10001 stateport \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/stateport --shell /usr/sbin/nologin stateport \
+    && shadow_epoch="${STATEPORT_BUILD_SOURCE_DATE_EPOCH:-0}"; case "$shadow_epoch" in ''|*[!0-9]*) shadow_epoch=0;; esac \
+    && sed -i "s/^stateport:\([^:]*\):[0-9]*:/\1:$((shadow_epoch / 86400)):/" /etc/shadow \
     && mkdir -p /workspace /artifacts \
     && chown -R 10001:10001 /workspace /artifacts
 WORKDIR /opt/stateport-playwright

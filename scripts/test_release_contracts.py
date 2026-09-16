@@ -75,7 +75,9 @@ from stateport_release.cosign import (  # noqa: E402
     retain_bundle,
     signature_bundle_name,
 )
-from stateport_release.contract import (  # noqa: E402
+from stateport_release.contract import (
+    # noqa: E402,
+    AGENT_PROVIDER_DIRECTORY_CONTRACT,
     parse_last_line_json,
     validate_release_disposition,
     validate_successor_disposition_transition,
@@ -344,6 +346,7 @@ def release_index() -> dict[str, object]:
                     "allocation": "stable-operator-bound",
                 }
             ],
+            "agentProviderDirectory": dict(AGENT_PROVIDER_DIRECTORY_CONTRACT),
             "writableVolumes": [
                 {
                     "name": "execution-state",
@@ -2189,6 +2192,14 @@ def test_stable_execution_host_has_separate_operational_lifecycle_and_normal_cli
     assert b"GroupAdd=" not in host_unit
     assert b"Volume=%t/podman:/run/stateport-engine:rw" in host_unit
     assert b"Environment=STATEPORT_ENGINE_SOCKET=/run/stateport-engine/podman.sock" in host_unit
+    assert (
+        b"Volume=/var/lib/stateport-exec/stateport-execution-host/agent-provider:"
+        b"/var/lib/stateport-exec/stateport-execution-host/agent-provider:ro" in host_unit
+    )
+    assert (
+        b"Environment=STATEPORT_EXECUTION_PROVIDER_DIR="
+        b"/var/lib/stateport-exec/stateport-execution-host/agent-provider" in host_unit
+    )
     assert b"After=podman.socket" in host_unit
     # Sibling-class guard: no rendered unit bind-mounts a socket FILE
     # (podman.socket recreates the inode on restart).
@@ -3558,19 +3569,19 @@ def test_provider_home_is_persistent_only_in_accepted_profile_and_outside_data_v
         if "stateport-web" not in Path(path).name or not path.endswith(".container.in"):
             assert host_path not in content
             continue
-        assert b"Environment=CODEX_HOME=/var/lib/stateport-provider/codex" in content
+        assert b"Environment=STATEPORT_OPENCODE_HOME=/var/lib/stateport-provider/opencode" in content
         assert b"UserNS=keep-id:uid=65532,gid=65532" in content
         if "-accepted-" in path:
-            assert b"Volume=" + host_path + b":/var/lib/stateport-provider/codex:rw\n" in content
+            assert b"Volume=" + host_path + b":/var/lib/stateport-provider/opencode:rw\n" in content
             provider_mounts = [line for line in content.decode().splitlines()
-                               if line.startswith(("Volume=", "Tmpfs=")) and "stateport-provider/codex" in line]
-            assert provider_mounts == ["Volume=" + host_path.decode() + ":/var/lib/stateport-provider/codex:rw"]
+                               if line.startswith(("Volume=", "Tmpfs=")) and "stateport-provider/opencode" in line]
+            assert provider_mounts == ["Volume=" + host_path.decode() + ":/var/lib/stateport-provider/opencode:rw"]
         else:
             assert host_path not in content
             provider_mounts = [line for line in content.decode().splitlines()
-                               if line.startswith(("Volume=", "Tmpfs=")) and "stateport-provider/codex" in line]
+                               if line.startswith(("Volume=", "Tmpfs=")) and "stateport-provider/opencode" in line]
             assert provider_mounts == [
-                "Tmpfs=/var/lib/stateport-provider/codex:rw,noexec,nosuid,nodev,notmpcopyup,mode=0700,size=67108864,U"
+                "Tmpfs=/var/lib/stateport-provider/opencode:rw,noexec,nosuid,nodev,notmpcopyup,mode=0700,size=67108864,U"
             ]
             # This exact option set passed a real rootless Podman6.1 image
             # smoke with UID/GID 65532 and mode 0700 assertions. U sets mount
@@ -4379,6 +4390,14 @@ def test_stable_execution_host_has_separate_operational_lifecycle_and_normal_cli
     assert b"GroupAdd=" not in host_unit
     assert b"Volume=%t/podman:/run/stateport-engine:rw" in host_unit
     assert b"Environment=STATEPORT_ENGINE_SOCKET=/run/stateport-engine/podman.sock" in host_unit
+    assert (
+        b"Volume=/var/lib/stateport-exec/stateport-execution-host/agent-provider:"
+        b"/var/lib/stateport-exec/stateport-execution-host/agent-provider:ro" in host_unit
+    )
+    assert (
+        b"Environment=STATEPORT_EXECUTION_PROVIDER_DIR="
+        b"/var/lib/stateport-exec/stateport-execution-host/agent-provider" in host_unit
+    )
     assert b"After=podman.socket" in host_unit
     # Sibling-class guard: no rendered unit bind-mounts a socket FILE
     # (podman.socket recreates the inode on restart).

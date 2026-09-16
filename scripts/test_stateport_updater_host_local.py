@@ -149,7 +149,7 @@ def test_provider_home_preflight_reads_no_provider_files_and_legacy_needs_no_hom
     monkeypatch.setattr(host_module.os, "fstat", observed)
     _require_provisioned_provider_home({"services": [{"providerHome": dict(PROVIDER_HOME_CONTRACT)}]})
     assert marker.name not in opened
-    assert opened == ["/", "var", "lib", "stateport-control", "provider-auth", "codex"]
+    assert opened == ["/", "var", "lib", "stateport-control", "provider-auth", "opencode"]
     opened.clear()
     _require_provisioned_provider_home({"services": [{}]})
     assert opened == []

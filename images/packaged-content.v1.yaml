@@ -61,8 +61,8 @@ profiles:
   stateport-web:
     buildOnlySources:
       - apps/web
-      - config/codex-runtime/package.json
-      - config/codex-runtime/package-lock.json
+      - config/opencode-runtime/package.json
+      - config/opencode-runtime/package-lock.json
     finalImageSources:
       - VERSION
       - apps/admin-cli/src
@@ -75,6 +75,7 @@ profiles:
       - config/context-lifecycle.v1.yaml
       - config/functionality-preservation.v1.yaml
       - config/statespec-schema-registry.v1.json
+      - docs/operations/application-workspace-authority.md
       - fixtures/application-experiences/checklist-state.yaml
       - fixtures/application-experiences/development-workspace.yaml
       - fixtures/application-experiences/managed-projectstate.yaml
@@ -136,8 +137,9 @@ profiles:
       - sources/profiles/studydd-local-alpha.yaml
   stateport-dev-workspace:
     finalImageSources:
-      - config/codex-runtime/package-lock.json
-      - config/codex-runtime/package.json
+      - config/opencode-runtime/package-lock.json
+      - config/opencode-runtime/package.json
+      - images/bin/stateport-agent-run
       - images/bin/stateport-healthcheck
       - images/stateport-dev-workspace/ubuntu-snapshot.sources
   stateport-playwright:

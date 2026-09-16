@@ -72,6 +72,17 @@ targets:
             hostPort: 17001
             hostScope: private-proxy
             allocation: stable-operator-bound
+        # Daemon-owned provider material for the sandboxed agent workspace.
+        # The execution host mounts it read-only at the same path and passes
+        # the directory to the engine; the content is operator-supplied and
+        # the agent run refuses honestly while it is absent.
+        agentProviderDirectory:
+          hostPath: /var/lib/stateport-exec/stateport-execution-host/agent-provider
+          mountPath: /var/lib/stateport-exec/stateport-execution-host/agent-provider
+          owner: stateport-exec
+          mode: "0755"
+          environmentVariable: STATEPORT_EXECUTION_PROVIDER_DIR
+          validation: operator-materialized
         writableVolumes:
           - name: execution-state
             hostPath: /var/lib/stateport-exec/stateport-execution-host/state
@@ -190,12 +201,12 @@ targets:
               authority: exact-backup-receipt-required
         # Provider CLI owns this persistent home. It is never a copied data volume.
         providerHome:
-          provider: codex
-          hostPath: /var/lib/stateport-control/provider-auth/codex
-          mountPath: /var/lib/stateport-provider/codex
+          provider: opencode
+          hostPath: /var/lib/stateport-control/provider-auth/opencode
+          mountPath: /var/lib/stateport-provider/opencode
           owner: stateport-control
           mode: "0700"
-          environmentVariable: CODEX_HOME
+          environmentVariable: STATEPORT_OPENCODE_HOME
           validation: ephemeral-empty
         readOnlyHostMounts:
           - name: template-sources

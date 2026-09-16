@@ -259,7 +259,7 @@ def _require_provisioned_provider_home(target: Mapping[str, Any]) -> None:
         descriptors.append(os.open("/", flags))
         for component in Path(PROVIDER_HOME_CONTRACT["hostPath"]).parts[1:]:
             descriptors.append(os.open(component, flags, dir_fd=descriptors[-1]))
-            if component in {"stateport-control", "provider-auth", "codex"}:
+            if component in {"stateport-control", "provider-auth", "opencode"}:
                 info = os.fstat(descriptors[-1])
                 if info.st_uid != 65531 or info.st_gid != 65531:
                     raise OSError("provider directory ownership differs")

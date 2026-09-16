@@ -97,8 +97,8 @@ containers, files, or volumes are convergence, and every step touches only
 names from the durable record — never a glob, never a foreign resource, and
 no external side-effect reversal is ever claimed.
 
-Provider-owned Codex sign-in stays outside these volumes and survives both
-uninstall and purge. Use ``codex logout`` in the installed provider environment
+Provider-owned OpenCode sign-in stays outside these volumes and survives both
+uninstall and purge. Use OpenCode itself in the installed provider environment
 before runtime removal when sign-out is intended; no credential files are read
 or deleted by StatePort cleanup.
 
@@ -213,11 +213,14 @@ _WSL_ROOTFS_IDENTITY = {
 UPDATE_TRUST_ROOT_SCHEMA = "stateport.internal-update-trust-root/v1"
 INSTALL_TRUST_SCHEMA = "stateport.internal-install-trust/v1"
 UNINSTALL_RECEIPT_SCHEMA = "stateport.internal-install-uninstall-receipt/v1"
-_PROVIDER_AUTH_HOME = "/var/lib/stateport-control/provider-auth/codex"
-_PROVIDER_AUTH_MOUNT = f"Volume={_PROVIDER_AUTH_HOME}:/var/lib/stateport-provider/codex:rw"
+_PROVIDER_AUTH_HOME = "/var/lib/stateport-control/provider-auth/opencode"
+_PROVIDER_AUTH_MOUNT = f"Volume={_PROVIDER_AUTH_HOME}:/var/lib/stateport-provider/opencode:rw"
+# The execution host's daemon-owned agent provider material, created by the
+# root provisioner (mode 0755) and declared in the recorded provisioning plan.
+_AGENT_PROVIDER_DIR = "/var/lib/stateport-exec/stateport-execution-host/agent-provider"
 _PROVIDER_LOGOUT_GUIDANCE = (
-    "Provider-owned Codex sign-in is preserved, including after purge. "
-    "To clear sign-in, run codex logout in the installed provider environment "
+    "Provider-owned OpenCode sign-in is preserved, including after purge. "
+    "To clear sign-in, use OpenCode itself in the installed provider environment "
     "before removing its runtime. StatePort does not read or delete the authentication files."
 )
 ACCEPTED_ACTIVATION_TARGET = "stateport-accepted.target"
@@ -5145,10 +5148,39 @@ def _derive_removal_plan(
             artifact.get("profile") == "accepted"
             and artifact.get("owner") == "stateport-control"
             and _PROVIDER_AUTH_MOUNT in text.splitlines()
-            and "Environment=CODEX_HOME=/var/lib/stateport-provider/codex" in text.splitlines()
+            and "Environment=STATEPORT_OPENCODE_HOME=/var/lib/stateport-provider/opencode" in text.splitlines()
         ):
             provider_paths.add(_PROVIDER_AUTH_HOME)
         quadlet_files.append(live_relative)
+    provisioning_plan_path = state_root / "execution-host-provisioning-plan.json"
+    if provisioning_plan_path.is_file() and not provisioning_plan_path.is_symlink():
+        provisioning_plan = _load_json(
+            provisioning_plan_path, "execution-host provisioning plan"
+        )
+        directories = provisioning_plan.get("directories")
+        if not isinstance(directories, list):
+            raise InstallerRefusal(
+                "installation_record_incomplete",
+                "the recorded execution-host provisioning plan has no directory list",
+            )
+        declared = [
+            entry
+            for entry in directories
+            if isinstance(entry, Mapping) and entry.get("path") == _AGENT_PROVIDER_DIR
+        ]
+        if declared:
+            if declared != [
+                {
+                    "path": _AGENT_PROVIDER_DIR,
+                    "mode": "0755",
+                    "owner": "stateport-exec:stateport-exec",
+                }
+            ]:
+                raise InstallerRefusal(
+                    "installation_record_incomplete",
+                    "the recorded agent provider directory contract is malformed",
+                )
+            provider_paths.add(_AGENT_PROVIDER_DIR)
     snapshot_volumes: list[str] = []
     for key, name in sorted(manifest["validationVolumeBindings"].items()):
         if not isinstance(key, str) or not isinstance(name, str) or not name:
@@ -5470,7 +5502,13 @@ def _validate_uninstall_receipt(receipt: Mapping[str, Any]) -> None:
             fail(f"{field} is missing")
     provider = receipt.get("providerAuthentication")
     if provider is not None:
-        if not isinstance(provider, dict) or provider.get("preservedPaths") not in ([], [_PROVIDER_AUTH_HOME]):
+        accepted_paths = (
+            [],
+            [_PROVIDER_AUTH_HOME],
+            [_AGENT_PROVIDER_DIR],
+            sorted([_PROVIDER_AUTH_HOME, _AGENT_PROVIDER_DIR]),
+        )
+        if not isinstance(provider, dict) or provider.get("preservedPaths") not in accepted_paths:
             fail("provider authentication preservation is malformed")
         expected_guidance = _PROVIDER_LOGOUT_GUIDANCE if provider["preservedPaths"] else None
         if provider.get("guidance") != expected_guidance:

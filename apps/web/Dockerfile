@@ -1,4 +1,3 @@
-ARG STATEPORT_PROVIDER_IMAGE=stateport-provider-empty
 FROM docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS web-build
 WORKDIR /web
 COPY apps/web/package.json apps/web/package-lock.json ./
@@ -21,63 +20,34 @@ ENV STATEPORT_BUILD_SOURCE_COMMIT=${STATEPORT_BUILD_SOURCE_COMMIT} \
     STATEPORT_BUILD_VERSION=${STATEPORT_BUILD_VERSION}
 RUN npm run build
 
-# Codex remains the supported provider. Install only the locked native runtime
-# in the control service that actually owns assistant execution; no Node/npm,
-# credentials or provider session state enter the final image.
-FROM docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS stateport-provider-empty
-RUN mkdir -p /out
-ARG STATEPORT_PROVIDER_IMAGE=stateport-provider-empty
-FROM ${STATEPORT_PROVIDER_IMAGE} AS stateport-provider
-FROM docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS provider-build
-WORKDIR /provider
-ARG STATEPORT_PROVIDER_MODE=official-npm
-ARG STATEPORT_PROVIDER_MANIFEST_DIGEST=
-ARG STATEPORT_PROVIDER_PLATFORM_MANIFEST_DIGEST=
-ARG STATEPORT_PROVIDER_VERSION=
-ARG STATEPORT_PROVIDER_BUBBLEWRAP_VERSION=
-ARG STATEPORT_PROVIDER_RIPGREP_VERSION=
-ARG STATEPORT_PROVIDER_SOURCE_COMMIT=
-ARG STATEPORT_PROVIDER_SOURCE_ARCHIVE_DIGEST=
-ARG STATEPORT_PROVIDER_BUILD_CONTEXT_DIGEST=
-ARG STATEPORT_PROVIDER_CODEX_DIGEST=
-ARG STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST=
-ARG STATEPORT_PROVIDER_RIPGREP_DIGEST=
-COPY config/codex-runtime/package.json config/codex-runtime/package-lock.json ./
-RUN --mount=type=bind,from=stateport-provider,source=/out,target=/provider-input,readonly \
-    set -eu \
-    && rm -rf /out \
-    && mkdir /out \
-    && if [ "$STATEPORT_PROVIDER_MODE" = official-npm ]; then \
-         npm ci --ignore-scripts --omit=dev --audit=false --fund=false \
-         && cp node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex /out/codex \
-         && cp node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path/rg /out/rg \
-         && chmod 0555 /out/codex /out/rg \
-         && /out/codex --version | grep -Fx "codex-cli 0.146.0"; \
-       elif [ "$STATEPORT_PROVIDER_MODE" = custom-oci ]; then \
-         export STATEPORT_PROVIDER_MANIFEST_DIGEST STATEPORT_PROVIDER_PLATFORM_MANIFEST_DIGEST STATEPORT_PROVIDER_VERSION \
-           STATEPORT_PROVIDER_BUBBLEWRAP_VERSION STATEPORT_PROVIDER_RIPGREP_VERSION \
-           STATEPORT_PROVIDER_SOURCE_COMMIT STATEPORT_PROVIDER_SOURCE_ARCHIVE_DIGEST \
-           STATEPORT_PROVIDER_BUILD_CONTEXT_DIGEST STATEPORT_PROVIDER_CODEX_DIGEST \
-           STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST STATEPORT_PROVIDER_RIPGREP_DIGEST; \
-         test -f /provider-input/provider-metadata.json \
-           && test -x /provider-input/codex \
-           && test -x /provider-input/bwrap \
-           && test -x /provider-input/rg \
-           && node -e 'const fs=require("fs"),m=JSON.parse(fs.readFileSync("/provider-input/provider-metadata.json")),d=/^sha256:[0-9a-f]{64}$/; const a=m.artifacts||{},s=m.source||{}; if(m.formatVersion!=="stateport.provider-runtime-metadata/v1"||m.version!==process.env.STATEPORT_PROVIDER_VERSION||m.bubblewrapVersion!==process.env.STATEPORT_PROVIDER_BUBBLEWRAP_VERSION||m.ripgrepVersion!==process.env.STATEPORT_PROVIDER_RIPGREP_VERSION||s.repository!=="https://github.com/openai/codex"||s.commit!==process.env.STATEPORT_PROVIDER_SOURCE_COMMIT||s.sourceArchiveDigest!==process.env.STATEPORT_PROVIDER_SOURCE_ARCHIVE_DIGEST||s.buildContextDigest!==process.env.STATEPORT_PROVIDER_BUILD_CONTEXT_DIGEST||!d.test(a.codex?.digest)||!d.test(a.bubblewrap?.digest)||!d.test(a.ripgrep?.digest)||a.codex?.digest!==process.env.STATEPORT_PROVIDER_CODEX_DIGEST||a.bubblewrap?.digest!==process.env.STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST||a.ripgrep?.digest!==process.env.STATEPORT_PROVIDER_RIPGREP_DIGEST||!Array.isArray(m.licenses)||m.licenses.join(",")!=="LICENSE,NOTICE,BUBBLEWRAP-LICENSE,BUBBLEWRAP-NOTICE") process.exit(1)' \
-           && test "$(sha256sum /provider-input/codex | cut -d' ' -f1)" = "${STATEPORT_PROVIDER_CODEX_DIGEST#sha256:}" \
-           && test "$(sha256sum /provider-input/bwrap | cut -d' ' -f1)" = "${STATEPORT_PROVIDER_BUBBLEWRAP_DIGEST#sha256:}" \
-           && test "$(sha256sum /provider-input/rg | cut -d' ' -f1)" = "${STATEPORT_PROVIDER_RIPGREP_DIGEST#sha256:}" \
-           && test "$(/provider-input/codex --version)" = "$STATEPORT_PROVIDER_VERSION" \
-           && test "$(/provider-input/bwrap --version | head -n1)" = "$STATEPORT_PROVIDER_BUBBLEWRAP_VERSION" \
-           && test "$(/provider-input/rg --version | head -n1)" = "$STATEPORT_PROVIDER_RIPGREP_VERSION" \
-           && for license in LICENSE NOTICE BUBBLEWRAP-LICENSE BUBBLEWRAP-NOTICE; do test -f "/provider-input/$license"; cp "/provider-input/$license" "/out/$license"; done \
-           && cp /provider-input/codex /out/codex \
-           && cp /provider-input/bwrap /out/bwrap \
-           && cp /provider-input/rg /out/rg \
-           && chmod 0555 /out/codex /out/bwrap /out/rg; \
-       else \
-         echo "unsupported provider input mode" >&2; exit 1; \
-       fi
+# OpenCode is consumed as a maintained upstream release and is never built or
+# patched here. The build fetches only the exact platform tarball recorded in
+# config/provider-runtime-inputs.yaml, cross-checks the audited lock entry
+# (resolved URL + sha512 SRI), verifies that SRI against the downloaded bytes,
+# verifies the extracted binary's sha256, and fails unless it reports exactly
+# the pinned version. The musl platform package is named explicitly for the
+# Alpine web target; npm's optional-dependency platform filtering is
+# deliberately not used, so a glibc/musl base mismatch can never select the
+# wrong binary.
+FROM docker.io/library/node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS opencode-build
+WORKDIR /opencode
+COPY config/opencode-runtime/package.json config/opencode-runtime/package-lock.json ./
+ARG STATEPORT_OPENCODE_VERSION=1.18.31
+ARG STATEPORT_OPENCODE_LOCK_PACKAGE=opencode-linux-x64-musl
+ARG STATEPORT_OPENCODE_TARBALL=https://registry.npmjs.org/opencode-linux-x64-musl/-/opencode-linux-x64-musl-1.18.31.tgz
+ARG STATEPORT_OPENCODE_SRI=sha512-TxKfcJII53MZ17NSrJ0p51wx0dJtZrX8By60N5O5/M+eP0oO4jCXKIkdBpP/Bku44gm8QZkTNLBWpPc2OTJweg==
+ARG STATEPORT_OPENCODE_BINARY_MEMBER=package/bin/opencode
+ARG STATEPORT_OPENCODE_BINARY_SHA256=sha256:b4a7415a1f8410c58e099d3bed7c2d78fbc06d2fef3bd7a4ba39fec7f40af48f
+RUN set -eu \
+    && node -e 'const crypto=require("crypto"),fs=require("fs");const [lockPath,platformPackage,tarUrl,sri,outPath]=process.argv.slice(1);const lock=JSON.parse(fs.readFileSync(lockPath,"utf8"));const entry=lock.packages["node_modules/"+platformPackage];if(!entry)throw new Error("lock has no "+platformPackage);if(entry.resolved!==tarUrl)throw new Error("lock platform tarball differs from the pin");if(entry.integrity!==sri)throw new Error("lock platform integrity differs from the pin");if(!/^sha512-[A-Za-z0-9+/]{86}==$/.test(sri))throw new Error("pinned platform integrity is not sha512 SRI");fetch(tarUrl).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.arrayBuffer()}).then(b=>{const d=Buffer.from(b);const a="sha512-"+crypto.createHash("sha512").update(d).digest("base64");if(a!==sri)throw new Error("tarball integrity differs from the pin");fs.writeFileSync(outPath,d);console.log("opencode platform tarball verified "+platformPackage+" bytes="+d.length)}).catch(e=>{console.error("opencode install refused: "+e.message);process.exit(1)});' \
+      /opencode/package-lock.json "$STATEPORT_OPENCODE_LOCK_PACKAGE" "$STATEPORT_OPENCODE_TARBALL" "$STATEPORT_OPENCODE_SRI" /opencode/opencode.tgz \
+    && mkdir -p /out /tmp/opencode-extract \
+    && tar -xzf /opencode/opencode.tgz -C /tmp/opencode-extract "$STATEPORT_OPENCODE_BINARY_MEMBER" \
+    && echo "${STATEPORT_OPENCODE_BINARY_SHA256#sha256:}  /tmp/opencode-extract/${STATEPORT_OPENCODE_BINARY_MEMBER}" | sha256sum -c - \
+    && cp /tmp/opencode-extract/"$STATEPORT_OPENCODE_BINARY_MEMBER" /out/opencode \
+    && chmod 0555 /out/opencode \
+    && test "$(/out/opencode --version)" = "$STATEPORT_OPENCODE_VERSION" \
+    && rm -rf /tmp/opencode-extract /opencode/opencode.tgz
 
 FROM docker.io/library/python:3.13-alpine3.23@sha256:75f27d686432419c9d42420b2b9ef605868c7a0682a6be10a6601fad46c2df01
 ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
@@ -102,7 +72,7 @@ LABEL org.opencontainers.image.title="StatePort Web" \
       io.stateport.image.role="control-web" \
       io.stateport.component.preview-gateway="same-origin-web-process" \
       io.stateport.packaged-content="stateport.packaged-content/v1" \
-      io.stateport.provider.executables="codex"
+      io.stateport.provider.executables="opencode"
 
 # The AppServer validates the exact runtime Git identity of the mounted
 # product root (_validate_product_root) and executes approved filesystem
@@ -114,11 +84,16 @@ LABEL org.opencontainers.image.title="StatePort Web" \
 # packages to the currently published v3.23 security releases; the pins fail
 # closed when the repositories roll forward, so a later rebuild can never
 # silently drift to unreviewed bytes.
+# libstdc++/libgcc are the C++ runtime the pinned musl OpenCode binary links
+# against (the Alpine python base omits them); they are exact-pinned for the
+# same fail-closed reason.
 RUN apk add --no-cache \
       git=2.52.0-r0 \
       bubblewrap=0.12.0-r0 \
       libcrypto3=3.5.8-r0 \
+      libgcc=15.2.0-r2 \
       libssl3=3.5.8-r0 \
+      libstdc++=15.2.0-r2 \
       libuuid=2.41.6-r1 \
       sqlite-libs=3.53.4-r0 \
     && rm -f /var/log/apk.log \
@@ -141,22 +116,15 @@ RUN if [ "${STATEPORT_BUILD_SOURCE_DATE_EPOCH}" != "unknown" ]; then \
 # This directory is deliberately outside StatePort data/config/backup roots.
 # The signed topology supplies a provider-owned mount; without it read-only
 # container roots refuse authentication instead of writing auth into product data.
-RUN mkdir -p /var/lib/stateport-provider/codex \
-    && chown 65532:65532 /var/lib/stateport-provider/codex \
-    && chmod 0700 /var/lib/stateport-provider/codex
-COPY --from=provider-build /out/codex /usr/local/bin/codex
-COPY --from=provider-build /out/rg /usr/local/bin/rg
-COPY --from=provider-build /out /tmp/stateport-provider-inputs
-ARG STATEPORT_PROVIDER_MODE=official-npm
-RUN if [ "$STATEPORT_PROVIDER_MODE" = custom-oci ]; then \
-      install -m 0555 /tmp/stateport-provider-inputs/bwrap /usr/bin/bwrap \
-      && install -d -m 0555 /usr/share/licenses/stateport-provider \
-      && install -m 0444 /tmp/stateport-provider-inputs/LICENSE /usr/share/licenses/stateport-provider/LICENSE \
-      && install -m 0444 /tmp/stateport-provider-inputs/NOTICE /usr/share/licenses/stateport-provider/NOTICE \
-      && install -m 0444 /tmp/stateport-provider-inputs/BUBBLEWRAP-LICENSE /usr/share/licenses/stateport-provider/BUBBLEWRAP-LICENSE \
-      && install -m 0444 /tmp/stateport-provider-inputs/BUBBLEWRAP-NOTICE /usr/share/licenses/stateport-provider/BUBBLEWRAP-NOTICE; \
-    fi \
-    && rm -rf /tmp/stateport-provider-inputs
+RUN mkdir -p /var/lib/stateport-provider/opencode \
+    && chown 65532:65532 /var/lib/stateport-provider/opencode \
+    && chmod 0700 /var/lib/stateport-provider/opencode
+COPY --from=opencode-build /out/opencode /usr/local/bin/opencode
+# The copied OpenCode binary must run in the final musl image (the web base
+# omits the C++ runtime; libstdc++/libgcc above supply it). Fail the build
+# unless the shipped binary reports exactly the pinned version.
+RUN chmod 0555 /usr/local/bin/opencode \
+    && test "$(/usr/local/bin/opencode --version)" = "1.18.31"
 WORKDIR /workspace
 
 # Final-image product content is an exact positive allowlist mirrored by
@@ -172,6 +140,7 @@ COPY config/application-experience-policy.yaml /workspace/config/application-exp
 COPY config/context-lifecycle.v1.yaml /workspace/config/context-lifecycle.v1.yaml
 COPY config/functionality-preservation.v1.yaml /workspace/config/functionality-preservation.v1.yaml
 COPY config/statespec-schema-registry.v1.json /workspace/config/statespec-schema-registry.v1.json
+COPY docs/operations/application-workspace-authority.md /workspace/docs/operations/application-workspace-authority.md
 COPY packages/api-auth/src /workspace/packages/api-auth/src
 COPY packages/api-native-adapter/src /workspace/packages/api-native-adapter/src
 COPY packages/application-experience/src /workspace/packages/application-experience/src
@@ -262,7 +231,7 @@ ENV HOME=/var/lib/stateport \
     XDG_CONFIG_HOME=/var/lib/stateport/config \
     XDG_DATA_HOME=/var/lib/stateport/data \
     XDG_STATE_HOME=/var/lib/stateport/state \
-    CODEX_HOME=/var/lib/stateport-provider/codex \
+    STATEPORT_OPENCODE_HOME=/var/lib/stateport-provider/opencode \
     STATEPORT_PACKAGED_PRODUCT=1 \
     STATEPORT_PRODUCT_ROOT=/workspace \
     STATEPORT_BUILD_SOURCE_COMMIT=${STATEPORT_BUILD_SOURCE_COMMIT} \

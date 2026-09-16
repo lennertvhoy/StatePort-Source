@@ -42,7 +42,6 @@ rules:
   - apps/web/assets/brand/stateport-mascot-dark-block-arch.svg
   - apps/web/assets/brand/stateport-mascot-light-block-arch.svg
   - apps/worker/README.md
-  - config/codex-runtime/README.md
   - docs/ACCEPTANCE_FREEZES.md
   - docs/AGENT_KITS.md
   - docs/API_CONTRACT.md
@@ -217,6 +216,7 @@ rules:
   - apps/web/src/client/__tests__/scenarios.test.ts
   - apps/web/src/client/__tests__/seed.test.ts
   - apps/web/src/client/__tests__/semantic.test.ts
+  - apps/web/src/client/agentClient.ts
   - apps/web/src/client/attachmentPolicy.ts
   - apps/web/src/client/client.ts
   - apps/web/src/client/http/__tests__/activity.test.ts
@@ -381,8 +381,10 @@ rules:
   - apps/web/src/features/conversation/useAttachmentUploads.ts
   - apps/web/src/features/conversation/useContextChips.ts
   - apps/web/src/features/conversation/useConversationController.ts
+  - apps/web/src/features/execution-host/AgentRunPanel.tsx
   - apps/web/src/features/execution-host/ExecutionHostPage.tsx
   - apps/web/src/features/execution-host/WorkspaceAuthorityPanel.tsx
+  - apps/web/src/features/execution-host/__tests__/AgentRunPanel.test.tsx
   - apps/web/src/features/execution-host/__tests__/WorkspaceAuthorityPanel.test.tsx
   - apps/web/src/features/execution-host/__tests__/ExecutionHostPage.test.tsx
   - apps/web/src/features/files/Breadcrumbs.tsx
@@ -591,16 +593,11 @@ rules:
   - config/agent-routing-policy.yaml
   - config/application-experience-policy.yaml
   - config/authority-policy.v1.yaml
-  - config/codex-runtime/Containerfile
-  - config/codex-runtime/bubblewrap.Containerfile
-  - config/codex-runtime/bubblewrap-build.json
-  - config/codex-runtime/prepare-source.py
-  - config/codex-runtime/source-build.json
-  - config/codex-runtime/package-lock.json
-  - config/codex-runtime/package.json
   - config/container-base-images.yaml
   - config/container-build-inputs.yaml
   - config/context-lifecycle.v1.yaml
+  - config/opencode-runtime/package-lock.json
+  - config/opencode-runtime/package.json
   - config/public-export-allowlist.v1.yaml
   - config/frontend-dynamic-preservation.v1.yaml
   - config/functionality-preservation.extensions/bl-ai-vertical-002.yaml
@@ -697,6 +694,7 @@ rules:
   - fixtures/templates/lifecycle-v2-minimal/template.yaml
   - fixtures/templates/studydd-minimal/.statedd/manifest.yaml
   - fixtures/templates/studydd-minimal/template.yaml
+  - images/bin/stateport-agent-run
   - images/bin/stateport-healthcheck
   - images/image-set.v1.yaml
   - images/packaged-content.v1.yaml
@@ -840,6 +838,7 @@ rules:
   - packages/execution-host/src/execution_host/workspace_revisions.py
   - packages/execution-host/src/execution_host/workspace_source.py
   - packages/execution-host/src/execution_host/workspaces.py
+  - packages/execution-host/tests/test_agent_provider_mount.py
   - packages/execution-host/tests/test_application_workspace_authority.py
   - packages/execution-host/tests/test_workspace_source.py
   - packages/execution-host/tests/test_execution_host_daemon_unit.py
@@ -887,6 +886,7 @@ rules:
   - packages/opencode-adapter/src/opencode_adapter/adapter.py
   - packages/persistent-app/src/stateport_persistent_app/__init__.py
   - packages/persistent-app/src/stateport_persistent_app/activity_receipts.py
+  - packages/persistent-app/src/stateport_persistent_app/agent_run.py
   - packages/persistent-app/src/stateport_persistent_app/app.py
   - packages/persistent-app/src/stateport_persistent_app/assistant_cancellable_runtime.py
   - packages/persistent-app/src/stateport_persistent_app/assistant_processor.py
@@ -899,6 +899,7 @@ rules:
   - packages/persistent-app/src/stateport_persistent_app/execution_host_proxy.py
   - packages/persistent-app/src/stateport_persistent_app/infrastructure.py
   - packages/persistent-app/src/stateport_persistent_app/platform_surface.py
+  - packages/persistent-app/src/stateport_persistent_app/provider_credentials.py
   - packages/persistent-app/src/stateport_persistent_app/provider_router.py
   - packages/persistent-app/src/stateport_persistent_app/repository_content.py
   - packages/persistent-app/src/stateport_persistent_app/repository_import.py
@@ -1133,14 +1134,12 @@ rules:
   - scripts/install.sh
   - scripts/install_no_checkout.py
   - scripts/local_closure_gate.py
-  - scripts/producer_build_custom_provider.py
   - scripts/run_web_e2e.py
-  - scripts/test_producer_build_custom_provider.py
   - scripts/test_run_web_e2e.py
   - scripts/materialize_public_snapshot.py
   - scripts/portable_instance.py
-  - scripts/prepare_provider_runtime_context.py
-  - scripts/test_prepare_provider_runtime_context.py
+  - scripts/prepare_opencode_distribution.py
+  - scripts/test_opencode_distribution.py
   - scripts/provision_execution_host.py
   - scripts/stateport-execution-host-provision
   - scripts/public_alpha_preflight.py
@@ -1167,6 +1166,8 @@ rules:
   - scripts/test_activity_receipts_service.py
   - scripts/test_agent_native_cockpit.py
   - scripts/test_agent_routing_policy.py
+  - scripts/test_agent_run.py
+  - scripts/test_agent_run_wrapper.py
   - scripts/test_alpha4_execution_host.py
   - scripts/test_alpha4_lease.py
   - scripts/test_alpha4_promotion.py
@@ -1203,11 +1204,7 @@ rules:
   - scripts/test_ci_continuation.py
   - scripts/test_ci_workflow.py
   - scripts/test_codex_adapter.py
-  - scripts/test_codex_runtime_cache.py
-  - scripts/test_codex_consumer_context.py
   - scripts/test_verify_public_image_transport.py
-  - scripts/test_xz_regression_prep.py
-  - scripts/test_codex_runtime_resume.py
   - scripts/test_control_materialization_paths.py
   - scripts/test_execution_host_receipt_inventory.py
   - scripts/test_complete_studydd_upgrade.py
@@ -1401,6 +1398,7 @@ rules:
   - HANDOFF_2026-09-03-ALPHA12-IMMUTABLE-INSTALLER-ARGPARSE.md
   - HANDOFF_BL_AI_VERTICAL_002.md
   - LICENSE_DECISION.md
+  - NEXT-SLICE-PLAN.md
   - STATE.yaml
   - WORKLOG.md
   - apps/web/assets/brand/favicon-asset-manifest.json
@@ -1586,6 +1584,10 @@ rules:
   - evidence/one-line-release-001/stage1-producer-build-procedure-r2.md
   - evidence/one-line-release-001/standard-source-and-notices-20260911.md
   - evidence/one-line-release-001/summary.md
+  - evidence/one-line-release-001/w15c-agent-run-receipt.json
+  - evidence/one-line-release-001/w15c-agent-run-refusal-grant-budget.json
+  - evidence/one-line-release-001/w15c-agent-run-refusal-ledger-recovery.json
+  - evidence/one-line-release-001/w15c-local-agent-run-proof.md
   - evidence/one-line-release-001/ui-audit-template-source.json
   - evidence/one-line-release-001/ui-control-inventory.json
   - evidence/one-line-release-001/ui-operation-audit.md
@@ -1603,6 +1605,10 @@ rules:
   - evidence/one-line-release-001/run-history-through-20260910-r13-start.md
   - evidence/one-line-release-001/run-history-before-sqlite-suite-20260910.md
   - evidence/one-line-release-001/v8-source-identities-20260911.md
+  - evidence/one-line-release-001/browser-terminal-proof-20260914/environment.json
+  - evidence/one-line-release-001/browser-terminal-proof-20260914/receipt.json
+  - evidence/one-line-release-001/browser-terminal-proof-20260914/terminal-proof.png
+  - evidence/one-line-release-001/browser-terminal-proof-20260914/ws-frame-trace.txt
   - evidence/template-lifecycle-001/journey.json
   - evidence/template-lifecycle-001/summary.md
   - docs/evidence/2026-07-12-overnight-program-convergence/integration-order.md
@@ -1860,114 +1866,6 @@ rules:
   - evidence/one-line-release-001/product-completion-three-template.json
   - scripts/test_provider_setup.py
   - scripts/test_template_lifecycle_journey_controller.py
-- id: codex-proc-mount-compatibility-patch
-  classification: third-party-reviewed
-  license: Apache-2.0
-  provenanceRationale: Proc diagnostic diff, regression tests, and exact dependency lock updates against OpenAI Codex commit e363b08c9175ac1cbe5893615dd2cb9ddf95043b; upstream context retains Apache-2.0 terms and build exports upstream LICENSE and NOTICE. No binary or credentials included.
-  paths:
-  - config/codex-runtime/proc-mount-compat.patch
-  - config/codex-runtime/dependency-updates.patch
-- id: native-repair-upstream-v8
-  classification: third-party-reviewed
-  license: BSD-3-Clause
-  provenanceRationale: Exact 53-file upstream V8 patch; commit, before/after hashes and retained original BSD notice bind
-    the reviewed material.
-  paths:
-  - config/codex-runtime/v8-repair/v8-security-update.patch
-- id: native-repair-upstream-codex
-  classification: third-party-reviewed
-  license: Apache-2.0
-  provenanceRationale: Minimal Codex consumer API and dependency diff; original Apache license and NOTICE retained in recipe/licenses.
-  paths:
-  - config/codex-runtime/v8-repair/codex-consumer-compat.patch
-- id: native-repair-upstream-icu
-  classification: third-party-reviewed
-  license: Unicode-3.0
-  provenanceRationale: Exact upstream ICU source corrections and full regression patches; immutable commits and original Unicode
-    license retained.
-  paths:
-  - config/codex-runtime/v8-repair/icu-corrections/icu-nfrule-fix.patch
-  - config/codex-runtime/v8-repair/icu-corrections/icu-source.patch
-  - config/codex-runtime/v8-repair/icu-corrections/icu-utfiterator-fix.patch
-- id: native-repair-public-domain-source
-  classification: third-party-reviewed
-  license: LicenseRef-Public-Domain
-  provenanceRationale: SQLite source/regression and maintained XZ v5.2 native index source explicitly disclaimed copyright;
-    exact source provenance and notices documented in recipe/licenses/README.md.
-  paths:
-  - config/codex-runtime/v8-repair/native-backports/libsqlite3-sys.patch
-  - config/codex-runtime/v8-repair/native-backports/lzma-sys.patch
-  - config/codex-runtime/v8-repair/native-backports/sqlite-upstream-regression.test
-- id: native-repair-xz-regression
-  classification: third-party-reviewed
-  license: 0BSD
-  provenanceRationale: Exact upstream XZ regression patch from SPDX-0BSD test source; verbatim 0BSD notice and original patch
-    author retained.
-  paths:
-  - config/codex-runtime/v8-repair/native-backports/xz-upstream-regression.patch
-- id: native-repair-ts-rs-macro-order
-  classification: third-party-reviewed
-  license: MIT
-  provenanceRationale: Minimal token-emission ordering diff against checksum-bound ts-rs-macros 11.1.0 at upstream commit 1dce5297090804082e9639d2b7d851ba815aa359; exact pre/postimages and original MIT notice retained. No complete dependency payload or artifact included.
-  paths:
-  - config/codex-runtime/v8-repair/native-backports/ts-rs-macros.patch
-- id: native-repair-rusty-v8-lock
-  classification: third-party-reviewed
-  license: MIT
-  provenanceRationale: Exact generated native Cargo lock from MIT-licensed rusty_v8 152.2.0; retains registry source identities
-    without relicensing dependencies.
-  paths:
-  - config/codex-runtime/v8-repair/native-Cargo.lock
-- id: native-repair-verbatim-notices
-  classification: third-party-reviewed
-  license: LicenseRef-Verbatim-License-Text
-  provenanceRationale: Verbatim license and notice texts from pinned upstream source commits; immutable URLs and digests retained.
-  paths:
-  - config/codex-runtime/v8-repair/icu-corrections/LICENSE-ICU
-  - config/codex-runtime/v8-repair/licenses/Codex-Apache-2.0.txt
-  - config/codex-runtime/v8-repair/licenses/Codex-NOTICE.txt
-  - config/codex-runtime/v8-repair/licenses/Rusty-V8-MIT.txt
-  - config/codex-runtime/v8-repair/licenses/V8-BSD-3-Clause.txt
-  - config/codex-runtime/v8-repair/licenses/XZ-0BSD.txt
-  - config/codex-runtime/v8-repair/licenses/TS-RS-MIT.txt
-- id: native-repair-documentation
-  classification: public-documentation
-  license: CC-BY-4.0
-  provenanceRationale: StatePort-authored preparation and qualification-limit documentation; third-party legal notices are
-    separately classified.
-  paths:
-  - config/codex-runtime/v8-repair/README.md
-  - config/codex-runtime/v8-repair/icu-corrections/README.md
-  - config/codex-runtime/v8-repair/licenses/README.md
-  - config/codex-runtime/v8-repair/native-backports/README.md
-- id: native-repair-preparation-source
-  classification: public-source
-  license: AGPL-3.0-or-later
-  provenanceRationale: StatePort-authored offline preparation scripts, image recipe, integrity manifests and factual dependency
-    inventories. Exact paths only; no downloaded payloads, caches, secrets or artifacts included.
-  paths:
-  - config/codex-runtime/v8-repair/.gitattributes
-  - config/codex-runtime/v8-repair/Containerfile
-  - config/codex-runtime/v8-repair/Consumer.Containerfile
-  - config/codex-runtime/v8-repair/booked_pilot.py
-  - config/codex-runtime/v8-repair/chromium-vendor.json
-  - config/codex-runtime/v8-repair/chromium_vendor.py
-  - config/codex-runtime/v8-repair/consumer_context.py
-  - config/codex-runtime/v8-repair/context_verify.py
-  - config/codex-runtime/v8-repair/fetch.py
-  - config/codex-runtime/v8-repair/licenses/sources.json
-  - config/codex-runtime/v8-repair/native-backports/.gitattributes
-  - config/codex-runtime/v8-repair/native-backports/maintained-sqlite.json
-  - config/codex-runtime/v8-repair/native-backports/pins.json
-  - config/codex-runtime/v8-repair/native-backports/prepare_backports.py
-  - config/codex-runtime/v8-repair/native-backports/prepare_xz_regression.py
-  - config/codex-runtime/v8-repair/native-backports/run_xz_asan.py
-  - config/codex-runtime/v8-repair/pilot.py
-  - config/codex-runtime/v8-repair/prepare.py
-  - config/codex-runtime/v8-repair/recipe.json
-  - config/codex-runtime/v8-repair/source-submodules.json
-  - config/codex-runtime/v8-repair/upstream-deps.json
-  - config/codex-runtime/v8-repair/verify_cached_work.py
 - id: reviewed-xterm-ligatures-fallback
   classification: third-party-reviewed
   license: MIT

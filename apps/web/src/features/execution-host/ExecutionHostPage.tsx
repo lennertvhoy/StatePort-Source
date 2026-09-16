@@ -5,6 +5,7 @@ import { getClient } from '@/client'
 import type { ExecutionHostOperationReceipt, ExecutionHostReceiptIndex, ExecutionHostResult, ExecutionHostStatus } from '@/client'
 import { ConfirmDialog } from '@/components'
 import { Button } from '@/components/ui/button'
+import AgentRunPanel from './AgentRunPanel'
 import WorkspaceAuthorityPanel from './WorkspaceAuthorityPanel'
 
 interface Workload {
@@ -382,13 +383,14 @@ export default function ExecutionHostPage() {
         {status?.detail && <p className="mt-2 text-xs text-foreground-secondary">{status.detail}</p>}
         <Button className="mt-3" size="sm" variant="outline" disabled={busy} onClick={() => void refresh()}>Refresh workloads</Button>
       </section>
+      <AgentRunPanel />
       {error && <p role="alert" className="rounded border border-border p-3 text-sm">{error}</p>}
       {refusal && <p role="alert" className="rounded border border-border p-3 text-sm">{refusal}</p>}
       {!available && status && <p className="text-sm">Execution runtime is unavailable. Review installation diagnostics and the provisioned execution grant.</p>}
           <section aria-label="Application workspaces" className="space-y-2">
             <h3 className="text-sm font-semibold">Application workspaces</h3>
-            <p className="text-xs text-foreground-secondary">An operator must provision each application's exact workspace profile and authority. Prepare an exact request here; the OS operator issues authority using the installed helper. Profiles without an approved source review start empty. Source-enabled profiles require exact source confirmation; recovery must preserve existing files. Container removal preserves workspace data; recovery reuses the same sealed profile.</p>
-            {workloads === null ? <p className="text-sm">Workspace authority and lifecycle are not confirmed. Refresh workloads before creation or recovery.</p> : applicationWorkspaces.length === 0 && <p className="text-sm">No application workspace authority has been provisioned.</p>}
+            <p className="text-xs text-foreground-secondary">An operator must provision each application's exact workspace profile and authority. Prepare an exact request here for each application below; the OS operator issues authority using the installed helper. Until then, application terminals keep working through the ordinary local terminal. Profiles without an approved source review start empty. Source-enabled profiles require exact source confirmation; recovery must preserve existing files. Container removal preserves workspace data; recovery reuses the same sealed profile. <a className="underline" href="/docs/operations/application-workspace-authority" target="_blank" rel="noreferrer">Workspace authority guide</a></p>
+            {workloads === null ? <p className="text-sm">Workspace authority and lifecycle are not confirmed. Refresh workloads before creation or recovery.</p> : applicationWorkspaces.length === 0 && <p className="text-sm">No application workspace authority has been provisioned yet. Each application below can prepare an exact authority request; see the <a className="underline" href="/docs/operations/application-workspace-authority" target="_blank" rel="noreferrer">workspace authority guide</a>.</p>}
             {applicationWorkspaces.map(profile => {
               const workload = (workloads ?? []).find(item => item.workloadId === profile.workloadId)
               const recover = workload && ['removed', 'interrupted'].includes(workload.state)

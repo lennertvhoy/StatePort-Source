@@ -7,7 +7,11 @@ allowlist before execution (hardening rules reused from
 namespaces, no mounts, bounded resources).  The mount exception is a
 sealed validator or source-backed agent command, whose argv carries exactly
 one read-only bind of its immutable staging tree and is re-asserted against
-that exact shape. Agent candidates remain on a bounded noexec tmpfs.  The engine never touches a control-plane
+that exact shape. A developer-network workspace carrying the sealed agent
+provider profile marker additionally carries exactly one read-only bind of the
+fixed daemon-owned provider directory at ``/stateport-provider`` and is
+re-asserted against that exact shape. Agent candidates remain on a bounded
+noexec tmpfs.  The engine never touches a control-plane
 socket; only the execution user's own rootless socket (or the default
 rootless CLI) is used.
 """
@@ -22,13 +26,14 @@ import pty
 import re
 import selectors
 import signal
+import stat
 import struct
 import subprocess
 import termios
 import time
 from typing import Any, Mapping, Sequence, Callable
 
-from .daemon_contract import MAX_OUTPUT_BYTES, MAX_REQUEST_TIMEOUT_SECONDS, DEVELOPMENT_SEED_POLICY, DEVELOPMENT_SEED_IMAGE, SIGNED_DEVELOPMENT_SEED_POLICY
+from .daemon_contract import MAX_OUTPUT_BYTES, MAX_REQUEST_TIMEOUT_SECONDS, DEVELOPMENT_SEED_POLICY, DEVELOPMENT_SEED_IMAGE, SIGNED_DEVELOPMENT_SEED_POLICY, AGENT_PROVIDER_PROFILE
 
 
 MANAGED_LABEL_KEY = "io.stateport.execution.managed"
@@ -51,6 +56,24 @@ CONTROL_PLANE_SOCKETS = frozenset(
         "/run/docker.sock",
     }
 )
+
+# Fixed agent provider profile.  The single accepted marker value selects one
+# extra read-only bind of a daemon-configured directory at the fixed container
+# path below.  The host source is never client-supplied: it comes from the
+# daemon's own configuration (env ``STATEPORT_EXECUTION_PROVIDER_DIR`` with a
+# documented default under the execution user's state root) and is
+# re-validated on every create.
+AGENT_PROVIDER_CONTAINER_PATH = "/stateport-provider"
+AGENT_PROVIDER_DIRECTORY_ENV = "STATEPORT_EXECUTION_PROVIDER_DIR"
+
+
+def default_agent_provider_directory() -> str:
+    """Documented default provider directory under the execution user's state root."""
+    state_home = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(state_home, "stateport", "agent-provider")
+
 
 # Daemon-owned volume naming.  The workspace data volume and cache volumes
 # only ever exist under these prefixes; host paths are not representable.
@@ -201,7 +224,67 @@ def cache_volume_name(workspace_id: str, volume_id: str) -> str:
     return CACHE_VOLUME_PREFIX + hashlib.sha256(identity).hexdigest()
 
 
-def build_create_argv(spec: Mapping[str, Any]) -> list[str]:
+def agent_provider_directory_configured(path: Any) -> str:
+    """Validate the fixed, daemon-owned read-only agent provider directory.
+
+    The directory must be an exact absolute, non-traversing path whose every
+    component (root to leaf) is a real, non-symlink entry; the leaf must be a
+    directory owned by the execution user or carrying the daemon's own group.
+    Any other shape refuses with a typed engine failure.
+    """
+    if (
+        not isinstance(path, str)
+        or not path.startswith("/")
+        or path == "/"
+        or os.path.normpath(path) != path
+        or any(character in path for character in (",", "\x00", "\\"))
+    ):
+        raise EngineError("agent provider directory must be a safe daemon-owned absolute path")
+    components = path.split("/")[1:]
+    current = "/"
+    for index, component in enumerate(components):
+        if component in {"", ".", ".."}:
+            raise EngineError("agent provider directory must be a safe daemon-owned absolute path")
+        current = os.path.join(current, component)
+        try:
+            info = os.lstat(current)
+        except OSError as exc:
+            raise EngineError("agent provider directory is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise EngineError("agent provider directory traverses a symlink")
+        if index == len(components) - 1:
+            if not stat.S_ISDIR(info.st_mode):
+                raise EngineError("agent provider directory is not a real directory")
+            if info.st_uid != os.geteuid() and info.st_gid != os.getegid():
+                raise EngineError("agent provider directory is not owned by the execution user")
+    return path
+
+
+def agent_provider_mount_argument(
+    parameters: Mapping[str, Any], provider_directory: Any
+) -> str:
+    """Return the exact sole mount argument for a sealed agent provider profile.
+
+    The marker and the developer network mode are both required; the host
+    source always comes from daemon configuration and is re-validated here at
+    create time, never from the request.
+    """
+    if parameters.get("agentProviderProfile") != AGENT_PROVIDER_PROFILE:
+        raise EngineError("agent provider profile is not the sealed value")
+    if parameters.get("networkMode") != "developer":
+        raise EngineError("agent provider profile requires the developer network mode")
+    if not provider_directory:
+        raise EngineError("agent provider directory is not configured")
+    directory = agent_provider_directory_configured(provider_directory)
+    return (
+        f"type=bind,src={directory},dst={AGENT_PROVIDER_CONTAINER_PATH},"
+        "readonly,relabel=private"
+    )
+
+
+def build_create_argv(
+    spec: Mapping[str, Any], *, provider_directory: Any = None
+) -> list[str]:
     """Build the hardened create argv from a validated sealed spec."""
 
     if spec["kind"] == "agent-run" and "command" in spec["parameters"]:
@@ -212,6 +295,9 @@ def build_create_argv(spec: Mapping[str, Any]) -> list[str]:
     parameters = spec["parameters"]
     is_workspace = spec["kind"] == "workspace"
     is_agent_run = spec["kind"] == "agent-run"
+    provider_mount: str | None = None
+    if is_workspace and parameters.get("agentProviderProfile") is not None:
+        provider_mount = agent_provider_mount_argument(parameters, provider_directory)
     env = {
         "STATEPORT_WORKLOAD_ID": spec["workloadId"],
         "STATEPORT_WORKLOAD_KIND": spec["kind"],
@@ -269,6 +355,11 @@ def build_create_argv(spec: Mapping[str, Any]) -> list[str]:
                 raise EngineError("cache volume mount is not daemon-owned")
             argv.extend(["--volume", cache_arg])
         argv.extend(["--workdir", "/workspace"])
+        if provider_mount is not None:
+            # Exactly one extra read-only daemon-owned provider bind; the
+            # dedicated assertion below re-asserts this exact shape and the
+            # rest of the workspace hardening.
+            argv.extend(["--mount", provider_mount])
     elif is_agent_run:
         argv.extend(["--cpus", str(spec["resources"]["cpuQuotaPercent"] / 100)])
         # The read-only ephemeral workload has no other writable filesystem,
@@ -300,10 +391,20 @@ def build_create_argv(spec: Mapping[str, Any]) -> list[str]:
         _workspace_seed_helper(spec)
         argv.extend(["--user", "10001:10001", "--userns", "host", "--label", "io.stateport.execution.seed-policy=" + spec["parameters"]["sourceSeed"]["helperPolicy"]])
         argv.extend([spec["image"]["reference"], "-c", _WORKLOAD_TEMPLATE])
-        assert_development_seed_argv_hardened(argv)
+        if provider_mount is not None:
+            assert_agent_provider_argv_hardened(
+                argv, provider_directory=provider_directory, seed_namespace=True
+            )
+        else:
+            assert_development_seed_argv_hardened(argv)
     else:
         argv.extend([spec["image"]["reference"], "-c", _WORKLOAD_TEMPLATE])
-        assert_create_argv_hardened(argv)
+        if provider_mount is not None:
+            assert_agent_provider_argv_hardened(
+                argv, provider_directory=provider_directory
+            )
+        else:
+            assert_create_argv_hardened(argv)
     return argv
 
 
@@ -406,6 +507,40 @@ def assert_agent_source_argv_hardened(argv: Sequence[str], *, source: str) -> No
         or re.fullmatch(r"/tmp:rw,noexec,nosuid,nodev,size=[1-9][0-9]*", temporary[0]) is None
     ):
         raise EngineError("agent source argv must retain its bounded noexec candidate filesystem")
+
+
+def assert_agent_provider_argv_hardened(
+    argv: Sequence[str], *, provider_directory: str, seed_namespace: bool = False
+) -> None:
+    """Re-assert the developer agent workspace with its one sealed provider bind.
+
+    Exactly one ``--mount`` may exist and it must be the read-only bind of the
+    fixed, re-validated daemon-owned provider directory.  No other mount or
+    client path is reachable; the remaining argv is asserted by the same
+    workspace (or development-seed) hardening used without the profile.
+    """
+    additional = frozenset({"--user", "--userns"}) if seed_namespace else frozenset()
+    text = _create_runtime_options(argv, additional_flags=additional)
+    expected = (
+        f"type=bind,src={provider_directory},dst={AGENT_PROVIDER_CONTAINER_PATH},"
+        "readonly,relabel=private"
+    )
+    mounts = [text[index + 1] for index, item in enumerate(text) if item == "--mount"]
+    if mounts != [expected]:
+        raise EngineError(
+            "agent provider workspace requires exactly its sealed read-only provider mount"
+        )
+    if "--network" in text:
+        raise EngineError("agent provider workspace must retain the developer network profile")
+    if "--volume" not in text:
+        raise EngineError("agent provider workspace must retain its daemon-owned workspace volume")
+    without_mount = list(argv)
+    position = without_mount.index("--mount")
+    del without_mount[position:position + 2]
+    if seed_namespace:
+        assert_development_seed_argv_hardened(without_mount)
+    else:
+        assert_create_argv_hardened(without_mount)
 
 
 def assert_development_seed_argv_hardened(argv: Sequence[str]) -> None:
@@ -546,6 +681,7 @@ class PodmanCliEngine:
     """Rootless Podman over the CLI, optionally against the owned socket."""
 
     agent_source_commands_supported = True
+    agent_provider_mount_supported = True
 
     def __init__(
         self,
@@ -553,6 +689,7 @@ class PodmanCliEngine:
         binary: str = "podman",
         socket_path: str | None = None,
         runner: Any = subprocess.run,
+        provider_directory: str | None = None,
     ) -> None:
         if socket_path is not None:
             normalized = os.path.normpath(socket_path)
@@ -561,11 +698,17 @@ class PodmanCliEngine:
                     f"engine socket {socket_path!r} is a control-plane or relative path; refused"
                 )
             socket_path = normalized
+        if not provider_directory:
+            provider_directory = (
+                os.environ.get(AGENT_PROVIDER_DIRECTORY_ENV)
+                or default_agent_provider_directory()
+            )
         self._workspace_image_reference: str | None = None
         self._workspace_image_authority: Callable[[], None] | None = None
         self._binary = binary
         self._socket_path = socket_path
         self._runner = runner
+        self._provider_directory = provider_directory
 
     @property
     def identity(self) -> dict[str, str]:
@@ -739,6 +882,17 @@ class PodmanCliEngine:
         if "helperPolicy" in spec["parameters"].get("sourceSeed", {}):
             self._require_rootless()
 
+    def validate_agent_provider_capability(self, spec: Mapping[str, Any]) -> None:
+        """Re-validate the fixed provider directory for a marked workspace.
+
+        Called by the daemon at create time and again by ``create`` before any
+        volume or container effect; a missing, symlinked, or foreign-owned
+        directory refuses and nothing is mounted.
+        """
+        if spec["kind"] != "workspace" or spec["parameters"].get("agentProviderProfile") is None:
+            return
+        agent_provider_mount_argument(spec["parameters"], self._provider_directory)
+
     def verify_workspace_seed_volume(self, spec: Mapping[str, Any], seed_id: str) -> None:
         name, labels = self._workspace_volume_claims(spec)[0]
         self._assert_volume(name, {**labels, "io.stateport.execution.volume.seed": seed_id,
@@ -854,10 +1008,14 @@ class PodmanCliEngine:
     def create(self, spec: Mapping[str, Any], *, timeout: int | None = None) -> str:
         if "helperPolicy" in spec["parameters"].get("sourceSeed", {}):
             self.validate_workspace_seed_capability(spec)
+        if spec["parameters"].get("agentProviderProfile") is not None:
+            # Re-validate the fixed daemon-owned provider directory before any
+            # volume or container effect; build_create_argv re-validates again.
+            self.validate_agent_provider_capability(spec)
         if spec["kind"] == "workspace":
             for name, labels in self._workspace_volume_claims(spec):
                 self._ensure_volume(name, labels)
-        argv = build_create_argv(spec)
+        argv = build_create_argv(spec, provider_directory=self._provider_directory)
         return self._require_ok(
             self._run(argv, timeout=timeout or MAX_REQUEST_TIMEOUT_SECONDS), "workload create"
         )

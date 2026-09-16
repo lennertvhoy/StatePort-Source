@@ -171,6 +171,13 @@ DEVELOPMENT_SEED_IMAGE = "ghcr.io/lennertvhoy/stateport-dev-workspace@sha256:010
 
 SIGNED_DEVELOPMENT_SEED_POLICY = "stateport.signed-development-python-seed/v1"
 
+# The only accepted agent provider profile.  When it is present on a
+# developer-network ``workspace`` workload it admits exactly one additional
+# read-only bind of a fixed, daemon-owned provider directory.  The value is a
+# fixed marker: it never carries a path, and it enables no other capability or
+# workload kind.
+AGENT_PROVIDER_PROFILE = "opencode-provider-v1"
+
 
 def workspace_descriptor_for_image(image_reference: str) -> dict[str, Any]:
     """Pure known template shape; this never authorizes the supplied image."""
@@ -353,6 +360,8 @@ def validate_workload_spec(value: Any) -> dict[str, Any]:
             "cacheVolumes",
             "cpuQuotaPercent",
             "diskMaxBytes",
+            # Fixed agent provider profile marker; it names no host path.
+            "agentProviderProfile",
         }
     if kind == "validator-run":
         # Fixed isolation policy fields; every one must hold its sealed value.
@@ -470,6 +479,20 @@ def validate_workload_spec(value: Any) -> dict[str, Any]:
         if network_mode not in {"none", "developer"}:
             raise ValueError("parameters.networkMode is invalid")
         normalized_parameters["networkMode"] = network_mode
+        agent_provider_profile = parameters.get("agentProviderProfile")
+        if agent_provider_profile is not None:
+            # The marker is the exact sealed profile string; it never carries a
+            # path, and the developer network mode is the only mode that may
+            # ever observe it.  Everything else refuses here, before authority.
+            if agent_provider_profile != AGENT_PROVIDER_PROFILE:
+                raise ValueError(
+                    "parameters.agentProviderProfile is not the sealed agent provider profile"
+                )
+            if network_mode != "developer":
+                raise ValueError(
+                    "parameters.agentProviderProfile requires the developer network mode"
+                )
+            normalized_parameters["agentProviderProfile"] = AGENT_PROVIDER_PROFILE
         normalized_parameters["cacheVolumes"] = _workspace_cache_volumes(
             parameters.get("cacheVolumes", [])
         )

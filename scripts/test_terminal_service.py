@@ -151,6 +151,73 @@ def _service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[s
         app.service_stop()
 
 
+@contextmanager
+def _published_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, object]]:
+    """Serve with the signed-install loopback topology.
+
+    The AppServer binds its internal loopback port while the browser is
+    expected on a distinct published host port (the digest-derived
+    18000-18999 mapping rendered by the release contract; compose mirrors it
+    with STATEPORT_EXTERNAL_LOOPBACK_PORT). Requests reach the internal
+    listener directly, exactly like a container port mapping, while Host and
+    Origin name the published port.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    layout = LocalLayout.from_environment()
+    app = PersistentApp(layout)
+    app.setup_init()
+    for instance_id, application_id in (
+        ("dev-one", APPLICATION_ID),
+        ("dev-two", APPLICATION_ID),
+    ):
+        project = layout.instances_root / instance_id
+        head = _project_fixture(project, instance_id)
+        app.catalog.register(
+            project,
+            instance_id=instance_id,
+            name=instance_id,
+            source={
+                "templateId": application_id,
+                "resolvedCommit": head,
+                "resolvedTree": f"tree-{instance_id}",
+                "manifestDigest": "sha256:" + hashlib.sha256(instance_id.encode()).hexdigest(),
+            },
+        )
+    internal_port = _free_port()
+    published_port = _free_port()
+    assert internal_port != published_port, "published topology requires distinct ports"
+    server = AppServer(
+        ("127.0.0.1", internal_port),
+        layout,
+        service_product_fixture(tmp_path, ROOT) / "apps" / "web",
+        allow_public_bind=True,
+        external_loopback_port=published_port,
+    )
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    origin = f"http://127.0.0.1:{internal_port}"
+    try:
+        with urlopen(f"{origin}/session") as response:
+            session = json.loads(response.read())["result"]
+            set_cookie = response.headers["Set-Cookie"]
+        yield {
+            "app": app,
+            "layout": layout,
+            "origin": origin,
+            "port": internal_port,
+            "publishedOrigin": f"http://127.0.0.1:{published_port}",
+            "cookie": set_cookie.split(";", 1)[0],
+            "setCookie": set_cookie,
+            "csrf": session["csrfToken"],
+        }
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 def _prepare(
     service: dict[str, object],
     instance_id: str = "dev-one",
@@ -690,6 +757,108 @@ def test_terminal_upgrade_accepts_loopback_host_and_origin_aliases(tmp_path: Pat
             assert struct.unpack("!H", close[:2])[0] == 1000
         finally:
             websocket.close()
+
+
+def test_terminal_socket_accepts_the_published_external_loopback_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signed install serves the browser on its published host port.
+
+    Ticket issuance, the socket ticket check, and the broker allow-lists must
+    all single-source the published origin. Pre-fix, the ticket check compared
+    the browser origin against the container-internal bind port, closed the
+    socket with 1008 "terminal_access_refused" before authentication, and the
+    UI reported "Connection failed" on every published (non-8080) install.
+    """
+    with _published_service(tmp_path, monkeypatch) as service:
+        published = str(service["publishedOrigin"])
+        status, prepared_payload = _prepare(service, origin=published)
+        assert status == 200, prepared_payload
+        ticket = prepared_payload["result"]
+        websocket = RawWebSocket.open(
+            service, host=published.removeprefix("http://"), origin=published
+        )
+        try:
+            assert websocket.response_version == "HTTP/1.1"
+            assert websocket.status == 101
+            websocket.send_json(_authentication(ticket, "dev-one"))
+            opcode, ready_payload = websocket.receive()
+            assert opcode == 0x1, "terminal socket closed before authentication completed"
+            ready = json.loads(ready_payload)
+            assert ready["type"] == "ready" and ready["sessionId"] == ticket["sessionId"]
+            websocket.send_json({"formatVersion": SOCKET_FORMAT, "type": "end"})
+            close = _receive_close(websocket)
+            assert struct.unpack("!H", close[:2])[0] == 1000
+        finally:
+            websocket.close()
+
+
+def test_terminal_socket_falls_back_to_local_pty_for_fresh_instance_under_v2_workspace_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signed installs mount the v2 workspace-authority transport.
+
+    A freshly imported application has no operator-issued binding row yet;
+    its ordinary terminal must keep working through the local PTY instead of
+    refusing with terminal_access_denied. Workspace-only terminals keep
+    requiring an exact binding (proven at the proxy boundary).
+    """
+    bindings = tmp_path / "workspace-bindings.json"
+    bindings.write_text(
+        json.dumps({"formatVersion": "stateport.application-workspace-bindings/v2", "bindings": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("STATEPORT_APPLICATION_WORKSPACE_BINDINGS", str(bindings))
+    monkeypatch.setenv("STATEPORT_APPLICATION_WORKSPACE_BINDINGS_FORMAT", "stateport.application-workspace-bindings/v2")
+    with _published_service(tmp_path, monkeypatch) as service:
+        published = str(service["publishedOrigin"])
+        status, prepared_payload = _prepare(service, origin=published)
+        assert status == 200, prepared_payload
+        ticket = prepared_payload["result"]
+        assert ticket["target"]["targetClass"] == "local_pty"
+        websocket = RawWebSocket.open(
+            service, host=published.removeprefix("http://"), origin=published
+        )
+        try:
+            assert websocket.status == 101
+            websocket.send_json(_authentication(ticket, "dev-one"))
+            opcode, ready_payload = websocket.receive()
+            assert opcode == 0x1, "terminal socket closed before authentication completed"
+            ready = json.loads(ready_payload)
+            assert ready["type"] == "ready" and ready["targetClass"] == "local_pty"
+            websocket.send_json({"formatVersion": SOCKET_FORMAT, "type": "end"})
+            close = _receive_close(websocket)
+            assert struct.unpack("!H", close[:2])[0] == 1000
+        finally:
+            websocket.close()
+
+
+def test_workspace_authority_document_is_served_to_the_local_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The installed product serves its workspace-authority boundary document.
+
+    The ExecutionHost empty state links this document, so it must come from
+    the running service itself (no checkout or external site) and stay behind
+    the local browser session.
+    """
+    with _published_service(tmp_path, monkeypatch) as service:
+        request = Request(
+            f"{service['origin']}/docs/operations/application-workspace-authority",
+            headers={"Cookie": str(service["cookie"])},
+        )
+        with urlopen(request) as response:
+            assert response.status == 200
+            assert (response.headers["Content-Type"] or "").startswith("text/markdown")
+            document = response.read().decode("utf-8")
+        assert "Application workspace authority" in document
+        assert "stateport-execution-host-provision" in document
+        anonymous = Request(f"{service['origin']}/docs/operations/application-workspace-authority")
+        try:
+            urlopen(anonymous)
+            raise AssertionError("the workspace authority document must require the local session")
+        except HTTPError as error:
+            assert error.code == 401
 
 
 def test_rejected_http11_request_body_is_not_reparsed_on_the_connection(

@@ -5556,7 +5556,7 @@ test('Status bar scopes active operations to the current instance and clears aft
   } }
 })
 
-test('Provider selection persists OpenCode refusal across an isolated service restart', async ({ page }) => {
+test('Provider selection persists an enabled OpenCode provider across an isolated service restart', async ({ page }) => {
   test.setTimeout(120_000)
   const home = path.join(disposableRoot, 'provider-private-home')
   const codexHome = path.join(home, 'codex')
@@ -5581,12 +5581,27 @@ test('Provider selection persists OpenCode refusal across an isolated service re
   await form.getByLabel('OpenCode model identifier', { exact: true }).fill(model)
   const [savedResponse] = await Promise.all([
     page.waitForResponse(response => new URL(response.url()).pathname === '/v1/provider/configure' && response.request().method() === 'POST'),
-    form.getByRole('button', { name: 'Save provider selection', exact: true }).click(),
+    form.getByRole('button', { name: 'Save model and enable', exact: true }).click(),
   ])
   expect(savedResponse.status()).toBe(200)
   expect(savedResponse.request().postDataJSON()).toEqual({ model, providerId: 'opencode' })
   const saved = (await savedResponse.json()).result
-  expect(saved).toMatchObject({ providerId: 'opencode', configured: true, connected: false, model, executionRefusal: 'sandboxed_validation_not_implemented', authenticationStatus: 'unavailable', requestStatus: 'unverified' })
+  // The durable selection is saved and enabled. Authentication stays
+  // provider-owned and is never claimed as verified by the control service.
+  // The executable observation is exactly what the restricted live-core PATH
+  // exposes, so only its self-consistency is asserted here.
+  expect(saved).toMatchObject({ providerId: 'opencode', configured: true, connected: true, model, requestStatus: 'unverified' })
+  expect(saved.executionRefusal ?? null).toBeNull()
+  expect(['installed', 'missing']).toContain(saved.executableStatus)
+  expect(saved.executableInstalled).toBe(saved.executableStatus === 'installed')
+  expect(saved.authenticationStatus).toBe(saved.executableInstalled ? 'unverified' : 'unavailable')
+  // Only an installed executable has a real version. A missing probe must not
+  // present its adapter placeholder as a version.
+  if (saved.executableInstalled) {
+    expect(typeof saved.executableVersion).toBe('string')
+  } else {
+    expect(saved.executableVersion == null || saved.executableVersion === 'unavailable').toBe(true)
+  }
   const profilePath = path.join(disposableRoot, 'xdg', 'config', 'stateport', 'provider-router.json')
   const disabledPath = path.join(disposableRoot, 'xdg', 'config', 'stateport', 'provider-router.disabled')
   const profileBefore = readFileSync(profilePath, 'utf8')
@@ -5595,21 +5610,29 @@ test('Provider selection persists OpenCode refusal across an isolated service re
   expect(profile.model).toEqual({ id: model })
   expect(profile.profileDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
   expect(statSync(profilePath).mode & 0o777).toBe(0o600)
-  const disabledBefore = readFileSync(disabledPath, 'utf8')
-  expect(disabledBefore).toBe('StatePort provider work disabled\n')
-  expect(statSync(disabledPath).mode & 0o777).toBe(0o600)
+  // A successful enable clears the durable disconnect marker instead of
+  // persisting a refusal.
+  expect(existsSync(disabledPath)).toBe(false)
   const observations = page.getByRole('region', { name: 'Provider observations' })
   await expect(observations).toContainText('OpenCode')
-  await expect(observations).toContainText('No Codex fallback is enabled.')
+  await expect(observations).toContainText('Enabled')
+  await expect(observations).toContainText(saved.executableInstalled ? 'Installed' : 'Missing')
+  await expect(observations).not.toContainText('sandboxed_validation_not_implemented')
   const [checkedResponse] = await Promise.all([
     page.waitForResponse(response => new URL(response.url()).pathname === '/v1/provider/verify' && response.request().method() === 'POST'),
     page.getByRole('button', { name: 'Check selected adapter', exact: true }).click(),
   ])
   expect(checkedResponse.status()).toBe(200)
   const checked = (await checkedResponse.json()).result
-  expect(checked).toMatchObject({ providerId: 'opencode', connected: false, model, executionRefusal: 'sandboxed_validation_not_implemented', authenticationStatus: 'unavailable', requestStatus: 'failed' })
+  if (saved.executableInstalled) {
+    // The version probe succeeded: authentication is still explicitly unverified.
+    expect(checked).toMatchObject({ providerId: 'opencode', connected: true, model, authenticationStatus: 'unverified', requestStatus: 'unverified' })
+  } else {
+    expect(checked).toMatchObject({ providerId: 'opencode', connected: true, model, authenticationStatus: 'unavailable', requestStatus: 'failed' })
+  }
+  expect(checked.executionRefusal ?? null).toBeNull()
   expect(readFileSync(profilePath, 'utf8')).toBe(profileBefore)
-  expect(readFileSync(disabledPath, 'utf8')).toBe(disabledBefore)
+  expect(existsSync(disabledPath)).toBe(false)
   verifyPrivateEnvironment()
   await page.goto('about:blank')
   await stopChild(service.child)
@@ -5624,13 +5647,17 @@ test('Provider selection persists OpenCode refusal across an isolated service re
   ])
   expect(newSession.status()).toBe(200)
   const restored = (await reopenedStatus.json()).result
-  expect(restored).toMatchObject({ providerId: 'opencode', configured: true, connected: false, model, executionRefusal: 'sandboxed_validation_not_implemented', authenticationStatus: 'unavailable', executableStatus: 'unverified', requestStatus: 'unverified' })
+  // A status read never probes: the enabled selection persists with an
+  // explicitly unverified executable observation until the next configure/verify.
+  expect(restored).toMatchObject({ providerId: 'opencode', configured: true, connected: true, model, executableStatus: 'unverified', authenticationStatus: 'unverified', requestStatus: 'unverified' })
+  expect(restored.executionRefusal ?? null).toBeNull()
   await expect(page.getByRole('combobox', { name: 'Coding provider', exact: true })).toHaveValue('opencode')
   await expect(page.getByLabel('OpenCode model identifier', { exact: true })).toHaveValue(model)
   await expect(page.getByRole('region', { name: 'Provider observations' })).toContainText('Not checked in this service session')
+  await expect(page.getByRole('region', { name: 'Provider observations' })).toContainText('Enabled')
   expect(readFileSync(profilePath, 'utf8')).toBe(profileBefore)
-  expect(readFileSync(disabledPath, 'utf8')).toBe(disabledBefore)
-  writeFileSync(path.join(ARTIFACT_ROOT, 'provider-selection-restart.json'), JSON.stringify({ classification: 'source HTTP/browser; private credential-free home; selection and refusal only', firstPid, restartedPid: service.child.pid, providerId: 'opencode', model, profileDigest: profile.profileDigest, configure: saved, adapterCheck: checked, afterRestart: restored, authenticationAttempted: false, providerExecutionAttempted: false }, null, 2))
+  expect(existsSync(disabledPath)).toBe(false)
+  writeFileSync(path.join(ARTIFACT_ROOT, 'provider-selection-restart.json'), JSON.stringify({ classification: 'source HTTP/browser; private credential-free home; OpenCode selection saved and enabled; executable observation is the restricted live-core PATH result; authentication provider-owned and unverified by the control service; no provider execution', firstPid, restartedPid: service.child.pid, providerId: 'opencode', model, executableInstalled: saved.executableInstalled, executableStatus: saved.executableStatus, executableVersion: saved.executableVersion ?? null, profileDigest: profile.profileDigest, configure: saved, adapterCheck: checked, afterRestart: restored, connectedAfterRestart: restored.connected, authenticationAttempted: false, providerExecutionAttempted: false }, null, 2))
 })
 
 

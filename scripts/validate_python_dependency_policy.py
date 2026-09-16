@@ -80,47 +80,56 @@ def _roots(path: Path) -> dict[str, str]:
     return packages
 
 
-def _native_codex_consumer(root: Path, relative: str, dockerfile: str) -> None:
-    """The shipped native provider is npm-integrity governed, never a PyPI extra."""
-    if "codex" not in dockerfile:
+def _native_opencode_consumer(root: Path, relative: str, dockerfile: str) -> None:
+    """The shipped agent is npm-integrity governed, never a PyPI extra.
+
+    OpenCode is consumed as a maintained upstream release.  A recipe that
+    mentions it must install the exact platform tarball recorded in
+    ``config/provider-runtime-inputs.yaml``, cross-check the audited lock
+    entry, verify the pinned SRI against the downloaded bytes, and assert the
+    extracted binary's sha256 and reported version.
+    """
+    if "opencode" not in dockerfile:
         return
     try:
-        provider = yaml.safe_load((root / "config/provider-runtime-inputs.yaml").read_text())["codex"]
-        npm = provider["npm"]
-        package = _json(root / npm["packageJson"])
-        lock = _json(root / npm["packageLock"])["packages"]
+        provider = yaml.safe_load(
+            (root / "config/provider-runtime-inputs.yaml").read_text()
+        )["opencode"]
         version = provider["version"]
-        identity = "stateport-" + Path(relative).parent.name
+        platform = (
+            provider["platforms"]["musl"]
+            if "opencode-linux-x64-musl" in dockerfile
+            else provider["platforms"]["glibc"]
+        )
+        lock = _json(root / provider["npm"]["packageLock"])["packages"]
+        entry = lock["node_modules/" + platform["package"]]
         if (
-            provider["package"] != "@openai/codex"
-            or identity not in provider["verification"]["installedOnlyIn"]
-            or relative != "apps/web/Dockerfile"
-            or package["dependencies"] != {"@openai/codex": version}
-            or lock[""]["dependencies"] != package["dependencies"]
+            entry["version"] != version
+            or entry["resolved"] != platform["tarball"]
+            or entry["integrity"] != platform["integrity"]
         ):
-            raise ValueError("undeclared provider consumer")
-        for name, suffix, integrity in (
-            ("node_modules/@openai/codex", "", npm["packageIntegrity"]),
-            ("node_modules/@openai/codex-linux-x64", "-linux-x64", npm["linuxAmd64Integrity"]),
-        ):
-            entry = lock[name]
-            if (
-                not re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", integrity)
-                or entry["integrity"] != integrity
-                or entry["version"] != version + suffix
-                or entry["resolved"] != f"https://registry.npmjs.org/@openai/codex/-/codex-{version}{suffix}.tgz"
-            ):
-                raise ValueError("native provider integrity mismatch")
+            raise ValueError("native agent lock entry differs from the pin")
         required = (
-            "COPY config/codex-runtime/package.json config/codex-runtime/package-lock.json ./",
-            "npm ci --ignore-scripts --omit=dev --audit=false --fund=false",
-            "cp node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex /out/codex",
-            f'/out/codex --version | grep -Fx "codex-cli {version}"',
+            "COPY config/opencode-runtime/package.json config/opencode-runtime/package-lock.json",
+            "ARG STATEPORT_OPENCODE_LOCK_PACKAGE=" + platform["package"],
+            "ARG STATEPORT_OPENCODE_TARBALL=" + platform["tarball"],
+            "ARG STATEPORT_OPENCODE_SRI=" + platform["integrity"],
+            "ARG STATEPORT_OPENCODE_BINARY_SHA256=" + platform["observedBinarySha256"],
+            "lock platform tarball differs from the pin",
+            "tarball integrity differs from the pin",
+            "STATEPORT_OPENCODE_BINARY_SHA256#sha256:",
         )
         if not all(value in dockerfile for value in required):
-            raise ValueError("native provider is not imported and verified from its locked package")
+            raise ValueError("native agent is not imported and verified from its locked package")
+        if not (
+            re.search(r'opencode --version\)" = "' + re.escape(version) + '"', dockerfile)
+            or re.search(r'opencode --version\)" = "\$STATEPORT_OPENCODE_VERSION"', dockerfile)
+        ):
+            raise ValueError("native agent version assertion is missing")
     except (KeyError, TypeError, ValueError, OSError, yaml.YAMLError) as exc:
-        raise PythonDependencyPolicyError(f"{relative} has an undeclared or unverified native provider") from exc
+        raise PythonDependencyPolicyError(
+            f"{relative} has an undeclared or unverified native agent"
+        ) from exc
 
 
 def validate(root: Path = ROOT) -> dict[str, int]:
@@ -163,7 +172,7 @@ def validate(root: Path = ROOT) -> dict[str, int]:
         for line in dockerfile.splitlines():
             if "pip install" in line and "--require-hashes" not in line:
                 raise PythonDependencyPolicyError(f"{relative} contains an unhashed pip install")
-        _native_codex_consumer(root, str(relative), dockerfile)
+        _native_opencode_consumer(root, str(relative), dockerfile)
     licenses = _json(root / "config" / "python-dependency-licenses.v1.json")
     if licenses.get("schema") != "stateport.python-dependency-licenses/v1" or licenses.get("reviewStatus") != "metadata_inventory_not_legal_advice":
         raise PythonDependencyPolicyError("Python license inventory boundary is invalid")

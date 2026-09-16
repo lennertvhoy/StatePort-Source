@@ -34,6 +34,12 @@ def service_product_fixture(tmp_path: Path, source_root: Path) -> Path:
     ):
         shutil.copytree(source_root / name, root / name)
     shutil.copy2(source_root / "VERSION", root / "VERSION")
+    operations_docs = root / "docs" / "operations"
+    operations_docs.mkdir(parents=True)
+    shutil.copy2(
+        source_root / "docs" / "operations" / "application-workspace-authority.md",
+        operations_docs / "application-workspace-authority.md",
+    )
 
     apps = root / "apps"
     apps.mkdir()

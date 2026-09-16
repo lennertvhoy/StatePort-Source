@@ -3,7 +3,20 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { act } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { getClient, resetClientForTests } from '@/client'
+import { agentClient } from '@/client/agentClient'
 import ExecutionHostPage from '../ExecutionHostPage'
+
+// The page embeds the control-plane agent panel. Its readiness/run reads are
+// mocked so these workload tests stay hermetic; the panel has its own suite.
+vi.mock('@/client/agentClient', () => ({
+  agentClient: {
+    getStatus: vi.fn(),
+    listRuns: vi.fn(),
+    getRun: vi.fn(),
+    getOutput: vi.fn(),
+    startRun: vi.fn(),
+  },
+}))
 
 const workloads = [
   {
@@ -16,6 +29,13 @@ const workloads = [
 ]
 beforeEach(() => {
   resetClientForTests()
+  vi.mocked(agentClient.getStatus).mockResolvedValue({
+    available: true,
+    refusals: [],
+    providerDirectory: { configured: true, present: true, files: { providerEnv: true, opencodeJson: true, model: true } },
+    workspace: { status: 'available', workloadId: 'w15c-agent' },
+  })
+  vi.mocked(agentClient.listRuns).mockResolvedValue([])
   vi.spyOn(getClient().executionHost, 'status').mockResolvedValue({ status: 'available', grantBound: true, grantId: 'grant-project' })
   vi.spyOn(getClient().executionHost, 'listWorkloads').mockResolvedValue({ accepted: true, result: { workloads } })
 })
@@ -25,6 +45,7 @@ it('renders every granted workload from the actual daemon object contract', asyn
   render(<ExecutionHostPage />)
   expect(await screen.findByRole('article', { name: 'Workload project-work' })).toBeTruthy()
   expect(screen.getByRole('article', { name: 'Workload study-work' })).toBeTruthy()
+  expect(screen.getByRole('region', { name: 'Agent run' })).toBeTruthy()
   expect(screen.getByText('Image: sha256:project')).toBeTruthy()
   expect(screen.getByText(/Authority grant:/).textContent).toContain('grant-project')
   expect(screen.getByText(/Declared limits:/).textContent).toContain('memory 256 MiB')

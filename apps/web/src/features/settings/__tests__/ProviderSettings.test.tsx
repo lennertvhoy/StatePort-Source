@@ -7,8 +7,12 @@ import { ProviderSettings } from '../ProviderSettings'
 import { providerClient, type LoginFlow, type ProviderStatus } from '@/client/providerClient'
 import { useSessionStore } from '@/state'
 import { ClientError } from '@/client/types'
-vi.mock('@/client/providerClient', () => ({ providerClient: { getStatus: vi.fn(), configure: vi.fn(), verify: vi.fn(), disconnect: vi.fn(), login: vi.fn(), getLogin: vi.fn(), cancelLogin: vi.fn(), logout: vi.fn() } }))
-const status: ProviderStatus = { configured: false, executableInstalled: false, connected: false, model: null, authenticationStatus: 'unavailable', requestStatus: 'unverified', telemetryStatus: 'unavailable', detail: 'Codex is missing in this runtime.' }
+vi.mock('@/client/providerClient', () => ({
+  OPENCODE_CREDENTIAL_PROVIDERS: ['anthropic', 'openai', 'openrouter', 'google', 'groq', 'xai'],
+  OPENCODE_CREDENTIAL_PROVIDER_LABELS: { anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter', google: 'Google (Gemini)', groq: 'Groq', xai: 'xAI' },
+  providerClient: { getStatus: vi.fn(), configure: vi.fn(), verify: vi.fn(), disconnect: vi.fn(), login: vi.fn(), getLogin: vi.fn(), cancelLogin: vi.fn(), logout: vi.fn(), setCredential: vi.fn(), removeCredential: vi.fn() },
+}))
+const status: ProviderStatus = { configured: false, executableInstalled: false, connected: false, model: null, providerId: 'codex', authenticationStatus: 'unavailable', requestStatus: 'unverified', telemetryStatus: 'unavailable', detail: 'Codex is missing in this runtime.' }
 afterEach(() => { cleanup(); Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 }) })
 describe('Provider settings', () => {
   beforeEach(() => { useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'platform_operator', actorId: 'operator', platformOperationsAllowed: true, statebenchInspectionAllowed: false } } }); vi.resetAllMocks(); vi.mocked(providerClient.getStatus).mockResolvedValue(status) })
@@ -18,6 +22,16 @@ describe('Provider settings', () => {
     expect((screen.getByRole('button', { name: 'Verify bounded request' }) as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getAllByRole('textbox')).toHaveLength(1)
     expect(screen.getByRole('textbox', { name: 'Codex model identifier' }).getAttribute('autoComplete')).toBe('off')
+  })
+  it('defaults to the shipped OpenCode provider when the service reports none', async () => {
+    const { providerId: _unused, ...withoutProvider } = status
+    vi.mocked(providerClient.getStatus).mockResolvedValue(withoutProvider)
+    render(<ProviderSettings />)
+    expect(await screen.findByText('Codex is missing in this runtime.')).not.toBeNull()
+    expect(screen.getByRole('textbox', { name: 'OpenCode model identifier' })).not.toBeNull()
+    expect(screen.getByText('OpenCode', { selector: 'dd' })).not.toBeNull()
+    const choice = document.getElementById('provider-choice') as HTMLSelectElement
+    expect(choice.value).toBe('opencode')
   })
   it('saves only model metadata, verifies explicitly and disconnects', async () => {
     const user = userEvent.setup()
@@ -314,14 +328,13 @@ it.each([
   } else expect(result.stdout).not.toContain('MOCK_EXEC:')
 })
 
-it('saves OpenCode as the actual selection, shows refusal, and retains it after reopening', async () => {
+it('saves OpenCode as the actual enabled selection and retains it after reopening', async () => {
   vi.resetAllMocks()
   useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'platform_operator', actorId: 'operator', platformOperationsAllowed: true, statebenchInspectionAllowed: false } } })
   const selected: ProviderStatus = {
-    ...status, providerId: 'opencode', configured: true, connected: false, model: 'opencode/test',
-    executableInstalled: true, executableStatus: 'installed', authenticationStatus: 'unavailable',
-    executionRefusal: 'sandboxed_validation_not_implemented',
-    detail: 'OpenCode selection is saved; isolated post-agent validation is not implemented. No Codex fallback is enabled.',
+    ...status, providerId: 'opencode', configured: true, connected: true, model: 'opencode/test',
+    executableInstalled: true, executableStatus: 'installed', executableVersion: '1.18.31', authenticationStatus: 'unverified',
+    detail: 'OpenCode model saved. StatePort runs the pinned OpenCode executable and reports it; it does not verify or store OpenCode authentication. Sign in with OpenCode itself, then send conversation work.',
   }
   vi.mocked(providerClient.getStatus).mockResolvedValueOnce(status).mockResolvedValue({ ...selected, executableStatus: 'unverified' })
   vi.mocked(providerClient.configure).mockResolvedValue(selected)
@@ -329,19 +342,20 @@ it('saves OpenCode as the actual selection, shows refusal, and retains it after 
   const user = userEvent.setup()
   const view = render(<ProviderSettings />)
   await screen.findByRole('combobox', { name: 'Coding provider' })
-  await user.selectOptions(screen.getByRole('combobox'), 'opencode')
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Coding provider' }), 'opencode')
   await user.type(screen.getByRole('textbox', { name: 'OpenCode model identifier' }), 'opencode/test')
-  await user.click(screen.getByRole('button', { name: 'Save provider selection' }))
+  await user.click(screen.getByRole('button', { name: 'Save model and enable' }))
   expect(providerClient.configure).toHaveBeenCalledExactlyOnceWith('opencode/test', 'opencode')
   expect(await screen.findByText(selected.detail)).not.toBeNull()
+  expect(screen.getByText('Installed (1.18.31)')).not.toBeNull()
   expect(screen.queryByRole('button', { name: 'Show installed login command' })).toBeNull()
-  expect(screen.getByText('Disconnected')).not.toBeNull()
+  expect(screen.getByText('Enabled')).not.toBeNull()
   await user.click(screen.getByRole('button', { name: 'Check selected adapter' }))
   expect(providerClient.verify).toHaveBeenCalledTimes(1)
   expect(await screen.findByText('failed')).not.toBeNull()
   view.unmount()
   render(<ProviderSettings />)
-  await waitFor(() => expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('opencode'))
+  await waitFor(() => expect((screen.getByRole('combobox', { name: 'Coding provider' }) as HTMLSelectElement).value).toBe('opencode'))
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('opencode/test')
   expect(screen.getByText('Not checked in this service session')).not.toBeNull()
   expect(providerClient.configure).toHaveBeenCalledTimes(1)
@@ -357,20 +371,72 @@ it.each([true, false])('preserves a draft and newer saved status when initial st
   vi.mocked(providerClient.configure).mockResolvedValue(selected)
   const user = userEvent.setup()
   render(<ProviderSettings />)
-  await user.selectOptions(screen.getByRole('combobox'), 'opencode')
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Coding provider' }), 'opencode')
   await user.type(screen.getByRole('textbox', { name: 'OpenCode model identifier' }), 'openai/test-model')
   if (beforeSave) {
     await act(async () => resolveInitial(status))
     expect((screen.getByRole('textbox', { name: 'OpenCode model identifier' }) as HTMLInputElement).value).toBe('openai/test-model')
     vi.mocked(providerClient.getStatus).mockResolvedValue(status)
     await user.click(screen.getByRole('button', { name: 'Refresh status' }))
-    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('opencode')
+    expect((screen.getByRole('combobox', { name: 'Coding provider' }) as HTMLSelectElement).value).toBe('opencode')
     expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('openai/test-model')
   }
-  await user.click(screen.getByRole('button', { name: 'Save provider selection' }))
+  await user.click(screen.getByRole('button', { name: 'Save model and enable' }))
   await screen.findByText('Selected OpenCode result')
   if (!beforeSave) await act(async () => resolveInitial(status))
   expect(screen.getByText('Selected OpenCode result')).toBeTruthy()
-  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('opencode')
+  expect((screen.getByRole('combobox', { name: 'Coding provider' }) as HTMLSelectElement).value).toBe('opencode')
   expect(providerClient.configure).toHaveBeenCalledExactlyOnceWith('openai/test-model', 'opencode')
+})
+
+it('connects and removes an operator OpenCode credential without re-displaying the key', async () => {
+  vi.resetAllMocks()
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'platform_operator', actorId: 'operator', platformOperationsAllowed: true, statebenchInspectionAllowed: false } } })
+  const selected: ProviderStatus = {
+    ...status, providerId: 'opencode', configured: true, connected: true, model: 'openai/test',
+    executableInstalled: true, executableStatus: 'installed', authenticationStatus: 'unverified',
+    credentialStatus: 'unconfigured', credentialProvider: null, credentialEnvVar: null,
+  }
+  vi.mocked(providerClient.getStatus).mockResolvedValue(selected)
+  vi.mocked(providerClient.setCredential).mockResolvedValue({
+    ...selected, credentialStatus: 'configured', credentialProvider: 'google', credentialEnvVar: 'GEMINI_API_KEY',
+  })
+  vi.mocked(providerClient.removeCredential).mockResolvedValue({
+    ...selected, credentialStatus: 'unconfigured', credentialProvider: null, credentialEnvVar: null,
+  })
+  const user = userEvent.setup()
+  const view = render(<ProviderSettings />)
+  await screen.findByRole('combobox', { name: 'OpenCode provider' })
+  expect(screen.getByText('No credential.')).toBeTruthy()
+  const providerSelect = screen.getByRole('combobox', { name: 'OpenCode provider' }) as HTMLSelectElement
+  expect(Array.from(providerSelect.options).map(option => option.value)).toEqual(['anthropic', 'openai', 'openrouter', 'google', 'groq', 'xai'])
+  await user.selectOptions(providerSelect, 'google')
+  const keyField = screen.getByLabelText('Provider API key') as HTMLInputElement
+  expect(keyField.getAttribute('type')).toBe('password')
+  await user.type(keyField, 'AIza-fake-browser')
+  await user.click(screen.getByRole('button', { name: 'Connect API key' }))
+  expect(providerClient.setCredential).toHaveBeenCalledExactlyOnceWith('google', 'AIza-fake-browser')
+  expect(await screen.findByText(/Credential configured for Google \(Gemini\)/)).toBeTruthy()
+  // The key field clears after submit and the value is never re-displayed.
+  expect((screen.getByLabelText('Provider API key') as HTMLInputElement).value).toBe('')
+  expect(screen.queryByDisplayValue('AIza-fake-browser')).toBeNull()
+  await user.click(screen.getByRole('button', { name: 'Remove credential' }))
+  expect(providerClient.removeCredential).toHaveBeenCalledExactlyOnceWith('google')
+  expect(await screen.findByText('No credential.')).toBeTruthy()
+  view.unmount()
+})
+
+it('refuses OpenCode credential controls without an operator session', async () => {
+  vi.resetAllMocks()
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'local_user', actorId: 'user', platformOperationsAllowed: false, statebenchInspectionAllowed: false } } })
+  vi.mocked(providerClient.getStatus).mockResolvedValue({ ...status, providerId: 'opencode', configured: true, model: 'openai/test' })
+  const view = render(<ProviderSettings />)
+  await screen.findByRole('combobox', { name: 'OpenCode provider' })
+  expect((screen.getByLabelText('Provider API key') as HTMLInputElement).disabled).toBe(true)
+  expect((screen.getByRole('button', { name: 'Connect API key' }) as HTMLButtonElement).disabled).toBe(true)
+  expect((screen.getByRole('button', { name: 'Remove credential' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.submit(screen.getByRole('form', { name: 'OpenCode credential' }))
+  expect(providerClient.setCredential).not.toHaveBeenCalled()
+  expect(providerClient.removeCredential).not.toHaveBeenCalled()
+  view.unmount()
 })

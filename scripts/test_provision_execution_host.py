@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "packages" / "release-contracts" / "src"))
 sys.path.insert(0, str(ROOT / "packages" / "execution-host" / "src"))
+sys.path.insert(0, str(ROOT / "packages" / "runtime-contracts" / "src"))
 
 from execution_host import daemon_contract as daemon_contract  # noqa: E402
 from stateport_release import execution_host_provisioning as prov  # noqa: E402
@@ -777,6 +778,7 @@ def test_plan_binds_identity_contract_subids_and_steps() -> None:
         "/var/lib/stateport-control/.config/systemd",
         "/var/lib/stateport-control/.config/systemd/user",
         "/var/lib/stateport-control/.config/systemd/user/sockets.target.wants",
+        "/var/lib/stateport-exec/stateport-execution-host/agent-provider",
     ]
     order = [step["step"] for step in plan["steps"]]
     assert order == [
@@ -886,14 +888,12 @@ def test_plan_provisions_template_import_root_for_bound_installer_client() -> No
         client_uid=1000,
         client_gid=1000,
     )
-    assert plan["directories"][-2:] == [
-        {"path": "/var/lib/stateport", "mode": "0755", "owner": "root:root"},
-        {
-            "path": "/var/lib/stateport/imports",
-            "mode": "0750",
-            "owner": "operator:stateport-execution-control",
-        },
-    ]
+    assert {"path": "/var/lib/stateport", "mode": "0755", "owner": "root:root"} in plan["directories"]
+    assert {
+        "path": "/var/lib/stateport/imports",
+        "mode": "0750",
+        "owner": "operator:stateport-execution-control",
+    } in plan["directories"]
     assert "/var/lib/stateport/imports" in next(
         step["directories"]
         for step in plan["steps"]
@@ -907,13 +907,47 @@ def test_provider_home_plan_is_fixed_private_and_not_installer_owned() -> None:
     web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
     web["providerHome"] = dict(prov.PROVIDER_HOME_CONTRACT)
     plan = prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="test", client_user="operator", client_uid=1000, client_gid=1000)
-    assert plan["directories"][-2:] == [
+    assert plan["directories"][-3:] == [
         {"path": "/var/lib/stateport-control/provider-auth", "mode": "0700", "owner": "stateport-control:stateport-control"},
         {"path": prov.PROVIDER_HOME_CONTRACT["hostPath"], "mode": "0700", "owner": "stateport-control:stateport-control"},
+        {
+            "path": prov.AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+            "mode": "0755",
+            "owner": "stateport-exec:stateport-exec",
+        },
     ]
     web["providerHome"]["hostPath"] = "/home/operator/.codex"
     with pytest.raises(ReleaseContractError, match="provider home contract"):
         prov.render_provisioning_plan(target, document["signed"]["images"], verification_basis="test")
+
+
+def test_agent_provider_directory_is_daemon_owned_contract_bound() -> None:
+    document = fixtures.release_index()
+    target = deepcopy(document["signed"]["targets"][0])
+    host = next(
+        service for service in target["hostServices"] if service["serviceId"] == "stateport-execution-host"
+    )
+    host["agentProviderDirectory"] = dict(prov.AGENT_PROVIDER_DIRECTORY_CONTRACT)
+    plan = prov.render_provisioning_plan(
+        target,
+        document["signed"]["images"],
+        verification_basis="test",
+        client_user="operator",
+        client_uid=1000,
+        client_gid=1000,
+    )
+    assert {
+        "path": prov.AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+        "mode": "0755",
+        "owner": "stateport-exec:stateport-exec",
+    } in plan["directories"]
+    # The material inside is operator-owned: a drifted directory refuses
+    # instead of being re-created or chmodded.
+    host["agentProviderDirectory"]["mode"] = "0700"
+    with pytest.raises(ReleaseContractError, match="agent provider directory"):
+        prov.render_provisioning_plan(
+            target, document["signed"]["images"], verification_basis="test"
+        )
 
 
 def test_provider_directory_reuses_exact_identity_without_reading_contents(tmp_path: Path) -> None:
@@ -1413,10 +1447,10 @@ def test_control_start_fails_closed_when_socket_metadata_cannot_converge(
     )
     original = prov._ensure_directory_converged
 
-    def refuse_socket_metadata(ctx, path, *, mode, uid, gid, step):
+    def refuse_socket_metadata(ctx, path, *, mode, uid, gid, step, **kwargs):
         if step == "start-control-plane-units" and path.endswith("/execution-control"):
             raise prov.StepFailed(step, "simulated socket metadata refusal")
-        return original(ctx, path, mode=mode, uid=uid, gid=gid, step=step)
+        return original(ctx, path, mode=mode, uid=uid, gid=gid, step=step, **kwargs)
 
     monkeypatch.setattr(prov, "_ensure_directory_converged", refuse_socket_metadata)
     daemon.start()
@@ -4140,6 +4174,98 @@ def test_fresh_signed_workspace_provisioning_records_dynamic_grant_and_both_imag
     step = next(row for row in receipt['steps'] if row['step'] == 'pull-execution-host-image')
     assert step['workspaceImage']['observedDigest'] == verified.index.document['signed']['images'][-1]['digest']
     assert reference in sim[1].image_store
+
+
+def test_agent_workspace_authority_is_provisioned_with_the_grant(sim):
+    sim[3].start()
+    verified = _verified_signed_workspace()
+    receipt = _apply(sim, verified=verified)
+    assert receipt['result'] == 'succeeded', receipt.get('failure')
+    host = sim[1]
+    reference = verified.index.document['signed']['images'][-1]['reference']
+    grant_path = host.resolve(prov.GRANTS_DIR + '/' + prov.AGENT_GRANT_ID + '.json')
+    grant = json.loads(grant_path.read_text())
+    assert grant['grantId'] == prov.AGENT_GRANT_ID
+    assert grant['imageReference'] == reference
+    assert 'execWorkload' in grant['operations']
+    assert stat.S_IMODE(grant_path.stat().st_mode) == 0o600
+
+    # The plan declares the exact binding document for the workspace-authority
+    # publication; it is written 0644 root-owned with the fixed path.
+    plan = prov.render_provisioning_plan(
+        verified.target,
+        verified.index.document['signed']['images'],
+        verification_basis='test',
+        client_user='operator',
+        client_uid=1000,
+        client_gid=1000,
+    )
+    grant_step = next(
+        entry for entry in plan['steps'] if entry['step'] == 'provision-execution-host-grant'
+    )
+    agent = grant_step['agentWorkspace']
+    assert agent['grantPath'] == prov.GRANTS_DIR + '/' + prov.AGENT_GRANT_ID + '.json'
+    assert agent['bindingPath'] == prov.AGENT_WORKSPACE_BINDING_PATH
+    assert agent['grant'] == grant
+    binding = agent['binding']
+    assert binding['formatVersion'] == prov.AGENT_WORKSPACE_BINDING_FORMAT
+    assert binding['grantId'] == prov.AGENT_GRANT_ID
+    assert binding['authorityGrantDigest'] == prov.canonical_digest(grant)
+    workload = binding['workload']
+    assert workload['workloadId'] == prov.AGENT_WORKSPACE_ID
+    assert workload['parameters']['agentProviderProfile'] == 'opencode-provider-v1'
+    assert workload['parameters']['networkMode'] == 'developer'
+    assert grant['workloadSpecDigests'][prov.AGENT_WORKSPACE_ID] == prov.canonical_digest(workload)
+    # The provisioner's sealed workload is byte-identical to the workspace
+    # adapter's output for the same declaration.
+    from execution_host.workspaces import sealed_workspace_workload
+    declaration = {
+        'formatVersion': 'stateport.workspace-spec/v1',
+        'workspaceId': prov.AGENT_WORKSPACE_ID,
+        'imageDigest': reference.rsplit('@', 1)[1],
+        'workspacePath': '/workspace',
+        'shell': ['/bin/sh'],
+        'resources': {
+            'memoryMaxBytes': 1024 * 1024 * 1024,
+            'cpuQuotaPercent': 200,
+            'pidsMax': 256,
+            'diskMaxBytes': 1024 * 1024 * 1024,
+        },
+        'networkProfile': {'mode': 'developer', 'allowlist': []},
+        'cacheVolumes': [],
+        'lifecyclePolicy': {
+            'idleTimeoutSeconds': 3600,
+            'stopAfterIdle': True,
+            'preserveDataOnRemove': True,
+        },
+    }
+    assert sealed_workspace_workload(
+        declaration, image_reference=reference, agent_provider_profile='opencode-provider-v1'
+    ) == workload
+
+
+def test_workspace_publication_writes_the_agent_binding(tmp_path: Path) -> None:
+    accounts = SimAccounts()
+    accounts.groups['root'] = prov.Group('root', accounts.gid, ())
+    host = SimHost(tmp_path, accounts)
+    agent = {
+        'grantPath': prov.GRANTS_DIR + '/' + prov.AGENT_GRANT_ID + '.json',
+        'bindingPath': prov.AGENT_WORKSPACE_BINDING_PATH,
+        'grant': {'grantId': prov.AGENT_GRANT_ID},
+        'binding': {'formatVersion': prov.AGENT_WORKSPACE_BINDING_FORMAT, 'grantId': prov.AGENT_GRANT_ID},
+    }
+    ctx = prov._Apply(
+        plan={'steps': [{'step': 'provision-execution-host-grant', 'agentWorkspace': agent}]},
+        signed_payload_digest='sha256:' + 'a' * 64,
+        runner=SimRunner(host),
+        accounts=accounts,
+        layout=prov.HostLayout(root=tmp_path),
+        rootless_group_probe=lambda *_: {},
+    )
+    prov._prepare_workspace_publication(ctx)
+    binding_path = ctx.layout.resolve(prov.AGENT_WORKSPACE_BINDING_PATH)
+    assert json.loads(binding_path.read_text()) == agent['binding']
+    assert stat.S_IMODE(binding_path.stat().st_mode) == 0o644
 
 
 def test_signed_workspace_refuses_legacy_install_before_changes(sim):

@@ -59,6 +59,9 @@ DEFAULT_GRANT_ID = PROVISIONED_DEFAULT_GRANT_ID
 MAX_LOG_BYTES = 256 * 1024
 MAX_STATUS_ENTRIES = 128
 MAX_COMMIT_OBJECT_BYTES = 64 * 1024
+# The single sealed agent workspace identity and its operator binding format.
+AGENT_WORKSPACE_ID = "agent-workspace"
+AGENT_WORKSPACE_BINDING_FORMAT = "stateport.agent-workspace-binding/v1"
 _WORKLOAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _OPERATIONS = frozenset(
     {
@@ -668,8 +671,13 @@ class ExecutionHostProxy:
     def application_client(self, instance_id: str, *, operation: str = "openTerminal") -> tuple[Mapping[str, Any], ExecutionHostClient] | None:
         binding = next((row for row in self._bindings() if row["workload"]["parameters"]["ownership"]["instanceId"] == instance_id), None)
         if binding is None:
-            if self._bindings_format == TRANSPORT_FORMAT:
-                raise ExecutionHostProxyError("workspace_authority_missing", "Ask an operator to issue exact application workspace authority; host terminal fallback is unavailable", status=403)
+            # A present, verified bindings document with no row for this
+            # instance means "no workspace authority yet", not a refusal: a
+            # freshly imported application keeps the ordinary local terminal
+            # until an operator provisions workspace authority. The terminal
+            # binding layer keeps the strict refusal for instances whose
+            # recorded workspace authority disappeared, and an unreadable or
+            # invalid bindings document still fails closed in _bindings().
             return None
         return binding, self._binding_client(binding, operation=operation)
 
@@ -861,6 +869,228 @@ class ExecutionHostProxy:
                 wid, argv, timeout_seconds=timeout_seconds
             ),
             workload_id=wid,
+        )
+
+    # -------------------------------------------------- agent workspace run
+
+    def agent_workspace_binding(self) -> dict[str, Any]:
+        """Read and strictly validate the operator agent-workspace binding.
+
+        The binding is the exact sealed workspace workload the control plane
+        may create or reuse, bound to one grant.  A missing authority file is
+        an explicit gap; a malformed one, or one whose image does not match the
+        installed workspace image, fails closed.
+        """
+
+        directory = self._authority_directory
+        if not directory:
+            raise ExecutionHostProxyError(
+                "agent_workspace_authority_missing",
+                "agent workspace authority is not configured",
+                status=503,
+            )
+        path = Path(directory) / "agent-workspace.json"
+        if not path.is_absolute() or ".." in path.parts:
+            raise ExecutionHostProxyError(
+                "agent_workspace_authority_invalid",
+                "agent workspace authority path is invalid",
+                status=503,
+            )
+        try:
+            os.lstat(path)
+        except OSError as exc:
+            raise ExecutionHostProxyError(
+                "agent_workspace_authority_missing",
+                "agent workspace authority is not installed",
+                status=503,
+            ) from exc
+        try:
+            raw = self._authority_document(path)
+        except (OSError, ValueError, TypeError) as exc:
+            raise ExecutionHostProxyError(
+                "agent_workspace_authority_invalid",
+                "agent workspace authority is missing, unsafe or invalid",
+                status=503,
+            ) from exc
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"formatVersion", "grantId", "authorityGrantDigest", "workload"}
+            or raw.get("formatVersion") != AGENT_WORKSPACE_BINDING_FORMAT
+        ):
+            raise ExecutionHostProxyError(
+                "agent_workspace_authority_invalid",
+                "agent workspace authority has an invalid shape",
+                status=503,
+            )
+        try:
+            grant_id = daemon_contract._id(raw["grantId"], "grantId")
+            authority_grant_digest = daemon_contract._digest(
+                raw["authorityGrantDigest"], "authorityGrantDigest"
+            )
+            workload = daemon_contract.validate_workload_spec(raw["workload"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionHostProxyError(
+                "agent_workspace_authority_invalid",
+                "agent workspace authority is not a valid sealed workload",
+                status=503,
+            ) from exc
+        parameters = workload["parameters"]
+        if (
+            workload["kind"] != "workspace"
+            or workload["workloadId"] != AGENT_WORKSPACE_ID
+            or parameters.get("agentProviderProfile") != daemon_contract.AGENT_PROVIDER_PROFILE
+            or parameters.get("networkMode") != "developer"
+            or parameters.get("cacheVolumes") != []
+            or "ownership" in parameters
+            or "sourceSeed" in parameters
+        ):
+            raise ExecutionHostProxyError(
+                "agent_workspace_authority_invalid",
+                "agent workspace authority is not the sealed agent profile",
+                status=503,
+            )
+        expected_image = (
+            os.environ.get("STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE")
+            or self._workspace_image
+        )
+        if expected_image is not None and workload["image"]["reference"] != expected_image:
+            raise ExecutionHostProxyError(
+                "agent_workspace_image_mismatch",
+                "the agent workspace image does not match the installed image",
+                status=503,
+            )
+        return {
+            "formatVersion": AGENT_WORKSPACE_BINDING_FORMAT,
+            "grantId": grant_id,
+            "authorityGrantDigest": authority_grant_digest,
+            "workload": workload,
+        }
+
+    def _agent_client(self, binding: Mapping[str, Any]) -> ExecutionHostClient:
+        reason = self._transport_ready()
+        if reason:
+            raise ExecutionHostProxyError(
+                "execution_unavailable",
+                f"execution transport is unavailable: {reason}",
+                status=503,
+            )
+        return ExecutionHostClient(
+            Path(self._socket_path),
+            grant_id=binding["grantId"],
+            authority_grant_digest=binding["authorityGrantDigest"],
+            timeout_seconds=self._timeout_seconds,
+            output_byte_bound=MAX_LOG_BYTES,
+        )
+
+    def agent_workspace_status(self) -> dict[str, Any]:
+        """Project the daemon-observed agent workspace row, never fabricated."""
+
+        binding = self.agent_workspace_binding()
+        client = self._agent_client(binding)
+        receipt = self._call("listWorkloads", client.list_workloads)
+        if receipt.get("accepted") is not True:
+            raise ExecutionHostProxyError(
+                "execution_unavailable",
+                "the execution host refused the agent workspace grant",
+                status=503,
+            )
+        result = self._list_projection(receipt)
+        operations = result.get("allowedOperations")
+        projection: dict[str, Any] = {
+            "workloadId": AGENT_WORKSPACE_ID,
+            "grantId": binding["grantId"],
+            "authorityGrantDigest": binding["authorityGrantDigest"],
+            "operations": (
+                [item for item in operations if isinstance(item, str)]
+                if isinstance(operations, list)
+                else []
+            ),
+        }
+        rows = result.get("workloads")
+        row = (
+            next(
+                (
+                    item
+                    for item in rows
+                    if isinstance(item, Mapping) and item.get("workloadId") == AGENT_WORKSPACE_ID
+                ),
+                None,
+            )
+            if isinstance(rows, list)
+            else None
+        )
+        if row is None:
+            projection.update(
+                {
+                    "state": "absent",
+                    "running": False,
+                    "imageDigest": None,
+                    "allowedOperations": [],
+                    "declaredLimits": {},
+                }
+            )
+        else:
+            limits = row.get("declaredLimits")
+            projection.update(
+                {
+                    "state": row.get("state"),
+                    "running": row.get("running") is True,
+                    "imageDigest": row.get("imageDigest"),
+                    "allowedOperations": (
+                        list(row.get("allowedOperations"))
+                        if isinstance(row.get("allowedOperations"), list)
+                        else []
+                    ),
+                    "declaredLimits": dict(limits) if isinstance(limits, Mapping) else {},
+                }
+            )
+        return projection
+
+    def create_agent_workspace(self) -> dict[str, Any]:
+        binding = self.agent_workspace_binding()
+        client = self._agent_client(binding)
+        return self._call(
+            "createWorkload",
+            lambda: client.create_workspace(binding["workload"]),
+            workload_id=AGENT_WORKSPACE_ID,
+        )
+
+    def start_agent_workspace(self) -> dict[str, Any]:
+        binding = self.agent_workspace_binding()
+        client = self._agent_client(binding)
+        return self._call(
+            "start",
+            lambda: client.start(AGENT_WORKSPACE_ID),
+            workload_id=AGENT_WORKSPACE_ID,
+        )
+
+    def agent_exec(self, objective: Any, *, timeout_seconds: int) -> dict[str, Any]:
+        """Run one bounded objective through the sealed wrapper; no shell."""
+
+        if (
+            not isinstance(objective, str)
+            or not objective
+            or len(objective) > 256
+            or "\x00" in objective
+        ):
+            raise ExecutionHostProxyError(
+                "invalid_objective",
+                "the objective must be a bounded non-empty string",
+                status=400,
+            )
+        binding = self.agent_workspace_binding()
+        client = self._agent_client(binding)
+        try:
+            bounded = max(1, min(int(timeout_seconds), daemon_contract.MAX_REQUEST_TIMEOUT_SECONDS))
+        except (TypeError, ValueError) as exc:
+            raise ExecutionHostProxyError(
+                "invalid_timeout", "the run timeout is invalid", status=400
+            ) from exc
+        argv = ["/usr/local/bin/stateport-agent-run", objective]
+        return self._call(
+            "execWorkload",
+            lambda: client.exec_workload(AGENT_WORKSPACE_ID, argv, timeout_seconds=bounded),
+            workload_id=AGENT_WORKSPACE_ID,
         )
 
     def _call(

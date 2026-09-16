@@ -48,6 +48,11 @@ except ModuleNotFoundError:  # Source-tree consumers may not pre-install sibling
     from stateport_preview_gateway import proxy as preview_proxy
 from stateport_persistent_app.activity_receipts import ActivityReceiptError, ActivityReceiptStore
 from stateport_persistent_app.conversation_attachments import ConversationAttachmentError, ConversationAttachmentStore
+from stateport_persistent_app.agent_run import (
+    DEFAULT_TIMEOUT_SECONDS as AGENT_RUN_DEFAULT_TIMEOUT_SECONDS,
+    AgentRunError,
+    AgentRunService,
+)
 from stateport_persistent_app.execution_host_proxy import ExecutionHostProxy, ExecutionHostProxyError
 from stateport_persistent_app.settings import SettingsError, SettingsStore
 from stateport_persistent_app.repository_import import RepositoryImportError, RepositoryInspector, RepositorySourcePolicy
@@ -492,8 +497,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.execution
 
     def _expected_origin(self) -> str:
-        port = self.server.external_loopback_port or self.server.server_address[1]
-        return f"http://127.0.0.1:{port}"
+        return self.server.published_origin()
 
     def _valid_request_host(self) -> bool:
         """Reject DNS-rebinding aliases before serving session or API data.
@@ -1050,6 +1054,17 @@ class Handler(BaseHTTPRequestHandler):
             if not self._session():
                 self._error(401, "local browser session is required", "session_required")
                 return
+            if path == "/docs/operations/application-workspace-authority":
+                # The installed product serves its own operational boundary
+                # document; no external site or checkout is required.
+                document = self._bounded_static(
+                    self.server.product_root, "docs/operations/application-workspace-authority.md"
+                )
+                if document is None:
+                    self._error(404, "workspace authority documentation not found", "not_found")
+                    return
+                self._send(200, document.read_bytes(), content_type="text/markdown; charset=utf-8")
+                return
             platform_surface.require_platform_operator_for_path(self.server, path)
             app = self.server.source_app()
             if path == "/v1/provider/status":
@@ -1310,7 +1325,25 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._send(200, {"ok": True, "result": {"availability": _preview_availability(self.server), "routes": _preview_registry(self.server).list_routes()}})
                 return
+            if path == "/v1/agent/status":
+                self._send(200, {"ok": True, "result": self.server.agent_run.readiness()})
+                return
+            if path == "/v1/agent/runs":
+                self._send(200, {"ok": True, "result": {"runs": self.server.agent_run.list_runs()}})
+                return
+            if path.startswith("/v1/agent/runs/"):
+                agent_parts = [unquote(part) for part in path.split("/") if part]
+                if len(agent_parts) == 5 and agent_parts[:3] == ["v1", "agent", "runs"] and agent_parts[4] == "output":
+                    self._send(200, {"ok": True, "result": self.server.agent_run.logs(agent_parts[3])})
+                    return
+                if len(agent_parts) == 4 and agent_parts[:3] == ["v1", "agent", "runs"]:
+                    self._send(200, {"ok": True, "result": self.server.agent_run.status(agent_parts[3])})
+                    return
+                self._error(404, "agent run route not found", "not_found")
+                return
             self._error(404, "route not found", "not_found")
+        except AgentRunError as exc:
+            self._error(404 if exc.code == "unknown_run" else 409, exc.detail, exc.code)
         except EnvironmentGatedExecution as exc:
             self._send(200, {"ok": True, "result": exc.payload})
         except ContextLifecycleError as exc:
@@ -1416,6 +1449,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._strict_body(body, ({"model", "providerId"} if "providerId" in body else {"model"}) if path.endswith("/configure") else set())
                 self._send(200, {"ok": True, "result": self.server.provider_action(path.rsplit("/", 1)[1], body)})
                 return
+            if path in {"/v1/provider/credential", "/v1/provider/credential/remove"}:
+                # Operator-owned provider API key: the request carries the key
+                # once, the response is the names-only provider projection and
+                # never echoes the value.
+                platform_surface.require_platform_operator(self.server)
+                removing = path.endswith("/credential/remove")
+                self._strict_body(body, {"provider"} if removing else {"provider", "apiKey"})
+                self._send(200, {"ok": True, "result": self.server.provider_credential(removing, body)})
+                return
             if path in {"/v1/provider/login", "/v1/provider/login/cancel", "/v1/provider/logout"}:
                 from .provider_setup import ProviderLoginError
                 platform_surface.require_platform_operator(self.server)
@@ -1432,6 +1474,29 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.server.provider_login_cancel()
                 else:
                     result = self.server.provider_logout()
+                self._send(200, {"ok": True, "result": result})
+                return
+            if path == "/v1/agent/run":
+                # One bounded objective into the sealed agent workspace.  The
+                # request crosses the same operator + CSRF mutation boundary as
+                # the provider credential routes before any daemon authority.
+                platform_surface.require_platform_operator(self.server)
+                self._strict_body(body, {"objective"})
+                try:
+                    result = self.server.agent_run.start(body.get("objective"))
+                except AgentRunError as exc:
+                    code_status = (
+                        503
+                        if exc.code
+                        in {
+                            "execution_unavailable",
+                            "agent_workspace_authority_missing",
+                            "agent_workspace_authority_invalid",
+                        }
+                        else 409
+                    )
+                    self._error(code_status, exc.detail, exc.code)
+                    return
                 self._send(200, {"ok": True, "result": result})
                 return
             if path == "/v1/repository-import/inspect":
@@ -2616,6 +2681,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(403, "preview route access denied", "preview_route_access_denied")
             elif path.startswith("/v1/execution-host"):
                 self._error(403, "execution host access denied", "execution_host_access_denied")
+            elif path.startswith("/v1/agent"):
+                self._error(403, "agent run access denied", "agent_run_access_denied")
             elif path == "/v1/application-fixtures/install":
                 self._error(403, "application installation authorization failed", "application_install_denied")
             elif "/template-upgrade/" in path:
@@ -2764,6 +2831,17 @@ class AppServer(ThreadingHTTPServer):
         self.log = open(layout.logs_root / "service.log", "a", encoding="utf-8")
         self.execution = PortableExecutionService(self.app, product_root)
         self.execution_host = ExecutionHostProxy(catalog_entry=self.workspace_catalog_entry, catalog_entries=lambda: self.source_app().catalog.list(), instance_runs=self.execution.history)
+        try:
+            agent_run_timeout: int | None = int(os.environ.get("STATEPORT_AGENT_RUN_TIMEOUT_SECONDS", ""))
+        except ValueError:
+            agent_run_timeout = AGENT_RUN_DEFAULT_TIMEOUT_SECONDS
+        self.agent_run = AgentRunService(
+            execution_host=self.execution_host,
+            state_dir=(layout.state_root / "agent-runs").resolve(),
+            provider_directory=os.environ.get("STATEPORT_AGENT_PROVIDER_DIR"),
+            workspace_image_reference=os.environ.get("STATEPORT_EXECUTION_HOST_WORKSPACE_IMAGE_REFERENCE"),
+            timeout_seconds=agent_run_timeout,
+        )
         self.repository_inspector = RepositoryInspector(RepositorySourcePolicy(layout))
         self.context_lifecycle = ContextLifecycleService(
             policy_path=(product_root / "config" / "context-lifecycle.v1.yaml").resolve(),
@@ -2872,9 +2950,6 @@ class AppServer(ThreadingHTTPServer):
                     model_identifier=model, time_seconds=30, steps=2,
                 )
                 self.provider_setup.probe(provider_id)
-                if provider_id == 'opencode':
-                    self.provider_setup.authentication = self.provider_setup.request = "unverified"
-                    return self.provider_setup.status()
                 candidate = AssistantProcessor(
                     self.conversations,
                     router=ProviderRouter(self.provider_setup.profile_path),
@@ -2886,7 +2961,13 @@ class AppServer(ThreadingHTTPServer):
                 self.provider_setup.disabled_path.unlink()
                 candidate.start()
                 self.provider_setup.authentication = self.provider_setup.request = "unverified"
-                self.provider_setup.detail = "Model saved. Authenticate using Codex in this runtime, then verify. StatePort never reads or copies credentials."
+                self.provider_setup.detail = (
+                    "OpenCode model saved. StatePort runs the pinned OpenCode executable and reports it. "
+                    "An operator-provided provider API key can be stored here and is injected only into "
+                    "OpenCode invocations; StatePort never reads OpenCode's own authentication."
+                    if provider_id == 'opencode'
+                    else "Model saved. Authenticate using Codex in this runtime, then verify. StatePort never reads or copies credentials."
+                )
                 return self.provider_setup.status()
             except Exception:
                 # A start can fail after creating its thread. Restore durable
@@ -2897,6 +2978,14 @@ class AppServer(ThreadingHTTPServer):
                     self._assistant_processor = candidate
                     self._stop_provider_processor()
                 raise RuntimeError("provider setup failed; StatePort provider work remains disabled") from None
+
+    def provider_credential(self, removing, body):
+        if not self._provider_execution_allowed:
+            raise PermissionError("provider execution is disabled in the validation release profile")
+        provider = body.get("provider")
+        if removing:
+            return self.provider_setup.remove_credential(provider)
+        return self.provider_setup.set_credential(provider, body.get("apiKey"))
 
     def provider_login_start(self):
         if not self._provider_execution_allowed:
@@ -4569,6 +4658,9 @@ class AppServer(ThreadingHTTPServer):
         # durable isolation markers, target/session creation or PTY effects.
         try:
             application_workspace = self.execution_host.application_client(instance_id)
+            if workspace_only and application_workspace is None:
+                self._drop_terminal_broker(instance_id)
+                raise PermissionError("an exact application workspace binding is required")
             if workspace_only and application_workspace is not None and self.execution_host._bindings_format == "stateport.application-workspace-bindings/v2" and "status" not in application_workspace[0]["grant"]["operations"]:
                 raise ExecutionHostProxyError("workspace_operation_not_granted", "Workspace status permission is required")
         except ExecutionHostProxyError as exc:
@@ -4638,9 +4730,6 @@ class AppServer(ThreadingHTTPServer):
             raise PermissionError("cataloged project filesystem identity changed")
         incarnation = ""
         if workspace_only:
-            if application_workspace is None:
-                self._drop_terminal_broker(instance_id)
-                raise PermissionError("an exact application workspace binding is required")
             binding, execution_client = application_workspace
             try:
                 observed = execution_client.status(binding["workload"]["workloadId"])["result"]
@@ -4671,7 +4760,7 @@ class AppServer(ThreadingHTTPServer):
             binding, execution_client = application_workspace
             target = TerminalTarget(f"terminal.workspace.{opaque}", "capsule", "Application workspace terminal", "available", TerminalCapabilities("capsule", True, True, True, False, False, True))
             profile_id = f"terminal.profile.{opaque}"
-            gateway = ExecutionHostTerminalGateway(execution_client, expected_container_identity_digest=incarnation if workspace_only else None, require_container_identity=workspace_only, workspace_id=binding["workload"]["workloadId"], instance_id=instance_id, profile_id=profile_id, target=target, allowed_origins=(f"http://127.0.0.1:{self.server_address[1]}",))
+            gateway = ExecutionHostTerminalGateway(execution_client, expected_container_identity_digest=incarnation if workspace_only else None, require_container_identity=workspace_only, workspace_id=binding["workload"]["workloadId"], instance_id=instance_id, profile_id=profile_id, target=target, allowed_origins=(self.published_origin(),))
             value = (cache_identity, gateway, gateway, Path("/workspace"), profile_id, target)
             self.terminal_brokers[instance_id] = value
             return value
@@ -4694,7 +4783,7 @@ class AppServer(ThreadingHTTPServer):
         broker = TerminalSessionBroker(
             (profile,),
             state_directory=state_directory,
-            allowed_origins=(f"http://127.0.0.1:{self.server_address[1]}",),
+            allowed_origins=(self.published_origin(),),
         )
         gateway = AuthenticatedTerminalGateway(broker)
         value = (cache_identity, broker, gateway, root, profile_id, target)
@@ -4714,11 +4803,24 @@ class AppServer(ThreadingHTTPServer):
             if float(self.terminal_tickets[digest]["expiresMonotonic"]) <= now:
                 self.terminal_tickets.pop(digest, None)
 
+    def published_origin(self) -> str:
+        """Single source for the loopback origin the browser actually names.
+
+        A signed install publishes the web service on a digest-derived host
+        port (18000-18999) while this server binds the container-internal
+        port; compose mirrors the topology with an explicit host mapping.
+        Every origin comparison — terminal ticket issue, ticket acceptance,
+        and broker allow-lists — must derive the same value or published
+        installs close the terminal socket before authentication.
+        """
+        port = self.external_loopback_port or self.server_address[1]
+        return f"http://127.0.0.1:{port}"
+
     def prepare_terminal(self, instance_id: str, *, columns: object, rows: object, workspace_only: bool = False, expected_target_id: object = None) -> dict[str, object]:
         from stateport_terminal_broker import GatewayActor, TerminalBrokerError
 
         columns, rows = self._terminal_dimensions(columns, rows)
-        origin = f"http://127.0.0.1:{self.server_address[1]}"
+        origin = self.published_origin()
         with self._terminal_mutex:
             cache_identity, broker, gateway, root, profile_id, target = self._terminal_binding_locked(instance_id, workspace_only=workspace_only)
             if workspace_only and (not isinstance(expected_target_id, str) or not secrets.compare_digest(expected_target_id, target.target_id)):
@@ -4792,7 +4894,7 @@ class AppServer(ThreadingHTTPServer):
                 secrets.compare_digest(str(authentication["purpose"]), str(ticket["purpose"])),
                 authentication["columns"] == ticket["columns"],
                 authentication["rows"] == ticket["rows"],
-                secrets.compare_digest(origin, f"http://127.0.0.1:{self.server_address[1]}"),
+                secrets.compare_digest(origin, self.published_origin()),
             )
             if not all(exact):
                 raise TerminalAccessDenied()

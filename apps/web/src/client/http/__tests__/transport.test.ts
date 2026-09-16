@@ -47,6 +47,18 @@ describe('HttpTransport — envelope normalization', () => {
     expect((err as ClientError).message).toBe('Nope')
   })
 
+  it('falls back to the documented error detail when no message is present', async () => {
+    const fake = makeFakeFetch([
+      ['POST', '/v1/thing', jsonResponse({ ok: false, error: { code: 'agent_run_refused', detail: 'Workspace authority is missing.' } }, 409)],
+    ])
+    const transport = new HttpTransport({ fetchFn: fake.fetchFn })
+    const err = await transport.request('/v1/thing', { method: 'POST', schema }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ClientError)
+    expect((err as ClientError).message).toBe('Workspace authority is missing.')
+    expect((err as ClientError).code).toBe('agent_run_refused')
+    expect((err as ClientError).status).toBe(409)
+  })
+
   it('accepts 204 No Content with a void schema', async () => {
     const fake = makeFakeFetch([['POST', '/v1/void', new Response(null, { status: 204 })]])
     const transport = new HttpTransport({ fetchFn: fake.fetchFn })
