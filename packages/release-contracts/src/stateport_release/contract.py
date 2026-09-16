@@ -15,6 +15,7 @@ plus key ID through :class:`ReleaseVerificationPolicy`.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -99,6 +100,19 @@ PROVIDER_HOME_CONTRACT = {
     "owner": "stateport-control",
     "mode": "0700",
     "environmentVariable": "STATEPORT_OPENCODE_HOME",
+    "validation": "ephemeral-empty",
+}
+# Alpha.15 through alpha.17 predecessors were signed and published with the
+# pre-W1 Codex provider home.  The exact historical block stays admissible
+# only when a caller explicitly requests a legacy predecessor load; it is
+# never a wildcard and never applies to fresh releases.
+_LEGACY_PROVIDER_HOME_CONTRACT = {
+    "provider": "codex",
+    "hostPath": "/var/lib/stateport-control/provider-auth/codex",
+    "mountPath": "/var/lib/stateport-provider/codex",
+    "owner": "stateport-control",
+    "mode": "0700",
+    "environmentVariable": "CODEX_HOME",
     "validation": "ephemeral-empty",
 }
 AGENT_PROVIDER_DIRECTORY_CONTRACT = {
@@ -571,9 +585,12 @@ def embedded_predecessor_index(
     raw = successor["predecessor"].get("rawIndex")
     if not isinstance(raw, Mapping):
         raise ReleaseContractError("successor predecessor raw index is missing")
-    return validate_release_index(
-        raw, legacy_predecessor=_is_legacy_predecessor(raw)
-    )
+    # The embedded raw index is by construction a historical predecessor, so it
+    # is admitted the same way as an explicitly requested predecessor load: the
+    # pinned alpha.3 accommodations stay gated by ``_is_legacy_predecessor``
+    # inside ``validate_release_index`` while the exact historical provider-home
+    # block is also accepted.
+    return validate_release_index(raw, legacy_predecessor=True)
 
 
 def verify_release_predecessor(
@@ -593,16 +610,14 @@ def verify_release_predecessor(
     admitted here; successor policy decides whether it is otherwise eligible.
     """
 
-    raw_document = document.document if isinstance(document, ReleaseIndex) else document
-    allow_legacy = legacy_predecessor and _is_legacy_predecessor(raw_document)
     index = (
         document
         if isinstance(document, ReleaseIndex)
-        else validate_release_index(document, legacy_predecessor=allow_legacy)
+        else validate_release_index(document, legacy_predecessor=legacy_predecessor)
     )
     if isinstance(document, ReleaseIndex):
         rebound = validate_release_index(
-            document.document, legacy_predecessor=allow_legacy
+            document.document, legacy_predecessor=legacy_predecessor
         )
         if (
             rebound.signed_bytes != document.signed_bytes
@@ -3638,6 +3653,42 @@ def _load_schema(schema_path: Path) -> dict[str, Any]:
     return value
 
 
+def _schema_with_legacy_provider_home(schema: dict[str, Any]) -> dict[str, Any]:
+    """Admit the exact historical provider-home block for one legacy load.
+
+    Alpha.15 through alpha.17 indexes name the pre-W1 Codex provider home.  A
+    legacy predecessor load accepts that block as an alternative to the current
+    contract while every value stays exactly pinned (never a wildcard).  If the
+    providerHome node cannot be located the unmodified current schema is
+    returned so the load fails closed instead of widening anything by accident.
+    """
+
+    candidate = copy.deepcopy(schema)
+    definitions = candidate.get("$defs")
+    if not isinstance(definitions, dict):
+        return schema
+    service = definitions.get("service")
+    if not isinstance(service, dict):
+        return schema
+    properties = service.get("properties")
+    if not isinstance(properties, dict):
+        return schema
+    current = properties.get("providerHome")
+    if not isinstance(current, dict):
+        return schema
+    historical = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(_LEGACY_PROVIDER_HOME_CONTRACT),
+        "properties": {
+            field: {"const": value}
+            for field, value in _LEGACY_PROVIDER_HOME_CONTRACT.items()
+        },
+    }
+    properties["providerHome"] = {"oneOf": [current, historical]}
+    return candidate
+
+
 def validate_contract_document(
     document: Mapping[str, Any],
     *,
@@ -4611,8 +4662,11 @@ def _validate_successor_fields(index: Mapping[str, Any]) -> None:
         raw_index = predecessor["rawIndex"]
         if not isinstance(raw_index, Mapping):
             raise ReleaseContractError("successor predecessor raw index is missing")
+        # Embedded predecessor bytes are a historical document; admit them like
+        # an explicit predecessor load (pinned alpha.3 behavior unchanged, exact
+        # historical provider home only).
         authenticated_index = validate_release_index(
-            raw_index, legacy_predecessor=_is_legacy_predecessor(raw_index)
+            raw_index, legacy_predecessor=True
         )
         if (
             authenticated_index.release_id != predecessor["releaseId"]
@@ -4770,7 +4824,11 @@ def _validate_same_lane_predecessor_identity(
 
 
 def _validate_cross_fields(
-    index: Mapping[str, Any], *, require_signatures: bool, legacy_predecessor: bool = False
+    index: Mapping[str, Any],
+    *,
+    require_signatures: bool,
+    legacy_predecessor: bool = False,
+    legacy_provider_home: bool = False,
 ) -> None:
     signed = index["signed"]
     source = signed["source"]
@@ -5052,8 +5110,13 @@ def _validate_cross_fields(
                         f"service {service_id} revision-scoped validation volume is not disposable"
                     )
             provider_home = service.get("providerHome")
+            authorized_provider_homes = (
+                (PROVIDER_HOME_CONTRACT, _LEGACY_PROVIDER_HOME_CONTRACT)
+                if legacy_provider_home
+                else (PROVIDER_HOME_CONTRACT,)
+            )
             if provider_home is not None and (
-                provider_home != PROVIDER_HOME_CONTRACT
+                provider_home not in authorized_provider_homes
                 or service_id != "stateport-web"
                 or service["quadletOwner"] != "stateport-control"
                 or service["runAsUser"] != 65532
@@ -5467,13 +5530,20 @@ def validate_release_index(
     if not isinstance(document, Mapping):
         raise ReleaseContractError("release index must be a mapping")
     value = _thaw(document)
+    legacy_provider_home = legacy_predecessor
     legacy_predecessor = legacy_predecessor and _is_legacy_predecessor(value)
     _validate_canonical_value(value)
-    issues = _schema_issues(value, _load_schema(schema_directory / _CONTRACT_SCHEMAS[INDEX_SCHEMA]))
+    schema = _load_schema(schema_directory / _CONTRACT_SCHEMAS[INDEX_SCHEMA])
+    if legacy_provider_home:
+        schema = _schema_with_legacy_provider_home(schema)
+    issues = _schema_issues(value, schema)
     if issues:
         raise ReleaseContractError(f"release index schema validation failed: {issues[0]}")
     _validate_cross_fields(
-        value, require_signatures=require_signatures, legacy_predecessor=legacy_predecessor
+        value,
+        require_signatures=require_signatures,
+        legacy_predecessor=legacy_predecessor,
+        legacy_provider_home=legacy_provider_home,
     )
     payload = canonical_json_bytes(value["signed"])
     return ReleaseIndex(
@@ -5534,12 +5604,11 @@ def load_release_index(
     legacy_predecessor: bool = False,
 ) -> ReleaseIndex:
     parsed = _parse_document(content)
-    allow_legacy = legacy_predecessor and _is_legacy_predecessor(parsed)
     return validate_release_index(
         parsed,
         require_signatures=require_signatures,
         schema_directory=schema_directory,
-        legacy_predecessor=allow_legacy,
+        legacy_predecessor=legacy_predecessor,
     )
 
 
@@ -5601,11 +5670,9 @@ def verify_release_index(
 ) -> VerifiedRelease:
     """Verify exact digest, policy, and successor qualification/disposition links."""
 
-    raw_document = document.document if isinstance(document, ReleaseIndex) else document
-    allow_legacy = legacy_predecessor and _is_legacy_predecessor(raw_document)
     if isinstance(document, ReleaseIndex):
         rebound = validate_release_index(
-            document.document, legacy_predecessor=allow_legacy
+            document.document, legacy_predecessor=legacy_predecessor
         )
         if (
             rebound.signed_bytes != document.signed_bytes
@@ -5619,7 +5686,7 @@ def verify_release_index(
         index = rebound
     else:
         index = validate_release_index(
-            document, legacy_predecessor=allow_legacy
+            document, legacy_predecessor=legacy_predecessor
         )
     if not index.document["signatures"]:
         raise ReleaseContractError("release index has no signatures")

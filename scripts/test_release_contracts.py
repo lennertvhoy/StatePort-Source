@@ -28,6 +28,7 @@ from stateport_release import (  # noqa: E402
     SignerIdentity,
     canonical_digest,
     canonical_json_bytes,
+    embedded_predecessor_index,
     image_set_digest,
     installer_directive_digest,
     load_release_index,
@@ -493,6 +494,7 @@ def _successor_index(
     *,
     version: str = "0.3.0-rc.1",
     disposition_sequence: int = 1,
+    legacy_predecessor: bool = False,
 ) -> dict[str, object]:
     value = deepcopy(release_index())
     signed = value["signed"]
@@ -504,7 +506,9 @@ def _successor_index(
     target["quadletBundleDigest"] = quadlet_bundle_digest(
         render_quadlet_bundle(target, signed["images"])
     )
-    predecessor_index = validate_release_index(predecessor)
+    predecessor_index = validate_release_index(
+        predecessor, legacy_predecessor=legacy_predecessor
+    )
     predecessor_identity = {
         "releaseId": predecessor_index.release_id,
         "version": predecessor_index.version,
@@ -3625,6 +3629,132 @@ def test_provider_home_refuses_contract_widening(field: str, value: str) -> None
     _refresh_index_topology(document)
     with pytest.raises(ReleaseContractError):
         verify_release_index(document, policy=_policy(), verifier=_EphemeralTestVerifier())
+
+
+# The provider home carried by the signed alpha.15 through alpha.17 indexes
+# (pre-W1 Codex era).  Pinned literally here so the legacy alternative cannot
+# drift from the published bytes and cannot silently widen.
+LEGACY_CODEX_PROVIDER_HOME = {
+    "provider": "codex",
+    "hostPath": "/var/lib/stateport-control/provider-auth/codex",
+    "mountPath": "/var/lib/stateport-provider/codex",
+    "owner": "stateport-control",
+    "mode": "0700",
+    "environmentVariable": "CODEX_HOME",
+    "validation": "ephemeral-empty",
+}
+
+
+def _legacy_codex_provider_home_index() -> dict[str, object]:
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["providerHome"] = dict(LEGACY_CODEX_PROVIDER_HOME)
+    _refresh_index_topology(document)
+    return document
+
+
+def test_historical_codex_provider_home_loads_only_for_requested_legacy_predecessor() -> None:
+    document = _legacy_codex_provider_home_index()
+    with pytest.raises(ReleaseContractError, match=r"providerHome\.provider"):
+        validate_release_index(document, require_signatures=False)
+    index = validate_release_index(document, require_signatures=False, legacy_predecessor=True)
+    assert index.signed_digest == canonical_digest(document["signed"])
+    assert index.signed_bytes == canonical_json_bytes(document["signed"])
+    assert (
+        index.document["signed"]["targets"][0]["services"][0]["providerHome"]
+        == LEGACY_CODEX_PROVIDER_HOME
+    )
+
+
+def test_historical_codex_provider_home_file_load_preserves_signed_bytes(tmp_path: Path) -> None:
+    document = _legacy_codex_provider_home_index()
+    path = tmp_path / "release-index.json"
+    path.write_bytes(canonical_json_bytes(document) + b"\n")
+    with pytest.raises(ReleaseContractError, match=r"providerHome\.provider"):
+        load_release_index_file(path)
+    index = load_release_index_file(path, require_signatures=False, legacy_predecessor=True)
+    assert index.canonical_index_bytes == canonical_json_bytes(document)
+    assert index.signed_digest == canonical_digest(document["signed"])
+    assert index.index_digest == canonical_digest(document)
+
+
+@pytest.mark.parametrize("mutation", [
+    {"provider": "codex2"},
+    {"provider": "codex", "hostPath": "/var/lib/stateport-control/provider-auth/opencode"},
+    {"environmentVariable": "HOME"},
+    {"extra": "x"},
+])
+def test_historical_codex_provider_home_rejects_any_widening(
+    mutation: dict[str, str],
+) -> None:
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["providerHome"] = (
+        dict(LEGACY_CODEX_PROVIDER_HOME) | mutation
+    )
+    _refresh_index_topology(document)
+    with pytest.raises(ReleaseContractError):
+        validate_release_index(document, require_signatures=False, legacy_predecessor=True)
+
+
+def test_current_provider_home_is_still_admitted_for_legacy_predecessor_requests() -> None:
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["providerHome"] = dict(PROVIDER_HOME_CONTRACT)
+    _refresh_index_topology(document)
+    for legacy_predecessor in (False, True):
+        index = validate_release_index(
+            document, require_signatures=False, legacy_predecessor=legacy_predecessor
+        )
+        assert index.signed_digest == canonical_digest(document["signed"])
+
+
+def test_embedded_historical_codex_provider_home_predecessor_is_admitted() -> None:
+    predecessor = _legacy_codex_provider_home_index()
+    successor = _successor_index(predecessor, legacy_predecessor=True)
+    index = validate_release_index(successor, require_signatures=False)
+    assert index.signed_digest == canonical_digest(successor["signed"])
+    embedded = embedded_predecessor_index(successor)
+    assert embedded is not None
+    assert embedded.signed_digest == canonical_digest(predecessor["signed"])
+    assert embedded.index_digest == canonical_digest(predecessor)
+    assert (
+        embedded.document["signed"]["targets"][0]["services"][0]["providerHome"]
+        == LEGACY_CODEX_PROVIDER_HOME
+    )
+
+
+@pytest.mark.parametrize("mutation", [
+    {"provider": "codex2"},
+    {"provider": "codex", "hostPath": "/var/lib/stateport-control/provider-auth/opencode"},
+    {"environmentVariable": "HOME"},
+    {"extra": "x"},
+])
+def test_embedded_historical_codex_provider_home_rejects_any_widening(
+    mutation: dict[str, str],
+) -> None:
+    predecessor = _legacy_codex_provider_home_index()
+    successor = _successor_index(predecessor, legacy_predecessor=True)
+    successor["signed"]["successor"]["predecessor"]["rawIndex"]["signed"]["targets"][0][
+        "services"
+    ][0]["providerHome"] = dict(LEGACY_CODEX_PROVIDER_HOME) | mutation
+    successor["signatures"][0]["subjectDigest"] = canonical_digest(successor["signed"])
+    with pytest.raises(ReleaseContractError, match="providerHome"):
+        validate_release_index(successor, require_signatures=False)
+
+
+def test_embedded_current_provider_home_predecessor_remains_admitted() -> None:
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
+    predecessor = _stable_execution_index()
+    predecessor["signed"]["targets"][0]["services"][0]["providerHome"] = dict(
+        PROVIDER_HOME_CONTRACT
+    )
+    _refresh_index_topology(predecessor)
+    successor = _successor_index(predecessor)
+    validate_release_index(successor, require_signatures=False)
+    embedded = embedded_predecessor_index(successor)
+    assert embedded is not None
+    assert embedded.signed_digest == canonical_digest(predecessor["signed"])
 
 
 def test_same_lane_predecessor_identity_rules() -> None:
