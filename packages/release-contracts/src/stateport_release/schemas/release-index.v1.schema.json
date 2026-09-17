@@ -1212,6 +1212,18 @@
                     "const": "STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY"
                   }
                 }
+              },
+              {
+                "const": {
+                  "name": "agent-provider",
+                  "hostPath": "/var/lib/stateport-control/agent-provider",
+                  "mountPath": "/var/lib/stateport-control/agent-provider",
+                  "purpose": "agent-provider",
+                  "sourceOwner": "stateport-control",
+                  "sourceGroup": "stateport-control",
+                  "mode": "ro",
+                  "environmentVariable": "STATEPORT_AGENT_PROVIDER_DIR"
+                }
               }
             ]
           }

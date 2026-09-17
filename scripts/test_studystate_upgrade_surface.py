@@ -797,6 +797,133 @@ def test_retained_simulation_requires_opt_in_and_preserves_fidelity(tmp_path: Pa
     assert evidence["guestRegistryTransport"] == receipt["guestRegistryTransport"]
 
 
+def _mark_retained_candidate_mirror(paths: dict[str, Path]) -> dict:
+    """Model a native candidate-mirror J1 receipt: explicit, never owner path."""
+    receipt_path = paths["vm_dir"] / "receipt.json"
+    receipt = json.loads((paths["vm_dir"].parent / "receipt.json").read_text())
+    distro = "StatePort-Rehearsal-mirror-fixture"
+    receipt.update({
+        "mode": "prepublication-mirror",
+        "evidenceClass": "candidate_mirror",
+        "transportClass": "prepublication-mirror",
+        "identityClass": "candidate-mirror",
+        "ownerPathQualification": False,
+        "publicTransportBoundary": False,
+        "siteTransport": {
+            "mode": "host-local-staged-pages",
+            "url": "https://lennertvhoy.github.io/StatePort-Site",
+            "guestLocalServer": False,
+            "hostMirror": True,
+            "hostGateway": "10.0.2.2",
+        },
+        "guestRegistryTransport": {
+            "mode": "host-local-prepublication-mirror",
+            "location": "10.0.2.2:5443/stateport-alpha",
+            "digestOnly": True,
+            "guestLocalMirror": False,
+            "retainedArchiveTransport": False,
+            "hostMirror": True,
+        },
+    })
+    receipt["rehearsalBaseline"] = {
+        "evidenceClass": "candidate_mirror",
+        "transportClass": "prepublication-mirror",
+        "identityClass": "candidate-mirror",
+        "ownerPathQualification": False,
+        "publicTransportBoundary": False,
+        "substrate": "native-wsl2",
+        "rootfsIdentity": journey_common.WSL_ROOTFS_IDENTITY,
+        "distroName": distro,
+        "machineId": "c" * 32,
+        "windowsIdentity": "Microsoft Windows 11|10.0|26200",
+    }
+    receipt["binding"]["images"] = {"stateport-web": "sha256:" + "d" * 64}
+    receipt["binding"].pop("archives", None)
+    receipt["phases"].pop("public-transport-boundary")
+    receipt["phases"]["prepublication-mirror-boundary"] = {"ok": True}
+    receipt_path.write_text(json.dumps(receipt))
+    return {**paths, "archive_root": None, "native_distro_name": distro}
+
+
+def test_candidate_mirror_requires_explicit_mode_and_is_never_owner_path(tmp_path: Path) -> None:
+    paths = _retained_candidate_fixture(tmp_path)
+    mirror = _mark_retained_candidate_mirror(paths)
+
+    with pytest.raises(ValueError, match="genuine native WSL2 owner-path"):
+        validate_retained_candidate_inputs(**mirror)
+
+    facts, evidence = validate_retained_candidate_inputs(**mirror, prepublication_mirror=True)
+    assert facts["releaseId"] == "release-test-1"
+    assert evidence["evidenceClass"] == "candidate_mirror"
+    assert evidence["lane"] == "native-prepublication-candidate"
+    assert evidence["transportClass"] == "prepublication-mirror"
+    assert evidence["identityClass"] == "candidate-mirror"
+    assert evidence["ownerPathQualification"] is False
+    assert evidence["publicTransportBoundary"] is False
+    assert evidence["admissibleForQualification"] is False
+    assert evidence["nativeIdentity"]["machineId"] == "c" * 32
+    assert evidence["archiveRoot"] is None and evidence["archiveDigests"] == {}
+
+
+@pytest.mark.parametrize("mixed", [
+    "owner-path-receipt",
+    "public-boundary-phase",
+    "simulation-flag",
+    "missing-distro",
+])
+def test_candidate_mirror_validation_refuses_mixed_or_mislabeled_evidence(
+    tmp_path: Path, mixed: str
+) -> None:
+    paths = _retained_candidate_fixture(tmp_path)
+    mirror = _mark_retained_candidate_mirror(paths)
+    if mixed == "simulation-flag":
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            validate_retained_candidate_inputs(
+                **paths, retained_simulation=True, prepublication_mirror=True
+            )
+        return
+    if mixed == "missing-distro":
+        with pytest.raises(ValueError, match="native WSL2 distro name"):
+            validate_retained_candidate_inputs(**paths, prepublication_mirror=True)
+        return
+    receipt_path = paths["vm_dir"] / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    if mixed == "owner-path-receipt":
+        receipt["evidenceClass"] = "owner_path_qualification"
+        match = "not a candidate-mirror prepublication receipt"
+    else:
+        receipt["phases"]["public-transport-boundary"] = {"ok": True}
+        match = "mixed evidence is refused"
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match=match):
+        validate_retained_candidate_inputs(**mirror, prepublication_mirror=True)
+
+
+def test_j4_forwards_the_explicit_candidate_mirror_mode(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def fake_validate(*_args, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after preflight")
+
+    monkeypatch.setattr(run_journey_j4, "validate_retained_candidate_inputs", fake_validate)
+    monkeypatch.setattr(sys, "argv", [
+        "run_journey_j4.py",
+        "--receipt-out", str(tmp_path / "j4.json"),
+        "--vm-dir", str(tmp_path / "vm"),
+        "--candidate-dir", str(tmp_path / "candidate"),
+        "--site-root", str(tmp_path / "site"),
+        "--native-wsl2", "--wsl-distro-name", "StatePort-Rehearsal-mirror-fixture",
+        "--prepublication-mirror",
+    ])
+    assert run_journey_j4.main() == 1
+    assert captured["prepublication_mirror"] is True
+    assert captured["native_distro_name"] == "StatePort-Rehearsal-mirror-fixture"
+    receipt = json.loads((tmp_path / "j4.json").read_text())
+    assert receipt["result"] == "failed"
+    assert receipt["steps"][0]["name"] == "input-preflight"
+
+
 def _production_retained_fixture(tmp_path: Path) -> tuple[dict, Path]:
     paths = _retained_candidate_fixture(tmp_path)
     _mark_retained_simulation(paths)

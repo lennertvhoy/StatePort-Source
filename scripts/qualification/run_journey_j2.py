@@ -1344,15 +1344,21 @@ def main() -> int:
     parser.add_argument("--archive-root", type=Path)
     parser.add_argument("--native-wsl2", action="store_true")
     parser.add_argument("--wsl-distro-name")
+    parser.add_argument("--prepublication-mirror", action="store_true",
+                        help="validate a candidate-mirror (pre-publication) native J1 receipt; "
+                             "never owner-path or public-route proof")
     parser.add_argument("--qualification-build-receipt", type=Path)
     args = parser.parse_args()
 
+    if args.prepublication_mirror and not args.native_wsl2:
+        parser.error("--prepublication-mirror requires --native-wsl2")
     try:
         facts, prerequisite_evidence = validate_retained_candidate_inputs(
             args.candidate_dir, args.vm_dir, args.site_root,
             None if args.native_wsl2 else args.archive_root,
             native_distro_name=args.wsl_distro_name if args.native_wsl2 else None,
             qualification_build_receipt=args.qualification_build_receipt,
+            prepublication_mirror=args.prepublication_mirror,
         )
     except Exception as exc:  # noqa: BLE001 - preflight failure must be durable
         receipt = JourneyReceipt(

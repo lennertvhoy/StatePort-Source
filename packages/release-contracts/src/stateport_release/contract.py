@@ -44,6 +44,18 @@ _LEGACY_PREDECESSOR_SIGNED_DIGEST = (
 _LEGACY_PREDECESSOR_INDEX_DIGEST = (
     "sha256:3353fdb6477fcb5269169177c625205c7737b13c904de0c4f70801d7189f3f38"
 )
+# Alpha.17 was the last release signed with the pre-W1 Codex provider home.
+# It shares the same legacy provider-home block as alpha.3 (and alpha.15/alpha.16
+# which lacked providerHome entirely) and must be loadable as a predecessor for
+# the alpha.18 successor chain.
+_ALPHA17_PREDECESSOR_RELEASE_ID = "stateport-alpha-0.1.0-alpha.17"
+_ALPHA17_PREDECESSOR_VERSION = "0.1.0-alpha.17"
+_ALPHA17_PREDECESSOR_SIGNED_DIGEST = (
+    "sha256:f5bebd221a33e787c1d61ebb59e3fd39c318faca2bafe63a2211c1f76e1168e8"
+)
+_ALPHA17_PREDECESSOR_INDEX_DIGEST = (
+    "sha256:441d05196edb6e4c5e16521b8f723f58941ac6d8fd9b0e6f02c6bd0f9cca0ead"
+)
 SCHEMA_DIRECTORY = Path(__file__).resolve().parent / "schemas"
 _CONTRACT_SCHEMAS = {
     "stateport.release-index/v1": "release-index.v1.schema.json",
@@ -122,6 +134,34 @@ AGENT_PROVIDER_DIRECTORY_CONTRACT = {
     "mode": "0755",
     "environmentVariable": "STATEPORT_EXECUTION_PROVIDER_DIR",
     "validation": "operator-materialized",
+}
+# The control plane reads the same operator material through its OWN private
+# copy under the control state root.  It cannot share the execution daemon's
+# directory: the web container runs as runAsUser 65532 with
+# UserNS=keep-id:uid=65532, so the control host identity appears as that
+# container uid, and the agent-run readiness check requires
+# st_uid == os.geteuid() on the mounted directory.  The execution host keeps
+# its separate daemon-owned copy for the sandboxed agent workspace.  The two
+# directories are separate copies of the same operator-supplied material,
+# each owned by the Linux user that reads it; the control copy is mounted
+# read-only at its own path so the container sees the exact expected mode.
+CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT = {
+    "hostPath": "/var/lib/stateport-control/agent-provider",
+    "mountPath": "/var/lib/stateport-control/agent-provider",
+    "owner": "stateport-control",
+    "mode": "0755",
+    "environmentVariable": "STATEPORT_AGENT_PROVIDER_DIR",
+    "validation": "operator-materialized",
+}
+CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT = {
+    "name": "agent-provider",
+    "hostPath": CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+    "mountPath": CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["mountPath"],
+    "purpose": "agent-provider",
+    "sourceOwner": "stateport-control",
+    "sourceGroup": "stateport-control",
+    "mode": "ro",
+    "environmentVariable": CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["environmentVariable"],
 }
 CONFINED_GROUP_OCI_RUNTIME_VERSION = "1.28"
 CONFINED_GROUP_OCI_RUNTIME_SHA256 = (
@@ -561,12 +601,25 @@ def signature_verification_proof_set_digest(release: VerifiedRelease) -> str:
 def _is_legacy_predecessor(document: Mapping[str, Any]) -> bool:
     signed = document.get("signed")
     release = signed.get("release") if isinstance(signed, Mapping) else None
-    return isinstance(release, Mapping) and (
+    if not isinstance(release, Mapping):
+        return False
+    # Alpha.3: the original bundled pre-W1 predecessor.
+    if (
         release.get("releaseId") == _LEGACY_PREDECESSOR_RELEASE_ID
         and release.get("version") == _LEGACY_PREDECESSOR_VERSION
         and canonical_digest(signed) == _LEGACY_PREDECESSOR_SIGNED_DIGEST
         and canonical_digest(document) == _LEGACY_PREDECESSOR_INDEX_DIGEST
-    )
+    ):
+        return True
+    # Alpha.17: the last release signed with the pre-W1 Codex provider home.
+    if (
+        release.get("releaseId") == _ALPHA17_PREDECESSOR_RELEASE_ID
+        and release.get("version") == _ALPHA17_PREDECESSOR_VERSION
+        and canonical_digest(signed) == _ALPHA17_PREDECESSOR_SIGNED_DIGEST
+        and canonical_digest(document) == _ALPHA17_PREDECESSOR_INDEX_DIGEST
+    ):
+        return True
+    return False
 
 
 def embedded_predecessor_index(
@@ -4883,8 +4936,17 @@ def _validate_cross_fields(
 
     for artifact_id, artifact in artifacts.items():
         _validate_uri(artifact["uri"], f"signed.artifacts.{artifact_id}.uri")
+    # The artifact set is a property of the release itself, not of the caller's assertion. Alpha.3
+    # shipped the bundled legacy set; alpha.17 is also a legacy predecessor (same pre-W1 provider
+    # home) but shipped the current set. Selecting on the caller's flag alone made alpha.3's own
+    # immutable index fail to load, so the pinned alpha.3 identity decides here.
+    legacy_artifacts = (
+        signed["release"].get("releaseId") == _LEGACY_PREDECESSOR_RELEASE_ID
+        and signed["release"].get("version") == _LEGACY_PREDECESSOR_VERSION
+        and canonical_digest(signed) == _LEGACY_PREDECESSOR_SIGNED_DIGEST
+    )
     expected_artifacts = _release_artifact_ids(
-        str(signed["release"]["version"]), legacy=legacy_predecessor
+        str(signed["release"]["version"]), legacy=legacy_artifacts
     )
     if set(artifacts) != expected_artifacts:
         raise ReleaseContractError("release artifact set is incomplete or unexpected")
@@ -5123,7 +5185,33 @@ def _validate_cross_fields(
                 or service["capabilities"]["controlContract"] != "narrow-unix-client"
             ):
                 raise ReleaseContractError(f"service {service_id} has an unauthorized provider home")
-            read_only_mounts = service.get("readOnlyHostMounts", ())
+            read_only_mounts = list(service.get("readOnlyHostMounts", ()))
+            control_provider_mounts = [
+                mount
+                for mount in read_only_mounts
+                if isinstance(mount, Mapping)
+                and (
+                    mount.get("name") == "agent-provider"
+                    or mount.get("environmentVariable")
+                    == CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["environmentVariable"]
+                )
+            ]
+            if control_provider_mounts:
+                if (
+                    service_id != "stateport-web"
+                    or service["quadletOwner"] != "stateport-control"
+                    or service["runAsUser"] != 65532
+                    or service["capabilities"]["controlContract"] != "narrow-unix-client"
+                    or control_provider_mounts != [CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT]
+                ):
+                    raise ReleaseContractError(
+                        f"service {service_id} has an unauthorized control agent provider mount"
+                    )
+                read_only_mounts = [
+                    mount
+                    for mount in read_only_mounts
+                    if mount != CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT
+                ]
             if read_only_mounts:
                 expected_template_mount = {
                     "name": "template-sources",

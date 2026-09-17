@@ -1122,6 +1122,7 @@ rules:
   - schemas/workspace-budget.v1.schema.json
   - schemas/workspace-lease.v1.schema.json
   - scripts/assemble_release_index.py
+  - scripts/broker_clearance.py
   - scripts/build_human_ready_gate.py
   - scripts/build_public_release_bundle.py
   - scripts/build_release_images.py
@@ -1151,10 +1152,13 @@ rules:
   - scripts/qualification/build_j1_candidate.py
   - scripts/qualification/provider_sandbox_probe.py
   - scripts/qualification/journey_common.py
+  - scripts/qualification/run_agent_result_stage.py
   - scripts/qualification/run_journey_j2.py
   - scripts/qualification/run_journey_j3.py
   - scripts/qualification/run_journey_j4.py
   - scripts/qualification/run_journey_j6.py
+  - scripts/qualification/run_native_follow_on.py
+  - scripts/qualification/run_reboot_stage.py
   - scripts/qualification/smoke_v14_surface.py
   - scripts/qualification/stage_j1_site.py
   - scripts/service_test_product.py
@@ -1187,6 +1191,7 @@ rules:
   - scripts/test_application_registry.py
   - scripts/test_approvals_projection.py
   - scripts/test_assemble_release_index.py
+  - scripts/test_broker_clearance.py
   - scripts/test_build_j1_candidate.py
   - scripts/test_assistant_cancellation.py
   - scripts/test_assistant_fault_boundaries.py
@@ -1290,7 +1295,10 @@ rules:
   - scripts/test_release_safe_io.py
   - scripts/test_release_scan_exceptions.py
   - scripts/test_release_tool_inputs.py
+  - scripts/test_agent_result_stage.py
+  - scripts/test_native_follow_on.py
   - scripts/test_qualification_candidate.py
+  - scripts/test_reboot_stage.py
   - scripts/test_routing_deviation_ledger.py
   - scripts/test_run_cancellation.py
   - scripts/test_run_store_recovery.py
@@ -1567,6 +1575,8 @@ rules:
   - evidence/one-line-release-001/native-source-advisories-interrupted-20260911.md
   - evidence/one-line-release-001/orphan-inventory-20260912c.txt
   - evidence/one-line-release-001/phase1-completion-handoff-20260912.md
+  - evidence/one-line-release-001/handoff-20260916-c4-signing.md
+  - evidence/one-line-release-001/handoff-20260917-step5-native.md
   - evidence/one-line-release-001/release-continuation-handoff-20260912.md
   - evidence/one-line-release-001/stage1-advisory-notice-completion-20260912.md
   - evidence/one-line-release-001/stage1-continuation-handoff-20260912b.md

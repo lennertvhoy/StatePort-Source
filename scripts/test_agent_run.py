@@ -306,6 +306,99 @@ def test_readiness_accepts_container_readable_material(tmp_path: Path) -> None:
     assert review["refusals"][0]["reason"] == "provider_directory_missing"
 
 
+def test_release_web_control_agent_provider_mount_reaches_readiness(tmp_path: Path) -> None:
+    """The installed web unit must carry the control-owned provider copy.
+
+    This exercises the real canonical topology: the exact mount contract is
+    bound to the release index, the rendered validation/accepted web units
+    mount the control-owned directory read-only at the same path with
+    ``STATEPORT_AGENT_PROVIDER_DIR``, the provisioning plan creates that
+    directory once with the control identity, and readiness accepts dummy
+    non-secret material of the supported shape.
+    """
+
+    import yaml
+
+    from stateport_release import render_quadlet_bundle, validate_release_index
+    from stateport_release.contract import (
+        AGENT_PROVIDER_DIRECTORY_CONTRACT,
+        CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT,
+        CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT,
+    )
+    from stateport_release.execution_host_provisioning import render_provisioning_plan
+    import test_release_contracts as fixtures
+
+    topology = yaml.safe_load((ROOT / "config/release-topology.v1.yaml").read_text())
+    target = topology["targets"][0]
+    web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
+    mounts = [
+        mount
+        for mount in web.get("readOnlyHostMounts", [])
+        if mount["environmentVariable"] == "STATEPORT_AGENT_PROVIDER_DIR"
+    ]
+    assert mounts == [CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT]
+    mount = mounts[0]
+    assert mount["hostPath"] == CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"]
+    assert mount["mountPath"] == CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["mountPath"]
+    assert mount["sourceOwner"] == "stateport-control"
+    assert mount["mode"] == "ro"
+    # The control copy and the execution host's daemon-owned copy of the same
+    # operator material stay separate directories.
+    execution_host = next(
+        service for service in target["hostServices"]
+        if service["serviceId"] == "stateport-execution-host"
+    )
+    assert execution_host["agentProviderDirectory"] == AGENT_PROVIDER_DIRECTORY_CONTRACT
+    assert mount["hostPath"] != execution_host["agentProviderDirectory"]["hostPath"]
+
+    document = fixtures.release_index()
+    installed_target = document["signed"]["targets"][0]
+    installed_web = next(
+        service for service in installed_target["services"]
+        if service["serviceId"] == "stateport-web"
+    )
+    installed_web["readOnlyHostMounts"] = list(web["readOnlyHostMounts"])
+    fixtures._refresh_index_topology(document)
+    validate_release_index(document)
+    files = render_quadlet_bundle(installed_target, document["signed"]["images"])
+    units = [
+        content.decode()
+        for path, content in files.items()
+        if "stateport-web" in Path(path).name and path.endswith(".container.in")
+    ]
+    assert len(units) == 2
+    directory = _provider_directory(tmp_path)
+    for unit in units:
+        environments = dict(
+            line.removeprefix("Environment=").split("=", 1)
+            for line in unit.splitlines()
+            if line.startswith("Environment=")
+        )
+        assert environments.get("STATEPORT_AGENT_PROVIDER_DIR") == mount["mountPath"]
+        assert unit.splitlines().count(
+            f"Volume={mount['hostPath']}:{mount['mountPath']}:ro"
+        ) == 1
+        assert f"Volume={mount['hostPath']}:{mount['mountPath']}:rw" not in unit
+        review = _service(tmp_path, FakeProxy(), provider_directory=directory).readiness()
+        assert review["available"] is True, review["refusals"]
+
+    plan = render_provisioning_plan(
+        installed_target, document["signed"]["images"], verification_basis="test"
+    )
+    assert plan["directories"].count(
+        {
+            "path": CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+            "mode": "0755",
+            "owner": "stateport-control:stateport-control",
+        }
+    ) == 1
+    assert {
+        "path": AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+        "mode": "0755",
+        "owner": "stateport-exec:stateport-exec",
+    } in plan["directories"]
+
+
 def test_readiness_reports_execution_unavailable_and_image_gap(tmp_path: Path) -> None:
     proxy = FakeProxy()
     proxy.raise_on["status"] = ExecutionHostProxyError(

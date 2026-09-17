@@ -3911,10 +3911,23 @@ def test_retained_provisioning_plan_cannot_omit_successor_provider_home() -> Non
     ]]
     new = {"directories": required}
     for old in ({"directories": []}, {"directories": required[:1]}, {"directories": [required[0], required[1] | {"mode": "0755"}]}):
-        with pytest.raises(installer.InstallerRefusal, match="exact private provider home"):
+        with pytest.raises(installer.InstallerRefusal, match="exact private provider material paths"):
             installer._require_retained_provider_home_plan(old, new)
     installer._require_retained_provider_home_plan(new, new)
     installer._require_retained_provider_home_plan({"directories": []}, {"directories": []})
+    # The same rule covers both successor-fixed agent-provider directories: a
+    # predecessor plan that lacks or mutates either one is not reusable.
+    control = {"path": installer._CONTROL_AGENT_PROVIDER_DIR, "mode": "0755", "owner": "stateport-control:stateport-control"}
+    exec_dir = {"path": installer._AGENT_PROVIDER_DIR, "mode": "0755", "owner": "stateport-exec:stateport-exec"}
+    successor = {"directories": [control, exec_dir]}
+    for old in (
+        {"directories": []},
+        {"directories": [control]},
+        {"directories": [control, exec_dir | {"owner": "stateport-exec:stateport-control"}]},
+    ):
+        with pytest.raises(installer.InstallerRefusal, match="exact private provider material paths"):
+            installer._require_retained_provider_home_plan(old, successor)
+    installer._require_retained_provider_home_plan(successor, successor)
 
 
 @pytest.mark.parametrize("purge", [False, True])
@@ -4013,6 +4026,11 @@ def test_agent_provider_material_is_disclosed_as_preserved(tmp_path: Path, monke
                 "mode": "0755",
                 "owner": "stateport-exec:stateport-exec",
             },
+            {
+                "path": installer._CONTROL_AGENT_PROVIDER_DIR,
+                "mode": "0755",
+                "owner": "stateport-control:stateport-control",
+            },
         ],
     }))
     read = installer._read_bounded
@@ -4020,6 +4038,7 @@ def test_agent_provider_material_is_disclosed_as_preserved(tmp_path: Path, monke
     def confined_read(path, **kwargs):
         assert not str(path).startswith(installer._PROVIDER_AUTH_HOME)
         assert not str(path).startswith(installer._AGENT_PROVIDER_DIR)
+        assert not str(path).startswith(installer._CONTROL_AGENT_PROVIDER_DIR)
         return read(path, **kwargs)
 
     monkeypatch.setattr(installer, "_read_bounded", confined_read)
@@ -4030,10 +4049,16 @@ def test_agent_provider_material_is_disclosed_as_preserved(tmp_path: Path, monke
     assert result.status == "succeeded", result.message
     receipt = json.loads(result.receipt_path.read_text())
     assert receipt["providerAuthentication"]["preservedPaths"] == sorted(
-        [installer._PROVIDER_AUTH_HOME, installer._AGENT_PROVIDER_DIR]
+        [
+            installer._PROVIDER_AUTH_HOME,
+            installer._AGENT_PROVIDER_DIR,
+            installer._CONTROL_AGENT_PROVIDER_DIR,
+        ]
     )
     assert installer._AGENT_PROVIDER_DIR in receipt["preserved"]["paths"]
+    assert installer._CONTROL_AGENT_PROVIDER_DIR in receipt["preserved"]["paths"]
     assert not any(installer._AGENT_PROVIDER_DIR in str(call) for call in runner.calls)
+    assert not any(installer._CONTROL_AGENT_PROVIDER_DIR in str(call) for call in runner.calls)
 
 
 def test_reinstall_after_non_purge_uninstall_reinstalls(

@@ -950,6 +950,89 @@ def test_agent_provider_directory_is_daemon_owned_contract_bound() -> None:
         )
 
 
+def test_control_agent_provider_mount_provisions_its_own_control_directory() -> None:
+    document = fixtures.release_index()
+    target = deepcopy(document["signed"]["targets"][0])
+    web = next(service for service in target["services"] if service["serviceId"] == "stateport-web")
+    web["readOnlyHostMounts"] = [dict(prov.CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT)]
+    plan = prov.render_provisioning_plan(
+        target, document["signed"]["images"], verification_basis="test",
+    )
+    assert plan["directories"].count({
+        "path": prov.CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+        "mode": "0755",
+        "owner": "stateport-control:stateport-control",
+    }) == 1
+    # The execution host's daemon-owned copy of the same operator material is
+    # still provisioned separately, at its own path and identity.
+    assert {
+        "path": prov.AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+        "mode": "0755",
+        "owner": "stateport-exec:stateport-exec",
+    } in plan["directories"]
+    assert (
+        prov.CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"]
+        != prov.AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"]
+    )
+    # Any drift from the exact control-owned read-only contract refuses before
+    # a directory is planned.
+    for mutation in (
+        {"hostPath": prov.AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"]},
+        {"mountPath": "/run/stateport-agent-provider"},
+        {"sourceOwner": "stateport-exec"},
+        {"sourceGroup": "stateport-exec"},
+        {"mode": "rw"},
+        {"environmentVariable": "STATEPORT_EXECUTION_PROVIDER_DIR"},
+    ):
+        web["readOnlyHostMounts"] = [
+            dict(prov.CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT) | mutation
+        ]
+        with pytest.raises(ReleaseContractError, match="control agent provider mount"):
+            prov.render_provisioning_plan(
+                target, document["signed"]["images"], verification_basis="test",
+            )
+    # A foreign service may not carry it.
+    web["readOnlyHostMounts"] = []
+    foreign = deepcopy(web)
+    foreign["serviceId"] = "stateport-other"
+    foreign["readOnlyHostMounts"] = [dict(prov.CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT)]
+    target["services"].append(foreign)
+    with pytest.raises(ReleaseContractError, match="control agent provider mount"):
+        prov.render_provisioning_plan(
+            target, document["signed"]["images"], verification_basis="test",
+        )
+
+
+def test_control_agent_provider_directory_drift_is_refused_not_converged(tmp_path: Path) -> None:
+    accounts = SimAccounts()
+    accounts.groups["root"] = prov.Group("root", accounts.gid, ())
+    host = SimHost(tmp_path, accounts)
+    ctx = prov._Apply(
+        plan={
+            "directories": [
+                {
+                    "path": prov.CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+                    "mode": "0755",
+                    "owner": "stateport-control:stateport-control",
+                }
+            ]
+        },
+        signed_payload_digest="sha256:" + "a" * 64,
+        runner=SimRunner(host),
+        accounts=accounts,
+        layout=prov.HostLayout(root=tmp_path),
+        rootless_group_probe=lambda *_: {},
+    )
+    assert prov._step_directories(ctx)["result"] == "applied"
+    leaf = ctx.layout.resolve(prov.CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"])
+    assert stat.S_IMODE(leaf.stat().st_mode) == 0o755
+    leaf.chmod(0o700)
+    with pytest.raises(prov.StepFailed, match="refusing to take it over"):
+        prov._step_directories(ctx)
+    # The operator-owned directory is not silently re-created or chmodded.
+    assert stat.S_IMODE(leaf.stat().st_mode) == 0o700
+
+
 def test_provider_directory_reuses_exact_identity_without_reading_contents(tmp_path: Path) -> None:
     from types import SimpleNamespace
 

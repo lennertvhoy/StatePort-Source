@@ -170,15 +170,40 @@ def main() -> int:
     parser.add_argument("--archive-root", type=Path)
     parser.add_argument("--native-wsl2", action="store_true")
     parser.add_argument("--wsl-distro-name")
+    parser.add_argument("--prepublication-mirror", action="store_true",
+                        help="validate a candidate-mirror (pre-publication) native J1 receipt; "
+                             "never owner-path or public-route proof")
+    parser.add_argument("--agent-result-stage", action="store_true",
+                        help="run the native installed-product agent-result stage (one real "
+                             "OpenCode result through the installed control plane) before the "
+                             "reboot stage and any lifecycle mutation; absent = unchanged")
+    parser.add_argument("--agent-result-stage-receipt-out", type=Path,
+                        help="durable agent-result receipt (written when --agent-result-stage is set)")
+    parser.add_argument("--reboot-stage", action="store_true",
+                        help="run the native reboot-survival stage after preflight and before "
+                             "any lifecycle mutation; absent = previous behavior unchanged")
+    parser.add_argument("--reboot-stage-receipt-out", type=Path,
+                        help="durable reboot-survival receipt (written when --reboot-stage is set)")
     parser.add_argument("--qualification-build-receipt", type=Path)
     args = parser.parse_args()
 
+    if args.prepublication_mirror and not args.native_wsl2:
+        parser.error("--prepublication-mirror requires --native-wsl2")
+    if args.agent_result_stage and not args.native_wsl2:
+        parser.error("--agent-result-stage requires --native-wsl2")
+    if args.agent_result_stage and args.agent_result_stage_receipt_out is None:
+        parser.error("--agent-result-stage requires --agent-result-stage-receipt-out")
+    if args.reboot_stage and not args.native_wsl2:
+        parser.error("--reboot-stage requires --native-wsl2")
+    if args.reboot_stage and args.reboot_stage_receipt_out is None:
+        parser.error("--reboot-stage requires --reboot-stage-receipt-out")
     try:
         facts, prerequisite_evidence = validate_retained_candidate_inputs(
             args.candidate_dir, args.vm_dir, args.site_root,
             None if args.native_wsl2 else args.archive_root,
             native_distro_name=args.wsl_distro_name if args.native_wsl2 else None,
             qualification_build_receipt=args.qualification_build_receipt,
+            prepublication_mirror=args.prepublication_mirror,
         )
     except Exception as exc:  # noqa: BLE001 - preflight failure must be durable
         receipt = JourneyReceipt(
@@ -221,6 +246,42 @@ def main() -> int:
         digests = verify_installed_image_digests(vm, dict(facts["images"]))  # type: ignore[arg-type]
         receipt.record("control-plane-bound-to-candidate",
                        not digests["mismatches"], services=services)  # type: ignore[union-attr]
+
+        if args.agent_result_stage:
+            # Optional stage: when the flag is absent this driver behaves exactly
+            # as before.  The stage proves the installed product produces a real
+            # OpenCode result before the reboot and any lifecycle mutation, in
+            # the acceptance order install -> first result -> reboot -> uninstall.
+            from run_agent_result_stage import execute_agent_result_stage
+            try:
+                agent_summary = execute_agent_result_stage(
+                    vm, facts=facts, evidence=prerequisite_evidence,
+                    prepublication_mirror=args.prepublication_mirror,
+                    receipt_out=args.agent_result_stage_receipt_out,
+                )
+            except SystemExit as exc:
+                raise RuntimeError(f"agent result stage refused: {exc}") from exc
+            receipt.record("agent-result-stage", True, **agent_summary)  # type: ignore[arg-type]
+
+        if args.reboot_stage:
+            # Optional stage: when the flag is absent this driver behaves exactly
+            # as before.  The stage proves the installed control plane survives a
+            # full WSL2 shutdown/reboot before any lifecycle mutation runs.
+            from run_reboot_stage import execute_reboot_stage
+            try:
+                reboot_summary = execute_reboot_stage(
+                    vm, facts=facts, evidence=prerequisite_evidence,
+                    prepublication_mirror=args.prepublication_mirror,
+                    receipt_out=args.reboot_stage_receipt_out,
+                )
+            except SystemExit as exc:
+                raise RuntimeError(f"reboot survival stage refused: {exc}") from exc
+            receipt.record("reboot-survival-stage", True, **reboot_summary)  # type: ignore[arg-type]
+            services = discover_services(vm)
+            wait_all_healthy(vm, services)
+            digests = verify_installed_image_digests(vm, dict(facts["images"]))  # type: ignore[arg-type]
+            expect(not digests["mismatches"],
+                   "control plane did not survive the reboot stage")
 
         web = GuestJsonClient(vm, services["stateport-web"]["port"])
         session = web.request("GET", "/session")

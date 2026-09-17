@@ -23,7 +23,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "infra" / "qualification") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "infra" / "qualification"))
 
-from wsl2_rehearsal import QEMU_ROOTFS_IDENTITY, QUALIFICATION_VM_MEMORY_MIB, SSH_PORT, VM, WSL_ROOTFS_IDENTITY  # noqa: E402
+from wsl2_rehearsal import (  # noqa: E402
+    EVIDENCE_CLASS_CANDIDATE_MIRROR,
+    IDENTITY_CLASS_CANDIDATE_MIRROR,
+    QEMU_ROOTFS_IDENTITY,
+    QUALIFICATION_VM_MEMORY_MIB,
+    SSH_PORT,
+    TRANSPORT_CLASS_PREPUBLICATION_MIRROR,
+    VM,
+    WSL_ROOTFS_IDENTITY,
+)
 
 def log(msg: str) -> None:
     print(f"[journey] {msg}", flush=True)
@@ -31,11 +40,26 @@ def log(msg: str) -> None:
 
 def load_release_facts(candidate_dir: Path) -> dict[str, object]:
     """Read the exact identity a journey receipt must bind to."""
-    index_path = candidate_dir / "release-index.json"
+    return load_release_facts_from_index(
+        candidate_dir / "release-index.json", candidate_dir=candidate_dir
+    )
+
+
+def load_release_facts_from_index(
+    index_path: Path, *, candidate_dir: Path | None = None
+) -> dict[str, object]:
+    """Read the exact candidate identity from one signed release index.
+
+    The staged native guest has no candidate directory: its follow-on driver
+    reads the same signed fields from the staged index at
+    ``site_root/download/<version>/release-index.json``.  ``candidateDir`` is
+    recorded only when the caller actually has a candidate directory, so a
+    staged-site fact set never claims one.
+    """
     index = json.loads(index_path.read_text(encoding="utf-8"))
     signed = index["signed"]
     signature = index["signatures"][0]
-    facts = {
+    facts: dict[str, object] = {
         "releaseId": signed["release"]["releaseId"],
         "version": signed["release"]["version"],
         "channel": signed["release"]["channel"],
@@ -53,8 +77,9 @@ def load_release_facts(candidate_dir: Path) -> dict[str, object]:
         },
         "releaseIndexSha256": "sha256:"
         + hashlib.sha256(index_path.read_bytes()).hexdigest(),
-        "candidateDir": str(candidate_dir),
     }
+    if candidate_dir is not None:
+        facts["candidateDir"] = str(candidate_dir)
     package_bundle = signed["artifacts"].get("podmanPackageBundle")
     if isinstance(package_bundle, dict):
         facts["podmanPackageBundleDigest"] = package_bundle["digest"]
@@ -159,6 +184,121 @@ def _validate_simulation_build_receipt(candidate_dir: Path, build_receipt: Path,
     return dict(receipt)
 
 
+def validate_native_j1_receipt(
+    full_j1_path: Path,
+    facts: dict[str, object],
+    *,
+    native_distro_name: str,
+    prepublication_mirror: bool,
+) -> dict[str, object]:
+    """Validate the retained native full-J1 receipt and derive its lane evidence.
+
+    This is the native half of :func:`validate_retained_candidate_inputs`,
+    factored out so a guest-side follow-on driver can enforce exactly the same
+    receipt identity, lane class, phase set, and machine/Windows identity
+    binding without a candidate build/qualification directory.  The refusal
+    messages are the reviewed ones; callers must never weaken them.
+
+    Returns the caller's building blocks: the retained ``binding``, the
+    ``baseline``, the lane class fields this receipt is allowed to stamp
+    (empty for the owner path), and its exact path and digest.  One
+    implementation, no drift.
+    """
+    full_j1 = _json_object(full_j1_path, "retained full-J1 receipt")
+    if full_j1.get("result") != "passed" or full_j1.get("version") != facts["version"]:
+        raise ValueError("retained full-J1 receipt is not a pass for this candidate version")
+    binding = full_j1.get("binding")
+    if not isinstance(binding, dict):
+        raise ValueError("retained full-J1 receipt has no candidate binding")
+    if (
+        binding.get("releaseIndexDigest") != facts["releaseIndexSha256"]
+        or binding.get("signedPayloadDigest") != facts["signedPayloadDigest"]
+        or binding.get("images") != facts["images"]
+    ):
+        raise ValueError("retained full-J1 receipt identity does not match the candidate")
+    baseline = full_j1.get("rehearsalBaseline")
+    if prepublication_mirror:
+        if (
+            full_j1.get("evidenceClass") != EVIDENCE_CLASS_CANDIDATE_MIRROR
+            or full_j1.get("transportClass") != TRANSPORT_CLASS_PREPUBLICATION_MIRROR
+            or full_j1.get("identityClass") != IDENTITY_CLASS_CANDIDATE_MIRROR
+            or full_j1.get("ownerPathQualification") is not False
+            or full_j1.get("publicTransportBoundary") is not False
+            or not isinstance(baseline, dict)
+            or baseline.get("evidenceClass") != EVIDENCE_CLASS_CANDIDATE_MIRROR
+            or baseline.get("transportClass") != TRANSPORT_CLASS_PREPUBLICATION_MIRROR
+            or baseline.get("substrate") != "native-wsl2"
+            or baseline.get("rootfsIdentity") != WSL_ROOTFS_IDENTITY
+            or baseline.get("distroName") != native_distro_name
+            or not isinstance(baseline.get("windowsIdentity"), str)
+        ):
+            raise ValueError(
+                "retained full-J1 receipt is not a candidate-mirror prepublication receipt "
+                "for this distro"
+            )
+    elif (
+        full_j1.get("evidenceClass") != "owner_path_qualification"
+        or not isinstance(baseline, dict)
+        or baseline.get("substrate") != "native-wsl2"
+        or baseline.get("rootfsIdentity") != WSL_ROOTFS_IDENTITY
+        or baseline.get("distroName") != native_distro_name
+        or not isinstance(baseline.get("windowsIdentity"), str)
+    ):
+        raise ValueError("retained full-J1 receipt is not genuine native WSL2 owner-path evidence for this distro")
+    if (not isinstance(baseline.get("machineId"), str)
+            or re.fullmatch(r"[0-9a-fA-F]{32}", baseline["machineId"]) is None
+            or not isinstance(baseline.get("windowsIdentity"), str)
+            or not baseline["windowsIdentity"].strip()
+            or baseline.get("distroName") != native_distro_name):
+        raise ValueError("native J1 receipt has incomplete identity binding")
+    phases = full_j1.get("phases")
+    required_phases = {
+        "bootstrap-fetch",
+        "public-transport-boundary",
+        "transport-probe",
+        "materialization-preflight",
+        "install",
+        "post-bootstrap-runtime-smoke",
+        "install-rerun",
+        "guest-runtime-smoke",
+    }
+    if prepublication_mirror:
+        if isinstance(phases, dict) and "public-transport-boundary" in phases:
+            raise ValueError(
+                "candidate-mirror receipt carries a public-transport-boundary phase; "
+                "mixed evidence is refused"
+            )
+        required_phases.remove("public-transport-boundary")
+        required_phases.add("prepublication-mirror-boundary")
+    if (
+        not isinstance(phases, dict)
+        or set(phases) != required_phases
+        or any(not isinstance(phases[name], dict) or phases[name].get("ok") is not True
+               for name in required_phases)
+    ):
+        raise ValueError("retained full-J1 receipt does not contain every passing phase")
+    lane_evidence = (
+        {
+            "evidenceClass": EVIDENCE_CLASS_CANDIDATE_MIRROR,
+            "lane": "native-prepublication-candidate",
+            "transportClass": TRANSPORT_CLASS_PREPUBLICATION_MIRROR,
+            "identityClass": IDENTITY_CLASS_CANDIDATE_MIRROR,
+            "ownerPathQualification": False,
+            "publicTransportBoundary": False,
+            "admissibleForQualification": False,
+        }
+        if prepublication_mirror
+        else {}
+    )
+    return {
+        "binding": binding,
+        "baseline": baseline,
+        "laneEvidence": lane_evidence,
+        "fullJ1Receipt": str(full_j1_path),
+        "fullJ1ReceiptSha256": _sha256_file(full_j1_path),
+    }
+
+
 def validate_retained_candidate_inputs(
     candidate_dir: Path,
     vm_dir: Path,
@@ -166,11 +306,24 @@ def validate_retained_candidate_inputs(
     archive_root: Path | None,
     *,
     retained_simulation: bool = False,
+    prepublication_mirror: bool = False,
     build_receipt: Path | None = None,
     native_distro_name: str | None = None,
     qualification_build_receipt: Path | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """Bind retained inputs to passing J1; explicitly opted-in simulation is not qualification."""
+    """Bind retained inputs to passing J1; explicitly opted-in simulation is not qualification.
+
+    The prepublication mirror is a second explicit opt-in: it accepts a
+    candidate-mirror J1 receipt only, never upgrades it to owner-path proof,
+    and refuses any run whose flags and receipt class disagree.
+    """
+
+    if retained_simulation and prepublication_mirror:
+        raise ValueError(
+            "retained simulation and the prepublication mirror are mutually exclusive"
+        )
+    if prepublication_mirror and native_distro_name is None:
+        raise ValueError("prepublication mirror validation requires a native WSL2 distro name")
 
     candidate_dir = _exact_directory(candidate_dir, "candidate directory")
     vm_dir = _exact_directory(vm_dir, "retained VM directory")
@@ -215,85 +368,91 @@ def validate_retained_candidate_inputs(
         }
 
     full_j1_path = vm_dir / "receipt.json" if native_distro_name else vm_dir.parent / "receipt.json"
-    full_j1 = _json_object(full_j1_path, "retained full-J1 receipt")
-    if full_j1.get("result") != "passed" or full_j1.get("version") != facts["version"]:
-        raise ValueError("retained full-J1 receipt is not a pass for this candidate version")
-    binding = full_j1.get("binding")
-    if not isinstance(binding, dict):
-        raise ValueError("retained full-J1 receipt has no candidate binding")
-    if (
-        binding.get("releaseIndexDigest") != facts["releaseIndexSha256"]
-        or binding.get("signedPayloadDigest") != facts["signedPayloadDigest"]
-        or binding.get("images") != facts["images"]
-    ):
-        raise ValueError("retained full-J1 receipt identity does not match the candidate")
-    baseline = full_j1.get("rehearsalBaseline")
-    if retained_simulation:
-        if (
-            full_j1.get("evidenceClass") != "simulation_only"
-            or full_j1.get("mode") != "j1"
-            or "diagnostic" in full_j1
-            or not isinstance(baseline, dict)
-            or baseline.get("evidenceClass") != "simulation_only"
-            or baseline.get("substrate") != "qemu-wsl-identity-simulation"
-            or baseline.get("rootfsIdentity") != QEMU_ROOTFS_IDENTITY
-            or baseline.get("identityShims") != [
-                "wsl_kernel_identity_only", "windows_interop_identity_only"
-            ]
-        ):
-            raise ValueError("retained simulation requires an explicit pinned QEMU full-J1 receipt")
-        site_transport = full_j1.get("siteTransport")
-        registry_transport = full_j1.get("guestRegistryTransport")
-        if (
-            not isinstance(site_transport, dict)
-            or site_transport.get("mode") != "guest-local-staged-pages"
-            or site_transport.get("guestLocalServer") is not True
-            or not isinstance(registry_transport, dict)
-            or registry_transport.get("mode") != "digest-only-prepublication-mirror"
-            or registry_transport.get("digestOnly") is not True
-            or registry_transport.get("guestLocalMirror") is not True
-            or registry_transport.get("retainedArchiveTransport") is not True
-        ):
-            raise ValueError("retained simulation requires explicit staged site and archive transport")
-    elif (
-        full_j1.get("evidenceClass") != "owner_path_qualification"
-        or not isinstance(baseline, dict)
-        or baseline.get("substrate") != "native-wsl2"
-        or baseline.get("rootfsIdentity") != WSL_ROOTFS_IDENTITY
-        or baseline.get("distroName") != native_distro_name
-        or not isinstance(baseline.get("windowsIdentity"), str)
-    ):
-        raise ValueError("retained full-J1 receipt is not genuine native WSL2 owner-path evidence for this distro")
+    native_lane: dict[str, object] = {}
     if native_distro_name is not None:
-        if (not isinstance(baseline.get("machineId"), str)
-                or re.fullmatch(r"[0-9a-fA-F]{32}", baseline["machineId"]) is None
-                or not isinstance(baseline.get("windowsIdentity"), str)
-                or not baseline["windowsIdentity"].strip()
-                or baseline.get("distroName") != native_distro_name):
-            raise ValueError("native J1 receipt has incomplete identity binding")
-    phases = full_j1.get("phases")
-    required_phases = {
-        "bootstrap-fetch",
-        "public-transport-boundary",
-        "transport-probe",
-        "materialization-preflight",
-        "install",
-        "post-bootstrap-runtime-smoke",
-        "install-rerun",
-        "guest-runtime-smoke",
-    }
-    if retained_simulation:
-        required_phases.remove("public-transport-boundary")
-        required_phases.update({"guest-swap", "install-services", "install-rerun-services"})
-        if binding.get("images") != facts["images"]:
-            raise ValueError("retained simulation service-smoke image binding mismatch")
-    if (
-        not isinstance(phases, dict)
-        or set(phases) != required_phases
-        or any(not isinstance(phases[name], dict) or phases[name].get("ok") is not True
-               for name in required_phases)
-    ):
-        raise ValueError("retained full-J1 receipt does not contain every passing phase")
+        # One shared implementation of the native J1 receipt checks, also used
+        # by the guest-side follow-on driver that has no candidate directory.
+        native = validate_native_j1_receipt(
+            full_j1_path, facts,
+            native_distro_name=native_distro_name,
+            prepublication_mirror=prepublication_mirror,
+        )
+        binding = native["binding"]
+        baseline = native["baseline"]
+        native_lane = native["laneEvidence"]
+    else:
+        full_j1 = _json_object(full_j1_path, "retained full-J1 receipt")
+        if full_j1.get("result") != "passed" or full_j1.get("version") != facts["version"]:
+            raise ValueError("retained full-J1 receipt is not a pass for this candidate version")
+        binding = full_j1.get("binding")
+        if not isinstance(binding, dict):
+            raise ValueError("retained full-J1 receipt has no candidate binding")
+        if (
+            binding.get("releaseIndexDigest") != facts["releaseIndexSha256"]
+            or binding.get("signedPayloadDigest") != facts["signedPayloadDigest"]
+            or binding.get("images") != facts["images"]
+        ):
+            raise ValueError("retained full-J1 receipt identity does not match the candidate")
+        baseline = full_j1.get("rehearsalBaseline")
+        if retained_simulation:
+            if (
+                full_j1.get("evidenceClass") != "simulation_only"
+                or full_j1.get("mode") != "j1"
+                or "diagnostic" in full_j1
+                or not isinstance(baseline, dict)
+                or baseline.get("evidenceClass") != "simulation_only"
+                or baseline.get("substrate") != "qemu-wsl-identity-simulation"
+                or baseline.get("rootfsIdentity") != QEMU_ROOTFS_IDENTITY
+                or baseline.get("identityShims") != [
+                    "wsl_kernel_identity_only", "windows_interop_identity_only"
+                ]
+            ):
+                raise ValueError("retained simulation requires an explicit pinned QEMU full-J1 receipt")
+            site_transport = full_j1.get("siteTransport")
+            registry_transport = full_j1.get("guestRegistryTransport")
+            if (
+                not isinstance(site_transport, dict)
+                or site_transport.get("mode") != "guest-local-staged-pages"
+                or site_transport.get("guestLocalServer") is not True
+                or not isinstance(registry_transport, dict)
+                or registry_transport.get("mode") != "digest-only-prepublication-mirror"
+                or registry_transport.get("digestOnly") is not True
+                or registry_transport.get("guestLocalMirror") is not True
+                or registry_transport.get("retainedArchiveTransport") is not True
+            ):
+                raise ValueError("retained simulation requires explicit staged site and archive transport")
+        elif (
+            full_j1.get("evidenceClass") != "owner_path_qualification"
+            or not isinstance(baseline, dict)
+            or baseline.get("substrate") != "native-wsl2"
+            or baseline.get("rootfsIdentity") != WSL_ROOTFS_IDENTITY
+            or baseline.get("distroName") != native_distro_name
+            or not isinstance(baseline.get("windowsIdentity"), str)
+        ):
+            raise ValueError("retained full-J1 receipt is not genuine native WSL2 owner-path evidence for this distro")
+        phases = full_j1.get("phases")
+        required_phases = {
+            "bootstrap-fetch",
+            "public-transport-boundary",
+            "transport-probe",
+            "materialization-preflight",
+            "install",
+            "post-bootstrap-runtime-smoke",
+            "install-rerun",
+            "guest-runtime-smoke",
+        }
+        if retained_simulation:
+            required_phases.remove("public-transport-boundary")
+            required_phases.update({"guest-swap", "install-services", "install-rerun-services"})
+            if binding.get("images") != facts["images"]:
+                raise ValueError("retained simulation service-smoke image binding mismatch")
+        if (
+            not isinstance(phases, dict)
+            or set(phases) != required_phases
+            or any(not isinstance(phases[name], dict) or phases[name].get("ok") is not True
+                   for name in required_phases)
+        ):
+            raise ValueError("retained full-J1 receipt does not contain every passing phase")
 
     version = str(facts["version"])
     bootstrap_digest = binding.get("bootstrapDigest")
@@ -398,6 +557,7 @@ def validate_retained_candidate_inputs(
             "siteTransport": site_transport,
             "guestRegistryTransport": registry_transport,
         } if retained_simulation else {}),
+        **native_lane,
         **qualification_evidence,
         "buildReceipt": str(build_receipt_path),
         "buildReceiptSha256": _sha256_file(build_receipt_path),

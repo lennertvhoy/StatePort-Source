@@ -72,6 +72,8 @@ from .contract import (
     CONFINED_GROUP_OCI_RUNTIME_SHA256,
     CONFINED_GROUP_OCI_RUNTIME_VERSION,
     AGENT_PROVIDER_DIRECTORY_CONTRACT,
+    CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT,
+    CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT,
     PROVIDER_HOME_CONTRACT,
     PinnedPublicKeyIdentity,
     ReleaseContractError,
@@ -964,6 +966,58 @@ def render_provisioning_plan(
         for service in target.get("services", ())
         for mount in service.get("readOnlyHostMounts", ())
     ]
+    control_provider_mounts = [
+        mount
+        for mount in template_mounts
+        if isinstance(mount, Mapping)
+        and (
+            mount.get("name") == "agent-provider"
+            or mount.get("environmentVariable")
+            == CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["environmentVariable"]
+        )
+    ]
+    if control_provider_mounts:
+        clients = [
+            service
+            for service in target.get("services", ())
+            if any(
+                isinstance(mount, Mapping)
+                and (
+                    mount.get("name") == "agent-provider"
+                    or mount.get("environmentVariable")
+                    == CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["environmentVariable"]
+                )
+                for mount in service.get("readOnlyHostMounts", ())
+            )
+        ]
+        if (
+            len(clients) != 1
+            or clients[0].get("serviceId") != "stateport-web"
+            or clients[0].get("quadletOwner") != CONTROL_USER
+            or clients[0].get("runAsUser") != 65532
+            or clients[0].get("capabilities", {}).get("controlContract")
+            != "narrow-unix-client"
+            or control_provider_mounts != [CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT]
+        ):
+            raise ReleaseContractError(
+                "installed control agent provider mount contract is malformed"
+            )
+        template_mounts = [
+            mount
+            for mount in template_mounts
+            if mount != CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT
+        ]
+        # The control plane's private copy is provisioned here with the exact
+        # control identity; the operator material inside stays operator-owned
+        # and the agent run refuses honestly while it is absent.  The execution
+        # host keeps its separate daemon-owned copy below.
+        directories.append(
+            {
+                "path": CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+                "mode": CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["mode"],
+                "owner": f"{CONTROL_USER}:{CONTROL_USER}",
+            }
+        )
     if template_mounts:
         expected_template_mount = {
             "name": "template-sources",
@@ -2920,6 +2974,7 @@ def _step_directories(ctx: _Apply) -> dict[str, Any]:
                 **({"refuse_existing_mismatch": True} if str(spec["path"]) in {
                     "/var/lib/stateport-control/provider-auth", PROVIDER_HOME_CONTRACT["hostPath"],
                     AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+                    CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
                 } else {}),
             )
             or changed

@@ -1720,7 +1720,11 @@ def test_sign_refuses_successor_when_authenticated_predecessor_bundle_is_removed
                 image_verifier=_image_verifier(trust_root, Path(str(successor_candidate["candidate"]))),
             )
 def test_canonical_topology_declares_one_separate_wsl2_target() -> None:
-    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+    from stateport_release.contract import (
+        AGENT_PROVIDER_DIRECTORY_CONTRACT,
+        CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT,
+        PROVIDER_HOME_CONTRACT,
+    )
 
     topology = yaml.safe_load((ROOT / "config/release-topology.v1.yaml").read_text())
     assembler._preflight_topology(topology)
@@ -1741,8 +1745,17 @@ def test_canonical_topology_declares_one_separate_wsl2_target() -> None:
             "sourceGroup": "stateport-execution-control",
             "mode": "ro",
             "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
-        }
+        },
+        CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT,
     ]
+    # The control plane's copy is separate from the execution host's daemon-
+    # owned copy of the same operator material.
+    execution_host = next(
+        service for service in target["hostServices"]
+        if service["serviceId"] == "stateport-execution-host"
+    )
+    assert execution_host["agentProviderDirectory"] == AGENT_PROVIDER_DIRECTORY_CONTRACT
+    assert CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT["hostPath"] != AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"]
 
 
 def test_same_lane_older_predecessor_embedding_is_allowed(

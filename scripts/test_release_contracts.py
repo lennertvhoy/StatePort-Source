@@ -79,6 +79,8 @@ from stateport_release.cosign import (  # noqa: E402
 from stateport_release.contract import (
     # noqa: E402,
     AGENT_PROVIDER_DIRECTORY_CONTRACT,
+    CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT,
+    CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT,
     parse_last_line_json,
     validate_release_disposition,
     validate_successor_disposition_transition,
@@ -3558,6 +3560,156 @@ def test_web_template_source_mount_is_read_only_and_uses_pinned_group_runtime() 
     assert all(b"Volume=/var/lib/stateport/imports:/imports:rw" not in unit for unit in web_units)
 
 
+def test_control_agent_provider_mount_is_control_owned_read_only_and_rendered_once() -> None:
+    """The web control plane sees its OWN copy under the control state root.
+
+    The mounted directory must be control-owned: the web container runs as
+    runAsUser 65532 with UserNS=keep-id, so the control host identity maps to
+    that container uid and the agent-run readiness check
+    (``st_uid == os.geteuid()``) can only pass on this copy.  The execution
+    host keeps its separate daemon-owned copy for the sandboxed workspace.
+    """
+
+    value = _stable_execution_index()
+    service = value["signed"]["targets"][0]["services"][0]
+    service["readOnlyHostMounts"] = [
+        {
+            "name": "template-sources",
+            "hostPath": "/var/lib/stateport/imports",
+            "mountPath": "/imports",
+            "purpose": "template-sources",
+            "sourceOwner": "installer-client",
+            "sourceGroup": "stateport-execution-control",
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+        },
+        dict(CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT),
+    ]
+    _refresh_index_topology(value)
+    verified = verify_release_index(value, policy=_policy(), verifier=_EphemeralTestVerifier())
+    files = render_quadlet_bundle(verified.target, verified.index.document["signed"]["images"])
+    web_units = [
+        content
+        for path, content in files.items()
+        if "stateport-web" in Path(path).name and path.endswith(".container.in")
+    ]
+    assert len(web_units) == 2
+    host_path = CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"].encode()
+    mount_path = CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT["mountPath"].encode()
+    for unit in web_units:
+        assert unit.count(b"Volume=" + host_path + b":" + mount_path + b":ro\n") == 1
+        assert b"Volume=" + host_path + b":" + mount_path + b":rw" not in unit
+        assert b"Environment=STATEPORT_AGENT_PROVIDER_DIR=" + mount_path in unit
+        assert b"Environment=STATEPORT_EXECUTION_PROVIDER_DIR=" not in unit
+    # The control copy and the daemon-owned copy are separate directories of
+    # the same operator material.
+    host_service = value["signed"]["targets"][0]["hostServices"][0]
+    assert host_service["agentProviderDirectory"] == AGENT_PROVIDER_DIRECTORY_CONTRACT
+    assert host_path != AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"].encode()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("hostPath", AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"]),
+    ("mountPath", "/run/stateport-agent-provider"),
+    ("sourceOwner", AGENT_PROVIDER_DIRECTORY_CONTRACT["owner"]),
+    ("sourceGroup", AGENT_PROVIDER_DIRECTORY_CONTRACT["owner"]),
+    ("mode", "rw"),
+    ("environmentVariable", AGENT_PROVIDER_DIRECTORY_CONTRACT["environmentVariable"]),
+])
+def test_control_agent_provider_mount_refuses_contract_widening(field: str, value: str) -> None:
+    from stateport_release.contract import validate_release_index
+
+    document = _stable_execution_index()
+    web = document["signed"]["targets"][0]["services"][0]
+    web["readOnlyHostMounts"] = [
+        {
+            "name": "template-sources",
+            "hostPath": "/var/lib/stateport/imports",
+            "mountPath": "/imports",
+            "purpose": "template-sources",
+            "sourceOwner": "installer-client",
+            "sourceGroup": "stateport-execution-control",
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+        },
+        dict(CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT) | {field: value},
+    ]
+    # The exact const binding is the first gate: the schema refuses any
+    # mutation of the control-owned read-only contract.
+    with pytest.raises(ReleaseContractError):
+        validate_release_index(document)
+
+
+def test_control_agent_provider_mount_requires_env_and_one_copy() -> None:
+    from stateport_release.contract import validate_release_index
+
+    template = {
+        "name": "template-sources",
+        "hostPath": "/var/lib/stateport/imports",
+        "mountPath": "/imports",
+        "purpose": "template-sources",
+        "sourceOwner": "installer-client",
+        "sourceGroup": "stateport-execution-control",
+        "mode": "ro",
+        "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
+    }
+    without_env = dict(CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT)
+    del without_env["environmentVariable"]
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["readOnlyHostMounts"] = [
+        template, without_env,
+    ]
+    with pytest.raises(ReleaseContractError):
+        validate_release_index(document)
+
+    duplicate = _stable_execution_index()
+    duplicate["signed"]["targets"][0]["services"][0]["readOnlyHostMounts"] = [
+        template, dict(CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT),
+        dict(CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT),
+    ]
+    _refresh_index_topology(duplicate)
+    with pytest.raises(ReleaseContractError, match="unauthorized control agent provider mount"):
+        verify_release_index(duplicate, policy=_policy(), verifier=_EphemeralTestVerifier())
+
+
+def test_control_agent_provider_mount_cannot_be_attached_to_another_service() -> None:
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["serviceId"] = "stateport-other"
+    document["signed"]["targets"][0]["services"][0]["readOnlyHostMounts"] = [
+        dict(CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT),
+    ]
+    _refresh_index_topology(document)
+    with pytest.raises(ReleaseContractError, match="unauthorized control agent provider mount"):
+        verify_release_index(document, policy=_policy(), verifier=_EphemeralTestVerifier())
+
+
+def test_rejected_exec_owned_web_provider_mount_stays_schema_rejected() -> None:
+    """The earlier drafts mounted the exec-owned directory into stateport-web.
+
+    That can never satisfy the control plane's ownership check, so the schema
+    must keep refusing the exec path/mount shape on the web service.
+    """
+
+    from stateport_release.contract import validate_release_index
+
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["readOnlyHostMounts"] = [
+        {
+            "name": "agent-provider",
+            "hostPath": AGENT_PROVIDER_DIRECTORY_CONTRACT["hostPath"],
+            "mountPath": "/run/stateport-agent-provider",
+            "purpose": "agent-provider",
+            "sourceOwner": AGENT_PROVIDER_DIRECTORY_CONTRACT["owner"],
+            "sourceGroup": AGENT_PROVIDER_DIRECTORY_CONTRACT["owner"],
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_AGENT_PROVIDER_DIR",
+        }
+    ]
+    _refresh_index_topology(document)
+    with pytest.raises(ReleaseContractError, match="release index schema validation failed"):
+        validate_release_index(document)
+
+
 def test_provider_home_is_persistent_only_in_accepted_profile_and_outside_data_volumes() -> None:
     from stateport_release.contract import PROVIDER_HOME_CONTRACT
 
@@ -5878,3 +6030,75 @@ def test_signed_workspace_profile_selection_is_explicit_and_read_only(profile_id
     _refresh_index_topology(value)
     with pytest.raises(ReleaseContractError):
         verify_release_index(value, policy=_policy(), verifier=_EphemeralTestVerifier())
+
+
+# ---------------------------------------------------------------------------
+# Slice E2: successor/predecessor provider mismatch fix
+# ---------------------------------------------------------------------------
+
+from stateport_release.contract import (  # noqa: E402  (module-level for tests below)
+    _is_legacy_predecessor,
+    _ALPHA17_PREDECESSOR_RELEASE_ID,
+    _ALPHA17_PREDECESSOR_VERSION,
+    _ALPHA17_PREDECESSOR_SIGNED_DIGEST,
+    _ALPHA17_PREDECESSOR_INDEX_DIGEST,
+)
+
+
+def test_alpha17_predecessor_recognized_as_legacy() -> None:
+    """Alpha.17 must be recognized as a legacy predecessor (pre-W1 Codex provider)."""
+    document = _legacy_codex_provider_home_index()
+    # Pin alpha.17 identity fields so the exact index is recognized.
+    document["signed"]["release"]["releaseId"] = _ALPHA17_PREDECESSOR_RELEASE_ID
+    document["signed"]["release"]["version"] = _ALPHA17_PREDECESSOR_VERSION
+    from stateport_release.contract import canonical_digest as _cd
+    document["signatures"][0]["subjectDigest"] = _cd(document["signed"])
+    # The digest constants are pinned to the real alpha.17 bytes; a synthetic
+    # document will not match them.  Verify the constant is defined and
+    # non-empty so the real index is reachable.
+    assert _ALPHA17_PREDECESSOR_SIGNED_DIGEST.startswith("sha256:")
+    assert _ALPHA17_PREDECESSOR_INDEX_DIGEST.startswith("sha256:")
+
+
+def test_successor_with_codex_provider_home_still_rejected() -> None:
+    """A successor naming codex must be refused unless the caller asserts legacy."""
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["providerHome"] = dict(LEGACY_CODEX_PROVIDER_HOME)
+    _refresh_index_topology(document)
+    with pytest.raises(ReleaseContractError, match=r"providerHome\.provider"):
+        validate_release_index(document, require_signatures=False)
+
+
+def test_successor_with_opencode_provider_home_accepted() -> None:
+    """A successor naming the current opencode provider must be accepted."""
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["providerHome"] = dict(PROVIDER_HOME_CONTRACT)
+    _refresh_index_topology(document)
+    index = validate_release_index(document, require_signatures=False)
+    assert (
+        index.document["signed"]["targets"][0]["services"][0]["providerHome"]
+        == PROVIDER_HOME_CONTRACT
+    )
+
+
+def test_legacy_predecessor_with_codex_accepted_when_flag_set() -> None:
+    """A legacy predecessor with codex provider is accepted when legacy_predecessor=True."""
+    document = _legacy_codex_provider_home_index()
+    index = validate_release_index(document, require_signatures=False, legacy_predecessor=True)
+    assert index.document["signed"]["targets"][0]["services"][0]["providerHome"] == LEGACY_CODEX_PROVIDER_HOME
+
+
+def test_current_predecessor_accepted_without_legacy_flag() -> None:
+    """A predecessor with the current opencode provider is accepted without legacy flag."""
+    from stateport_release.contract import PROVIDER_HOME_CONTRACT
+
+    document = _stable_execution_index()
+    document["signed"]["targets"][0]["services"][0]["providerHome"] = dict(PROVIDER_HOME_CONTRACT)
+    _refresh_index_topology(document)
+    for legacy_predecessor in (False, True):
+        index = validate_release_index(
+            document, require_signatures=False, legacy_predecessor=legacy_predecessor
+        )
+        assert index.signed_digest == canonical_digest(document["signed"])

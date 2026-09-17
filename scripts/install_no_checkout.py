@@ -218,6 +218,10 @@ _PROVIDER_AUTH_MOUNT = f"Volume={_PROVIDER_AUTH_HOME}:/var/lib/stateport-provide
 # The execution host's daemon-owned agent provider material, created by the
 # root provisioner (mode 0755) and declared in the recorded provisioning plan.
 _AGENT_PROVIDER_DIR = "/var/lib/stateport-exec/stateport-execution-host/agent-provider"
+# The control plane's separate copy of the same operator material, created by
+# the same root provisioner under the control state root and declared in the
+# recorded provisioning plan.
+_CONTROL_AGENT_PROVIDER_DIR = "/var/lib/stateport-control/agent-provider"
 _PROVIDER_LOGOUT_GUIDANCE = (
     "Provider-owned OpenCode sign-in is preserved, including after purge. "
     "To clear sign-in, use OpenCode itself in the installed provider environment "
@@ -3755,14 +3759,24 @@ def _derive_control_plane_materialization(
 
 
 def _require_retained_provider_home_plan(existing: Mapping[str, Any], rendered: Mapping[str, Any]) -> None:
-    """Never let historical plan reuse erase a successor's fixed provider home."""
-    paths = {_PROVIDER_AUTH_HOME, str(PurePosixPath(_PROVIDER_AUTH_HOME).parent)}
+    """Never let historical plan reuse erase a successor's fixed provider paths.
+
+    The provider home (authentication) and both agent-provider directories are
+    successor-fixed: their host paths and identities must come from the
+    successor's rendered plan, not a predecessor's receipt-bound plan.
+    """
+    paths = {
+        _PROVIDER_AUTH_HOME,
+        str(PurePosixPath(_PROVIDER_AUTH_HOME).parent),
+        _AGENT_PROVIDER_DIR,
+        _CONTROL_AGENT_PROVIDER_DIR,
+    }
     required = [entry for entry in rendered.get("directories", ()) if isinstance(entry, Mapping) and entry.get("path") in paths]
     retained = [entry for entry in existing.get("directories", ()) if isinstance(entry, Mapping) and entry.get("path") in paths]
     if required and retained != required:
         raise InstallerRefusal(
             "provider_home_reprovisioning_required",
-            "the receipt-bound provisioning plan does not declare this successor's exact private provider home; run the signature-verified provisioner for the successor before retrying",
+            "the receipt-bound provisioning plan does not declare this successor's exact private provider material paths; run the signature-verified provisioner for the successor before retrying",
         )
 
 
@@ -5163,24 +5177,22 @@ def _derive_removal_plan(
                 "installation_record_incomplete",
                 "the recorded execution-host provisioning plan has no directory list",
             )
-        declared = [
-            entry
-            for entry in directories
-            if isinstance(entry, Mapping) and entry.get("path") == _AGENT_PROVIDER_DIR
-        ]
-        if declared:
-            if declared != [
-                {
-                    "path": _AGENT_PROVIDER_DIR,
-                    "mode": "0755",
-                    "owner": "stateport-exec:stateport-exec",
-                }
-            ]:
-                raise InstallerRefusal(
-                    "installation_record_incomplete",
-                    "the recorded agent provider directory contract is malformed",
-                )
-            provider_paths.add(_AGENT_PROVIDER_DIR)
+        for path, owner in (
+            (_AGENT_PROVIDER_DIR, "stateport-exec:stateport-exec"),
+            (_CONTROL_AGENT_PROVIDER_DIR, "stateport-control:stateport-control"),
+        ):
+            declared = [
+                entry
+                for entry in directories
+                if isinstance(entry, Mapping) and entry.get("path") == path
+            ]
+            if declared:
+                if declared != [{"path": path, "mode": "0755", "owner": owner}]:
+                    raise InstallerRefusal(
+                        "installation_record_incomplete",
+                        "the recorded agent provider directory contract is malformed",
+                    )
+                provider_paths.add(path)
     snapshot_volumes: list[str] = []
     for key, name in sorted(manifest["validationVolumeBindings"].items()):
         if not isinstance(key, str) or not isinstance(name, str) or not name:
@@ -5502,15 +5514,22 @@ def _validate_uninstall_receipt(receipt: Mapping[str, Any]) -> None:
             fail(f"{field} is missing")
     provider = receipt.get("providerAuthentication")
     if provider is not None:
-        accepted_paths = (
-            [],
-            [_PROVIDER_AUTH_HOME],
-            [_AGENT_PROVIDER_DIR],
-            sorted([_PROVIDER_AUTH_HOME, _AGENT_PROVIDER_DIR]),
-        )
-        if not isinstance(provider, dict) or provider.get("preservedPaths") not in accepted_paths:
+        allowed_provider_paths = {
+            _PROVIDER_AUTH_HOME,
+            _AGENT_PROVIDER_DIR,
+            _CONTROL_AGENT_PROVIDER_DIR,
+        }
+        preserved = provider.get("preservedPaths") if isinstance(provider, dict) else None
+        if (
+            not isinstance(preserved, list)
+            or any(
+                not isinstance(path, str) or path not in allowed_provider_paths
+                for path in preserved
+            )
+            or preserved != sorted(set(preserved))
+        ):
             fail("provider authentication preservation is malformed")
-        expected_guidance = _PROVIDER_LOGOUT_GUIDANCE if provider["preservedPaths"] else None
+        expected_guidance = _PROVIDER_LOGOUT_GUIDANCE if preserved else None
         if provider.get("guidance") != expected_guidance:
             fail("provider authentication guidance is inconsistent")
 

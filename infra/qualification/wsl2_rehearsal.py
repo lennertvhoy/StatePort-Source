@@ -9,6 +9,16 @@ hosts override, or mirror configuration, so the unmodified bootstrap uses
 anonymous Pages and GHCR directly. The WSL2 platform gates are shimmed
 guest-locally; every subsequent step executes exactly as on the owner target.
 
+The native candidate lane (``--prepublication-mirror --mirror-ca <ca.crt>``)
+admits exactly three staged inputs before publication: one rehearsal CA, one
+``/etc/hosts`` mapping of the production hostname to the QEMU gateway
+``10.0.2.2``, and one containers mirror stanza pointing at the host registry.
+The staged Site tree and OCI archives stay on the host and are served at the
+production URLs, so the fetched bootstrap bytes and every pulled image digest
+remain the exact candidate bytes. Every receipt from this mode is labeled
+``candidate_mirror`` / ``transportClass: prepublication-mirror`` and can never
+validate as owner-path or public-transport-boundary evidence.
+
 WSL2 identity shims (all guest-local, none shipped):
 
   1. /usr/local/bin/uname        -> bootstrap shell gate (uname -r)
@@ -35,11 +45,13 @@ shim leaves /proc completely untouched.
 
 Usage: wsl2_rehearsal.py --site-root <staged Site tree> --version <exact candidate> \
            [--archive-root <retained OCI archives>] --work-dir <dir> \
-           --receipt-out <receipt.json> [--public-transport]
+           --receipt-out <receipt.json> [--public-transport | \
+           --native-wsl2 --prepublication-mirror --mirror-ca <ca.crt>]
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -111,6 +123,41 @@ mirror-by-digest-only=true
 location="{PREPUBLICATION_REGISTRY_MIRROR}"
 insecure=true
 '''
+# Candidate-lane transport markers.  Every receipt or prerequisite document
+# produced by the prepublication mirror mode carries these exact values, and
+# none of them may ever be promoted to owner-path or public-boundary proof.
+TRANSPORT_CLASS_PREPUBLICATION_MIRROR = "prepublication-mirror"
+IDENTITY_CLASS_CANDIDATE_MIRROR = "candidate-mirror"
+EVIDENCE_CLASS_CANDIDATE_MIRROR = "candidate_mirror"
+# Host-local mirror addressing for the native candidate lane: the Windows
+# guest reaches the Linux host loopback at the slirp gateway 10.0.2.2, where
+# the reviewed launcher serves the staged Site tree over HTTPS and the host
+# registry over plain HTTP on its loopback port.
+PREPUBLICATION_HOST_MIRROR_GATEWAY = "10.0.2.2"
+PREPUBLICATION_HOST_MIRROR = (
+    f"{PREPUBLICATION_HOST_MIRROR_GATEWAY}:{REGISTRY_PORT}/stateport-alpha"
+)
+GUEST_REGISTRIES_CONF_HOST_MIRROR = f'''[[registry]]
+location="{PREPUBLICATION_HOST_MIRROR_GATEWAY}:{REGISTRY_PORT}"
+insecure=true
+
+[[registry]]
+prefix="{PREPUBLICATION_REGISTRY_PREFIX}"
+location="{PREPUBLICATION_REGISTRY_PREFIX}"
+mirror-by-digest-only=true
+
+[[registry.mirror]]
+location="{PREPUBLICATION_HOST_MIRROR}"
+insecure=true
+'''
+# Pristine-stock capability gate: the imported native WSL2 rootfs must carry
+# no podman/netavark capability before the bootstrap provisions it.
+NATIVE_STOCK_CAPABILITY_GATE = (
+    "for package in podman netavark aardvark-dns zstd; do if dpkg-query -W -f='${db:Status-Abbrev}' \"$package\" 2>/dev/null | grep -q '^ii '; then echo \"RUNTIME-PACKAGE-PRESENT-BEFORE-BOOTSTRAP:$package\"; exit 1; fi; done;"
+    + "if command -v podman >/dev/null 2>&1; then echo PODMAN-PRESENT-BEFORE-BOOTSTRAP; exit 1; fi;"
+    + "if command -v zstd >/dev/null 2>&1; then echo ZSTD-PRESENT-BEFORE-BOOTSTRAP; exit 1; fi;"
+    + "if grep -RqsE '(^|[[:space:]])questing([[:space:]]|$)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then echo QUESTING-SOURCE-PRESENT; exit 1; fi;"
+)
 FAILURE_SNAPSHOT_ROOT = "/var/tmp/stateport-j1-runtime-trace"
 DIAGNOSTIC_VM_MEMORY_MIB = 4096
 QUALIFICATION_VM_MEMORY_MIB = 6144
@@ -613,16 +660,26 @@ class VM:
         phase_gates: bool = False,
         diagnostic_reuse: bool = False,
         public_transport: bool = False,
+        prepublication_mirror: bool = False,
+        mirror_ca: Path | None = None,
         memory_mib: int = QUALIFICATION_VM_MEMORY_MIB,
         base_image: Path | None = None,
         bootstrap_url: str | None = None,
     ):
+        if public_transport and prepublication_mirror:
+            raise ValueError(
+                "public transport and the prepublication mirror are mutually exclusive"
+            )
+        if prepublication_mirror and mirror_ca is None:
+            raise ValueError("the prepublication mirror requires the staged mirror CA")
         self.work = work
         self.site_root = site_root
         self.archive_root = archive_root
         self.phase_gates = phase_gates
         self.diagnostic_reuse = diagnostic_reuse
         self.public_transport = public_transport
+        self.prepublication_mirror = prepublication_mirror
+        self.mirror_ca = mirror_ca
         self.memory_mib = memory_mib
         self.base_image = base_image
         self.bootstrap_url = bootstrap_url or f"https://{HOSTNAME}/StatePort-Site/download/install.sh"
@@ -630,6 +687,7 @@ class VM:
         self.proc: subprocess.Popen | None = None
         self.key = work / "id_ed25519"
         self.public_transport_boundary: dict[str, object] | None = None
+        self.prepublication_mirror_boundary: dict[str, object] | None = None
         self.rehearsal_baseline: dict[str, object] | None = None
         self.rootfs_identity = dict(QEMU_ROOTFS_IDENTITY)
         self.native_wsl = False
@@ -693,6 +751,26 @@ class VM:
             self._make_ca()
 
     def transport_receipt(self) -> dict[str, object]:
+        if self.prepublication_mirror:
+            return {
+                "siteTransport": {
+                    "mode": "host-local-staged-pages",
+                    "url": f"https://{HOSTNAME}/StatePort-Site",
+                    "guestLocalServer": False,
+                    "hostMirror": True,
+                    "hostGateway": PREPUBLICATION_HOST_MIRROR_GATEWAY,
+                },
+                "guestRegistryTransport": {
+                    "mode": "host-local-prepublication-mirror",
+                    "sourcePrefix": PREPUBLICATION_REGISTRY_PREFIX,
+                    "location": PREPUBLICATION_HOST_MIRROR,
+                    "digestOnly": True,
+                    "guestLocalMirror": False,
+                    "retainedArchiveTransport": False,
+                    "hostMirror": True,
+                },
+                "transportClass": TRANSPORT_CLASS_PREPUBLICATION_MIRROR,
+            }
         if self.public_transport:
             return {
                 "siteTransport": {
@@ -983,8 +1061,24 @@ class VM:
             "zstdBeforeBootstrap": None if values["ZSTD"] == "absent" else values["ZSTD"],
             "quadletBeforeBootstrap": values["QUADLET"],
             "extraRepositories": [],
-            "extraBinaries": [] if self.public_transport else ["cloud-guest-utils", "docker-registry", "skopeo"],
-            "extraRuntimeConfiguration": [] if self.public_transport else ["guest_registry", "staged_https_site", "registry_mirror"],
+            "extraBinaries": (
+                []
+                if self.public_transport or self.prepublication_mirror
+                else ["cloud-guest-utils", "docker-registry", "skopeo"]
+            ),
+            "extraRuntimeConfiguration": (
+                [
+                    "prepublication_host_mirror_trust",
+                    "prepublication_host_mirror_hosts",
+                    "prepublication_host_mirror_registry",
+                ]
+                if self.prepublication_mirror
+                else (
+                    []
+                    if self.public_transport
+                    else ["guest_registry", "staged_https_site", "registry_mirror"]
+                )
+            ),
             "capabilityPreparation": [],
             "capabilityProvisioner": "exact_public_bootstrap_only",
             "identityShims": list(self.identity_shims),
@@ -992,14 +1086,24 @@ class VM:
             "runtimeConfigurationChanges": list(self.runtime_configuration_changes),
         }
         policy = effective_mission(load_envelope())["rehearsalBaseline"]
-        baseline["evidenceClass"] = (
-            classify_rehearsal_baseline(baseline, policy)
-            if self.public_transport
-            else "simulation_only"
-        )
+        if self.prepublication_mirror:
+            # The candidate lane is never owner path, whatever the observed
+            # stock inventory says: its transport carries staged mirror seams.
+            baseline["evidenceClass"] = EVIDENCE_CLASS_CANDIDATE_MIRROR
+            baseline["transportClass"] = TRANSPORT_CLASS_PREPUBLICATION_MIRROR
+            baseline["identityClass"] = IDENTITY_CLASS_CANDIDATE_MIRROR
+            baseline["ownerPathQualification"] = False
+            baseline["publicTransportBoundary"] = False
+        elif self.public_transport:
+            baseline["evidenceClass"] = classify_rehearsal_baseline(baseline, policy)
+        else:
+            baseline["evidenceClass"] = "simulation_only"
         return baseline
 
     def setup(self, version: str) -> None:
+        if self.prepublication_mirror:
+            self._setup_prepublication_mirror(version)
+            return
         transport = "anonymous public Site/GHCR" if self.public_transport else "staged Site and registry"
         log(f"installing shims and {transport} transport")
         if self.rehearsal_baseline is None:
@@ -1134,14 +1238,7 @@ class VM:
         # netavark chain), so applying the same hard gate there can never pass.
         # The QEMU lane's honest baseline is already recorded by
         # _capture_rehearsal_baseline and classifies as simulation_only.
-        stock_gate = ""
-        if self.native_wsl:
-            stock_gate = (
-                "for package in podman netavark aardvark-dns zstd; do if dpkg-query -W -f='${db:Status-Abbrev}' \"$package\" 2>/dev/null | grep -q '^ii '; then echo \"RUNTIME-PACKAGE-PRESENT-BEFORE-BOOTSTRAP:$package\"; exit 1; fi; done;"
-                + "if command -v podman >/dev/null 2>&1; then echo PODMAN-PRESENT-BEFORE-BOOTSTRAP; exit 1; fi;"
-                + "if command -v zstd >/dev/null 2>&1; then echo ZSTD-PRESENT-BEFORE-BOOTSTRAP; exit 1; fi;"
-                + "if grep -RqsE '(^|[[:space:]])questing([[:space:]]|$)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then echo QUESTING-SOURCE-PRESENT; exit 1; fi;"
-            )
+        stock_gate = NATIVE_STOCK_CAPABILITY_GATE if self.native_wsl else ""
         setup_cmd = (
             "set -eu;"
             "for i in $(seq 1 100); do sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 3; done;"
@@ -1199,6 +1296,95 @@ class VM:
                        f"https://{HOSTNAME}/StatePort-Site/download/install.sh | sha256sum", timeout=120)
         source = "public" if self.public_transport else "staged"
         log(f"{source} install.sh reachable in VM, sha256 {out.stdout.split()[0]}")
+
+    def _setup_prepublication_mirror(self, version: str) -> None:
+        """Install the host mirror seams for the native candidate lane.
+
+        The staged Site tree and OCI archives stay on the host; only the
+        rehearsal CA, one /etc/hosts mapping of the production hostname to the
+        gateway 10.0.2.2, and one registries mirror stanza enter the guest.
+        The boundary probe then proves those seams are exactly what the guest
+        resolves and talks to.  Everything here is candidate-mirror evidence
+        and can never become owner-path or public-transport-boundary proof.
+        """
+        if (
+            self.mirror_ca is None
+            or self.mirror_ca.is_symlink()
+            or not self.mirror_ca.is_file()
+        ):
+            raise SystemExit("prepublication mirror requires one exact --mirror-ca file")
+        ca_bytes = self.mirror_ca.read_bytes()
+        if not ca_bytes.startswith(b"-----BEGIN CERTIFICATE-----"):
+            raise SystemExit("prepublication mirror CA must be one PEM certificate")
+        log("installing prepublication host-mirror transport (candidate lane)")
+        if self.rehearsal_baseline is None:
+            cloud_init = self.ssh(
+                "timeout 420 cloud-init status --wait >/dev/null", check=False, timeout=450
+            )
+            if cloud_init.returncode != 0:
+                raise SystemExit("cloud-init did not settle before stock inventory")
+            self.rehearsal_baseline = self._capture_rehearsal_baseline()
+        ca_b64 = base64.b64encode(ca_bytes).decode("ascii")
+        registries_b64 = base64.b64encode(
+            GUEST_REGISTRIES_CONF_HOST_MIRROR.encode("utf-8")
+        ).decode("ascii")
+        stock_gate = NATIVE_STOCK_CAPABILITY_GATE if self.native_wsl else ""
+        setup_cmd = (
+            "set -eu;"
+            "for i in $(seq 1 100); do sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 3; done;"
+            + stock_gate
+            + f"printf '%s' {shlex.quote(ca_b64)} | base64 -d | sudo tee "
+            + "/usr/local/share/ca-certificates/stateport-prepublication-mirror.crt >/dev/null;"
+            + "sudo update-ca-certificates >/dev/null;"
+            + f"grep -q '{HOSTNAME}' /etc/hosts || printf '%s\\n' "
+            + f"'{PREPUBLICATION_HOST_MIRROR_GATEWAY} {HOSTNAME}' | sudo tee -a /etc/hosts >/dev/null;"
+            + "sudo install -d -o root -g root -m 0755 /etc/containers/registries.conf.d;"
+            + f"printf '%s' {shlex.quote(registries_b64)} | base64 -d | sudo tee "
+            + "/etc/containers/registries.conf.d/99-stateport-prepublication-mirror.conf >/dev/null;"
+            + "ok=0; for i in $(seq 1 20); do "
+            + f"if curl -fsSL --proto '=https' --tlsv1.2 https://{HOSTNAME}/StatePort-Site/download/install.sh -o /tmp/selftest.sh 2>/tmp/selftest.err; then ok=1; break; fi; "
+            + "sleep 1; done;"
+            + "if [ \"$ok\" != 1 ]; then echo TRANSPORT-SELFTEST-FAILED; cat /tmp/selftest.err; exit 1; fi;"
+            + "echo SELFTEST-OK"
+        )
+        r = self.ssh(setup_cmd, check=False)
+        if r.returncode != 0:
+            log(f"prepublication mirror setup FAILED (exit {r.returncode})\n"
+                f"stdout:\n{r.stdout[-3000:]}\nstderr:\n{r.stderr[-3000:]}")
+            raise SystemExit("prepublication mirror setup failed; see log above")
+        log("prepublication mirror setup selftest passed")
+        boundary = self.ssh(
+            "set -eu;"
+            "test -e /usr/local/share/ca-certificates/stateport-prepublication-mirror.crt;"
+            f"grep -Eq '^{PREPUBLICATION_HOST_MIRROR_GATEWAY}[[:space:]]+{HOSTNAME}([[:space:]]|$)' /etc/hosts;"
+            "test -e /etc/containers/registries.conf.d/99-stateport-prepublication-mirror.conf;"
+            f"resolved=$(getent ahostsv4 {HOSTNAME} | awk '{{print $1}}' | sort -u | tr '\\n' ',');"
+            f"case \",$resolved\" in *,\"{PREPUBLICATION_HOST_MIRROR_GATEWAY}\",*) ;; *) "
+            "echo \"HOSTNAME-RESOLUTION-NOT-MIRRORED resolved=$resolved\"; exit 1;; esac;"
+            f"curl -fsS -m 10 http://{PREPUBLICATION_HOST_MIRROR_GATEWAY}:{REGISTRY_PORT}/v2/ >/dev/null;"
+            "printf 'PREPUBLICATION-MIRROR-BOUNDARY-OK resolved=%s\\n' \"$resolved\"",
+            check=False,
+            timeout=120,
+        )
+        if boundary.returncode != 0:
+            raise SystemExit(
+                "prepublication mirror boundary failed: "
+                + (boundary.stderr or boundary.stdout).strip()[-1000:]
+            )
+        self.prepublication_mirror_boundary = {
+            "ok": True,
+            "stdoutTail": boundary.stdout[-1000:],
+            "transportClass": TRANSPORT_CLASS_PREPUBLICATION_MIRROR,
+            "identityClass": IDENTITY_CLASS_CANDIDATE_MIRROR,
+            "ownerPathQualification": False,
+            "publicTransportBoundary": False,
+        }
+        out = self.ssh(
+            "curl -fsSL --proto '=https' --tlsv1.2 "
+            f"https://{HOSTNAME}/StatePort-Site/download/install.sh | sha256sum",
+            timeout=120,
+        )
+        log(f"mirrored install.sh reachable in VM, sha256 {out.stdout.split()[0]}")
 
     def _registry_images(self, version: str) -> list[tuple[str, str]]:
         version_root = self.site_root / "download" / version
@@ -1353,24 +1539,47 @@ class VM:
         expected_candidate: str | None = None,
         expected_signed_payload: str | None = None,
     ) -> dict:
+        if diagnostic and self.prepublication_mirror:
+            raise ValueError("the prepublication mirror lane cannot reuse diagnostic mode")
         receipt: dict = {
             "version": version,
             "mode": (
                 "phase0-transport"
                 if phase0_only
-                else ("j1-diagnostic" if diagnostic else ("public-transport" if self.public_transport else "j1"))
+                else (
+                    "j1-diagnostic"
+                    if diagnostic
+                    else (
+                        "prepublication-mirror"
+                        if self.prepublication_mirror
+                        else ("public-transport" if self.public_transport else "j1")
+                    )
+                )
             ),
             "binding": binding,
             "phases": {},
         }
         self.current_receipt = receipt
         receipt.update(self.transport_receipt())
+        if self.prepublication_mirror:
+            receipt.update({
+                "identityClass": IDENTITY_CLASS_CANDIDATE_MIRROR,
+                "ownerPathQualification": False,
+                "publicTransportBoundary": False,
+            })
         receipt["rehearsalBaseline"] = self.rehearsal_baseline
         receipt["evidenceClass"] = (
             self.rehearsal_baseline.get("evidenceClass", "simulation_only")
             if self.rehearsal_baseline is not None
             else "simulation_only"
         )
+        if self.prepublication_mirror and receipt["evidenceClass"] != EVIDENCE_CLASS_CANDIDATE_MIRROR:
+            # A candidate lane can never inherit a foreign baseline class.
+            raise ValueError(
+                "prepublication mirror run carries a mismatched rehearsal baseline class"
+            )
+        if self.prepublication_mirror_boundary is not None:
+            receipt["phases"]["prepublication-mirror-boundary"] = self.prepublication_mirror_boundary
         if self.public_transport_boundary is not None:
             receipt["phases"]["public-transport-boundary"] = self.public_transport_boundary
         if diagnostic:
@@ -1870,14 +2079,28 @@ class NativeWSL(VM):
 
     def __init__(self, work: Path, site_root: Path, archive_root: Path | None, *,
                  distro_name: str, phase_gates: bool = False,
-                 public_transport: bool = True, attach_existing: bool = False,
+                 public_transport: bool = True, prepublication_mirror: bool = False,
+                 mirror_ca: Path | None = None,
+                 attach_existing: bool = False,
                  bootstrap_url: str | None = None) -> None:
-        if not public_transport:
-            raise ValueError("native WSL2 qualification requires anonymous public transport")
+        if public_transport and prepublication_mirror:
+            raise ValueError(
+                "native WSL2 lane selects public transport or the prepublication "
+                "mirror, not both"
+            )
+        if not public_transport and not prepublication_mirror:
+            raise ValueError(
+                "native WSL2 qualification requires anonymous public transport "
+                "or explicit --prepublication-mirror"
+            )
+        if prepublication_mirror and mirror_ca is None:
+            raise ValueError("the prepublication mirror requires the staged mirror CA")
         if re.fullmatch(r"StatePort-Rehearsal-[A-Za-z0-9._-]{3,64}", distro_name) is None:
             raise ValueError("native WSL2 rehearsal distribution name is invalid")
         super().__init__(work, site_root, archive_root, phase_gates=phase_gates,
-                         public_transport=True, memory_mib=0,
+                         public_transport=public_transport,
+                         prepublication_mirror=prepublication_mirror,
+                         mirror_ca=mirror_ca, memory_mib=0,
                          bootstrap_url=bootstrap_url)
         self.distro_name = distro_name
         self.install_root = work / "distribution"
@@ -2151,6 +2374,36 @@ def public_binding(work: Path) -> dict:
     }
 
 
+def provider_container_namespace_isolation(vm: VM, container: str) -> str:
+    """Prove the provider container is in its own namespaces, from the guest.
+
+    A service-uid process inside the container observes only the container's
+    own namespaces, so the isolation claim is evaluated where it is
+    observable: the guest compares the running container init against its own
+    namespace links and refuses a shared one.
+    """
+    from qualification.journey_common import control_user_env
+    script = (
+        "pid=$(run_control podman container inspect --format '{{.State.Pid}}' "
+        + shlex.quote(container) + "); "
+        "case \"$pid\" in ''|*[!0-9]*) echo INVALID-CONTAINER-PID; exit 3;; esac; "
+        "for ns in pid user mnt net; do "
+        "container_ns=$(readlink \"/proc/$pid/ns/$ns\") || { echo UNAVAILABLE-$ns; exit 4; }; "
+        "guest_ns=$(readlink \"/proc/self/ns/$ns\") || { echo UNAVAILABLE-$ns; exit 5; }; "
+        "if [ \"$container_ns\" = \"$guest_ns\" ]; then echo SHARED-$ns; exit 6; fi; "
+        "done; echo NAMESPACES-ISOLATED"
+    )
+    shell = control_user_env() + "; " + script
+    checked = vm.ssh("sudo runuser -u stateport-control -- bash -c " + shlex.quote(shell),
+                     check=False, timeout=60)
+    if checked.returncode != 0 or "NAMESPACES-ISOLATED" not in checked.stdout:
+        raise ValueError(
+            "installed provider container namespaces are not isolated: "
+            + (checked.stderr or checked.stdout)[-2500:]
+        )
+    return "isolated"
+
+
 def installed_service_smoke(vm: VM, binding: dict) -> dict:
     from qualification.journey_common import (
         GuestJsonClient, control_user_env, discover_services, verify_installed_image_digests,
@@ -2183,11 +2436,11 @@ def installed_service_smoke(vm: VM, binding: dict) -> dict:
         if any(observed.get(key) != value for key, value in expected.items()):
             raise ValueError("fresh installed provider observations do not match the signed runtime contract")
         provider = expected
-        # Exercise the real provider sandbox, not just CLI presence. Bind exec
-        # to the exact running ID already checked against the signed images.
+        # Exercise the shipped provider, not just CLI presence. Bind exec to
+        # the exact running ID already checked against the signed images.
         container = digests.get("containers", {}).get("stateport-web", {}).get("containerId", "")
         if re.fullmatch(r"[0-9a-f]{64}", container) is None:
-            raise ValueError("provider sandbox requires the verified running container ID")
+            raise ValueError("provider smoke requires the verified running container ID")
         source = (Path(__file__).resolve().parents[2] / "scripts/qualification/provider_sandbox_probe.py").read_text()
         command = ["podman", "exec", "--user", "65532:65532", container,
                    "/usr/local/bin/python3", "-c", source]
@@ -2195,18 +2448,25 @@ def installed_service_smoke(vm: VM, binding: dict) -> dict:
         checked = vm.ssh("sudo runuser -u stateport-control -- bash -c " + shlex.quote(shell),
                          check=False, timeout=110)
         if checked.returncode != 0:
-            raise ValueError("installed provider sandbox failed: " + checked.stderr[-2500:])
-        sandbox = json.loads(checked.stdout)
-        version = sandbox.get("providerVersion") if isinstance(sandbox, dict) else None
+            raise ValueError("installed provider smoke failed: " + checked.stderr[-2500:])
+        observed_sandbox = json.loads(checked.stdout)
+        version = observed_sandbox.get("providerVersion") if isinstance(observed_sandbox, dict) else None
         if (not isinstance(version, str) or len(version) > 160
-                or re.fullmatch(r"codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?", version) is None):
-            raise ValueError("installed provider sandbox returned no valid provider version")
-        if sandbox != {"result": "passed", "insideWrite": "passed", "outsideWrite": "refused",
-                       "symlinkEscape": "refused", "networkSocket": "refused",
-                       "childProcess": "passed", "namespaces": "isolated",
+                or re.fullmatch(r"opencode [0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?", version) is None):
+            raise ValueError("installed provider smoke returned no valid OpenCode version")
+        # The service uid cannot see the host namespaces from inside the
+        # container, so container isolation is asserted from the guest.
+        sandbox = {**observed_sandbox,
+                   "namespaceIsolation": provider_container_namespace_isolation(vm, container)}
+        if sandbox != {"result": "passed", "provider": "opencode", "providerVersion": version,
+                       "providerExecutable": "/usr/local/bin/opencode", "sandboxLayer": "container",
+                       "insideWrite": "passed", "outsideWrite": "refused",
+                       "symlinkEscape": "refused", "childProcess": "passed",
+                       "capabilities": "dropped", "parentNetworkSocket": "permitted",
+                       "networkSocket": "refused", "networkPolicy": "container-internal",
                        "authentication": "not attempted", "runtime": "web",
-                       "parentNetworkSocket": "permitted", "providerVersion": version}:
-            raise ValueError("installed provider sandbox returned incomplete boundary evidence")
+                       "namespaceIsolation": "isolated"}:
+            raise ValueError("installed provider smoke returned incomplete boundary evidence")
     return {"ok": True, "services": services, "imageDigests": digests,
             "providerFreshObservations": provider,
             "providerSandbox": sandbox,
@@ -2347,6 +2607,8 @@ def main() -> int:
     ap.add_argument("--phase0-receipt", type=Path)
     ap.add_argument("--public-transport", action="store_true")
     ap.add_argument("--native-wsl2", action="store_true")
+    ap.add_argument("--prepublication-mirror", action="store_true")
+    ap.add_argument("--mirror-ca", type=Path)
     ap.add_argument("--bootstrap-url")
     ap.add_argument("--wsl-distro-name")
     ap.add_argument("--diagnostic", action="store_true")
@@ -2358,7 +2620,7 @@ def main() -> int:
     require_guard("qualification", sys.argv)
     if not args.site_root.is_dir() or not (args.site_root / "download" / "install.sh").is_file():
         raise SystemExit("--site-root must be a staged Site tree containing download/install.sh")
-    if not args.public_transport and (
+    if not args.public_transport and not args.prepublication_mirror and (
         args.archive_root is None
         or not args.archive_root.is_dir()
         or not list(args.archive_root.glob("*.oci.tar"))
@@ -2368,14 +2630,20 @@ def main() -> int:
         ap.error("public transport is a full post-publication rehearsal, not a phase-0 mode")
     if args.public_transport and args.diagnostic:
         ap.error("public transport cannot reuse the prepublication diagnostic lane")
-    if args.native_wsl2 and not args.public_transport:
+    if args.native_wsl2 and not args.public_transport and not args.prepublication_mirror:
         ap.error("native WSL2 owner-path qualification requires --public-transport")
     if args.native_wsl2 and (args.phase0_only or args.diagnostic or args.retained_vm_dir):
         ap.error("native WSL2 owner-path qualification is a fresh full journey only")
+    if args.prepublication_mirror and args.public_transport:
+        ap.error("--prepublication-mirror is the candidate lane; it cannot run public transport")
+    if args.prepublication_mirror and not args.native_wsl2:
+        ap.error("--prepublication-mirror is a native WSL2 candidate lane")
+    if args.prepublication_mirror and args.mirror_ca is None:
+        ap.error("--prepublication-mirror requires --mirror-ca <PEM certificate>")
     binding = phase0_binding(
         args.site_root,
         args.version,
-        None if args.public_transport else args.archive_root,
+        None if (args.public_transport or args.prepublication_mirror) else args.archive_root,
         args.bootstrap_url,
     )
     # Full journeys execute both transport and materialization probes themselves.
@@ -2404,7 +2672,9 @@ def main() -> int:
             args.archive_root,
             distro_name=distro_name,
             phase_gates=True,
-            public_transport=True,
+            public_transport=not args.prepublication_mirror,
+            prepublication_mirror=args.prepublication_mirror,
+            mirror_ca=args.mirror_ca,
             bootstrap_url=args.bootstrap_url,
         )
     else:

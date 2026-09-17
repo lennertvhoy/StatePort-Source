@@ -343,6 +343,229 @@ def test_stock_capability_gate_is_native_wsl_only(tmp_path: Path) -> None:
     assert "QUESTING-SOURCE-PRESENT" in rendered
 
 
+def _mirror_ca(tmp_path: Path) -> Path:
+    ca = tmp_path / "mirror-ca.crt"
+    ca.write_bytes(b"-----BEGIN CERTIFICATE-----\nMIIBfakeRehearsalCA\n-----END CERTIFICATE-----\n")
+    return ca
+
+
+def test_prepublication_mirror_is_an_explicit_native_only_lane(tmp_path: Path) -> None:
+    ca = _mirror_ca(tmp_path)
+    native = rehearsal.NativeWSL(
+        tmp_path / "native", tmp_path / "site", tmp_path / "archives",
+        distro_name="StatePort-Rehearsal-mirror",
+        public_transport=False, prepublication_mirror=True, mirror_ca=ca,
+    )
+    assert native.prepublication_mirror is True
+    assert native.public_transport is False
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        rehearsal.VM(tmp_path / "vm", tmp_path / "site", tmp_path / "archives",
+                     public_transport=True, prepublication_mirror=True, mirror_ca=ca)
+    with pytest.raises(ValueError, match="anonymous public transport or explicit"):
+        rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                            distro_name="StatePort-Rehearsal-no-transport",
+                            public_transport=False)
+    with pytest.raises(ValueError, match="staged mirror CA"):
+        rehearsal.NativeWSL(tmp_path / "native", tmp_path / "site", None,
+                            distro_name="StatePort-Rehearsal-no-ca",
+                            public_transport=False, prepublication_mirror=True)
+
+
+def test_prepublication_mirror_transport_receipt_is_candidate_labeled(tmp_path: Path) -> None:
+    ca = _mirror_ca(tmp_path)
+    vm = rehearsal.VM(tmp_path / "work", tmp_path / "site", tmp_path / "archives",
+                      prepublication_mirror=True, mirror_ca=ca)
+    transport = vm.transport_receipt()
+    assert transport["transportClass"] == "prepublication-mirror"
+    assert transport["siteTransport"] == {
+        "mode": "host-local-staged-pages",
+        "url": "https://lennertvhoy.github.io/StatePort-Site",
+        "guestLocalServer": False,
+        "hostMirror": True,
+        "hostGateway": "10.0.2.2",
+    }
+    assert transport["guestRegistryTransport"] == {
+        "mode": "host-local-prepublication-mirror",
+        "sourcePrefix": "ghcr.io/lennertvhoy",
+        "location": "10.0.2.2:5443/stateport-alpha",
+        "digestOnly": True,
+        "guestLocalMirror": False,
+        "retainedArchiveTransport": False,
+        "hostMirror": True,
+    }
+    config = rehearsal.GUEST_REGISTRIES_CONF_HOST_MIRROR
+    assert 'location="10.0.2.2:5443"\ninsecure=true' in config
+    assert 'prefix="ghcr.io/lennertvhoy"' in config
+    assert "mirror-by-digest-only=true" in config
+    assert 'location="10.0.2.2:5443/stateport-alpha"\ninsecure=true' in config
+    assert "127.0.0.1" not in config
+
+
+def test_prepublication_mirror_setup_installs_only_host_mirror_seams(tmp_path: Path) -> None:
+    ca = _mirror_ca(tmp_path)
+    vm = rehearsal.NativeWSL(
+        tmp_path / "native", tmp_path / "site", None,
+        distro_name="StatePort-Rehearsal-mirror-setup",
+        public_transport=False, prepublication_mirror=True, mirror_ca=ca,
+    )
+    commands: list[str] = []
+
+    def fake_ssh(command: str, **_: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command.startswith("set -eu;for package in podman netavark"):
+            return subprocess.CompletedProcess([], 0, _stock_baseline_output(), "")
+        if "PREPUBLICATION-MIRROR-BOUNDARY-OK" in command:
+            return subprocess.CompletedProcess(
+                [], 0, "PREPUBLICATION-MIRROR-BOUNDARY-OK resolved=10.0.2.2,\n", ""
+            )
+        return subprocess.CompletedProcess([], 0, "SELFTEST-OK\n", "")
+
+    vm.ssh = fake_ssh  # type: ignore[method-assign]
+    vm.scp_in = lambda *_: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("the host mirror lane must never copy a host path into the guest")
+    )
+    vm.setup("0.1.0-alpha.18")
+
+    setup = next(command for command in commands if command.startswith("set -eu;for i in $(seq 1 100)"))
+    subprocess.run(["/bin/sh", "-n", "-c", setup], check=True)
+    for required in (
+        "stateport-prepublication-mirror.crt",
+        "update-ca-certificates",
+        "10.0.2.2 lennertvhoy.github.io",
+        "99-stateport-prepublication-mirror.conf",
+        "RUNTIME-PACKAGE-PRESENT-BEFORE-BOOTSTRAP",
+        "SELFTEST-OK",
+    ):
+        assert required in setup
+    for forbidden in (
+        "stage/site",
+        "stage/oci-archives",
+        "stage/ca.crt",
+        "stage/uname",
+        "docker-registry",
+        "serve.py",
+        "/srv/StatePort-Site",
+        "127.0.0.1:5443",
+    ):
+        assert forbidden not in setup
+    boundary = next(command for command in commands if "PREPUBLICATION-MIRROR-BOUNDARY-OK" in command)
+    assert "curl -fsS -m 10 http://10.0.2.2:5443/v2/ >/dev/null" in boundary
+    assert boundary.index("test -e /usr/local/share/ca-certificates/stateport-prepublication-mirror.crt") < boundary.index("getent ahostsv4")
+    assert vm.prepublication_mirror_boundary == {
+        "ok": True,
+        "stdoutTail": "PREPUBLICATION-MIRROR-BOUNDARY-OK resolved=10.0.2.2,\n",
+        "transportClass": "prepublication-mirror",
+        "identityClass": "candidate-mirror",
+        "ownerPathQualification": False,
+        "publicTransportBoundary": False,
+    }
+    assert vm.public_transport_boundary is None
+    assert vm.rehearsal_baseline is not None
+    assert vm.rehearsal_baseline["evidenceClass"] == "candidate_mirror"
+    assert vm.rehearsal_baseline["transportClass"] == "prepublication-mirror"
+    assert vm.rehearsal_baseline["identityClass"] == "candidate-mirror"
+    assert vm.rehearsal_baseline["extraBinaries"] == []
+    assert vm.rehearsal_baseline["extraRuntimeConfiguration"] == [
+        "prepublication_host_mirror_trust",
+        "prepublication_host_mirror_hosts",
+        "prepublication_host_mirror_registry",
+    ]
+
+
+def test_prepublication_mirror_j1_receipt_never_claims_owner_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ca = _mirror_ca(tmp_path)
+    vm = rehearsal.NativeWSL(
+        tmp_path / "native", tmp_path / "site", None,
+        distro_name="StatePort-Rehearsal-mirror-receipt",
+        public_transport=False, prepublication_mirror=True, mirror_ca=ca,
+    )
+
+    def fake_ssh(command: str, **_: object) -> SimpleNamespace:
+        if command.startswith("set -eu;for package in podman netavark"):
+            return SimpleNamespace(returncode=0, stdout=_stock_baseline_output(), stderr="")
+        return SimpleNamespace(returncode=0, stdout="ok\nSMOKE-OK\n", stderr="")
+
+    monkeypatch.setattr(vm, "ssh", fake_ssh)
+    monkeypatch.setattr(vm, "ssh_install", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout="ok\nSMOKE-OK\n", stderr=""))
+    monkeypatch.setattr(vm, "_start_failure_watcher", lambda **_kwargs: None)
+    monkeypatch.setattr(vm, "_stop_failure_watcher", lambda: None)
+    monkeypatch.setattr(vm, "_collect_diagnostics", lambda _receipt: None)
+    vm.rehearsal_baseline = vm._capture_rehearsal_baseline()
+    assert vm.rehearsal_baseline["evidenceClass"] == "candidate_mirror"
+    vm.prepublication_mirror_boundary = {
+        "ok": True, "stdoutTail": "PREPUBLICATION-MIRROR-BOUNDARY-OK\n",
+        "transportClass": "prepublication-mirror", "identityClass": "candidate-mirror",
+        "ownerPathQualification": False, "publicTransportBoundary": False,
+    }
+
+    receipt = vm.rehearse("0.1.0-alpha.18", binding={"bootstrapDigest": "sha256:ok"})
+
+    assert receipt["result"] == "passed"
+    assert receipt["mode"] == "prepublication-mirror"
+    assert receipt["evidenceClass"] == "candidate_mirror"
+    assert receipt["transportClass"] == "prepublication-mirror"
+    assert receipt["identityClass"] == "candidate-mirror"
+    assert receipt["ownerPathQualification"] is False
+    assert receipt["publicTransportBoundary"] is False
+    assert receipt["siteTransport"]["mode"] == "host-local-staged-pages"
+    assert receipt["guestRegistryTransport"]["mode"] == "host-local-prepublication-mirror"
+    assert "public-transport-boundary" not in receipt["phases"]
+    assert receipt["phases"]["prepublication-mirror-boundary"]["ok"] is True
+
+
+def test_candidate_mirror_rehearse_refuses_diagnostic_reuse(tmp_path: Path) -> None:
+    ca = _mirror_ca(tmp_path)
+    vm = rehearsal.NativeWSL(
+        tmp_path / "native", tmp_path / "site", None,
+        distro_name="StatePort-Rehearsal-mirror-diagnostic",
+        public_transport=False, prepublication_mirror=True, mirror_ca=ca,
+    )
+    with pytest.raises(ValueError, match="cannot reuse diagnostic mode"):
+        vm.rehearse("0.1.0-alpha.18", binding={}, diagnostic=True)
+
+
+def test_candidate_mirror_rehearse_refuses_a_foreign_baseline_class(tmp_path: Path) -> None:
+    ca = _mirror_ca(tmp_path)
+    vm = rehearsal.NativeWSL(
+        tmp_path / "native", tmp_path / "site", None,
+        distro_name="StatePort-Rehearsal-mirror-baseline",
+        public_transport=False, prepublication_mirror=True, mirror_ca=ca,
+    )
+    vm.rehearsal_baseline = {"evidenceClass": "owner_path_qualification"}
+    with pytest.raises(ValueError, match="mismatched rehearsal baseline class"):
+        vm.rehearse("0.1.0-alpha.18", binding={})
+
+
+@pytest.mark.parametrize("extra,include_ca,message", [
+    (("--native-wsl2", "--prepublication-mirror", "--public-transport"), True,
+     "candidate lane; it cannot run public transport"),
+    (("--prepublication-mirror",), True, "is a native WSL2 candidate lane"),
+    (("--native-wsl2", "--prepublication-mirror"), False, "requires --mirror-ca"),
+])
+def test_main_refuses_inadmissible_mirror_combinations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    extra: tuple[str, ...], include_ca: bool, message: str,
+) -> None:
+    site = tmp_path / "site"
+    (site / "download").mkdir(parents=True)
+    (site / "download" / "install.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    argv = [
+        "wsl2_rehearsal.py", "--site-root", str(site), "--version", "0.1.0-alpha.18",
+        "--receipt-out", str(tmp_path / "receipt.json"), *extra,
+    ]
+    if include_ca:
+        argv += ["--mirror-ca", str(_mirror_ca(tmp_path))]
+    monkeypatch.setattr(rehearsal, "require_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as excinfo:
+        rehearsal.main()
+    assert excinfo.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 def _rendered_setup_command(vm: rehearsal.VM, version: str) -> str:
     """Render the guest setup command string without running a real guest."""
     vm.work.mkdir(parents=True, exist_ok=True)
@@ -782,50 +1005,69 @@ def test_full_journey_needs_no_separate_phase0_but_rejects_stale_receipt(
 
 @pytest.mark.parametrize('missing_binary', [False, True])
 @pytest.mark.parametrize('sandbox_result', [
-    'passed', 'failed', 'incomplete', 'missing_parent', 'missing_version',
-    'wrong_runtime', 'invalid_version', 'non_object',
+    'passed', 'failed', 'incomplete', 'missing_version', 'foreign_version',
+    'wrong_runtime', 'invalid_version', 'non_object', 'network_permitted',
+    'capabilities_retained', 'namespace_shared', 'namespace_unavailable',
 ])
-def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatch, missing_binary, sandbox_result):
+def test_installed_provider_smoke_requires_opencode_without_authentication(monkeypatch, missing_binary, sandbox_result):
     from qualification import journey_common
     # The product executes nothing on GET: a fresh install reports the CLI as
-    # unverified until the sandbox probe actually runs it. CLI absence must
-    # therefore fail through the real sandbox boundary, not a GET boolean.
+    # unverified until the container-boundary probe actually runs it. CLI
+    # absence must therefore fail through the real smoke, not a GET boolean.
     observed = dict(executableInstalled=False, executableStatus='unverified', configured=False, connected=False,
                     authenticationStatus='unverified', requestStatus='unverified', telemetryStatus='unavailable')
     requests = []
-    sandbox_calls = []
+    exec_calls = []
+    isolation_calls = []
     class Guest:
         payload = {}
         def ssh(self, command, **_):
             import shlex
             if command.startswith('sudo runuser '):
-                sandbox_calls.append(command)
+                if 'podman exec --user 65532:65532 ' + 'a' * 64 in command:
+                    exec_calls.append(command)
+                    assert 'stateport-control' in command
+                    assert 'provider_sandbox_probe' not in command  # actual payload, no guest checkout
+                    result = {'result': 'passed', 'provider': 'opencode',
+                              'providerVersion': 'opencode 1.18.31',
+                              'providerExecutable': '/usr/local/bin/opencode',
+                              'sandboxLayer': 'container', 'insideWrite': 'passed',
+                              'outsideWrite': 'refused', 'symlinkEscape': 'refused',
+                              'childProcess': 'passed', 'capabilities': 'dropped',
+                              'parentNetworkSocket': 'permitted', 'networkSocket': 'refused',
+                              'networkPolicy': 'container-internal',
+                              'authentication': 'not attempted', 'runtime': 'web'}
+                    if sandbox_result == 'incomplete':
+                        result.pop('outsideWrite')
+                    elif sandbox_result == 'missing_version':
+                        result.pop('providerVersion')
+                    elif sandbox_result == 'wrong_runtime':
+                        result['runtime'] = 'workspace'
+                    elif sandbox_result == 'invalid_version':
+                        result['providerVersion'] = 'unknown'
+                    elif sandbox_result == 'foreign_version':
+                        result['providerVersion'] = 'codex-cli 0.146.0+stateport.3'
+                    elif sandbox_result == 'network_permitted':
+                        # A container that can open an external connection must
+                        # not pass the boundary smoke.
+                        result['networkSocket'] = 'permitted'
+                    elif sandbox_result == 'capabilities_retained':
+                        result['capabilities'] = 'retained'
+                    elif sandbox_result == 'non_object':
+                        result = []
+                    if missing_binary:
+                        # CLI absent: the probe itself fails to execute it.
+                        result = {'result': 'failed'}
+                        return subprocess.CompletedProcess([], 1, json.dumps(result), 'provider smoke refused')
+                    return subprocess.CompletedProcess([], int(sandbox_result == 'failed'), json.dumps(result), 'provider smoke refused')
+                isolation_calls.append(command)
                 assert 'stateport-control' in command
-                assert 'podman exec --user 65532:65532 ' + 'a' * 64 in command
-                assert 'provider_sandbox_probe' not in command  # actual payload, no guest checkout
-                result = {'result': 'passed', 'insideWrite': 'passed', 'outsideWrite': 'refused',
-                          'symlinkEscape': 'refused', 'networkSocket': 'refused',
-                          'childProcess': 'passed', 'namespaces': 'isolated',
-                          'authentication': 'not attempted', 'runtime': 'web',
-                          'parentNetworkSocket': 'permitted',
-                          'providerVersion': 'codex-cli 0.146.0+stateport.2'}
-                if sandbox_result == 'incomplete':
-                    result.pop('outsideWrite')
-                elif sandbox_result == 'missing_parent':
-                    result.pop('parentNetworkSocket')
-                elif sandbox_result == 'missing_version':
-                    result.pop('providerVersion')
-                elif sandbox_result == 'wrong_runtime':
-                    result['runtime'] = 'workspace'
-                elif sandbox_result == 'invalid_version':
-                    result['providerVersion'] = 'unknown'
-                elif sandbox_result == 'non_object':
-                    result = []
-                if missing_binary:
-                    # CLI absent: the probe itself fails to execute it.
-                    result = {'result': 'failed'}
-                    return subprocess.CompletedProcess([], 1, json.dumps(result), 'sandbox refused')
-                return subprocess.CompletedProcess([], int(sandbox_result == 'failed'), json.dumps(result), 'sandbox refused')
+                assert 'podman container inspect' in command
+                if sandbox_result == 'namespace_shared':
+                    return subprocess.CompletedProcess([], 6, 'SHARED-net\n', '')
+                if sandbox_result == 'namespace_unavailable':
+                    return subprocess.CompletedProcess([], 4, 'UNAVAILABLE-mnt\n', '')
+                return subprocess.CompletedProcess([], 0, 'NAMESPACES-ISOLATED\n', '')
             if command == 'cat /tmp/journey-resp.json':
                 return subprocess.CompletedProcess([], 0, json.dumps({'ok': True, 'result': self.payload}), '')
             argv = shlex.split(command)
@@ -848,13 +1090,70 @@ def test_installed_provider_smoke_requires_cli_without_authentication(monkeypatc
     monkeypatch.setattr(journey_common, 'verify_installed_image_digests', lambda *a: {
         'mismatches': {}, 'containers': {'stateport-web': {'containerId': 'a' * 64}}})
     binding = {'images': {}, 'providerRuntimeRequired': True}
-    if missing_binary or sandbox_result != 'passed':
-        with pytest.raises(ValueError, match='provider sandbox'):
+    if missing_binary or sandbox_result in ('failed', 'non_object', 'missing_version', 'invalid_version', 'foreign_version'):
+        with pytest.raises(ValueError, match='provider smoke'):
+            rehearsal.installed_service_smoke(guest, binding)
+    elif sandbox_result in ('namespace_shared', 'namespace_unavailable'):
+        with pytest.raises(ValueError, match='namespaces are not isolated'):
+            rehearsal.installed_service_smoke(guest, binding)
+    elif sandbox_result != 'passed':
+        with pytest.raises(ValueError, match='provider smoke'):
             rehearsal.installed_service_smoke(guest, binding)
     else:
-        assert rehearsal.installed_service_smoke(guest, binding)['providerFreshObservations'] == observed
-    assert len(sandbox_calls) == 1
+        smoke = rehearsal.installed_service_smoke(guest, binding)
+        assert smoke['providerFreshObservations'] == observed
+        assert smoke['providerSandbox']['providerVersion'] == 'opencode 1.18.31'
+        assert smoke['providerSandbox']['namespaceIsolation'] == 'isolated'
+        assert smoke['providerSandbox']['sandboxLayer'] == 'container'
+    assert len(exec_calls) == 1
+    if not missing_binary and sandbox_result in ('passed', 'incomplete', 'wrong_runtime', 'network_permitted',
+                                                 'capabilities_retained', 'namespace_shared',
+                                                 'namespace_unavailable'):
+        assert len(isolation_calls) == 1
+    else:
+        assert isolation_calls == []
     assert requests == [('GET', '/session'), ('GET', '/v1/execution-host'), ('GET', '/v1/provider/status')]
+
+
+def test_provider_smoke_targets_the_shipped_opencode_executable() -> None:
+    from qualification import provider_sandbox_probe as probe_module
+    assert probe_module.PROVIDER_NAME == 'opencode'
+    assert probe_module.PROVIDER_EXECUTABLE == '/usr/local/bin/opencode'
+    assert 'codex' not in probe_module._BOUNDARY_CHILD.lower()
+    assert '1.1.1.1' in probe_module._BOUNDARY_CHILD
+    assert probe_module._RUNTIMES['web'] == {
+        'uid': 65532, 'temporaryRoot': '/var/lib/stateport/data', 'readOnlyOwned': '/workspace'}
+    assert probe_module._RUNTIMES['workspace']['readOnlyOwned'] == '/home/stateport'
+    source = (ROOT / 'scripts/qualification/provider_sandbox_probe.py').read_text()
+    assert '/usr/local/bin/codex' not in source
+
+
+@pytest.mark.parametrize('output, expected', [
+    ('1.18.31', 'opencode 1.18.31'),
+    ('opencode 1.18.31\n', 'opencode 1.18.31'),
+    ('opencode 1.19.0-beta.1', 'opencode 1.19.0-beta.1'),
+])
+def test_provider_version_accepts_only_the_opencode_semver(output, expected) -> None:
+    from qualification import provider_sandbox_probe as probe_module
+    assert probe_module.normalise_provider_version(output) == expected
+
+
+@pytest.mark.parametrize('output', ['', 'unknown', 'codex-cli 0.146.0+stateport.3',
+                                    'opencode', '1.18', None, 123])
+def test_provider_version_refuses_a_foreign_or_malformed_cli(output) -> None:
+    from qualification import provider_sandbox_probe as probe_module
+    with pytest.raises(RuntimeError, match='OpenCode version'):
+        probe_module.normalise_provider_version(output)
+
+
+def test_provider_probe_refuses_unknown_runtime_and_wrong_service_identity(monkeypatch) -> None:
+    from qualification import provider_sandbox_probe as probe_module
+    with pytest.raises(ValueError, match='unsupported provider runtime'):
+        probe_module.probe('native')
+    monkeypatch.setattr(probe_module.os, 'getuid', lambda: 0)
+    monkeypatch.setattr(probe_module.os, 'getgid', lambda: 0)
+    with pytest.raises(RuntimeError, match='signed service identity'):
+        probe_module.probe('web')
 
 
 def _image_identity_fixture(*, units=None, live=None, unit_exit=0, live_exit=0):

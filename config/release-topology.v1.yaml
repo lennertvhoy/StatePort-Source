@@ -217,6 +217,24 @@ targets:
             sourceGroup: stateport-execution-control
             mode: ro
             environmentVariable: STATEPORT_REPOSITORY_ROOTS
+          # Control-owned copy of the operator-supplied provider material.
+          # The web container needs its own copy under the control state root:
+          # it runs as runAsUser 65532 with UserNS=keep-id, so the control host
+          # identity appears as that container uid inside the namespace, and the
+          # agent-run readiness check requires st_uid == os.geteuid() on this
+          # directory. The execution host's daemon-owned copy
+          # (agentProviderDirectory above) stays a separate copy of the same
+          # operator material, mounted only inside the sandboxed agent
+          # workspace. Operator-materialized; the agent run refuses honestly
+          # while it is absent or unsafe.
+          - name: agent-provider
+            hostPath: /var/lib/stateport-control/agent-provider
+            mountPath: /var/lib/stateport-control/agent-provider
+            purpose: agent-provider
+            sourceOwner: stateport-control
+            sourceGroup: stateport-control
+            mode: ro
+            environmentVariable: STATEPORT_AGENT_PROVIDER_DIR
         resources:
           memoryMaxBytes: 2147483648
           cpuQuotaPercent: 200

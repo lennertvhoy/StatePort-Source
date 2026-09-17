@@ -52,3 +52,37 @@ def test_rehearsal_smoke_failure_writes_failed_receipt_and_snapshots() -> None:
     assert receipt2["result"] == "failed"
     assert "ssh down" in receipt2["failureSnapshotsError"]
     assert receipt2["phases"]["install-services"]["ok"] is False
+
+
+def test_candidate_mirror_smoke_failure_keeps_candidate_class_and_fails() -> None:
+    """A failed mirror-lane smoke must stay candidate-mirror, never promote."""
+
+    class StubVM:
+        _record_smoke_failure = VM._record_smoke_failure
+
+        def _collect_failure_snapshots(self, receipt):  # noqa: ANN001
+            receipt["failureSnapshots"] = {}
+
+        def _collect_diagnostics(self, receipt):  # noqa: ANN001
+            pass
+
+    receipt: dict[str, Any] = {
+        "result": "running",
+        "mode": "prepublication-mirror",
+        "evidenceClass": "candidate_mirror",
+        "transportClass": "prepublication-mirror",
+        "identityClass": "candidate-mirror",
+        "ownerPathQualification": False,
+        "publicTransportBoundary": False,
+        "phases": {"install-services": {"ok": False}},
+    }
+    StubVM()._record_smoke_failure(
+        receipt, "install-services", ValueError("installed execution host unavailable")
+    )
+    assert receipt["result"] == "failed"
+    assert receipt["evidenceClass"] == "candidate_mirror"
+    assert receipt["transportClass"] == "prepublication-mirror"
+    assert receipt["identityClass"] == "candidate-mirror"
+    assert receipt["ownerPathQualification"] is False
+    assert receipt["publicTransportBoundary"] is False
+    assert receipt["phases"]["install-services"]["ok"] is False
