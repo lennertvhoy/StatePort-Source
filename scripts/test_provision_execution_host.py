@@ -4077,12 +4077,34 @@ def test_workspace_publication_initializes_v2_once_and_refuses_legacy_migration(
     assert path.read_bytes() == legacy
 
 
-def test_current_default_topology_does_not_activate_unqualified_workspace_transport():
+def test_current_default_topology_activates_reviewed_workspace_authority_transport():
     import yaml
     topology = yaml.safe_load((ROOT / "config/release-topology.v1.yaml").read_text())
     serialized = json.dumps(topology)
+    # The bindings transport is projected by the release contract from the
+    # reviewed workspace-authority mount itself; the topology never
+    # hand-declares it.
     assert "STATEPORT_APPLICATION_WORKSPACE_BINDINGS" not in serialized
-    assert "workspace-authority" not in serialized
+    web = next(
+        service
+        for target in topology["targets"]
+        for service in target["services"]
+        if service["serviceId"] == "stateport-web"
+    )
+    # Field-for-field equality with the contract's expected workspace mount
+    # (contract.py expected_workspace_mount): the reviewed read-only
+    # workspace-authority transport MUST be active in the real topology.
+    expected_workspace_mount = {
+        "name": "workspace-authority",
+        "hostPath": "/etc/stateport/workspace-authority",
+        "mountPath": "/run/stateport-workspace-authority",
+        "purpose": "workspace-authority",
+        "sourceOwner": "root",
+        "sourceGroup": "root",
+        "mode": "ro",
+        "environmentVariable": "STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY",
+    }
+    assert expected_workspace_mount in web["readOnlyHostMounts"]
 
 
 def test_workspace_issuer_derives_transport_from_actual_default_grant():

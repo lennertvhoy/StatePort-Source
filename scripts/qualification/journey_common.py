@@ -196,7 +196,10 @@ def validate_native_j1_receipt(
     This is the native half of :func:`validate_retained_candidate_inputs`,
     factored out so a guest-side follow-on driver can enforce exactly the same
     receipt identity, lane class, phase set, and machine/Windows identity
-    binding without a candidate build/qualification directory.  The refusal
+    binding without a candidate build/qualification directory.  The phase set
+    accepts exactly the producer's two reviewed full-J1 shapes: the base phases
+    and the base phases plus the ``install-services``/``install-rerun-services``
+    smoke pair the current harness records after each install.  The refusal
     messages are the reviewed ones; callers must never weaken them.
 
     Returns the caller's building blocks: the retained ``binding``, the
@@ -270,11 +273,29 @@ def validate_native_j1_receipt(
             )
         required_phases.remove("public-transport-boundary")
         required_phases.add("prepublication-mirror-boundary")
+    elif isinstance(phases, dict) and "prepublication-mirror-boundary" in phases:
+        raise ValueError(
+            "owner-path receipt carries a prepublication-mirror-boundary phase; "
+            "mixed evidence is refused"
+        )
+    # The rehearsal harness (producer) has exactly two supported full-J1 phase
+    # shapes.  Older producer generations stop at the base phases; the current
+    # harness additionally records one installed-service smoke phase after each
+    # install phase (`install-services`, `install-rerun-services`).  Accept
+    # exactly one shape: a partial service pair, any unknown phase, any missing
+    # required phase, or any phase that did not pass is refused.  When the
+    # service phases are present they are always required and must pass, so the
+    # installed-service evidence is never weakened.
+    installed_service_phases = {"install-services", "install-rerun-services"}
+    accepted_shapes = (
+        frozenset(required_phases),
+        frozenset(required_phases | installed_service_phases),
+    )
     if (
         not isinstance(phases, dict)
-        or set(phases) != required_phases
+        or frozenset(phases) not in accepted_shapes
         or any(not isinstance(phases[name], dict) or phases[name].get("ok") is not True
-               for name in required_phases)
+               for name in phases)
     ):
         raise ValueError("retained full-J1 receipt does not contain every passing phase")
     lane_evidence = (
@@ -620,7 +641,7 @@ class JourneyReceipt:
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(out.suffix + ".part")
         tmp.write_text(json.dumps(self.document, indent=2, sort_keys=True))
-        tmp.rename(out)
+        tmp.replace(out)
 
 
 def discover_services(vm: VM) -> dict[str, dict[str, str]]:

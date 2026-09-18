@@ -1747,6 +1747,16 @@ def test_canonical_topology_declares_one_separate_wsl2_target() -> None:
             "environmentVariable": "STATEPORT_REPOSITORY_ROOTS",
         },
         CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT,
+        {
+            "name": "workspace-authority",
+            "hostPath": "/etc/stateport/workspace-authority",
+            "mountPath": "/run/stateport-workspace-authority",
+            "purpose": "workspace-authority",
+            "sourceOwner": "root",
+            "sourceGroup": "root",
+            "mode": "ro",
+            "environmentVariable": "STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY",
+        },
     ]
     # The control plane's copy is separate from the execution host's daemon-
     # owned copy of the same operator material.

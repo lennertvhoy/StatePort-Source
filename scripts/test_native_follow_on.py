@@ -65,6 +65,11 @@ MIRROR_PHASES = (
 OWNER_PHASES = tuple(
     name for name in MIRROR_PHASES if name != "prepublication-mirror-boundary"
 ) + ("public-transport-boundary",)
+# Current producer shape: the harness records one installed-service smoke phase
+# after each install phase (install, install-rerun).
+INSTALLED_SERVICE_PHASES = ("install-services", "install-rerun-services")
+MIRROR_SERVICE_PHASES = MIRROR_PHASES + INSTALLED_SERVICE_PHASES
+OWNER_SERVICE_PHASES = OWNER_PHASES + INSTALLED_SERVICE_PHASES
 
 
 def _digest(text: str) -> str:
@@ -373,6 +378,25 @@ def test_load_staged_candidate_inputs_owner_path_lane(tmp_path) -> None:
     assert "ownerPathQualification" not in evidence
 
 
+@pytest.mark.parametrize(
+    ("transport", "prepublication_mirror", "phases"),
+    [
+        ("prepublication-mirror", True, MIRROR_SERVICE_PHASES),
+        ("owner-path", False, OWNER_SERVICE_PHASES),
+    ],
+)
+def test_load_staged_candidate_inputs_accepts_current_producer_phase_shape(
+    tmp_path, transport, prepublication_mirror, phases
+) -> None:
+    """The harness's installed-service phase pair is a supported J1 shape."""
+    site, j1, _ = _staged_inputs(tmp_path, transport=transport, phases=phases)
+    _, evidence = follow_on.load_staged_candidate_inputs(
+        j1, site, native_distro_name=DISTRO, prepublication_mirror=prepublication_mirror
+    )
+    assert evidence["rehearsalBaseline"]["distroName"] == DISTRO
+    assert evidence["fullJ1Receipt"] == str(j1)
+
+
 def test_load_staged_candidate_inputs_refuses_no_candidate_dir_requirement(tmp_path) -> None:
     """A staged site without a candidate/qualification dir is enough (no fabrication)."""
     site, j1, _ = _staged_inputs(tmp_path)
@@ -396,6 +420,16 @@ def test_load_staged_candidate_inputs_refuses_no_candidate_dir_requirement(tmp_p
          "identity does not match the candidate"),
         ({"phases_failed": ("install",)}, "does not contain every passing phase"),
         ({"extra_phases": ("unexpected",)}, "does not contain every passing phase"),
+        # Both producer shapes are exact: the installed-service pair must be
+        # whole and passing, and it never licenses arbitrary extra phases.
+        ({"phases": MIRROR_PHASES + ("install-services",)},
+         "does not contain every passing phase"),
+        ({"phases": MIRROR_SERVICE_PHASES, "phases_failed": ("install-services",)},
+         "does not contain every passing phase"),
+        ({"phases": MIRROR_SERVICE_PHASES, "phases_failed": ("install-rerun-services",)},
+         "does not contain every passing phase"),
+        ({"phases": MIRROR_SERVICE_PHASES, "extra_phases": ("unexpected",)},
+         "does not contain every passing phase"),
         ({"transport": "owner-path"}, "not a candidate-mirror prepublication receipt"),
         ({"baseline_overrides": {"distroName": "StatePort-Rehearsal-other"}},
          "not a candidate-mirror prepublication receipt"),
@@ -418,6 +452,18 @@ def test_load_staged_candidate_inputs_refuses_mixed_public_boundary(tmp_path) ->
     with pytest.raises(ValueError, match="mixed evidence is refused"):
         follow_on.load_staged_candidate_inputs(
             j1, site, native_distro_name=DISTRO, prepublication_mirror=True
+        )
+
+
+def test_load_staged_candidate_inputs_refuses_mixed_mirror_boundary_on_owner_path(tmp_path) -> None:
+    """The lane refusal is symmetric: an owner-path receipt carries no mirror phase."""
+    site, j1, _ = _staged_inputs(
+        tmp_path, transport="owner-path",
+        extra_phases=("prepublication-mirror-boundary",),
+    )
+    with pytest.raises(ValueError, match="mixed evidence is refused"):
+        follow_on.load_staged_candidate_inputs(
+            j1, site, native_distro_name=DISTRO, prepublication_mirror=False
         )
 
 
@@ -917,3 +963,23 @@ def test_validate_native_j1_receipt_returns_lane_evidence(tmp_path) -> None:
     assert native["baseline"]["distroName"] == DISTRO
     assert native["binding"]["bootstrapDigest"].startswith("sha256:")
     assert native["fullJ1ReceiptSha256"].startswith("sha256:")
+
+
+def test_journey_receipt_write_overwrites_existing_file(tmp_path) -> None:
+    # Regression: on Windows, Path.rename raises WinError 183 when the target
+    # exists, so a retry (for example a preflight-failure receipt for a path
+    # that already carries an earlier receipt) crashed before recording the
+    # failure. Atomic replacement must overwrite in place on both platforms.
+    out = tmp_path / "follow-on-receipt.json"
+    first = journey_common.JourneyReceipt("native-follow-on-journey", {"attempt": 1})
+    first.document["result"] = "running"
+    first.write(out)
+    assert json.loads(out.read_text(encoding="utf-8"))["binding"] == {"attempt": 1}
+
+    second = journey_common.JourneyReceipt("native-follow-on-journey", {"attempt": 2})
+    second.document["result"] = "failed"
+    second.write(out)
+    replaced = json.loads(out.read_text(encoding="utf-8"))
+    assert replaced["binding"] == {"attempt": 2}
+    assert replaced["result"] == "failed"
+    assert not out.with_suffix(out.suffix + ".part").exists()

@@ -235,6 +235,14 @@ targets:
             sourceGroup: stateport-control
             mode: ro
             environmentVariable: STATEPORT_AGENT_PROVIDER_DIR
+          - name: workspace-authority
+            hostPath: /etc/stateport/workspace-authority
+            mountPath: /run/stateport-workspace-authority
+            purpose: workspace-authority
+            sourceOwner: root
+            sourceGroup: root
+            mode: ro
+            environmentVariable: STATEPORT_WORKSPACE_AUTHORITY_DIRECTORY
         resources:
           memoryMaxBytes: 2147483648
           cpuQuotaPercent: 200
