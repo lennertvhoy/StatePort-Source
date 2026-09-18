@@ -69,7 +69,7 @@ executionHostAlpine:
     conmon: 2.2.1-r0
     container-libs: 0.69.1-r0
     crun: 1.28-r0
-    glib: 2.88.3-r0
+    glib: 2.90.0-r0
     json-c: 0.19-r1
     libblkid: 2.42.3-r1
     libbsd: 0.12.2-r0
@@ -202,7 +202,7 @@ definitions:
   apps/worker/Dockerfile: sha256:4fc27944b9f35c9604b596baf4424659b3ed1a6e7c18a406d82e399ff0de317a
   apps/runner/Dockerfile: sha256:3bb9c0535d80d683dfe289958020825d78c7f4cd777e39ab49797ebd3902d881
   images/stateport-dev-workspace/Containerfile: sha256:818f92e2811f92bb6269287390e9d7e172e44b0bca2befd64de74289c28821d0
-  images/stateport-execution-host/Containerfile: sha256:fe3613986e3cda87e49d73716a0489147e2fc1fb336c2f8084e18eca33ca2823
+  images/stateport-execution-host/Containerfile: sha256:3b95f44841ebec6de45a22c93d86e12b21dc743ffd97511a0bf3c089e5e586da
   images/stateport-playwright/Containerfile: sha256:1e305b76d9a6ead773883da14b1a57b08d2df8057f1ce8cb4d5ea9e7555f3906
   images/packaged-content.v1.yaml: sha256:1014e6e05083703b45c4f89b26322ff1bbe40d5a1a95891530195cf907531f48
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
