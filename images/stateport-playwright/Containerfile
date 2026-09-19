@@ -55,7 +55,10 @@ RUN export HOME=/tmp/stateport-build-home \
 
 # The pinned Playwright base currently carries Chrome 151.0.7922.34. Replace
 # only that browser payload with digest-pinned Chrome for Testing153.0.8010.36.
-# Qualification must use this exact payload with the pinned Playwright runtime.
+# The base's firefox/webkit payloads are never referenced by the product (the
+# journey drives the Chrome payload only) and are removed as dead vulnerable
+# surface rather than carried unpatched. Qualification must use this exact
+# payload with the pinned Playwright runtime.
 RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
        -o /tmp/chrome-linux64-153.0.8010.36.zip \
        https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.36/linux64/chrome-linux64.zip \
@@ -68,6 +71,8 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
     && rm -rf /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
     && unzip -q /tmp/chrome-linux64-153.0.8010.36.zip -d /tmp \
     && mv /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
+    && rm -rf /ms-playwright/firefox-* /ms-playwright/webkit-* \
+    && test -z "$(ls -d /ms-playwright/firefox-* /ms-playwright/webkit-* 2>/dev/null)" \
     && test -x /ms-playwright/chromium-1234/chrome-linux64/chrome \
     && rm -f /tmp/chrome-linux64-153.0.8010.36.zip
 

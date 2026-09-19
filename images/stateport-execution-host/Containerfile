@@ -4,16 +4,16 @@ RUN apk add --no-cache git=2.52.0-r0 \
     && mkdir -p /tmp/podman-source /out \
     && git -C /tmp/podman-source init -q \
     && git -C /tmp/podman-source remote add origin https://github.com/podman-container-tools/podman.git \
-    && git -C /tmp/podman-source fetch --depth 1 origin 93dbfd0d86ee57f8f91801f61ce57dd880a4725f \
+    && git -C /tmp/podman-source fetch --depth 1 origin c593b672bf3db1173aebea565ebf1a724ea196dc \
     && git -C /tmp/podman-source checkout -q --detach FETCH_HEAD \
-    && git -C /tmp/podman-source archive --format=tar --prefix=podman-93dbfd0d86ee57f8f91801f61ce57dd880a4725f/ HEAD > /tmp/podman-93dbfd0d.tar \
-    && echo "a8f31ff8e010d23e2fc8a478caff694b9ac91e94e7eb661250c72f9e6bed1a0d  /tmp/podman-93dbfd0d.tar" | sha256sum -c - \
-    && tar -xf /tmp/podman-93dbfd0d.tar -C /tmp/podman-source --strip-components=1 \
+    && git -C /tmp/podman-source archive --format=tar --prefix=podman-c593b672bf3db1173aebea565ebf1a724ea196dc/ HEAD > /tmp/podman-c593b672.tar \
+    && echo "171238512538a0d6f17c95c1ca132ed46fd2bf3281d3a6c18e88bc9915ed9763  /tmp/podman-c593b672.tar" | sha256sum -c - \
+    && tar -xf /tmp/podman-c593b672.tar -C /tmp/podman-source --strip-components=1 \
     && cd /tmp/podman-source \
     && GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
       -mod=readonly -trimpath -buildvcs=false \
       -tags "remote exclude_graphdriver_btrfs containers_image_openpgp" \
-      -ldflags "-s -w -X github.com/containers/podman/v5/libpod/define.gitCommit=93dbfd0d86ee57f8f91801f61ce57dd880a4725f -X github.com/containers/podman/v5/libpod/define.buildInfo=1781276973 -X github.com/containers/podman/v5/libpod/config._installPrefix=/usr -X github.com/containers/podman/v5/libpod/config._etcDir=/etc -X github.com/containers/podman/v5/pkg/systemd/quadlet._binDir=/usr/bin" \
+      -ldflags "-s -w -X github.com/containers/podman/v5/libpod/define.gitCommit=c593b672bf3db1173aebea565ebf1a724ea196dc -X github.com/containers/podman/v5/libpod/define.buildInfo=1789570405 -X github.com/containers/podman/v5/libpod/config._installPrefix=/usr -X github.com/containers/podman/v5/libpod/config._etcDir=/etc -X github.com/containers/podman/v5/pkg/systemd/quadlet._binDir=/usr/bin" \
       -o /out/podman-remote ./cmd/podman \
     && go version -m /out/podman-remote | grep -F "go1.26.6" \
     && grep -aqF "golang.org/x/crypto/ssh.NewClientConn" /out/podman-remote \
@@ -22,7 +22,7 @@ RUN apk add --no-cache git=2.52.0-r0 \
        else \
          status=$?; test "$status" -eq 1; \
        fi \
-    && /out/podman-remote --version | grep -Fx "podman-remote version 5.8.3"
+    && /out/podman-remote --version | grep -Fx "podman-remote version 5.8.7"
 
 FROM docker.io/library/python:3.13-alpine3.23@sha256:75f27d686432419c9d42420b2b9ef605868c7a0682a6be10a6601fad46c2df01
 
@@ -51,7 +51,7 @@ LABEL org.opencontainers.image.title="StatePort Execution Host" \
 
 # The daemon talks only to the execution user's own rootless Podman socket
 # (mounted at /run/stateport-engine/podman.sock by the stable-host Quadlet).
-# podman-remote is built from the exact v5.8.3 source with Go 1.26.6; no engine
+# podman-remote is built from the exact v5.8.7 source with Go 1.26.6; no engine
 # runs inside this image. The Alpine package is not installed.
 # The container must never observe a control-plane socket.
 # The runtime crypto/sqlite libraries come from the python base image's own

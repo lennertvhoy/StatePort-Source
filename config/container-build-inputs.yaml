@@ -141,10 +141,10 @@ buildToolchains:
 
 sourceBuiltTools:
   podman-remote:
-    version: 5.8.3
-    sourceCommit: 93dbfd0d86ee57f8f91801f61ce57dd880a4725f
+    version: 5.8.7
+    sourceCommit: c593b672bf3db1173aebea565ebf1a724ea196dc
     uri: https://github.com/podman-container-tools/podman.git
-    digest: sha256:a8f31ff8e010d23e2fc8a478caff694b9ac91e94e7eb661250c72f9e6bed1a0d
+    digest: sha256:171238512538a0d6f17c95c1ca132ed46fd2bf3281d3a6c18e88bc9915ed9763
     buildToolchain: golang-1.26.6-alpine3.23
     installPath: /usr/bin/podman-remote
 
@@ -202,8 +202,8 @@ definitions:
   apps/worker/Dockerfile: sha256:4fc27944b9f35c9604b596baf4424659b3ed1a6e7c18a406d82e399ff0de317a
   apps/runner/Dockerfile: sha256:3bb9c0535d80d683dfe289958020825d78c7f4cd777e39ab49797ebd3902d881
   images/stateport-dev-workspace/Containerfile: sha256:818f92e2811f92bb6269287390e9d7e172e44b0bca2befd64de74289c28821d0
-  images/stateport-execution-host/Containerfile: sha256:3b95f44841ebec6de45a22c93d86e12b21dc743ffd97511a0bf3c089e5e586da
-  images/stateport-playwright/Containerfile: sha256:1e305b76d9a6ead773883da14b1a57b08d2df8057f1ce8cb4d5ea9e7555f3906
+  images/stateport-execution-host/Containerfile: sha256:d6db3b89b54d14efb614c73d249626922ab1651214671479514cfa8496ab257e
+  images/stateport-playwright/Containerfile: sha256:13af4b32ba753ffe9bc6c8ed003e3af9036fd16bb742861aa2a3b43df8dbbd61
   images/packaged-content.v1.yaml: sha256:1014e6e05083703b45c4f89b26322ff1bbe40d5a1a95891530195cf907531f48
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
 
