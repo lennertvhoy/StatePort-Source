@@ -162,6 +162,93 @@ def readiness_projection(readiness: object) -> dict:
     }
 
 
+
+# Safety valves only.  A bump in container/mount-source count is reported
+# explicitly in an ``omitted`` entry rather than silently dropping evidence.
+_MAX_CONTAINERS = 40
+_MAX_MOUNT_SOURCES = 200
+
+
+def _collect_container_diagnostics(vm: object) -> list[dict[str, object]]:
+    """Per-container identity + mount-source ownership for readiness refusals.
+
+    vm-r25/r26 lesson: a truncated --latest probe could not answer WHO owns the
+    persistent-app workspace. Enumerate every container (no --latest), record
+    name/image/state and the FULL parsed mount list, and stat every unique mount
+    source on the guest so the uid/gid contrast (root vs stateport-control vs
+    65534) is in the receipt. Caps exist only as safety valves and are reported
+    in an explicit ``omitted`` entry, so no bound silently hides a container or
+    a source. Every ssh step is best-effort; diagnostics never mask the refusal.
+    """
+
+    def _sh(argv: str) -> str:
+        try:
+            probe = vm.ssh(argv, check=False, timeout=90)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 - diagnostics never mask the refusal
+            return f"probe-failed: {exc}"
+        return (probe.stdout or probe.stderr or "").strip()
+
+    entries: list[dict[str, object]] = []
+    ps = _sh(
+        "run_control podman ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Status}}' "
+        "2>/dev/null || su - stateport-control -c \"podman ps -a "
+        "--format '{{.ID}} {{.Names}} {{.Image}} {{.Status}}'\" 2>&1"
+    )
+    rows = [r for r in ps.splitlines() if len(r.split(None, 3)) == 4]
+    omitted_containers = max(0, len(rows) - _MAX_CONTAINERS)
+    sources: list[str] = []
+    for row in rows[:_MAX_CONTAINERS]:
+        cid, name, image, status = row.split(None, 3)
+        mounts_raw = _sh(
+            f"run_control podman inspect --format '{{{{json .Mounts}}}}' {cid} "
+            f"2>/dev/null || su - stateport-control -c "
+            f"\"podman inspect --format '{{{{json .Mounts}}}}' {cid}\" 2>&1"
+        )
+        parsed = True
+        try:
+            mounts = json.loads(mounts_raw)
+            assert isinstance(mounts, list)
+        except (ValueError, AssertionError):
+            mounts = []
+            parsed = False
+        for mount in mounts:
+            if not isinstance(mount, dict):
+                continue
+            # podman's Go struct emits the capitalised "Source" (the same shape
+            # the agent-workspace mount parser reads); accept the lower-case
+            # spelling only as a tolerated fallback so a shape drift is still
+            # captured instead of silently dropping the ownership evidence.
+            source = mount.get("Source")
+            if not isinstance(source, str):
+                source = mount.get("source")
+            if isinstance(source, str) and source:
+                sources.append(source)
+        entry: dict[str, object] = {
+            "id": cid,
+            "name": name,
+            "image": image,
+            "status": status,
+            "mounts": mounts,
+        }
+        if not parsed:
+            # The probe did not return parseable JSON; keep the raw text so the
+            # refusal is diagnosable instead of collapsing to an empty list.
+            entry["mountsRaw"] = mounts_raw
+        entries.append(entry)
+    unique_sources = list(dict.fromkeys(sources))
+    omitted_sources = max(0, len(unique_sources) - _MAX_MOUNT_SOURCES)
+    ownership: list[str] = []
+    for source in unique_sources[:_MAX_MOUNT_SOURCES]:
+        ownership.append(_sh(f"stat -c '%u:%g %a %n' -- '{source}' 2>&1"))
+    entries.append({"identity": _sh("id -u; id -u stateport-control 2>&1")})
+    if ownership:
+        entries.append({"mountSourceOwnership": ownership})
+    if omitted_containers or omitted_sources:
+        entries.append(
+            {"omitted": {"containers": omitted_containers, "mountSources": omitted_sources}}
+        )
+    return entries
+
 def _readiness_ready(projection: dict) -> bool:
     provider = projection["providerDirectory"]
     return bool(
@@ -393,13 +480,47 @@ def execute_agent_result_stage(
                 "the agent-run mutation boundary would refuse it"
             )
 
-        readiness = readiness_projection(web.request("GET", "/v1/agent/status"))
-        ready = _readiness_ready(readiness)
-        receipt.record("agent-readiness", ready, **readiness)
+        # The agent surface reports readiness through its own refusal list.
+        # vm-r24/vm-r25/vm-r26 lesson 2026-09-21/22: the refusal was DURABLE and
+        # identical across every retry (agent_workspace_authority_invalid).  The
+        # earlier "a single un-retried GET raced the stage's own receipt
+        # finalization" explanation was DISPROVEN and must not be reused to
+        # justify another replay.  Sampling is retained only to tolerate a
+        # genuine control-plane settle immediately after a just-finished run; a
+        # repeated refusal is the real wall, so each failed attempt
+        # self-diagnoses: the full refusals, the raw readiness document and the
+        # control-plane container mounts (rootless control-plane podman) go to
+        # stdout (stage heartbeat tail) and to a durable guest-side file.
+        readiness = None
+        ready = False
+        attempts = 0
+        diag_lines: list[str] = []
+        for attempts in range(1, 5):
+            readiness_raw = web.request("GET", "/v1/agent/status")
+            readiness = readiness_projection(readiness_raw)
+            ready = _readiness_ready(readiness)
+            if ready:
+                break
+            diag = _collect_container_diagnostics(vm)
+            line = (
+                f"[agent-readiness] attempt={attempts} ready=False "
+                f"refusals={json.dumps(readiness.get('refusals'), sort_keys=True)} "
+                f"readiness={json.dumps(readiness_raw, sort_keys=True, default=str)} "
+                f"containers={json.dumps(diag, sort_keys=True, default=str)}"
+            )
+            diag_lines.append(line)
+            print(line, flush=True)
+            time.sleep(20)
+        try:
+            Path("C:/StatePort-r2/readiness-diag.txt").write_text(
+                "\n".join(diag_lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        receipt.record("agent-readiness", ready, attempts=attempts, **readiness)
         if not ready:
             raise AssertionError(
                 "the installed agent surface is not ready: "
-                + json.dumps(readiness["refusals"], sort_keys=True)[:600]
+                + json.dumps(readiness["refusals"], sort_keys=True)
             )
 
         submitted = web.request(

@@ -1634,7 +1634,11 @@ def verify_podman_package_bundle(
                     if compared.returncode != 0:
                         raise InstallerRefusal(
                             "package_baseline_invalid",
-                            f"installed {name} would require a downgrade or ambiguous replacement",
+                            "installed {} version {} is not below sealed {}; "
+                            "downgrade or ambiguous replacement refused "
+                            "(drifted past pin? unattended-upgrades?)".format(
+                                name, fields[1], record["version"]
+                            ),
                         )
                     action = "upgrade"
                 current_version: str | None = fields[1]

@@ -484,8 +484,8 @@ def render(
     package_downloads: list[str] = []
     package_install: list[str] = [
         'sudo -v',
-        'sudo apt-get update -o DPkg::Lock::Timeout=300 || { printf "StatePort apt update retry after lock contention\\n" >&2; sleep 10; sudo apt-get update -o DPkg::Lock::Timeout=300; }',
-        'sudo apt-get install -y -o DPkg::Lock::Timeout=300 ca-certificates curl python3 python3-venv podman skopeo uidmap slirp4netns fuse-overlayfs dbus-user-session',
+        'sudo apt-get update -o DPkg::Lock::Timeout=900 || { printf "StatePort apt update retry after lock contention\\n" >&2; sleep 10; sudo apt-get update -o DPkg::Lock::Timeout=900; }',
+        'sudo apt-get install -y -o DPkg::Lock::Timeout=900 ca-certificates curl python3 python3-venv podman skopeo uidmap slirp4netns fuse-overlayfs dbus-user-session',
     ]
     runtime_post_checks = [
         'sudo loginctl enable-linger "$USER"',
@@ -541,8 +541,8 @@ def render(
             # by apt metadata): a negative not-installed record makes
             # dpkg-query --show report empty fields and the preflight refuse.
             'sudo -v',
-            'sudo apt-get update -o DPkg::Lock::Timeout=300 || { printf "StatePort apt update retry after lock contention\\n" >&2; sleep 10; sudo apt-get update -o DPkg::Lock::Timeout=300; }',
-            'sudo apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=300 ca-certificates fuse3 nftables libglib2.0-0t64 libgpgme11t64 libdevmapper1.02.1 libfuse3-3 libseccomp2 libsqlite3-0 libaudit1 libselinux1 dbus-broker dbus-session-bus-common libpam-systemd systemd python3 python3-venv',
+            'sudo apt-get update -o DPkg::Lock::Timeout=900 || { printf "StatePort apt update retry after lock contention\\n" >&2; sleep 10; sudo apt-get update -o DPkg::Lock::Timeout=900; }',
+            'sudo apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=900 ca-certificates fuse3 nftables libglib2.0-0t64 libgpgme11t64 libdevmapper1.02.1 libfuse3-3 libseccomp2 libsqlite3-0 libaudit1 libselinux1 dbus-broker dbus-session-bus-common libpam-systemd systemd python3 python3-venv',
             'python3 "$tmp/installer" --verify-podman-package-bundle \\\n+  ' + package_preflight_args + ' > "$tmp/podman-package-preflight.json"',
             'package_plan_digest=$(python3 - "$tmp/podman-package-preflight.json" <<\'PY\'\nimport json, re, sys\nvalue = json.load(open(sys.argv[1], encoding="utf-8"))\ndigest = value.get("packagePlanDigest", "")\nif re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:\n    raise SystemExit("invalid authenticated package plan")\nprint("Authenticated repository-free package plan:", digest, file=sys.stderr)\nfor name, action in sorted(value["transaction"].items()):\n    package = value["packages"][name]\n    current = action["currentVersion"] or "absent"\n    print(f"  {action[\'action\']}: {name} {current} -> {action[\'targetVersion\']} ({package[\'sha256\']}, {package[\'size\']} bytes)", file=sys.stderr)\nprint(digest, end="")\nPY\n)',
             'printf "Type install-packages to authorize this exact authenticated package plan: " >/dev/tty',
@@ -572,6 +572,12 @@ def render(
             # already authenticated the exact package set and digests and the
             # root re-verification matched the unprivileged admission.
             'sudo -n sh -c \'cd "$1/podman-package-bundle/packages" && dpkg -i -- *.deb\' sh "$root_package_dir"',
+            # Hold the sealed bundle at its signed versions so apt
+            # unattended-upgrades / component updaters cannot drift skopeo or a
+            # runtime dep past the pin between install and install-rerun
+            # (vm-r27 root cause: package_baseline_invalid on drifted skopeo).
+            # Names come from the authenticated preflight, never a hardcoded list.
+            'hold_packages="$(python3 -c \'import json,sys;d=json.load(open(sys.argv[1]));print(" ".join(sorted(d["packages"])))\' "$tmp/podman-package-preflight.json")" && sudo -n apt-mark hold $hold_packages && printf "StatePort held sealed packages: %s\\n" "$hold_packages"',
             'sudo -n rm -rf -- "$root_stage"; root_stage=',
             'python3 "$tmp/installer" --verify-installed-podman-packages --podman-package-preflight "$tmp/podman-package-preflight.json" > "$tmp/podman-package-installation.json"',
         ]

@@ -2055,7 +2055,7 @@ def test_wsl2_bootstrap_is_deterministic_pinned_and_one_command_ready(
     )
     # F15: apt waits out fresh-boot unattended-upgrades locks and retries the
     # update once instead of failing on "Could not get lock".
-    assert text.count("apt-get update -o DPkg::Lock::Timeout=300") == 2
+    assert text.count("apt-get update -o DPkg::Lock::Timeout=900") == 2
     assert "StatePort apt update retry after lock contention" in text
     # F10: after the privileged provisioner confines the invoking user into the
     # socket group, the user manager is restarted once so the keep-groups
@@ -2065,7 +2065,7 @@ def test_wsl2_bootstrap_is_deterministic_pinned_and_one_command_ready(
     ) < text.index('sudo -n systemctl restart "user@$(id -u).service"') < text.rindex(
         'python3 "$tmp/installer"'
     )
-    assert "apt-get install -y -o DPkg::Lock::Timeout=300" in text
+    assert "apt-get install -y -o DPkg::Lock::Timeout=900" in text
     # F16: the sudo timestamp is refreshed immediately before the sudo -n
     # stage; slow links can no longer expire it mid-run after partial work.
     assert text.count("sudo -v") == 2
@@ -2196,7 +2196,7 @@ def test_alpha11_bootstrap_authenticates_packages_before_sudo(
     assert "Type install-exact to authorize this exact plan" in text
     assert "--confirmed-plan-digest" in text
     assert " questing" not in text.casefold()
-    assert "apt-get install -y -o DPkg::Lock::Timeout=300" not in text
+    assert "apt-get install -y -o DPkg::Lock::Timeout=900" not in text
     assert "\n+  --" not in text
 
 
@@ -2253,6 +2253,13 @@ def test_alpha11_bootstrap_retains_signature_bundles_into_digest_slots_before_pr
     assert "python3-venv" in install_line
     assert "nftables" in install_line
     assert "libglib2.0-0t64" in install_line
+    # vm-r27 anti-drift: the sealed bundle must be apt-held immediately after
+    # its dpkg install, with hold names sourced from the authenticated
+    # preflight (no hardcoded package list).
+    hold = text.index("apt-mark hold $hold_packages")
+    dpkg_install = text.index('dpkg -i -- *.deb')
+    assert dpkg_install < hold
+    assert 'd[\"packages\"]' in text[hold - 400 : hold]
 
 
 def test_phantom_not_installed_podman_record_is_an_install_action(

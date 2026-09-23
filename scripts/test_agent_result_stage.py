@@ -843,6 +843,115 @@ def test_j4_runs_the_reboot_stage_after_a_successful_agent_result_stage(
     assert names.index("agent-result-stage") < names.index("driver-error")
 
 
+class _DiagnosticVM:
+    """Scripted guest for the readiness-refusal diagnostic collector."""
+
+    def __init__(self, rows: list[str], mounts: dict[str, str]) -> None:
+        self.rows = rows
+        self.mounts = mounts
+        self.commands: list[str] = []
+
+    def ssh(self, command, **_kwargs):
+        self.commands.append(command)
+        if "podman ps -a" in command:
+            return subprocess.CompletedProcess([], 0, "\n".join(self.rows) + "\n", "")
+        if "podman inspect" in command:
+            for cid, payload in self.mounts.items():
+                if f" {cid} " in command:
+                    return subprocess.CompletedProcess([], 0, payload + "\n", "")
+            return subprocess.CompletedProcess([], 1, "", "no such container")
+        if "stat -c" in command:
+            return subprocess.CompletedProcess([], 0, "1000:1000 755 /vol/x\n", "")
+        if "id -u" in command:
+            return subprocess.CompletedProcess([], 0, "1000\n1001\n", "")
+        raise AssertionError(f"unexpected ssh command: {command[:200]}")
+
+    def stat_targets(self) -> list[str]:
+        return [command for command in self.commands if "stat -c" in command]
+
+
+def _mounts_json(*sources: str, key: str = "Source") -> str:
+    return json.dumps(
+        [
+            {"Type": "bind", key: source, "Destination": f"/d{index}", "RW": False}
+            for index, source in enumerate(sources)
+        ]
+    )
+
+
+def test_collect_container_diagnostics_uses_capitalised_source_without_truncation() -> None:
+    # Five containers and four distinct sources: proves neither the old
+    # per-container cap (4) nor the old ownership cap (3) silently drops proof.
+    rows = [
+        f"{index:064x} stateport-c{index} image:tag Up {index} hours"
+        for index in range(1, 6)
+    ]
+    mounts = {
+        f"{1:064x}": _mounts_json(
+            "/vol/a", "/vol/b", "/vol/c", "/var/lib/stateport/agent-provider"
+        ),
+        f"{2:064x}": _mounts_json("/vol/a"),
+        f"{3:064x}": "not json at all",
+        f"{4:064x}": _mounts_json("/legacy", key="source"),
+        f"{5:064x}": _mounts_json(),
+    }
+    vm = _DiagnosticVM(rows, mounts)
+
+    entries = stage._collect_container_diagnostics(vm)
+
+    container_entries = [entry for entry in entries if "id" in entry]
+    assert len(container_entries) == 5
+    # Mounts are the full parsed list, never a truncated string.
+    first = container_entries[0]
+    assert isinstance(first["mounts"], list) and len(first["mounts"]) == 4
+    # A probe that does not parse keeps the raw text instead of losing it.
+    unparsed = container_entries[2]
+    assert unparsed["mounts"] == [] and isinstance(unparsed["mountsRaw"], str)
+    # Ownership is stat'd for every distinct source, capitalised and fallback.
+    stat_targets = vm.stat_targets()
+    for source in ("/vol/a", "/vol/b", "/vol/c",
+                   "/var/lib/stateport/agent-provider", "/legacy"):
+        assert any(f"'{source}'" in command for command in stat_targets)
+    ownership = [entry for entry in entries if "mountSourceOwnership" in entry]
+    assert len(ownership) == 1 and len(ownership[0]["mountSourceOwnership"]) == 5
+    # Under the safety valves nothing is reported as omitted.
+    assert not [entry for entry in entries if "omitted" in entry]
+
+
+def test_collect_container_diagnostics_reports_caps_explicitly(monkeypatch) -> None:
+    monkeypatch.setattr(stage, "_MAX_CONTAINERS", 2)
+    monkeypatch.setattr(stage, "_MAX_MOUNT_SOURCES", 1)
+    rows = [f"{index:064x} stateport-c{index} image:tag Up" for index in range(1, 4)]
+    mounts = {
+        f"{1:064x}": _mounts_json("/vol/a", "/vol/b"),
+        f"{2:064x}": _mounts_json(),
+        f"{3:064x}": _mounts_json(),
+    }
+    vm = _DiagnosticVM(rows, mounts)
+
+    entries = stage._collect_container_diagnostics(vm)
+
+    assert len([entry for entry in entries if "id" in entry]) == 2
+    omitted = [entry["omitted"] for entry in entries if "omitted" in entry]
+    assert omitted == [{"containers": 1, "mountSources": 1}]
+
+
+def test_readiness_projection_keeps_reason_and_detail_but_bounds_text() -> None:
+    projection = stage.readiness_projection(
+        {
+            "available": False,
+            "refusals": [
+                {"reason": "agent_workspace_authority_invalid", "detail": "x" * 900},
+                {"reason": 5, "detail": "ignored"},
+            ],
+        }
+    )
+    assert projection["available"] is False
+    refusal = projection["refusals"][0]
+    assert refusal["reason"] == "agent_workspace_authority_invalid"
+    assert len(refusal["detail"]) == 300
+
+
 def test_j4_without_the_flag_never_invokes_the_agent_result_stage(
     tmp_path, monkeypatch
 ) -> None:

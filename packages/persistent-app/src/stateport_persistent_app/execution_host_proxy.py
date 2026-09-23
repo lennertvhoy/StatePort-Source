@@ -430,7 +430,9 @@ class ExecutionHostProxy:
                 info = os.fstat(fd)
                 if trusted_owner and info.st_uid not in {0, self._bindings_owner_uid}:
                     raise ValueError("untrusted public authority owner")
-                if trusted_owner and info.st_mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX and info.st_uid == 0):
+                # Writability is verifiable in-namespace regardless of uid
+                # mapping, so it is enforced even where owner identity is not.
+                if info.st_mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX and info.st_uid == 0):
                     raise ValueError("unsafe public authority permissions")
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 1024 * 1024:
@@ -905,7 +907,11 @@ class ExecutionHostProxy:
                 status=503,
             ) from exc
         try:
-            raw = self._authority_document(path)
+            # In transport format the rootless container cannot verify the
+            # host-side owner through the uid map (host root projects as the
+            # unmapped identity); mirror the issuer path, which already skips
+            # the owner check there. Bindings format keeps the strict check.
+            raw = self._authority_document(path, trusted_owner=self._bindings_format != TRANSPORT_FORMAT)
         except (OSError, ValueError, TypeError) as exc:
             raise ExecutionHostProxyError(
                 "agent_workspace_authority_invalid",

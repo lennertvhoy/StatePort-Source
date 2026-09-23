@@ -1150,8 +1150,12 @@ rules:
   - scripts/render_wsl2_install_bootstrap.py
   - scripts/qualification/__init__.py
   - scripts/qualification/build_j1_candidate.py
-  - scripts/qualification/provider_sandbox_probe.py
+  - scripts/qualification/guest_choreography.py
   - scripts/qualification/journey_common.py
+  - scripts/qualification/local_authority_repro.py
+  - scripts/qualification/local_readiness_repro.py
+  - scripts/qualification/observe_guest.py
+  - scripts/qualification/provider_sandbox_probe.py
   - scripts/qualification/run_agent_result_stage.py
   - scripts/qualification/run_journey_j2.py
   - scripts/qualification/run_journey_j3.py
@@ -1249,6 +1253,7 @@ rules:
   - scripts/test_governed_mutations.py
   - scripts/test_governed_restore.py
   - scripts/test_governed_runner.py
+  - scripts/test_guest_choreography.py
   - scripts/test_historical_benchmark.py
   - scripts/test_install_no_checkout.py
   - scripts/test_instance_backup.py
@@ -1266,6 +1271,7 @@ rules:
   - scripts/test_model_gateway.py
   - scripts/test_nix_project_registration.py
   - scripts/test_observability.py
+  - scripts/test_observe_guest.py
   - scripts/test_oidc_auth.py
   - scripts/test_packaged_content_boundary.py
   - scripts/test_packaged_product_identity.py
@@ -1579,6 +1585,7 @@ rules:
   - evidence/one-line-release-001/handoff-20260917-step5-native.md
   - evidence/one-line-release-001/handoff-20260918-successor-cycle.md
   - evidence/one-line-release-001/release-continuation-handoff-20260912.md
+  - evidence/one-line-release-001/handoff-20260919-step4-signing-blocked.md
   - evidence/one-line-release-001/stage1-advisory-notice-completion-20260912.md
   - evidence/one-line-release-001/stage1-continuation-handoff-20260912b.md
   - evidence/one-line-release-001/stage1-f3-advisory-consolidation-r1.md
@@ -1595,6 +1602,21 @@ rules:
   - evidence/one-line-release-001/stage1-producer-build-procedure-r2.md
   - evidence/one-line-release-001/standard-source-and-notices-20260911.md
   - evidence/one-line-release-001/summary.md
+  - evidence/one-line-release-001/admission-repair-20260921.md
+  - evidence/one-line-release-001/audits/audit-20260922.md
+  - evidence/one-line-release-001/audits/audit-20260923.md
+  - evidence/one-line-release-001/autonomy-convergence-20260920.md
+  - evidence/one-line-release-001/checkpoint-history-through-20260920.md
+  - evidence/one-line-release-001/external-review-20260922-opencode.md
+  - evidence/one-line-release-001/local-rootless-auth-repro-20260922.md
+  - evidence/one-line-release-001/state-addenda-archive-20260922.md
+  - evidence/one-line-release-001/visual-observer-smoke.json
+  - evidence/one-line-release-001/vm-r23-harness-diagnosis-20260921.md
+  - evidence/one-line-release-001/vm-r23-refusal-diagnosis-20260921.md
+  - evidence/one-line-release-001/vm-r23-wsl2-postmortem-20260921.md
+  - evidence/one-line-release-001/vm-r24-run-state-20260921.md
+  - evidence/one-line-release-001/wsl1-wsl2-discriminator-runbook-20260921.md
+  - evidence/one-line-release-001/r7d-build-evidence-20260923.md
   - evidence/one-line-release-001/w15c-agent-run-receipt.json
   - evidence/one-line-release-001/w15c-agent-run-refusal-grant-budget.json
   - evidence/one-line-release-001/w15c-agent-run-refusal-ledger-recovery.json
