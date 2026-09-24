@@ -83,7 +83,9 @@ LABEL org.opencontainers.image.title="StatePort Web" \
 # libcrypto3/libssl3/sqlite-libs are exact-pinned upgrades of base-image
 # packages to the currently published v3.23 security releases; the pins fail
 # closed when the repositories roll forward, so a later rebuild can never
-# silently drift to unreviewed bytes.
+# silently drift to unreviewed bytes. libexpat is the same fail-closed
+# security upgrade of the Git dependency chain to the maintained v3.23
+# release that fixes CVE-2026-93990 (2.8.5-r0).
 # libstdc++/libgcc are the C++ runtime the pinned musl OpenCode binary links
 # against (the Alpine python base omits them); they are exact-pinned for the
 # same fail-closed reason.
@@ -91,6 +93,7 @@ RUN apk add --no-cache \
       git=2.52.0-r0 \
       bubblewrap=0.12.0-r0 \
       libcrypto3=3.5.8-r0 \
+      libexpat=2.8.5-r0 \
       libgcc=15.2.0-r2 \
       libssl3=3.5.8-r0 \
       libstdc++=15.2.0-r2 \

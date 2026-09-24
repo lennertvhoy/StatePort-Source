@@ -1617,6 +1617,23 @@ rules:
   - evidence/one-line-release-001/vm-r24-run-state-20260921.md
   - evidence/one-line-release-001/wsl1-wsl2-discriminator-runbook-20260921.md
   - evidence/one-line-release-001/r7d-build-evidence-20260923.md
+  - evidence/one-line-release-001/r7g-build-evidence-20260924.md
+  - evidence/one-line-release-001/r7i-build-evidence-20260924.md
+  - evidence/one-line-release-001/candidate-r14-diagnosis-20260924.md
+  - evidence/one-line-release-001/audits/audit-20260924.md
+  - evidence/one-line-release-001/bundle-r12-evidence-20260923.md
+  - evidence/one-line-release-001/eadf7125-public-snapshot-evidence-20260923.md
+  - evidence/one-line-release-001/evidence-r7e-r12-r2-expiring-db-20260924.md
+  - evidence/one-line-release-001/evidence-r7e-r12-review-20260923.md
+  - evidence/one-line-release-001/evidence-r7e-r12-stdout-death-20260923.md
+  - evidence/one-line-release-001/phase4-r8-repin-dryrun-failures-20260923.md
+  - evidence/one-line-release-001/phase4-r8-repin-evidence-20260923.md
+  - evidence/one-line-release-001/phase4-r8-signing-admission-blocker-20260923.md
+  - evidence/one-line-release-001/phase4-r9-guard-prep-evidence-20260923.md
+  - evidence/one-line-release-001/phase4-r9-repin-review-20260923.md
+  - evidence/one-line-release-001/r7-bundle-public-authority-refusal-20260923.md
+  - evidence/one-line-release-001/r7e-build-evidence-20260923.md
+  - evidence/one-line-release-001/source-publication-ff5330f-20260923.md
   - evidence/one-line-release-001/w15c-agent-run-receipt.json
   - evidence/one-line-release-001/w15c-agent-run-refusal-grant-budget.json
   - evidence/one-line-release-001/w15c-agent-run-refusal-ledger-recovery.json

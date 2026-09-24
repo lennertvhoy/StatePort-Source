@@ -43,6 +43,8 @@ alpinePackages:
   # python base image's own packages (the upstream rebuilt tag still ships
   # 3.5.7-r0/3.51.2-r0); every alpine-based runtime image pins the same
   # versions against the base's default v3.23 repositories.
+  # libexpat is the exact-pinned security upgrade of the Git dependency chain
+  # to the maintained v3.23 release fixing CVE-2026-93990 (2.8.5-r0).
   # libstdc++/libgcc are the C++ runtime the pinned musl OpenCode binary links
   # against (the Alpine python web base omits them); exact-pinned for the same
   # fail-closed reason.
@@ -50,6 +52,7 @@ alpinePackages:
     git: 2.52.0-r0
     bubblewrap: 0.12.0-r0
     libcrypto3: 3.5.8-r0
+    libexpat: 2.8.5-r0
     libgcc: 15.2.0-r2
     libssl3: 3.5.8-r0
     libstdc++: 15.2.0-r2
@@ -198,7 +201,7 @@ browserAssets:
 
 definitions:
   apps/api/Dockerfile: sha256:b99f3541983ab4d2ad5057249c2c54422d4356042ae1fc621338e87d351b7219
-  apps/web/Dockerfile: sha256:97936e5625fc5a75a3e4c9c6264fbe7daf098ccc12f61b9d6520a9166d41a52b
+  apps/web/Dockerfile: sha256:d2747d898b3e767d54457c8b052e0dc560a17d07d00a122659c6a3b0036e2385
   apps/worker/Dockerfile: sha256:4fc27944b9f35c9604b596baf4424659b3ed1a6e7c18a406d82e399ff0de317a
   apps/runner/Dockerfile: sha256:3bb9c0535d80d683dfe289958020825d78c7f4cd777e39ab49797ebd3902d881
   images/stateport-dev-workspace/Containerfile: sha256:818f92e2811f92bb6269287390e9d7e172e44b0bca2befd64de74289c28821d0

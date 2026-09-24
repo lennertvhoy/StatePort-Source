@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -25,6 +26,7 @@ from build_public_release_bundle import (
     _python_build_environment,
     _release_manifest,
 )
+from public_snapshot_audit import INPUT_FORMAT, RIGHTS_FORMAT, audit_public_snapshot
 from validate_candidate_provenance import (
     CandidateProvenanceError,
     _verify_updater_wheel,
@@ -170,6 +172,248 @@ def _candidate(tmp_path: Path) -> tuple[Path, str, str]:
     return candidate, _git(candidate, "rev-parse", "HEAD"), _git(candidate, "rev-parse", "HEAD^{tree}")
 
 
+def test_rebind_publication_audit_updates_public_head_and_receipt_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "audit-input.json").write_text(
+        json.dumps({"git": {"expectedHead": "old-head"}}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (evidence / "materialization-receipt.json").write_text(
+        json.dumps(
+            {
+                "candidateHead": "old-head",
+                "candidateTree": "old-tree",
+                "auditReportDigest": "sha256:old",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = {"status": "passed", "gitIdentity": {"verifiedHead": "public-head"}}
+    monkeypatch.setattr(
+        bundle,
+        "audit_public_snapshot",
+        lambda _candidate, _descriptor: SimpleNamespace(passed=True, report=report),
+    )
+
+    bundle._rebind_publication_audit(
+        tmp_path / "candidate",
+        evidence,
+        public_commit="public-head",
+        public_tree="public-tree",
+        ref="refs/heads/qualification-local-r7g",
+    )
+
+    audit_input = json.loads((evidence / "audit-input.json").read_text(encoding="utf-8"))
+    materialization = json.loads(
+        (evidence / "materialization-receipt.json").read_text(encoding="utf-8")
+    )
+    observed_report = json.loads((evidence / "snapshot-audit.json").read_text(encoding="utf-8"))
+    assert audit_input["git"]["expectedHead"] == "public-head"
+    assert audit_input["git"]["expectedBranch"] == "qualification-local-r7g"
+    assert observed_report == report
+    assert materialization["candidateHead"] == "public-head"
+    assert materialization["candidateTree"] == "public-tree"
+    assert materialization["auditReportDigest"] == bundle._sha(bundle._json_bytes(report))
+
+
+def _audit_branch_candidate(tmp_path: Path) -> tuple[Path, str, str]:
+    """Minimal committed single-branch snapshot equivalent to a materialized candidate."""
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    _git(candidate, "init", "--quiet", "--initial-branch=public-main")
+    (candidate / "README.md").write_text("public snapshot audit branch fixture\n", encoding="utf-8")
+    (candidate / "src").mkdir()
+    (candidate / "src/main.py").write_text("print('public snapshot branch')\n", encoding="utf-8")
+    _git(candidate, "add", "--all")
+    _git(
+        candidate,
+        "-c",
+        "user.name=StatePort test",
+        "-c",
+        "user.email=stateport-test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "candidate",
+    )
+    return candidate, _git(candidate, "rev-parse", "HEAD"), _git(candidate, "rev-parse", "HEAD^{tree}")
+
+
+def _materialized_audit_input(evidence: Path, candidate: Path, head: str, tree: str) -> Path:
+    """Record the audit descriptor exactly as materialization wrote it (public-main)."""
+    inventory = {
+        "formatVersion": RIGHTS_FORMAT,
+        "metadata": {
+            "created": "2026-09-24",
+            "scope": "Every regular file in the audit-branch regression fixture.",
+            "completeness": "Exact path coverage is verified by the audit.",
+            "notes": "Synthetic test inventory only; no legal certification claim.",
+        },
+        "files": [
+            {
+                "path": relative,
+                "category": "owned_documentation" if relative.endswith(".md") else "owned_code",
+                "proposedLicence": "CC-BY-4.0" if relative.endswith(".md") else "AGPL-3.0-or-later",
+                "source": "Synthetic audit-branch regression fixture authored in-test.",
+                "attribution": "StatePort test",
+                "redistributable": True,
+                "publicExportDecision": "include",
+                "evidence": "Synthetic fixture ownership and licence were reviewed in-test.",
+                "reviewerStatus": "reviewed_internal",
+            }
+            for relative in sorted(
+                item.relative_to(candidate).as_posix()
+                for item in candidate.rglob("*")
+                if item.is_file()
+                and not item.is_symlink()
+                and ".git" not in item.relative_to(candidate).parts
+            )
+        ],
+    }
+    evidence.mkdir(parents=True, exist_ok=True)
+    inventory_bytes = yaml.safe_dump(inventory, sort_keys=True).encode("utf-8")
+    (evidence / "rights-inventory.yaml").write_bytes(inventory_bytes)
+    descriptor = {
+        "formatVersion": INPUT_FORMAT,
+        "git": {"expectedBranch": "public-main", "expectedHead": head},
+        "rightsInventory": {
+            "digest": "sha256:" + hashlib.sha256(inventory_bytes).hexdigest(),
+            "path": "rights-inventory.yaml",
+        },
+    }
+    audit_input = evidence / "audit-input.json"
+    audit_input.write_text(json.dumps(descriptor, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    receipt = {
+        "candidateHead": head,
+        "candidateTree": tree,
+        "auditReportDigest": "sha256:" + "0" * 64,
+    }
+    (evidence / "materialization-receipt.json").write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return audit_input
+
+
+def test_rebind_publication_audit_binds_local_qualification_branch_for_real_audit(
+    tmp_path: Path,
+) -> None:
+    candidate, head, tree = _audit_branch_candidate(tmp_path)
+    evidence = tmp_path / "evidence"
+    _materialized_audit_input(evidence, candidate, head, tree)
+    _git(candidate, "branch", "-m", "qualification-local-r7g")
+
+    bundle._rebind_publication_audit(
+        candidate,
+        evidence,
+        public_commit=head,
+        public_tree=tree,
+        ref="refs/heads/qualification-local-r7g",
+    )
+
+    audit_input = json.loads((evidence / "audit-input.json").read_text(encoding="utf-8"))
+    assert audit_input["git"] == {
+        "expectedBranch": "qualification-local-r7g",
+        "expectedHead": head,
+    }
+    report = json.loads((evidence / "snapshot-audit.json").read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["findingCounts"] == []
+    assert report["gitIdentity"] == {"verifiedHead": head}
+
+
+def test_rebind_publication_audit_preserves_public_main_binding_for_real_audit(
+    tmp_path: Path,
+) -> None:
+    candidate, head, tree = _audit_branch_candidate(tmp_path)
+    evidence = tmp_path / "evidence"
+    _materialized_audit_input(evidence, candidate, head, tree)
+
+    bundle._rebind_publication_audit(
+        candidate,
+        evidence,
+        public_commit=head,
+        public_tree=tree,
+    )
+
+    audit_input = json.loads((evidence / "audit-input.json").read_text(encoding="utf-8"))
+    assert audit_input["git"] == {"expectedBranch": "public-main", "expectedHead": head}
+    report = json.loads((evidence / "snapshot-audit.json").read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["findingCounts"] == []
+
+
+def test_rebind_publication_audit_fails_closed_on_stale_branch_binding(
+    tmp_path: Path,
+) -> None:
+    candidate, head, tree = _audit_branch_candidate(tmp_path)
+    evidence = tmp_path / "evidence"
+    _materialized_audit_input(evidence, candidate, head, tree)
+    _git(candidate, "branch", "-m", "qualification-local-r7g")
+
+    with pytest.raises(
+        PublicReleaseBuildError,
+        match="public snapshot audit blocked the published candidate",
+    ):
+        bundle._rebind_publication_audit(
+            candidate,
+            evidence,
+            public_commit=head,
+            public_tree=tree,
+            ref="refs/heads/public-main",
+        )
+    audit = audit_public_snapshot(candidate, evidence / "audit-input.json")
+    assert not audit.passed
+    assert [item["code"] for item in audit.report["findingCounts"]] == ["git_branch_mismatch"]
+    assert audit.report["gitIdentity"] == {"verifiedHead": head}
+
+
+def test_prune_candidate_history_removes_unreachable_prepublication_root(
+    tmp_path: Path,
+) -> None:
+    candidate, _head, _tree = _candidate(tmp_path)
+    _git(candidate, "checkout", "--quiet", "-b", "prepublication-root")
+    (candidate / "old.txt").write_text("old\n", encoding="utf-8")
+    _git(candidate, "add", "old.txt")
+    _git(
+        candidate,
+        "-c",
+        "user.name=StatePort test",
+        "-c",
+        "user.email=stateport-test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "old root",
+    )
+    _git(candidate, "checkout", "--quiet", "public-main")
+    _git(candidate, "branch", "-D", "prepublication-root")
+    before = subprocess.run(
+        ["git", "-C", str(candidate), "fsck", "--unreachable", "--no-reflogs"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "unreachable" in before.stdout or "dangling" in before.stdout
+
+    bundle._prune_candidate_history(candidate)
+
+    after = subprocess.run(
+        ["git", "-C", str(candidate), "fsck", "--unreachable", "--no-reflogs"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "unreachable" not in after.stdout
+    assert "dangling" not in after.stdout
+
+
 def test_source_validator_accepts_frozen_ancestor_and_attests_current_controller(
     tmp_path: Path,
 ) -> None:
@@ -258,6 +502,22 @@ def test_execution_host_identity_contract_paths_are_public_policy_bound() -> Non
         "schemas/execution-host-operation.v1.schema.json",
         "schemas/execution-host-receipt.v1.schema.json",
     } <= selected
+
+
+def test_current_release_evidence_paths_are_private_policy_bound() -> None:
+    policy = yaml.safe_load(
+        (ROOT / "config/public-export-allowlist.v1.yaml").read_text(encoding="utf-8")
+    )
+    private_rule = next(
+        rule
+        for rule in policy["rules"]
+        if rule["id"] == "private-operating-and-unverified-assets"
+    )
+    assert {
+        "evidence/one-line-release-001/candidate-r14-diagnosis-20260924.md",
+        "evidence/one-line-release-001/r7g-build-evidence-20260924.md",
+        "evidence/one-line-release-001/r7i-build-evidence-20260924.md",
+    } <= set(private_rule["paths"])
 
 
 def test_podman_package_lock_builds_byte_identical_plain_tar(
@@ -473,6 +733,7 @@ def test_bind_public_ref_accepts_append_only_commit_with_same_tree(
     ) == descendant
     assert _git(candidate, "rev-parse", "HEAD") == descendant
     assert _git(candidate, "rev-parse", "HEAD^{tree}") == tree
+    assert _git(candidate, "for-each-ref", "--format=%(refname)", "refs/remotes/") == ""
 
 
 def test_credential_free_git_disables_prompts_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:

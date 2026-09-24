@@ -32,7 +32,7 @@ import zipfile
 
 import yaml
 
-from materialize_public_snapshot import SnapshotBuildError, materialize_snapshot
+from materialize_public_snapshot import SnapshotBuildError, audit_public_snapshot, materialize_snapshot
 from release_guard import ReleaseGuardError, require_guard
 from validate_candidate_provenance import CandidateProvenanceError, verify_release_tree
 
@@ -900,7 +900,42 @@ def _bind_public_ref(candidate: Path, *, authority_url: str, ref: str, tree: str
     if observed_commit != commit or observed_tree != tree:
         raise PublicReleaseBuildError("public Git authority tree does not match local materialization")
     _git(candidate, ["update-ref", f"refs/heads/{branch}", observed_commit])
+    _git(candidate, ["update-ref", "-d", f"refs/remotes/origin/{branch}"])
     return commit
+
+
+def _prune_candidate_history(candidate: Path) -> None:
+    """Remove the pre-publication root before auditing the public descendant."""
+    _git(candidate, ["reflog", "expire", "--expire=now", "--all"])
+    _git(candidate, ["gc", "--prune=now", "--quiet"])
+
+
+def _rebind_publication_audit(
+    candidate: Path,
+    evidence: Path,
+    *,
+    public_commit: str,
+    public_tree: str,
+    ref: str = PUBLIC_REF,
+) -> None:
+    """Re-run the snapshot audit after the public authority binds the ref."""
+    audit_input_path = evidence / "audit-input.json"
+    audit_input = json.loads(audit_input_path.read_text(encoding="utf-8"))
+    audit_input["git"]["expectedHead"] = public_commit
+    audit_input["git"]["expectedBranch"] = ref.removeprefix("refs/heads/")
+    audit_input_path.write_bytes(_json_bytes(audit_input))
+    audit = audit_public_snapshot(candidate, audit_input_path)
+    if not audit.passed:
+        raise PublicReleaseBuildError("public snapshot audit blocked the published candidate")
+    snapshot_audit_path = evidence / "snapshot-audit.json"
+    snapshot_audit_bytes = _json_bytes(audit.report)
+    snapshot_audit_path.write_bytes(snapshot_audit_bytes)
+    materialization_receipt_path = evidence / "materialization-receipt.json"
+    materialization_receipt = json.loads(materialization_receipt_path.read_text(encoding="utf-8"))
+    materialization_receipt["candidateHead"] = public_commit
+    materialization_receipt["candidateTree"] = public_tree
+    materialization_receipt["auditReportDigest"] = _sha(snapshot_audit_bytes)
+    materialization_receipt_path.write_bytes(_json_bytes(materialization_receipt))
 
 
 def _archive(
@@ -1492,11 +1527,14 @@ def build_release_bundle(
                 ref=PUBLIC_REF,
                 tree=candidate_tree,
             )
-        materialization_receipt_path = evidence / "materialization-receipt.json"
-        materialization_receipt = json.loads(materialization_receipt_path.read_text(encoding="utf-8"))
-        materialization_receipt["candidateHead"] = candidate_commit
-        materialization_receipt["candidateTree"] = candidate_tree
-        materialization_receipt_path.write_bytes(_json_bytes(materialization_receipt))
+        _prune_candidate_history(candidate)
+        _rebind_publication_audit(
+            candidate,
+            evidence,
+            public_commit=candidate_commit,
+            public_tree=candidate_tree,
+            ref=candidate_ref,
+        )
         clone_receipt = (
             _local_qualification_clone_receipt(
                 candidate,
@@ -1582,6 +1620,7 @@ def build_release_bundle(
         _copy_new(bundle_path, output / "source/stateport-public.git.bundle")
         _copy_new(manifest, output / "source/public-export-manifest.json")
         _copy_new(rights, output / "source/licensing-inventory.yaml")
+        _copy_new(rights, output / "evidence/rights-inventory.yaml")
         for filename, _digest, _bytes_count in locked_wheels:
             _copy_new(
                 wheelhouse / filename,

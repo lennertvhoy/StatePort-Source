@@ -96,6 +96,21 @@ def test_alpine_packages_are_exact_and_repository_bound() -> None:
     assert "|| true" not in dockerfile
 
 
+def test_web_image_pins_exact_maintained_libexpat_cve_fix() -> None:
+    # CVE-2026-93990 is fixed upstream in Alpine v3.23-main at libexpat
+    # 2.8.5-r0; the fresh r3 scan refused stateport-web for shipping the
+    # vulnerable 2.8.4-r0 pulled in transitively by git. The exact
+    # fail-closed pin is the maintained-upstream repair: exactly one
+    # libexpat pin in the web Dockerfile, exactly the fix version, and the
+    # locked input record must state the same exact version so a rebuild
+    # can never silently reintroduce the vulnerable release.
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    dockerfile = (ROOT / "apps/web/Dockerfile").read_text()
+    assert value["alpinePackages"]["packages"]["libexpat"] == "2.8.5-r0"
+    assert re.findall(r"libexpat=\S+", dockerfile) == ["libexpat=2.8.5-r0"]
+    assert "libexpat=2.8.4-r0" not in dockerfile
+
+
 def test_execution_host_alpine_packages_are_exact_and_fully_pinned() -> None:
     value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
     containerfile = (ROOT / "images/stateport-execution-host/Containerfile").read_text()

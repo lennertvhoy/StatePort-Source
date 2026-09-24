@@ -458,7 +458,13 @@ def materialize_snapshot(
     if not exported:
         inventory = json.loads(private_inventory_path.read_text(encoding="utf-8"))
         blocked_paths = sorted(
-            str(entry.get("path") or entry.get("blobPath") or entry.get("relativePath") or "<unnamed>")
+            str(
+                entry.get("sourcePath")
+                or entry.get("path")
+                or entry.get("blobPath")
+                or entry.get("relativePath")
+                or "<unnamed>"
+            )
             for entry in inventory.get("files", [])
             if isinstance(entry, dict) and (
                 entry.get("issues") or entry.get("classification") == "unresolved-blocking"
