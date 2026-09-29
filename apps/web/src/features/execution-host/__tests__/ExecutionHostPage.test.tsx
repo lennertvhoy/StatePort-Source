@@ -510,3 +510,81 @@ it('uses a run-owned workload operation set without borrowing a workspace or def
   expect(within(row).getByRole('button', { name: 'Remove container' })).toHaveProperty('disabled', true)
   expect(screen.getByRole('button', { name: 'Create development workspace' })).toHaveProperty('disabled', true)
 })
+
+// The three container controls below were DECLARED in the preservation manifest but had no
+// click-level test: Start had zero references here, and Cancel work and Remove container were
+// asserted only as `toHaveProperty('disabled', true)`. A declaration whose cited test never
+// dispatches the control is not behavioural coverage, so each gets one test that really clicks
+// it and asserts the exact client call, paired with a refusal twin so a green run cannot be
+// explained by the dispatch never happening.
+
+it('dispatches Start on a created workload without a confirmation step', async () => {
+  const start = vi.spyOn(getClient().executionHost, 'startWorkload')
+    .mockResolvedValue({ accepted: true, result: { workloadId: 'study-work', state: 'running' } })
+  render(<ExecutionHostPage />)
+  const row = await screen.findByRole('article', { name: 'Workload study-work' })
+  fireEvent.click(within(row).getByRole('button', { name: 'Start' }))
+  await waitFor(() => expect(start).toHaveBeenCalledExactlyOnceWith('study-work'))
+  // Start is the one lifecycle control that is not gated behind the confirm dialog, so a
+  // dialog appearing here would mean the control had started demanding confirmation it did not.
+  expect(screen.queryByRole('alertdialog')).toBeNull()
+})
+
+it('reports a Start refusal without claiming the workload started', async () => {
+  vi.spyOn(getClient().executionHost, 'startWorkload')
+    .mockResolvedValue({ accepted: false, refusal: { reason: 'grant-revoked', detail: 'operation refused' } })
+  render(<ExecutionHostPage />)
+  const row = await screen.findByRole('article', { name: 'Workload study-work' })
+  fireEvent.click(within(row).getByRole('button', { name: 'Start' }))
+  expect(await screen.findByText(/study-work: grant-revoked/)).toBeTruthy()
+  expect(within(row).getByText(/Lifecycle: created/)).toBeTruthy()
+})
+
+it('confirms the exact selected workload before cancelling work', async () => {
+  const cancel = vi.spyOn(getClient().executionHost, 'cancelWorkload')
+    .mockResolvedValue({ accepted: true, result: { workloadId: 'project-work', state: 'cancelled' } })
+  render(<ExecutionHostPage />)
+  const row = await screen.findByRole('article', { name: 'Workload project-work' })
+  fireEvent.click(within(row).getByRole('button', { name: 'Cancel work' }))
+  expect(cancel).not.toHaveBeenCalled()
+  const dialog = await screen.findByRole('alertdialog')
+  expect(within(dialog).getByText('project-work')).toBeTruthy()
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm operation' }))
+  await waitFor(() => expect(cancel).toHaveBeenCalledExactlyOnceWith('project-work'))
+  expect(screen.getByRole('article', { name: 'Workload study-work' })).toBeTruthy()
+})
+
+it('surfaces a Cancel work refusal instead of reporting the work stopped', async () => {
+  vi.spyOn(getClient().executionHost, 'cancelWorkload')
+    .mockResolvedValue({ accepted: false, refusal: { reason: 'grant-revoked', detail: 'operation refused' } })
+  render(<ExecutionHostPage />)
+  fireEvent.click(within(await screen.findByRole('article', { name: 'Workload project-work' })).getByRole('button', { name: 'Cancel work' }))
+  fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Confirm operation' }))
+  expect(await screen.findByText(/project-work: grant-revoked/)).toBeTruthy()
+  expect(within(screen.getByRole('article', { name: 'Workload project-work' })).getByText(/Lifecycle: running/)).toBeTruthy()
+})
+
+it('confirms the exact selected workload before removing its container', async () => {
+  const remove = vi.spyOn(getClient().executionHost, 'removeWorkload')
+    .mockResolvedValue({ accepted: true, result: { workloadId: 'project-work', state: 'removed' } })
+  render(<ExecutionHostPage />)
+  const row = await screen.findByRole('article', { name: 'Workload project-work' })
+  fireEvent.click(within(row).getByRole('button', { name: 'Remove container' }))
+  expect(remove).not.toHaveBeenCalled()
+  const dialog = await screen.findByRole('alertdialog')
+  expect(within(dialog).getByText('project-work')).toBeTruthy()
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm operation' }))
+  await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith('project-work'))
+  expect(screen.getByRole('article', { name: 'Workload study-work' })).toBeTruthy()
+})
+
+it('refuses to remove a container when the grant is revoked, preserving the other workload', async () => {
+  vi.spyOn(getClient().executionHost, 'removeWorkload')
+    .mockResolvedValue({ accepted: false, refusal: { reason: 'grant-revoked', detail: 'operation refused' } })
+  render(<ExecutionHostPage />)
+  fireEvent.click(within(await screen.findByRole('article', { name: 'Workload project-work' })).getByRole('button', { name: 'Remove container' }))
+  fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Confirm operation' }))
+  expect(await screen.findByText(/project-work: grant-revoked/)).toBeTruthy()
+  expect(screen.getByRole('article', { name: 'Workload project-work' })).toBeTruthy()
+  expect(screen.getByRole('article', { name: 'Workload study-work' })).toBeTruthy()
+})

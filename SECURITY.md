@@ -41,10 +41,14 @@ is explicitly published there.
 
 ## Supported versions
 
-Published Alpha.15 and Alpha.16 are evaluation artifacts, not production-qualified
-versions. Alpha.16 has a reproduced fresh-install signature-preflight defect.
+Published Alpha.15, Alpha.16 and Alpha.17 are evaluation artifacts, not
+production-qualified versions. Alpha.17 is the current public release. Alpha.16
+is a superseded predecessor and has a reproduced fresh-install
+signature-preflight defect, so the Alpha.16 route is not usable for a fresh
+installation.
 The qualification target is Windows 11 WSL2 Ubuntu 24.04 AMD64; complete native
 evidence remains pending. Publication does not create a support commitment.
+The public site is the authoritative statement of what is currently published.
 
 ## Current engineering posture
 

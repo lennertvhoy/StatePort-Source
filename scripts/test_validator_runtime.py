@@ -186,6 +186,7 @@ class ValidatorEngine:
         self.created_specs.append(deepcopy(spec))
         self.items[spec["workloadId"]] = {
             "spec": spec,
+            "containerId": "container-" + spec["workloadId"],
             "running": False,
             "exitStatus": 0,
             "labels": {
@@ -196,9 +197,19 @@ class ValidatorEngine:
         }
         return "container-" + spec["workloadId"]
 
-    def start(self, workload_id, *, timeout=None):
+    def _control_target(self, workload_id, expected_container_id):
+        """Mirror the real engine: the operation is scoped to a verified container."""
+        item = self.items[workload_id]
+        if expected_container_id is not None and expected_container_id != item["containerId"]:
+            raise AssertionError(
+                f"control targeted the wrong container for {workload_id}: "
+                f"{expected_container_id!r} != {item['containerId']!r}"
+            )
+
+    def start(self, workload_id, *, timeout=None, expected_container_id=None):
         # The fake models a validator that has completed independently before
         # the daemon observes it.
+        self._control_target(workload_id, expected_container_id)
         self.items[workload_id]["running"] = False
 
     def inspect(self, workload_id):
@@ -212,24 +223,33 @@ class ValidatorEngine:
             "exitStatus": item["exitStatus"],
             "startedAt": "2026-01-01T00:00:00Z",
             "finishedAt": "2026-01-01T00:00:01Z",
+            # The real engine maps the raw container Id to this key, and
+            # _container_identity_error refuses a control whose observed id is
+            # unavailable. This stub created an id in create() and dropped it, so
+            # every governed control here was refused before it could act.
+            "containerId": item["containerId"],
             "imageDigest": item["spec"]["image"]["reference"].rsplit("@", 1)[1],
             "imageReference": item["spec"]["image"]["reference"],
             "labels": item["labels"],
         }
 
-    def logs(self, workload_id, *, max_bytes):
+    def logs(self, workload_id, *, max_bytes, expected_container_id=None):
+        self._control_target(workload_id, expected_container_id)
         data = "validator output that is not persisted"
         encoded = data.encode()
         return {"bytes": data[:max_bytes], "byteCount": min(len(encoded), max_bytes), "truncated": len(encoded) > max_bytes}
 
-    def remove(self, workload_id, *, force=True):
+    def remove(self, workload_id, *, force=True, expected_container_id=None):
+        self._control_target(workload_id, expected_container_id)
         self.items.pop(workload_id, None)
         self.removed.append(workload_id)
 
-    def stop(self, workload_id, *, timeout=2):
+    def stop(self, workload_id, *, timeout=2, expected_container_id=None):
+        self._control_target(workload_id, expected_container_id)
         self.items[workload_id]["running"] = False
 
-    def kill(self, workload_id):
+    def kill(self, workload_id, *, expected_container_id=None):
+        self._control_target(workload_id, expected_container_id)
         self.stop(workload_id, timeout=0)
 
     def list_managed(self):
@@ -386,10 +406,14 @@ def test_validator_restart_recovery_interrupts_and_removes_workload(tmp_path: Pa
     root.mkdir()
     workload = daemon_workload(root)
     ledger = OperationLedger(tmp_path / "state")
-    ledger.record_created(workload, at="2026-01-01T00:00:00Z", container_id="container")
-    ledger.transition(workload["workloadId"], "running", at="2026-01-01T00:00:01Z")
     engine = ValidatorEngine()
-    engine.create(workload)
+    # A real ledger records the container id the engine reported at create time,
+    # so the pairing is derived from the engine rather than hand-written. A ledger
+    # id that disagrees with the observed one is a different scenario entirely,
+    # and would be read as a replaced container rather than an interrupted run.
+    container_id = engine.create(workload)
+    ledger.record_created(workload, at="2026-01-01T00:00:00Z", container_id=container_id)
+    ledger.transition(workload["workloadId"], "running", at="2026-01-01T00:00:01Z")
     engine.start(workload["workloadId"])
     report = reconcile_on_boot(ledger, engine, at="2026-01-01T00:01:00Z")
     assert report["interrupted"] == [workload["workloadId"]]
@@ -582,7 +606,8 @@ class ValidatorStartCasEngine(ValidatorEngine):
         super().__init__()
         self.state_dir = state_dir
 
-    def start(self, workload_id, *, timeout=None):
+    def start(self, workload_id, *, timeout=None, expected_container_id=None):
+        self._control_target(workload_id, expected_container_id)
         self.items[workload_id]["running"] = True
         ledger = OperationLedger(self.state_dir)
         current = ledger.get(workload_id)

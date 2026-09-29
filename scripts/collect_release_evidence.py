@@ -53,6 +53,42 @@ BASE_IMAGES = ROOT / "config/container-base-images.yaml"
 BUILD_INPUTS = ROOT / "config/container-build-inputs.yaml"
 SCAN_EXCEPTIONS = ROOT / "config/release-scan-exceptions.v1.yaml"
 SCAN_EXCEPTIONS_SCHEMA = ROOT / "schemas/release-scan-exceptions.v1.schema.json"
+# The vulnerability scan's ignore configuration is a committed, versioned
+# release input, never an ambient grype default resolved from outside the
+# repository.  Every scan names it explicitly with `-c`, and the collected
+# manifest declares its path, digest and the population it suppressed.
+SCAN_CONFIG = ROOT / "config/grype-scan.v1.yaml"
+SCAN_CONFIG_REPOSITORY_PATH = "config/grype-scan.v1.yaml"
+SCAN_CONFIG_FORMAT_VERSION = "stateport.grype-scan-config/v1"
+# The one rule the signed Alpha.19 per-image grype documents record in
+# `appliedIgnoreRules`, reproduced field for field.  It is pinned here, and the
+# committed file is refused unless it contains exactly this rule, so the
+# configuration cannot drift away from what the evidence can support.  There is
+# deliberately no `location` and no `version`: the signed `artifact` record
+# carries no location at all, and a narrower rule would be an unverifiable
+# claim.  See config/grype-scan.v1.yaml for the measured population.
+SCAN_CONFIG_IGNORE_RULE: Mapping[str, Any] = {
+    "match-type": "exact-indirect-match",
+    "namespace": "",
+    "package": {
+        "name": "linux-libc-dev",
+        "type": "deb",
+        "upstream-name": "linux",
+        "language": "",
+    },
+}
+# SEPARATE, ADDITIONAL contract.  `config/grype-scan.v1.yaml` above is the
+# grype CONFIGURATION the scan runs under (which rules grype is told to apply);
+# this file is the SUPPRESSION POLICY those rules are judged against, and it
+# exists because a rule that is configured is not thereby justified, bounded or
+# expiring.  The two files are independent on purpose: the policy declares the
+# grype tool version it is valid for, justifies every rule by name, type and
+# match type, and expires them, and it is evaluated against the scan's
+# `ignoredMatches` -- the findings that never reach `matches` and are therefore
+# invisible to the per-advisory RX-* exception ledger.
+SCAN_SUPPRESSION = ROOT / "config/release-scan-suppression.v1.yaml"
+SCAN_SUPPRESSION_FILE = "config/release-scan-suppression.v1.yaml"
+SCAN_SUPPRESSION_FORMAT = "stateport.release-scan-suppression/v1"
 PODMAN = Path("/usr/bin/podman")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DIGEST_REFERENCE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
@@ -76,6 +112,119 @@ _IMAGE_OUTPUT_SUFFIXES = (
 
 class EvidenceError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ScanConfiguration:
+    """The committed grype ignore configuration, pinned by identity."""
+
+    path: Path
+    repository_path: str
+    digest: str
+    ignore_rules: tuple[Mapping[str, Any], ...]
+
+
+def _canonical_scan_rule(rule: Any) -> Mapping[str, Any]:
+    """Return one ignore rule with grype's empty optional fields filled in.
+
+    Any field outside the pinned set is a refusal, not something to drop: an
+    unrecognised field (a `location`, a `version`, a `reason`) would change what
+    the configuration suppresses, so it must never be silently normalised away
+    into a rule that looks like the recorded one.
+    """
+
+    if not isinstance(rule, Mapping):
+        raise EvidenceError("scan configuration ignore entry is not a mapping")
+    unexpected = sorted(set(rule) - set(SCAN_CONFIG_IGNORE_RULE))
+    if unexpected:
+        raise EvidenceError(f"scan configuration ignore rule has unrecorded fields: {unexpected}")
+    canonical: dict[str, Any] = {key: str(rule.get(key, "")) for key in SCAN_CONFIG_IGNORE_RULE}
+    package = rule.get("package")
+    if not isinstance(package, Mapping):
+        raise EvidenceError("scan configuration ignore rule has no package mapping")
+    pinned_package = SCAN_CONFIG_IGNORE_RULE["package"]
+    unexpected = sorted(set(package) - set(pinned_package))
+    if unexpected:
+        raise EvidenceError(
+            f"scan configuration ignore rule package has unrecorded fields: {unexpected}"
+        )
+    canonical["package"] = {key: str(package.get(key, "")) for key in pinned_package}
+    return canonical
+
+
+def load_scan_configuration(path: Path = SCAN_CONFIG) -> ScanConfiguration:
+    """Load the committed scan configuration, or refuse to scan at all.
+
+    Failing closed is the point: an absent, unreadable, drifting or
+    unparseable configuration must abort the collection rather than let grype
+    fall back to whatever configuration the environment happens to offer.
+    """
+
+    if path.is_symlink() or not path.is_file():
+        raise EvidenceError(f"committed scan configuration is missing or unsafe: {path}")
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise EvidenceError(f"committed scan configuration is unreadable: {path}") from exc
+    if not isinstance(document, Mapping) or set(document) != {"ignore"}:
+        raise EvidenceError("committed scan configuration declares no single top-level ignore list")
+    rules = document["ignore"]
+    if not isinstance(rules, list) or len(rules) != 1:
+        raise EvidenceError(
+            f"committed scan configuration must declare exactly one ignore rule, found "
+            f"{len(rules) if isinstance(rules, list) else 'a non-list value'}"
+        )
+    canonical = _canonical_scan_rule(rules[0])
+    if canonical != dict(SCAN_CONFIG_IGNORE_RULE):
+        raise EvidenceError("committed scan configuration does not match the single recorded rule")
+    return ScanConfiguration(
+        path=path,
+        repository_path=SCAN_CONFIG_REPOSITORY_PATH,
+        digest="sha256:" + sha256_file(path),
+        ignore_rules=(canonical,),
+    )
+
+
+def suppressed_population(
+    *, scan_path: Path, declared_rules: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Measure what the scan suppressed, refusing any undeclared suppression.
+
+    The committed configuration is the only admissible source of suppression, so
+    every rule grype reports as applied must be one the configuration declares.
+    A rule applied from anywhere else means the resolved configuration was not
+    the committed one, and the collection fails instead of signing a scan whose
+    ignore behaviour nobody in the repository can reproduce.
+    """
+
+    scan = _load_json_file(scan_path, maximum_bytes=256 * 1024 * 1024)
+    ignored = scan.get("ignoredMatches", [])
+    if not isinstance(ignored, list):
+        raise EvidenceError("vulnerability scan ignoredMatches is not a list")
+    severities: dict[str, int] = {}
+    applied: dict[str, Mapping[str, Any]] = {}
+    for match in ignored:
+        if not isinstance(match, Mapping):
+            raise EvidenceError("vulnerability scan ignored match is not an object")
+        severity = str(match.get("vulnerability", {}).get("severity", ""))
+        severities[severity] = severities.get(severity, 0) + 1
+        rules = match.get("appliedIgnoreRules", [])
+        if not isinstance(rules, list):
+            raise EvidenceError("vulnerability scan appliedIgnoreRules is not a list")
+        for rule in rules:
+            applied[json.dumps(rule, sort_keys=True)] = rule
+    declared = {json.dumps(dict(rule), sort_keys=True) for rule in declared_rules}
+    undeclared = sorted(set(applied) - declared)
+    if undeclared:
+        raise EvidenceError(
+            "vulnerability scan applied ignore rules the committed configuration does not "
+            f"declare: {undeclared}"
+        )
+    return {
+        "suppressedMatches": len(ignored),
+        "suppressedMatchesBySeverity": dict(sorted(severities.items())),
+        "appliedIgnoreRules": [applied[key] for key in sorted(applied)],
+    }
 
 
 def _load_yaml(path: Path) -> Mapping[str, Any]:
@@ -186,7 +335,15 @@ class CollectionContext:
     database: Mapping[str, Any]
     exceptions_config: Mapping[str, Any]
     exceptions_digest: str
+    suppression_config: Mapping[str, Any]
+    suppression_digest: str
     receipt_digest: str
+    # Preflighted once per release so an absent or drifting scan configuration
+    # aborts before any podman, syft or grype work happens.  It defaults to
+    # None only so a hand-built context keeps working; a per-image collection
+    # that reaches the scan without it resolves the committed configuration
+    # itself and fails closed the same way.
+    scan_config: ScanConfiguration | None = None
 
 
 def prepare_collection_context(
@@ -198,6 +355,10 @@ def prepare_collection_context(
     """Perform release-wide checks once before collecting image evidence."""
     _progress("release", "release-wide identity validation starting")
     started = time.monotonic()
+    # First, because it is a pure file read and the cheapest refusal: an absent
+    # or drifting scan configuration must abort the release before any podman,
+    # syft or grype process is started at all.
+    scan_config = load_scan_configuration()
     receipt = _load_json_file(build_receipt)
     if receipt.get("formatVersion") != "stateport.release-image-build-receipt/v1":
         raise EvidenceError("image evidence requires a canonical release build receipt")
@@ -210,6 +371,7 @@ def prepare_collection_context(
     tools = verify_toolchain()
     database = refresh_grype_database()
     exceptions_config, exceptions_digest = load_scan_exceptions()
+    suppression_config, suppression_digest = load_scan_suppression()
     _progress("release", f"release-wide validation complete in {time.monotonic() - started:.1f}s")
     return CollectionContext(
         receipt=receipt,
@@ -218,7 +380,10 @@ def prepare_collection_context(
         database=database,
         exceptions_config=exceptions_config,
         exceptions_digest=exceptions_digest,
+        suppression_config=suppression_config,
+        suppression_digest=suppression_digest,
         receipt_digest=receipt_digest,
+        scan_config=scan_config,
     )
 
 
@@ -266,18 +431,31 @@ def _collect_sboms(
 
 
 def _collect_grype_scan(
-    *, image_id: str, syft_json: Path, grype: str, output: Path
-) -> tuple[Path, datetime, datetime]:
+    *, image_id: str, syft_json: Path, grype: str, scan_config: ScanConfiguration, output: Path
+) -> tuple[Path, datetime, datetime, dict[str, Any]]:
     name = f"{image_id}.grype.json"
     scan_started_at = datetime.now(timezone.utc)
     started = time.monotonic()
-    _progress(image_id, "vulnerability scan starting from Syft catalogue")
+    _progress(
+        image_id,
+        f"vulnerability scan starting from Syft catalogue under {scan_config.repository_path}",
+    )
     with tempfile.TemporaryDirectory(prefix="grype-", dir=output) as temporary_root:
         temporary_scan = Path(temporary_root) / name
-        _run_to_new_file([grype, f"sbom:{syft_json}", "-o", "json"], temporary_scan)
+        # `-c` is explicit so the resolved configuration is the committed one
+        # and not whatever grype would otherwise discover in the environment.
+        _run_to_new_file(
+            [grype, f"sbom:{syft_json}", "-c", str(scan_config.path), "-o", "json"],
+            temporary_scan,
+        )
         published = _publish_tool_output(root=output, source=temporary_scan, name=name)
-    _progress(image_id, f"vulnerability scan complete in {time.monotonic() - started:.1f}s")
-    return published, scan_started_at, datetime.now(timezone.utc)
+    population = suppressed_population(scan_path=published, declared_rules=scan_config.ignore_rules)
+    _progress(
+        image_id,
+        f"vulnerability scan complete in {time.monotonic() - started:.1f}s "
+        f"({population['suppressedMatches']} suppressed by the committed configuration)",
+    )
+    return published, scan_started_at, datetime.now(timezone.utc), population
 
 
 def _catalogue_source(*, image: Mapping[str, Any], build_receipt_path: Path, local_tag: str) -> str:
@@ -820,6 +998,412 @@ def load_scan_exceptions() -> tuple[Mapping[str, Any], str]:
     return config, digest
 
 
+_SUPPRESSION_RULE_KEYS = frozenset(
+    {"id", "package", "packageType", "matchType", "justification", "expiresOn"}
+)
+_SUPPRESSION_CONFIG_KEYS = frozenset(
+    {"formatVersion", "resolvedOn", "tool", "suppressionRule", "rules"}
+)
+_SUPPRESSION_TOOL_KEYS = frozenset({"name", "version", "provenance"})
+_SUPPRESSION_RULE_ID = re.compile(r"^RS-[0-9]{4}-[0-9]{3}$")
+# A justification has to be prose, not a placeholder: whitespace, a single word
+# and an empty string are all treated as no justification at all.
+_MIN_JUSTIFICATION = 16
+# The evaluation document gained two mandatory keys (``suppressedFindings`` and
+# ``unexplainedSuppressedFindings``), so it is a new major version: a v1 document
+# cannot answer the suppression question at all, and a v2 document that omits the
+# block is malformed rather than clean. The assembler refuses evidence whose
+# manifest does not bind the suppression contract, which is what makes a
+# pre-suppression v1 document unusable for assembly rather than silently
+# "zero suppressed findings".
+_SCAN_EVALUATION_FORMAT = "stateport.release-scan-evaluation/v2"
+_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_VERSION = re.compile(r"^[0-9]+(\.[0-9]+)*$")
+
+
+def _suppression_rule_text(rule: Mapping[str, Any], field: str) -> str:
+    value = rule.get(field)
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def load_scan_suppression() -> tuple[Mapping[str, Any], str]:
+    """Load and validate the accepted scan-suppression contract.
+
+    The contract is hand-validated rather than schema-validated because
+    ``schemas/`` is outside this collector's change boundary; every field the
+    release gate depends on is therefore checked here, and an absent, empty,
+    duplicated, or unjustified rule refuses the release instead of passing
+    silently.  Returns the contract and the digest of its exact bytes.
+    """
+    config = _load_yaml(SCAN_SUPPRESSION)
+    if set(config) != _SUPPRESSION_CONFIG_KEYS:
+        raise EvidenceError(
+            "scan suppression contract must declare exactly "
+            f"{sorted(_SUPPRESSION_CONFIG_KEYS)}, got {sorted(config)}"
+        )
+    if config.get("formatVersion") != SCAN_SUPPRESSION_FORMAT:
+        raise EvidenceError(
+            f"scan suppression contract formatVersion must be {SCAN_SUPPRESSION_FORMAT!r}"
+        )
+    resolved_on = str(config.get("resolvedOn", ""))
+    if not _DATE.fullmatch(resolved_on):
+        raise EvidenceError("scan suppression contract has no valid resolvedOn date")
+    if not str(config.get("suppressionRule", "")).strip():
+        raise EvidenceError("scan suppression contract declares no suppression rule")
+    tool = config.get("tool")
+    if not isinstance(tool, Mapping) or set(tool) != _SUPPRESSION_TOOL_KEYS:
+        raise EvidenceError("scan suppression contract must pin name, version, provenance")
+    if str(tool.get("name", "")).strip() != "grype" or not _VERSION.fullmatch(
+        str(tool.get("version", "")).strip()
+    ):
+        raise EvidenceError("scan suppression contract must pin the grype tool version")
+    if not str(tool.get("provenance", "")).strip():
+        raise EvidenceError("scan suppression contract must record tool provenance")
+    rules = config.get("rules")
+    if not isinstance(rules, Sequence) or isinstance(rules, (str, bytes)) or not rules:
+        raise EvidenceError("scan suppression contract declares no rules")
+    if len(rules) > 32:
+        raise EvidenceError("scan suppression contract declares more rules than the gate bounds")
+    seen_ids: set[str] = set()
+    seen_keys: set[tuple[str, str, str]] = set()
+    for rule in rules:
+        if not isinstance(rule, Mapping) or set(rule) != _SUPPRESSION_RULE_KEYS:
+            raise EvidenceError(
+                f"scan suppression rule must declare exactly {sorted(_SUPPRESSION_RULE_KEYS)}"
+            )
+        identifier = _suppression_rule_text(rule, "id")
+        if not _SUPPRESSION_RULE_ID.fullmatch(identifier) or identifier in seen_ids:
+            raise EvidenceError(f"scan suppression rule id is invalid or duplicated: {identifier!r}")
+        seen_ids.add(identifier)
+        if not _DATE.fullmatch(_suppression_rule_text(rule, "expiresOn")):
+            raise EvidenceError(f"scan suppression rule {identifier} has no valid expiry")
+        if len(_suppression_rule_text(rule, "justification")) < _MIN_JUSTIFICATION:
+            raise EvidenceError(f"scan suppression rule {identifier} has no usable justification")
+        if not _suppression_rule_text(rule, "matchType"):
+            raise EvidenceError(f"scan suppression rule {identifier} pins no match type")
+        pattern = _suppression_rule_text(rule, "package")
+        if not pattern:
+            raise EvidenceError(f"scan suppression rule {identifier} pins no package name")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise EvidenceError(
+                f"scan suppression rule {identifier} package is not a valid expression"
+            ) from exc
+        key = (
+            pattern,
+            _suppression_rule_text(rule, "packageType"),
+            _suppression_rule_text(rule, "matchType"),
+        )
+        if not key[1] or key in seen_keys:
+            raise EvidenceError(
+                f"scan suppression rule {identifier} has no package type or duplicates another rule"
+            )
+        seen_keys.add(key)
+    digest = "sha256:" + hashlib.sha256(SCAN_SUPPRESSION.read_bytes()).hexdigest()
+    return config, digest
+
+
+def _pinned_grype_version() -> str:
+    version = _load_yaml(TOOLS).get("tools", {}).get("grype", {}).get("version", "")
+    if not str(version).strip():
+        raise EvidenceError("pinned tool inputs record no grype version")
+    return str(version).strip()
+
+
+def _is_unexpired(rule: Mapping[str, Any], today: str) -> bool:
+    """True only when a rule carries a real, parseable, future expiry.
+
+    A missing or malformed date is treated as already lapsed, so an unreadable
+    expiry can never keep a suppression alive.
+    """
+    expiry = _suppression_rule_text(rule, "expiresOn")
+    if not _DATE.fullmatch(expiry) or not _DATE.fullmatch(today):
+        return False
+    return expiry >= today
+
+
+def _effective_ignore_rules(scan: Mapping[str, Any]) -> tuple[list[dict[str, str]], str | None]:
+    """Read the ignore rules the scan document actually had in effect.
+
+    Grype records its effective configuration inside every scan document, so
+    the rules that can suppress a finding are observable rather than implied.
+    A malformed entry is refused instead of ignored: an unparsable effective
+    rule cannot be declared, and an undeclared effective rule is a refusal.
+    """
+    descriptor = scan.get("descriptor")
+    if not isinstance(descriptor, Mapping):
+        return [], None
+    version = str(descriptor.get("version", "")).strip() or None
+    configuration = descriptor.get("configuration")
+    entries = configuration.get("ignore") if isinstance(configuration, Mapping) else None
+    if entries is None:
+        return [], version
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        raise EvidenceError("scan document effective ignore rules are malformed")
+    effective: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("package"), Mapping):
+            raise EvidenceError("scan document effective ignore rule is malformed")
+        effective.append(
+            {
+                "package": str(entry["package"].get("name", "")),
+                "packageType": str(entry["package"].get("type", "")),
+                "matchType": str(entry.get("match-type", "")),
+            }
+        )
+    return effective, version
+
+
+def _applied_ignore_rules(match: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Read the ignore rules a single suppressed match was actually filtered by."""
+    applied = match.get("appliedIgnoreRules")
+    if not isinstance(applied, Sequence) or isinstance(applied, (str, bytes)):
+        return []
+    rules: list[dict[str, str]] = []
+    for entry in applied:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("package"), Mapping):
+            raise EvidenceError("suppressed match appliedIgnoreRules entry is malformed")
+        rules.append(
+            {
+                "package": str(entry["package"].get("name", "")),
+                "packageType": str(entry["package"].get("type", "")),
+                "matchType": str(entry.get("match-type", "")),
+            }
+        )
+    return rules
+
+
+def _match_types(match: Mapping[str, Any]) -> list[str]:
+    details = match.get("matchDetails")
+    if not isinstance(details, Sequence) or isinstance(details, (str, bytes)):
+        return []
+    return [
+        str(entry["type"])
+        for entry in details
+        if isinstance(entry, Mapping) and entry.get("type")
+    ]
+
+
+def _suppression_verdict(
+    *,
+    scan: Mapping[str, Any],
+    suppression_config: Mapping[str, Any] | None,
+    threshold: int,
+    today: str,
+) -> dict[str, Any]:
+    """Classify every suppressed finding against the declared suppression policy.
+
+    Fail-closed in four independent ways: a suppressed finding at or above the
+    effective threshold with no declared, justified, unexpired rule covering its
+    package name, package type, and match type is unexplained; an effective
+    rule the contract does not declare is a refusal; a declared rule with an
+    empty justification is a refusal; and a rule that is expired cannot cover
+    anything.  Nothing here is derived from the scanner binary's behaviour.
+    """
+    rules: list[Mapping[str, Any]] = []
+    declared_version = ""
+    if isinstance(suppression_config, Mapping):
+        if suppression_config.get("formatVersion") != SCAN_SUPPRESSION_FORMAT:
+            raise EvidenceError(
+                f"suppression policy must declare {SCAN_SUPPRESSION_FORMAT!r}"
+            )
+        declared_version = str(suppression_config.get("tool", {}).get("version", "")).strip()
+        rules = [rule for rule in suppression_config.get("rules", []) if isinstance(rule, Mapping)]
+    suppressed = scan.get("ignoredMatches")
+    if suppressed is None:
+        suppressed = []
+    if not isinstance(suppressed, Sequence) or isinstance(suppressed, (str, bytes)):
+        raise EvidenceError("scan document ignoredMatches is malformed")
+    effective, observed_version = _effective_ignore_rules(scan)
+    declared_by_key: dict[tuple[str, str, str], Mapping[str, Any]] = {
+        (
+            str(rule.get("package", "")).strip(),
+            str(rule.get("packageType", "")).strip(),
+            str(rule.get("matchType", "")).strip(),
+        ): rule
+        for rule in rules
+    }
+    declared_by_id: dict[str, Mapping[str, Any]] = {
+        str(rule.get("id")): rule for rule in rules
+    }
+    unjustified = [
+        str(rule.get("id"))
+        for rule in rules
+        if len(_suppression_rule_text(rule, "justification")) < _MIN_JUSTIFICATION
+    ]
+    expired = [str(rule.get("id")) for rule in rules if not _is_unexpired(rule, today)]
+    undeclared = [
+        entry
+        for entry in effective
+        if (entry["package"], entry["packageType"], entry["matchType"]) not in declared_by_key
+    ]
+
+    def qualifies(entry: Mapping[str, str], match: Mapping[str, Any]) -> bool:
+        """True when a declared rule covers this finding and may explain it.
+
+        All four declared properties have to agree with the finding itself: the
+        applied rule's package name, package type and match type must name a
+        declared rule, that rule's package expression must match the suppressed
+        package, the rule's match type must be one of the match types the
+        finding actually has, and the rule must be justified and unexpired.
+        """
+        rule = declared_by_key.get(
+            (entry["package"], entry["packageType"], entry["matchType"])
+        )
+        if rule is None:
+            return False
+        if str(rule.get("id")) in unjustified or not _is_unexpired(rule, today):
+            return False
+        types = _match_types(match)
+        if types and entry["matchType"] not in types:
+            return False
+        artifact = match.get("artifact") if isinstance(match.get("artifact"), Mapping) else match
+        return bool(re.fullmatch(entry["package"], str(artifact.get("name", ""))))
+
+    by_severity: dict[str, int] = {}
+    gated: list[dict[str, Any]] = []
+    uncovered: list[dict[str, Any]] = []
+    covered_by_rule: dict[str, int] = {}
+    for match in suppressed:
+        vulnerability = match.get("vulnerability", {})
+        artifact = match.get("artifact", {})
+        severity = str(vulnerability.get("severity", ""))
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        if _SEVERITY_ORDER.get(severity, -1) < threshold:
+            continue
+        fix = vulnerability.get("fix", {})
+        finding = {
+            "advisory": str(vulnerability.get("id", "")),
+            "package": str(artifact.get("name", "")),
+            "packageVersion": str(artifact.get("version", "")),
+            "packageType": str(artifact.get("type", "")),
+            "severity": severity,
+            "fixState": str(fix.get("state", "unknown")),
+            "fixVersions": [str(item) for item in fix.get("versions", []) if item],
+            "matchTypes": _match_types(match),
+        }
+        applied = _applied_ignore_rules(match)
+        covering = next((entry for entry in applied if qualifies(entry, match)), None)
+        if covering is None:
+            uncovered.append(finding)
+            continue
+        rule = declared_by_key[
+            (covering["package"], covering["packageType"], covering["matchType"])
+        ]
+        identifier = str(rule.get("id"))
+        covered_by_rule[identifier] = covered_by_rule.get(identifier, 0) + 1
+        gated.append({**finding, "suppressionRuleId": identifier})
+
+    refusals: list[str] = []
+    if undeclared:
+        names = ", ".join(
+            f"{entry['package']!r}/{entry['packageType']}/{entry['matchType']}" for entry in undeclared
+        )
+        refusals.append(
+            f"the scan suppressed findings under {len(undeclared)} effective ignore rule(s) "
+            f"the policy does not declare: {names}"
+        )
+    if unjustified:
+        refusals.append(
+            "declared suppression rule(s) carry no justification: " + ", ".join(sorted(unjustified))
+        )
+    if uncovered:
+        refusals.append(
+            f"{len(uncovered)} suppressed finding(s) at or above the threshold are covered by no "
+            "declared, justified, unexpired rule"
+        )
+    if declared_version and observed_version and declared_version != observed_version:
+        refusals.append(
+            f"the suppression policy is declared for grype {declared_version} but the scan was "
+            f"produced by grype {observed_version}"
+        )
+    if declared_version and not observed_version:
+        refusals.append(
+            "the suppression policy is declared for grype "
+            f"{declared_version} but the scan document names no scanner version, so the "
+            "declaration cannot be shown to apply"
+        )
+    pinned_version = _pinned_grype_version() if declared_version else ""
+    if declared_version and declared_version != pinned_version:
+        refusals.append(
+            f"the suppression policy is declared for grype {declared_version} but the pinned tool "
+            f"inputs require grype {pinned_version}"
+        )
+    # The earliest expiry the declaration can lapse on. It travels into the
+    # signed release block so a consumer of signed bytes can see the residual's
+    # own deadline instead of trusting that someone checked it once.
+    declared_expiries = sorted(
+        _suppression_rule_text(rule, "expiresOn")
+        for rule in rules
+        if _DATE.fullmatch(_suppression_rule_text(rule, "expiresOn"))
+    )
+    applied_expiries = sorted(
+        _suppression_rule_text(declared_by_id[identifier], "expiresOn")
+        for identifier in covered_by_rule
+        if _DATE.fullmatch(_suppression_rule_text(declared_by_id[identifier], "expiresOn"))
+    )
+    return {
+        "policyFile": SCAN_SUPPRESSION_FILE,
+        "policyFormatVersion": SCAN_SUPPRESSION_FORMAT,
+        "policyResolvedOn": str(suppression_config.get("resolvedOn", "")) if suppression_config else "",
+        "tool": {
+            "name": "grype",
+            "declaredVersion": declared_version,
+            "observedVersion": observed_version,
+            "pinnedVersion": pinned_version or _pinned_grype_version(),
+        },
+        "total": len(suppressed),
+        "bySeverity": by_severity,
+        "gatedTotal": len(gated) + len(uncovered),
+        "coveredByRule": dict(sorted(covered_by_rule.items())),
+        "gatedFindings": sorted(gated, key=lambda item: (item["advisory"], item["package"])),
+        "uncoveredGatedFindings": sorted(
+            uncovered, key=lambda item: (item["advisory"], item["package"])
+        ),
+        "declaredRuleIds": sorted(declared_by_id),
+        "declaredExpiresOn": declared_expiries[0] if declared_expiries else "",
+        "appliedExpiresOn": applied_expiries[0] if applied_expiries else "",
+        "effectiveRules": effective,
+        "undeclaredEffectiveRules": undeclared,
+        "expiredRuleIds": sorted(expired),
+        "unjustifiedRuleIds": sorted(unjustified),
+        "refusals": refusals,
+    }
+
+
+def _scan_suppression_record(suppression: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the evaluation's suppression verdict into the evidence manifest.
+
+    The manifest carries counts, the rule identities in force, and the refusal
+    list rather than the full suppressed finding list: the complete list stays
+    in the digested evaluation artifact, while the manifest stays small enough
+    for the assembler to refuse an undeclared, unjustified, expired, or
+    uncovered suppression without reading the retained scan document.
+    """
+    return {
+        "policyFile": str(suppression["policyFile"]),
+        "policyFormatVersion": str(suppression["policyFormatVersion"]),
+        "policyResolvedOn": str(suppression["policyResolvedOn"]),
+        "toolName": str(suppression["tool"]["name"]),
+        "toolVersion": str(suppression["tool"]["observedVersion"] or ""),
+        "declaredToolVersion": str(suppression["tool"]["declaredVersion"]),
+        "suppressedTotal": int(suppression["total"]),
+        "suppressedBySeverity": dict(suppression["bySeverity"]),
+        "suppressedGatedTotal": int(suppression["gatedTotal"]),
+        "suppressedCoveredByRule": dict(suppression["coveredByRule"]),
+        "uncoveredSuppressedCount": len(suppression["uncoveredGatedFindings"]),
+        "declaredRuleIds": list(suppression["declaredRuleIds"]),
+        "declaredExpiresOn": str(suppression["declaredExpiresOn"]),
+        "appliedExpiresOn": str(suppression["appliedExpiresOn"]),
+        "effectiveRules": [dict(entry) for entry in suppression["effectiveRules"]],
+        "undeclaredEffectiveRules": [dict(entry) for entry in suppression["undeclaredEffectiveRules"]],
+        "expiredRuleIds": list(suppression["expiredRuleIds"]),
+        "unjustifiedRuleIds": list(suppression["unjustifiedRuleIds"]),
+        "refusals": list(suppression["refusals"]),
+    }
+
+
 def _scan_threshold() -> str:
     policy = _load_yaml(TOOLS).get("policy", {})
     threshold = str(policy.get("vulnerabilityFailureThreshold", "high")).lower()
@@ -863,6 +1447,7 @@ def evaluate_scan(
     image_id: str,
     exceptions_config: Mapping[str, Any],
     today: str,
+    suppression_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify every threshold-severity finding as explained or unexplained.
 
@@ -870,6 +1455,19 @@ def evaluate_scan(
     the same advisory and package, applies to this image and exact artifact
     path when declared, and is unexpired on the evaluation date. Everything
     else fails the image.
+
+    Findings the scanner suppressed never appear in ``matches``: they arrive in
+    ``ignoredMatches`` and, before this contract existed, no ledger record could
+    reach them.  They are therefore evaluated too, against the declared
+    suppression policy, and both verdicts travel in the same document: the
+    suppressed ones under ``suppressedFindings`` (with the full list at or above
+    the effective threshold) and, at the top level, under
+    ``unexplainedSuppressedFindings``.
+
+    ``suppression_config`` defaults to no declared rules at all, which is the
+    fail-closed reading: a caller that does not load the contract can never
+    pass a suppressed finding, and can never pass a scan whose effective ignore
+    rules it has not declared.
     """
     scan = _load_json_file(scan_path, maximum_bytes=256 * 1024 * 1024)
     threshold = _THRESHOLD_ORDER[_scan_threshold()]
@@ -913,8 +1511,14 @@ def evaluate_scan(
             unexplained.append(finding)
         else:
             applied.append({**finding, "exceptionId": str(exception["id"])})
+    suppression = _suppression_verdict(
+        scan=scan,
+        suppression_config=suppression_config,
+        threshold=threshold,
+        today=today,
+    )
     return {
-        "formatVersion": "stateport.release-scan-evaluation/v1",
+        "formatVersion": _SCAN_EVALUATION_FORMAT,
         "imageId": image_id,
         "evaluatedOn": today,
         "findingsBySeverity": counts,
@@ -922,6 +1526,8 @@ def evaluate_scan(
         "unexplainedFindings": sorted(
             unexplained, key=lambda item: (item["advisory"], item["package"])
         ),
+        "suppressedFindings": suppression,
+        "unexplainedSuppressedFindings": suppression["uncoveredGatedFindings"],
     }
 
 
@@ -952,16 +1558,18 @@ def _collect_image(
     _progress(image_id, f"catalogue source: {local_source}")
     syft = tools["syft"]["executable"]
     grype = tools["grype"]["executable"]
+    scan_config = context.scan_config or load_scan_configuration()
     cdx, spdx, syft_json = _collect_sboms(
         image_id=image_id,
         local_source=local_source,
         syft=syft,
         output=output,
     )
-    scan, scan_started_at, scan_completed_at = _collect_grype_scan(
+    scan, scan_started_at, scan_completed_at, suppressed = _collect_grype_scan(
         image_id=image_id,
         syft_json=syft_json,
         grype=grype,
+        scan_config=scan_config,
         output=output,
     )
     database.update(
@@ -976,11 +1584,16 @@ def _collect_image(
     )
     write_json_create_only(output, f"{image_id}.grype-db.json", database)
     _progress(image_id, "scan policy evaluation starting")
+    # One evaluation date for the whole image: the manifest, the evaluation
+    # document and the suppression expiry check must not disagree about which
+    # day the rules were judged against.
+    today = datetime.now(timezone.utc).date().isoformat()
     evaluation = evaluate_scan(
         scan_path=scan,
         image_id=image_id,
         exceptions_config=context.exceptions_config,
-        today=datetime.now(timezone.utc).date().isoformat(),
+        today=today,
+        suppression_config=context.suppression_config,
     )
     evaluation_path = write_json_create_only(output, f"{image_id}.scan-evaluation.json", evaluation)
     _progress(image_id, "scan policy evaluation complete")
@@ -1065,15 +1678,42 @@ def _collect_image(
         "grypeDatabase": database,
         "scanPolicy": {
             "threshold": _scan_threshold(),
+            "evaluatedOn": today,
             "unfixedFindingsIncluded": True,
-            "result": "passed" if not evaluation["unexplainedFindings"] else "failed",
+            "result": "passed"
+            if not evaluation["unexplainedFindings"]
+            and not evaluation["unexplainedSuppressedFindings"]
+            and not evaluation["suppressedFindings"]["refusals"]
+            else "failed",
             "exceptionsFile": "config/release-scan-exceptions.v1.yaml",
             "exceptionsDigest": context.exceptions_digest,
+            "suppressionFile": SCAN_SUPPRESSION_FILE,
+            "suppressionDigest": context.suppression_digest,
+            "suppression": _scan_suppression_record(evaluation["suppressedFindings"]),
             "evaluationArtifact": evaluation_path.name,
             "appliedExceptionIds": sorted(
                 {item["exceptionId"] for item in evaluation["appliedExceptions"]}
             ),
             "unexplainedFindings": evaluation["unexplainedFindings"],
+            "unexplainedSuppressedFindings": evaluation["unexplainedSuppressedFindings"],
+            "suppressionRefusals": evaluation["suppressedFindings"]["refusals"],
+        },
+        # A NEW top-level key, deliberately outside `scanPolicy`: the
+        # assembler's and the contract's reading of `scanPolicy` is unchanged,
+        # and the image evidence manifest carries no closed key set, so an extra
+        # top-level key is read by nobody and disturbs no already-signed index.
+        # What this buys: the signed scan DECLARES the configuration it ran
+        # under and the population that configuration suppressed, instead of
+        # carrying its ignore behaviour ambiently.
+        "vulnerabilityScanConfiguration": {
+            "formatVersion": SCAN_CONFIG_FORMAT_VERSION,
+            "path": scan_config.repository_path,
+            "digest": scan_config.digest,
+            "ignoreRuleCount": len(scan_config.ignore_rules),
+            "ignoreRules": [dict(rule) for rule in scan_config.ignore_rules],
+            "suppressedMatches": suppressed["suppressedMatches"],
+            "suppressedMatchesBySeverity": suppressed["suppressedMatchesBySeverity"],
+            "appliedIgnoreRules": suppressed["appliedIgnoreRules"],
         },
         "artifacts": {path.name: sha256_file(path) for path in artifact_paths},
         "signature": {
@@ -1085,6 +1725,12 @@ def _collect_image(
     }
     write_json_create_only(output, f"{image_id}.evidence.json", manifest)
     _progress(image_id, "evidence collection complete")
+    if evaluation["suppressedFindings"]["refusals"]:
+        raise EvidenceError(
+            f"scan suppression policy refuses {image_id}: "
+            + "; ".join(evaluation["suppressedFindings"]["refusals"])
+            + "; evidence retained"
+        )
     if evaluation["unexplainedFindings"]:
         preview = ", ".join(
             f"{item['advisory']}:{item['package']}"
@@ -1094,6 +1740,26 @@ def _collect_image(
             f"unexplained high-or-critical vulnerability findings refuse {image_id} "
             f"({len(evaluation['unexplainedFindings'])}): {preview}; evidence retained"
         )
+    # There is deliberately no second refusal here for
+    # `unexplainedSuppressedFindings`, and the one that was here could not fire.
+    # `_suppression_verdict` appends to `refusals` whenever `uncovered` is
+    # non-empty, and publishes that same `uncovered` list as
+    # `uncoveredGatedFindings`, which `evaluate_scan` republishes as
+    # `unexplainedSuppressedFindings`. So the two guards tested the same
+    # condition and the one above raised first.
+    #
+    # That coupling is a property of ANOTHER function, not an invariant of this
+    # one, so the deletion is only safe while the coupling holds -- and a
+    # comment cannot hold it. It is held by a test instead:
+    # `test_an_uncovered_suppressed_finding_always_also_produces_a_refusal`
+    # fails if a refactor ever stops appending the refusal while leaving the
+    # field populated, which is precisely the decoupling that would make a
+    # refusal here necessary again. Measured: breaking the coupling makes that
+    # test fail, so the invariant is enforced on every change rather than only
+    # when a release happens to hit the case.
+    #
+    # The field itself is not redundant either way: it sets `scanPolicy.result`
+    # and travels in the manifest, where the assembler reads it.
     return manifest
 
 
@@ -1148,6 +1814,95 @@ def _verified_checkpoint(
         artifact = safe_path(manifest_path.parent, str(name))
         if sha256_file(artifact) != str(expected):
             raise EvidenceError(f"resume checkpoint artifact digest mismatch: {artifact.name}")
+    # The artifact digests above prove the checkpoint is INTACT, not that it is a
+    # PASS. `_collect_image` publishes the image manifest and only then refuses,
+    # so a scan that failed leaves a complete, digest-correct manifest behind --
+    # and resuming over it used to return that failed image as complete and skip
+    # the collection that would have refused it.
+    #
+    # The verdict is RE-DERIVED from the digested scan evaluation rather than read
+    # from the manifest. The manifest is unsigned, so `scanPolicy.result` inside
+    # it is a claim; `*.scan-evaluation.json` is the evidence the digests above
+    # already cover, and the evaluator is what produced both. Anything the
+    # derivation cannot read is treated as a failure, not as a pass.
+    scan_policy = manifest.get("scanPolicy")
+    if not isinstance(scan_policy, Mapping):
+        raise EvidenceError(f"resume checkpoint carries no scan policy: {image_id}")
+    evaluation_name = f"{image_id}.scan-evaluation.json"
+    if evaluation_name not in artifacts or scan_policy.get("evaluationArtifact") != evaluation_name:
+        raise EvidenceError(
+            f"resume checkpoint does not carry its scan evaluation artifact "
+            f"{evaluation_name}, so its verdict cannot be re-derived: {image_id}"
+        )
+    evaluation = _load_json_file(
+        safe_path(manifest_path.parent, evaluation_name), maximum_bytes=4 * 1024 * 1024
+    )
+    if evaluation.get("imageId") != image_id:
+        raise EvidenceError(
+            f"resume checkpoint scan evaluation is not bound to this image: {image_id}"
+        )
+    suppression = evaluation.get("suppressedFindings")
+    derived = "passed"
+    if (
+        not isinstance(evaluation.get("unexplainedFindings"), list)
+        or evaluation["unexplainedFindings"]
+        or not isinstance(evaluation.get("unexplainedSuppressedFindings"), list)
+        or evaluation["unexplainedSuppressedFindings"]
+        or not isinstance(suppression, Mapping)
+        or not isinstance(suppression.get("refusals"), list)
+        or suppression["refusals"]
+    ):
+        derived = "failed"
+    claimed = scan_policy.get("result")
+    if derived != "passed" or claimed != "passed":
+        raise EvidenceError(
+            f"resume checkpoint is not a completed image: {image_id} records "
+            f"scanPolicy.result {claimed!r} while its scan evaluation derives "
+            f"{derived!r}"
+        )
+    # Reproduce the verdict from the scan itself, against the ledger as it
+    # stands TODAY, and require it to be clean.
+    #
+    # `today`, deliberately, and not the checkpoint's recorded evaluation date.
+    # A resume must accept exactly what a fresh collection would accept, and a
+    # fresh collection evaluates against the ledger in force now. An earlier
+    # version of this guard re-ran with the recorded date, which was a hole the
+    # independent verification demonstrated: `scanPolicy.evaluatedOn` is an
+    # unsigned field, so backdating that one field passed an image whose
+    # exception has since lapsed -- 107 of the 227 records in the committed
+    # ledger have already lapsed, so this was not an edge case. A stored
+    # evaluation is a record of a past judgement; the question this gate answers
+    # is whether the image may be signed now.
+    #
+    # The stored document is not compared field by field any more, because when
+    # the ledger moves a legitimate image legitimately differs from its own
+    # stored evaluation, and refusing that would force a re-collection rather
+    # than fix anything. The claim is still checked against the stored document
+    # above, and the verdict that matters is computed here, from the scan the
+    # manifest already digests. Measured on the largest retained scan in this
+    # campaign (12.5 MB) this costs about 0.1 s per image.
+    scan_name = f"{image_id}.grype.json"
+    if scan_name not in artifacts:
+        raise EvidenceError(
+            f"resume checkpoint does not carry its scan document {scan_name}, so its "
+            f"evaluation cannot be reproduced: {image_id}"
+        )
+    reproduced = evaluate_scan(
+        scan_path=safe_path(manifest_path.parent, scan_name),
+        image_id=image_id,
+        exceptions_config=context.exceptions_config,
+        today=datetime.now(timezone.utc).date().isoformat(),
+        suppression_config=context.suppression_config,
+    )
+    if (
+        reproduced["unexplainedFindings"]
+        or reproduced["unexplainedSuppressedFindings"]
+        or reproduced["suppressedFindings"]["refusals"]
+    ):
+        raise EvidenceError(
+            f"resume checkpoint scan document does not pass a fresh evaluation against "
+            f"the ledger in force today: {image_id}"
+        )
     return dict(manifest)
 
 

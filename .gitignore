@@ -39,3 +39,10 @@ output/playwright/
 *.sqlite3-wal
 *.sqlite3-shm
 .venv-test/
+
+# Gate report captures written next to STATE.yaml by an external wrapper.
+# They are build artefacts, never tracked, and the release image build requires a
+# clean tree INCLUDING untracked paths (build_release_images.py uses
+# `git status --porcelain=v1 --untracked-files=all`), so an untracked capture would
+# otherwise block the release build on the gate own output.
+STATE.yaml.gateout.*

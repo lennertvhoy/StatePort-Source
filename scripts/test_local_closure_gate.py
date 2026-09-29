@@ -172,6 +172,7 @@ def test_authoritative_plan_covers_every_local_closure_boundary() -> None:
         "web_typecheck",
         "web_lint",
         "web_unit_tests",
+        "web_live_core_collection",
         "web_build",
         "web_bundle_budget",
         "web_build_isolation",

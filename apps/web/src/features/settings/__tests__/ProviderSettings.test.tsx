@@ -24,6 +24,7 @@ describe('Provider settings', () => {
     expect(screen.getByRole('textbox', { name: 'Codex model identifier' }).getAttribute('autoComplete')).toBe('off')
   })
   it('defaults to the shipped OpenCode provider when the service reports none', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to omit providerId from the fixture; the binding is the omission, not its value.
     const { providerId: _unused, ...withoutProvider } = status
     vi.mocked(providerClient.getStatus).mockResolvedValue(withoutProvider)
     render(<ProviderSettings />)

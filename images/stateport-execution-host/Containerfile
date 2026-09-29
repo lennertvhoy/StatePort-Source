@@ -1,19 +1,64 @@
 FROM docker.io/library/golang:1.26.6-alpine3.23@sha256:5978cc992ad5ef96a7469713c8af849c1433824761ce3be2c56381403cd8d9a3 AS podman-remote-builder
 
+# Group A remediation pin: podman-container-tools/podman @ 4b94ccce (v6.2.0-dev).
+# This is the earliest commit clearing all five Group A component thresholds
+# (grpc >= 1.83.2 is the binding one) on unreleased code, chosen 2026-09-27 over
+# a1ce95d7 (same clearing set, four weeks smaller unreleased window) and over
+# v6.1.2 (which does not clear and fails the scan fail-closed).
+# Evidence: evidence/one-line-release-001/groupa-option-a-pin-verification-20260926.md
+#
+# This pin renames the Go module (containers/podman/v5 -> go.podman.io/podman/v6),
+# so the ldflags below are re-pathed. Exactly TWO -X injections remain, and both
+# are asserted through the program further down.
+#   EFFECTIVE   libpod/define.gitCommit, libpod/define.buildInfo
+#               -> package-level `var` in libpod/define/version.go, measured
+#                  present and consumed at this pin (GitCommit, Built, BuiltTime).
+#   DROPPED     libpod/config._installPrefix, libpod/config._etcDir
+#               -> no declaration exists anywhere in the v6 tree outside vendor/,
+#                  so there is no symbol for -X to target. Carried forward for
+#                  years doing nothing.
+#   DROPPED     pkg/systemd/quadlet._binDir
+#               -> declared at pkg/systemd/quadlet/podmancmdline.go:12, so a
+#                  source-tree search FINDS it, but it is not linked into
+#                  podman-remote: every importer in cmd/podman's graph
+#                  (pkg/domain/infra/abi/quadlet.go, quadlet_utils.go,
+#                  pkg/api/handlers/libpod/quadlets.go) is gated
+#                  //go:build !remote and this build passes -tags remote.
+#                  Source existence is NOT linking; a migration that re-paths it
+#                  would carry a fourth silently inert flag across the v6 bump.
+# Go's linker ignores -X for a missing symbol SILENTLY, so a green build cannot
+# distinguish an effective injection from an inert one.
+# Evidence: evidence/one-line-release-001/groupa-ldflags-assertion-gap-20260926.md
+# DO NOT add an assertion that greps the binary for the injected strings: the
+# -ldflags text itself is embedded in the build info, so such a grep passes even
+# when -X has silently done nothing. An assertion must observe the value through
+# the program (e.g. `podman-remote version`) and must be validated by an actual
+# build before it is relied on.
+# The `version --format json` observation below is wrapped in a group that
+# tolerates EXACTLY exit 125 and no other status. `version` is not a pure
+# client-info command: in tunnel mode it calls registry.NewContainerEngine ->
+# pingNewConnection, and this builder stage has no podman service, so it exits
+# 125 (define.ExecErrorCodeGeneric) after printing the client report. Measured
+# against a real podman-remote: stdout still carries the full "Client" object
+# with GitCommit and Built, and only the exit status is non-zero. Chaining it
+# with a bare `&&` fails the build, and swallowing the status unconditionally is
+# forbidden by test_execution_host_alpine_packages_are_exact_and_fully_pinned,
+# so the tolerance is pinned to the one expected code.
+
 RUN apk add --no-cache git=2.52.0-r0 \
     && mkdir -p /tmp/podman-source /out \
     && git -C /tmp/podman-source init -q \
     && git -C /tmp/podman-source remote add origin https://github.com/podman-container-tools/podman.git \
-    && git -C /tmp/podman-source fetch --depth 1 origin c593b672bf3db1173aebea565ebf1a724ea196dc \
+    && git -C /tmp/podman-source fetch --depth 1 origin 4b94ccce9f4474155b4bf3da1b8218230e898595 \
     && git -C /tmp/podman-source checkout -q --detach FETCH_HEAD \
-    && git -C /tmp/podman-source archive --format=tar --prefix=podman-c593b672bf3db1173aebea565ebf1a724ea196dc/ HEAD > /tmp/podman-c593b672.tar \
-    && echo "171238512538a0d6f17c95c1ca132ed46fd2bf3281d3a6c18e88bc9915ed9763  /tmp/podman-c593b672.tar" | sha256sum -c - \
-    && tar -xf /tmp/podman-c593b672.tar -C /tmp/podman-source --strip-components=1 \
+    && git -C /tmp/podman-source archive --format=tar --prefix=podman-4b94ccce9f4474155b4bf3da1b8218230e898595/ HEAD > /tmp/podman-4b94ccce.tar \
+    && echo "d8829f954519de28563351cda90bb7b9795b935360419d20bf8308a57821c187  /tmp/podman-4b94ccce.tar" | sha256sum -c - \
+    && tar -xf /tmp/podman-4b94ccce.tar -C /tmp/podman-source --strip-components=1 \
     && cd /tmp/podman-source \
     && GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
       -mod=readonly -trimpath -buildvcs=false \
       -tags "remote exclude_graphdriver_btrfs containers_image_openpgp" \
-      -ldflags "-s -w -X github.com/containers/podman/v5/libpod/define.gitCommit=c593b672bf3db1173aebea565ebf1a724ea196dc -X github.com/containers/podman/v5/libpod/define.buildInfo=1789570405 -X github.com/containers/podman/v5/libpod/config._installPrefix=/usr -X github.com/containers/podman/v5/libpod/config._etcDir=/etc -X github.com/containers/podman/v5/pkg/systemd/quadlet._binDir=/usr/bin" \
+      -ldflags "-s -w -X go.podman.io/podman/v6/libpod/define.gitCommit=4b94ccce9f4474155b4bf3da1b8218230e898595 -X go.podman.io/podman/v6/libpod/define.buildInfo=1788082111" \
       -o /out/podman-remote ./cmd/podman \
     && go version -m /out/podman-remote | grep -F "go1.26.6" \
     && grep -aqF "golang.org/x/crypto/ssh.NewClientConn" /out/podman-remote \
@@ -22,7 +67,10 @@ RUN apk add --no-cache git=2.52.0-r0 \
        else \
          status=$?; test "$status" -eq 1; \
        fi \
-    && /out/podman-remote --version | grep -Fx "podman-remote version 5.8.7"
+    && /out/podman-remote --version | grep -Fx "podman-remote version 6.2.0-dev" \
+    && { /out/podman-remote version --format json > /tmp/podman-version.json || [ "$?" -eq 125 ]; } \
+    && grep -q '"GitCommit": *"4b94ccce9f4474155b4bf3da1b8218230e898595"' /tmp/podman-version.json \
+    && grep -q '"Built": *1788082111' /tmp/podman-version.json
 
 FROM docker.io/library/python:3.13-alpine3.23@sha256:75f27d686432419c9d42420b2b9ef605868c7a0682a6be10a6601fad46c2df01
 
@@ -51,8 +99,8 @@ LABEL org.opencontainers.image.title="StatePort Execution Host" \
 
 # The daemon talks only to the execution user's own rootless Podman socket
 # (mounted at /run/stateport-engine/podman.sock by the stable-host Quadlet).
-# podman-remote is built from the exact v5.8.7 source with Go 1.26.6; no engine
-# runs inside this image. The Alpine package is not installed.
+# podman-remote is built from the exact pinned v6 source (4b94ccce) with Go 1.26.6;
+# no engine runs inside this image. The Alpine package is not installed.
 # The container must never observe a control-plane socket.
 # The runtime crypto/sqlite libraries come from the python base image's own
 # Alpine 3.23 repositories, so they are upgraded in a separate exact-pinned
@@ -73,8 +121,8 @@ RUN apk add --no-cache \
         aardvark-dns=2.1.0-r0 \
         catatonit=0.2.1-r0 \
         conmon=2.2.1-r0 \
-        container-libs=0.69.1-r0 \
-        crun=1.28-r0 \
+        container-libs=0.69.2-r0 \
+        crun=1.30.1-r0 \
         glib=2.90.0-r0 \
         json-c=0.19-r1 \
         libblkid=2.42.4-r0 \
@@ -88,7 +136,7 @@ RUN apk add --no-cache \
         libseccomp=2.6.0-r2 \
         linux-pam=1.7.1-r3 \
         netavark=2.1.0-r0 \
-        passt=2026.07.28-r0 \
+        passt=2026.09.25-r0 \
         pcre2=10.48-r0 \
         skalibs-libs=2.15.1.0-r0 \
         shadow-libs=4.18.0-r1 \

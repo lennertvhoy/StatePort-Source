@@ -20,6 +20,7 @@ for source_root in sorted((ROOT / "apps").glob("*/src")):
 from stateport_persistent_app import LocalLayout  # noqa: E402
 from stateport_persistent_app.service_process import (  # noqa: E402
     AppServer,
+    Handler,
     _REQUIRED_PRODUCT_PATHS,
     _select_web_root,
     _unlink_runtime_if_owned,
@@ -509,3 +510,63 @@ def test_launcher_construction_failure_is_recordable_and_does_not_leak_log(tmp_p
     with pytest.raises(RuntimeError, match="synthetic launcher construction failure"):
         AppServer(("127.0.0.1", 0), layout, web_root)
     assert (layout.logs_root / "service.log").is_file()
+
+
+def _request_handler(server: AppServer, path: str) -> Handler:
+    """A Handler bound to a real AppServer, without running a real request.
+
+    Only the attributes log_request/log_message read are populated, so the real
+    method bodies run against the server's real log stream.
+    """
+    handler = Handler.__new__(Handler)
+    handler.server = server
+    handler.path = path
+    handler.command = "GET"
+    return handler
+
+
+def test_request_logging_never_breaks_a_request_that_arrives_during_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request after server_close() loses its log line, never its response.
+
+    AppServer sets daemon_threads and server_close() closes the service log, so a
+    request thread can still be inside send_response -> log_request at that point.
+    Writing to the closed log raised ValueError out of send_response before any
+    bytes were sent, which is how two requests in the governed actual-template run
+    were answered with nothing at all.
+    """
+    layout = _layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        AppServer, "_construct_telegram_launcher", lambda self, layout: _FakeTelegramLauncher(enabled=False)
+    )
+    web_root = service_product_fixture(tmp_path, ROOT) / "apps" / "web"
+    server = AppServer(("127.0.0.1", 0), layout, web_root)
+    handler = _request_handler(server, "/api/health?token=secret")
+    server.server_close()
+    assert server.log.closed
+    handler.log_request(200, 17)  # must not raise
+
+
+def test_request_logging_still_records_the_fixed_path_while_the_log_is_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative twin: the guard must not silence logging, nor the redaction.
+
+    Asserting only that nothing raises would be satisfied by a log_message that
+    writes nothing at all, so this pins both the recorded line and the documented
+    property that query values never reach the log.
+    """
+    layout = _layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        AppServer, "_construct_telegram_launcher", lambda self, layout: _FakeTelegramLauncher(enabled=False)
+    )
+    web_root = service_product_fixture(tmp_path, ROOT) / "apps" / "web"
+    server = AppServer(("127.0.0.1", 0), layout, web_root)
+    try:
+        _request_handler(server, "/api/health?token=secret").log_request(200, 17)
+    finally:
+        server.server_close()
+    recorded = (layout.logs_root / "service.log").read_text(encoding="utf-8")
+    assert "method=GET path=/api/health status=200 bytes=17" in recorded
+    assert "secret" not in recorded

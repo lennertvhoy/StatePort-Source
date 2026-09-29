@@ -232,6 +232,36 @@ def _load_builder_descriptor() -> tuple[Mapping[str, Any], str]:
     return value, "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def _version_at_least(version: str, floor: str) -> bool | None:
+    """True/False if both parse as dotted numeric versions, None if either does not.
+
+    Only the leading dotted numeric core is compared, so a pre-release suffix such
+    as `6.2.0-dev` is treated as its numeric core. Callers must treat None as a
+    refusal rather than as a pass: an unparsable floor or version is a
+    configuration error, and silently accepting one would make this check
+    decorative in exactly the way it was before it existed.
+    """
+    def core(text: str) -> tuple[int, ...] | None:
+        head = text.strip().lstrip("vV").split("-", 1)[0]
+        parts = head.split(".")
+        # isascii() matters: str.isdigit() is true for Arabic-Indic digits and
+        # int() accepts them, so '٦.١.١' would otherwise pass as 6.1.1 while the
+        # module's own _VERSION regex rejects it. The length bound matters because
+        # int() refuses strings over 4300 digits with ValueError, which would
+        # escape as a crash instead of the refusal this function promises.
+        if len(head) > 64 or not parts:
+            return None
+        if not all(part.isascii() and part.isdigit() for part in parts):
+            return None
+        return tuple(int(part) for part in parts)
+
+    left, right = core(version), core(floor)
+    if left is None or right is None:
+        return None
+    width = max(len(left), len(right))
+    return left + (0,) * (width - len(left)) >= right + (0,) * (width - len(right))
+
+
 def verify_podman_builder() -> dict[str, Any]:
     inputs = _load_yaml(BUILD_INPUTS)
     expected = inputs["builder"]
@@ -239,6 +269,34 @@ def verify_podman_builder() -> dict[str, Any]:
     executable = Path(str(descriptor.get("executablePath", PODMAN)))
     if os.environ.get("STATEPORT_PODMAN_PATH") and executable != PODMAN:
         raise ReleaseBuildError("builder descriptor executable does not match STATEPORT_PODMAN_PATH")
+    # The build EXECUTES the module-level PODMAN, resolved from PATH, at every image
+    # and podman call site. Hashing the descriptor's path while running a different
+    # binary is the bypass this closes: an honest descriptor naming /usr/bin/podman
+    # verified clean, while PATH supplied the attacker's binary and it built the
+    # images. The previous guard was unreachable because STATEPORT_PODMAN_PATH is
+    # never set, so this compares the two unconditionally. realpath on both sides
+    # keeps an honest PATH that resolves to the same inode acceptable.
+    #
+    # realpath alone is NOT sufficient, and this is the second bypass it left open: a
+    # PATH-precedence SYMLINK pointing at the honest file satisfies realpath equality,
+    # is never hashed, is never type-checked, and is what all fourteen exec sites
+    # actually run -- so repointing it after the check swaps the builder for a ~30
+    # minute build whose provenance already names the honest digest. The governor's
+    # own PATH begins with user-owned directories, so this is reachable, not
+    # theoretical. So PODMAN is validated and hashed in its OWN right below, rather
+    # than being reconciled to the descriptor's path by resolution alone.
+    if os.path.realpath(PODMAN) != os.path.realpath(executable):
+        raise ReleaseBuildError(
+            "the builder the build would execute is not the verified builder: "
+            f"PATH resolves podman to {PODMAN!r} but the descriptor verified "
+            f"{str(executable)!r}"
+        )
+    executed = Path(PODMAN)
+    if executed.is_symlink() or not executed.is_file():
+        raise ReleaseBuildError(
+            "the builder the build would execute is a symlink or not a regular file; "
+            "point PATH at the reviewed builder binary itself, not at an alias"
+        )
     if executable.is_symlink() or not executable.is_file():
         raise ReleaseBuildError("pinned Podman builder path is unavailable or symlinked")
     digest = sha256_file(executable)
@@ -251,6 +309,33 @@ def verify_podman_builder() -> dict[str, Any]:
         raise ReleaseBuildError("Podman builder artifact has no immutable URI")
     if artifact.get("digest") != digest:
         raise ReleaseBuildError("Podman builder artifact digest does not match its executable")
+    # The descriptor is supplied by the same party that supplies the executable and
+    # is not signed, allowlisted, or committed anywhere, so every check above is a
+    # self-consistency check: a 41-byte stand-in that reports a matching version and
+    # a descriptor hashing itself satisfies all of them. The only anchor the
+    # descriptor cannot supply for itself is a digest committed to this repository
+    # and reviewed with it, so the executable is pinned here as well. Refusing is
+    # the intended behaviour after a host Podman upgrade: the builder is part of the
+    # release provenance, so a new builder is a re-pin for a human, not a refresh.
+    committed_digest = str(expected.get("observedExecutableDigest", ""))
+    if not committed_digest:
+        raise ReleaseBuildError(
+            "container build inputs declare no committed builder executable digest"
+        )
+    if digest != committed_digest:
+        raise ReleaseBuildError(
+            "Podman builder executable is not the committed, reviewed builder"
+        )
+    # The executed binary is hashed independently, so the provenance this gate returns
+    # describes the bytes that will actually run rather than a path that resolved to
+    # them at check time. The two must agree; if PATH ever yields a different regular
+    # file with a different digest, the build refuses rather than reporting a digest
+    # for something it is not about to run.
+    if sha256_file(executed) != digest:
+        raise ReleaseBuildError(
+            "the builder the build would execute hashes differently from the "
+            "verified builder"
+        )
     if descriptor.get("name") != str(expected["name"]):
         raise ReleaseBuildError("Podman builder name does not match container build inputs")
     value = json.loads(_run([str(executable), "version", "--format", "json"], capture=True))
@@ -259,6 +344,12 @@ def verify_podman_builder() -> dict[str, Any]:
         raise ReleaseBuildError("Podman builder version does not match container build inputs")
     if version != str(expected["observedVersion"]):
         raise ReleaseBuildError("Podman builder version does not match container build inputs")
+    floor = str(expected.get("compatibilityFloor", ""))
+    if _version_at_least(version, floor) is not True:
+        raise ReleaseBuildError(
+            f"Podman builder version {version!r} is below the committed "
+            f"compatibility floor {floor!r}"
+        )
     info = json.loads(_run([str(executable), "info", "--format", "json"], capture=True))
     if not isinstance(info, Mapping):
         raise ReleaseBuildError("Podman builder returned an invalid host observation")

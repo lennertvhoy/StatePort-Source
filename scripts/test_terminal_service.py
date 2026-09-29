@@ -1017,6 +1017,275 @@ def test_persistent_service_periodically_enforces_terminal_expiry(tmp_path: Path
     assert probe.closed is True
 
 
+def _observed_process(record: dict[str, object]) -> tuple[bool, str]:
+    """Report liveness from /proc using the broker's own identity fields.
+
+    A bare pid is not identity: the pid may have been reused. The broker
+    records ``startTimeTicks``, so liveness is only reported for a process
+    whose start ticks still match the recorded ownership identity.
+    """
+    pid = int(record["pid"])
+    started = str(record["startTimeTicks"])
+    identity = terminal_broker_module._process_identity(pid)
+    if identity is None:
+        return False, f"pid={pid} not present in /proc"
+    state, group, session, observed_started = identity
+    if observed_started != started:
+        return False, f"pid={pid} reused: start={observed_started} != recorded {started}"
+    return True, f"pid={pid} state={state} pgid={group} sid={session} start={observed_started}"
+
+
+def _observed_generation(generation: str) -> tuple[bool, str]:
+    """Report whether any process of the session generation is still running."""
+    members = terminal_broker_module._exact_generation_members(generation)
+    if members is None:
+        return False, "generation members unreadable"
+    pids = ",".join(str(item[0]) for item in members)
+    return bool(members), f"{len(members)} generation member(s) alive: [{pids}]"
+
+
+def _broker_state(service: dict[str, object]) -> dict[str, object]:
+    state_files = tuple(Path(service["layout"].runtime_root).glob("terminal-broker-*/terminal-broker-state.json"))
+    assert len(state_files) == 1, state_files
+    return json.loads(state_files[0].read_text(encoding="utf-8"))
+
+
+def _sole_active_record(service: dict[str, object]) -> dict[str, object]:
+    active = _broker_state(service)["activeSessions"]
+    assert isinstance(active, list) and len(active) == 1, active
+    record = active[0]
+    assert isinstance(record, dict)
+    return record
+
+
+def test_terminal_process_survival_after_socket_close_is_measured_at_three_horizons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Measure real PTY process survival for both ways the web client closes a terminal.
+
+    Two distinct closures are measured, because the two client paths are not
+    the same wire event:
+
+    * ``end`` — ``TerminalSocket.end()`` sends a ``{"type": "end"}`` control
+      text frame and then closes the socket. This is the actual End button.
+    * plain close — no control frame at all, only the transport detaching.
+      This is ``disconnect()``, tab close/unmount, and the reconnect detach.
+
+    Both closures are measured with the SAME observation helpers, so a
+    surviving process cannot be an artefact of a check that always reports
+    dead: the ``end`` case is the in-test falsifier control for the plain
+    close case.
+    """
+    def horizon(label: str, record: dict[str, object], elapsed: float) -> tuple[bool, str]:
+        leader_alive, leader = _observed_process(record)
+        tree_alive, tree = _observed_generation(str(record["generation"]))
+        print(
+            f"[{label}] t+{elapsed:.2f}s session={record['sessionId']} "
+            f"leader_alive={leader_alive} ({leader}) generation_alive={tree_alive} ({tree})",
+            flush=True,
+        )
+        return leader_alive and tree_alive, f"{leader}; {tree}"
+
+    def run_case(instance_id: str, *, send_end_frame: bool) -> dict[str, object]:
+      # Each case gets its own service instance: horizon 3 stops the service,
+      # which is itself the teardown under measurement.
+      with _service(tmp_path / instance_id, monkeypatch) as service:
+          status, prepared_payload = _prepare(service, instance_id)
+          assert status == 200, prepared_payload
+          ticket = prepared_payload["result"]
+          assert isinstance(ticket, dict)
+          websocket = RawWebSocket.open(service)
+          try:
+              websocket.send_json(_authentication(ticket, instance_id))
+              opcode, ready_payload = websocket.receive()
+              assert opcode == 0x1
+              ready = json.loads(ready_payload)
+              assert ready["type"] == "ready" and ready["targetClass"] == "local_pty"
+              assert ready["sessionId"] == ticket["sessionId"]
+
+              # Confirm the PTY process tree is really up before the close, so a
+              # later "dead" observation cannot be a process that never started.
+              record = _sole_active_record(service)
+              leader_alive, leader = _observed_process(record)
+              assert leader_alive, f"session process was not running before the close: {leader}"
+              tree_alive, tree = _observed_generation(str(record["generation"]))
+              assert tree_alive, f"session process tree was not running before the close: {tree}"
+              print(
+                  f"[{instance_id}] BEFORE-CLOSE leader_alive=True ({leader}) "
+                  f"generation_alive=True ({tree}) send_end_frame={send_end_frame}",
+                  flush=True,
+              )
+
+              if send_end_frame:
+                  # What the End button actually puts on the wire.
+                  websocket.send_json({"formatVersion": SOCKET_FORMAT, "type": "end"})
+                  assert struct.unpack("!H", _receive_close(websocket)[:2])[0] == 1000
+              else:
+                  # Plain transport detach: no control frame, close frame only.
+                  websocket.send(0x8, struct.pack("!H", 1000) + b"detach")
+                  assert struct.unpack("!H", _receive_close(websocket)[:2])[0] == 1000
+          finally:
+              websocket.close()
+
+          # Horizon 1: immediately after the close acknowledgement.
+          started_at = time.monotonic()
+          immediate, detail = horizon("H1-immediate", record, 0.0)
+          # The broker receipt is durable; record it verbatim. _persist_state()
+          # drops four contract-metadata fields before writing, which is why the
+          # persisted receipt is narrower than TerminalAuditReceipt.to_dict().
+          receipts = [
+              item for item in _broker_state(service)["auditReceipts"]
+              if item["sessionId"] == ticket["sessionId"]
+          ]
+          print(f"[{instance_id}] RECEIPT-VERBATIM {json.dumps(receipts, sort_keys=True)}", flush=True)
+          print(f"[{instance_id}] H1 detail: {detail}", flush=True)
+
+          # Horizon 2: bounded wait. The service sweeps every 0.2s
+          # (serve_forever poll_interval), so 2.0s is ~10 sweep opportunities
+          # and proves the sweeper ran without reaping. It deliberately does NOT
+          # exceed the session TTL, which this service profile cannot shorten.
+          time.sleep(2.0)
+          after_wait, detail_wait = horizon("H2-after-2.0s-sweep", record, time.monotonic() - started_at)
+          print(f"[{instance_id}] H2 detail: {detail_wait}", flush=True)
+
+          # Horizon 3: broker teardown the service performs on its own.
+          stopped = service["app"].service_stop()
+          assert stopped["status"] == "stopped", stopped
+          teardown_alive, detail_teardown = horizon("H3-after-service-stop", record, time.monotonic() - started_at)
+          print(f"[{instance_id}] H3 detail: {detail_teardown}", flush=True)
+          print(
+              f"[{instance_id}] SUMMARY immediate={immediate} after_wait={after_wait} "
+              f"after_teardown={teardown_alive}",
+              flush=True,
+          )
+          return {
+              "immediate": immediate,
+              "after_wait": after_wait,
+              "after_teardown": teardown_alive,
+              "receipt_actions": [item["action"] for item in receipts],
+          }
+
+    end_case = run_case("dev-one", send_end_frame=True)
+    plain_case = run_case("dev-two", send_end_frame=False)
+
+    # The falsifier: the identical observation path reports DEAD for the
+    # control case. Without this, a surviving result proves nothing.
+    assert end_case["immediate"] is False, end_case
+    assert end_case["after_wait"] is False, end_case
+    assert end_case["after_teardown"] is False, end_case
+    assert "closed" in end_case["receipt_actions"], end_case
+
+    # The measured finding: a plain close leaves the PTY process running.
+    assert plain_case["immediate"] is True, plain_case
+    assert plain_case["after_wait"] is True, plain_case
+    assert plain_case["after_teardown"] is False, plain_case
+    assert "disconnected" in plain_case["receipt_actions"], plain_case
+    assert "closed" not in plain_case["receipt_actions"], plain_case
+
+    with capsys.disabled():
+        print("TERMINAL-PROCESS-SURVIVAL RESULT", json.dumps({"end_frame": end_case, "plain_close": plain_case}, sort_keys=True))
+
+
+def test_disconnected_terminal_process_is_reaped_at_the_idle_timeout_horizon(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The TTL horizon itself, on the same _finalize_live path the plain close leaves open.
+
+    The service profile fixes idle_timeout_seconds=900 and
+    maximum_lifetime_seconds=3600 (TerminalConnectionProfile defaults), which a
+    cheap harness cannot wait out and the service does not let a test
+    configure. This drives the broker directly with an injected clock and a
+    short profile lifetime so the TTL horizon is actually observed rather than
+    extrapolated, and records the real TerminalAuditReceipt verbatim.
+    """
+    from stateport_terminal_broker import (
+        TerminalCapabilities,
+        TerminalConnectionProfile,
+        TerminalSessionBroker,
+        TerminalTarget,
+    )
+
+    clock = [time.time()]
+    origin = "http://127.0.0.1:18771"
+    project = tmp_path / "ttl-project"
+    head = _project_fixture(project, "ttl-project")
+    assert head
+    state_directory = tmp_path / "broker-state"
+    state_directory.mkdir()
+    now = clock[0]
+    profile = TerminalConnectionProfile(
+        "terminal.profile.ttl-probe",
+        TerminalTarget(
+            "terminal.local.ttl-probe", "local_pty", "Project terminal", "available",
+            TerminalCapabilities("local_pty", True, True, True, True, True, True),
+        ),
+        ("ttl-instance",),
+        project,
+        ("/bin/sh",),
+        idle_timeout_seconds=1,
+        maximum_lifetime_seconds=60,
+    )
+    broker = TerminalSessionBroker(
+        (profile,), state_directory=state_directory, allowed_origins=(origin,), clock=lambda: clock[0],
+    )
+    identity = {"actor_id": "operator.ttl-probe", "instance_id": "ttl-instance", "origin": origin}
+    state_path = state_directory / "terminal-broker-state.json"
+    try:
+        token = broker.prepare_session(
+            profile.profile_id, selected_root=project, **identity,
+        )
+        session, created = broker.open_session(token.value, selected_root=project, **identity)
+        record = json.loads(state_path.read_text(encoding="utf-8"))["activeSessions"][0]
+        assert record["sessionId"] == session.session_id
+        generation = str(record["generation"])
+        assert _observed_process(record)[0], record
+        assert _observed_generation(generation)[0], generation
+        print(f"[ttl] BEFORE-CLOSE pid={record['pid']} created_receipt={json.dumps(created.to_dict(), sort_keys=True)}", flush=True)
+
+        # The plain-close path: disconnect_session never touches live.process.
+        disconnected = broker.disconnect_session(session.session_id, **identity)
+        print(f"[ttl] RECEIPT-VERBATIM {json.dumps(disconnected.to_dict(), sort_keys=True)}", flush=True)
+
+        leader_alive, leader = _observed_process(record)
+        tree_alive, tree = _observed_generation(generation)
+        print(f"[ttl] H1-immediate leader_alive={leader_alive} ({leader}) generation_alive={tree_alive} ({tree})", flush=True)
+        assert leader_alive and tree_alive
+
+        # The stated intent, confirmed at runtime rather than by reading: the
+        # broker will still issue a reconnect token for a disconnected session
+        # whose process is alive.
+        reconnect = broker.prepare_reconnect(session.session_id, **identity)
+        print(f"[ttl] RECONNECT-TOKEN-ISSUED purpose={reconnect.purpose} session={reconnect.session_id}", flush=True)
+        assert reconnect.purpose == "reconnect"
+
+        # Horizon 2: cross the idle TTL. idle_timeout_seconds=1, and
+        # disconnect_session reset last_activity to the injected clock, so
+        # advancing 2s puts the session strictly past the deadline.
+        clock[0] += 2.0
+        swept = broker.sweep_expired()
+        print(f"[ttl] SWEEP-EXPIRED reasons={[item.reason for item in swept]}", flush=True)
+        assert [item.reason for item in swept] == ["idle_timeout"], swept
+        leader_alive, leader = _observed_process(record)
+        tree_alive, tree = _observed_generation(generation)
+        print(f"[ttl] H2-after-idle-TTL leader_alive={leader_alive} ({leader}) generation_alive={tree_alive} ({tree})", flush=True)
+        assert not leader_alive and not tree_alive
+
+        # Past the TTL the stated intent is no longer honoured.
+        try:
+            broker.prepare_reconnect(session.session_id, **identity)
+        except Exception as error:  # noqa: BLE001 - the refusal type is the observation
+            print(f"[ttl] RECONNECT-AFTER-TTL REFUSED {type(error).__name__}: {error}", flush=True)
+            refused = True
+        else:
+            refused = False
+        assert refused, "a reaped disconnected session must not yield a reconnect token"
+    finally:
+        broker.close()
+
+    with capsys.disabled():
+        print("TERMINAL-TTL-HORIZON RESULT sweep_reason=idle_timeout process_gone=True reconnect_refused_after_ttl=True")
+
+
 def test_persistent_service_rejects_non_loopback_listener(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))

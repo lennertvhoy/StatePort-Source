@@ -6,6 +6,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'packages/execution-host/src'))
 from execution_host.daemon import ExecutionHostDaemon, _Refusal
+from execution_host.daemon_contract import workspace_template_for_image
 from execution_host.engine import MANAGED_LABEL_KEY, WORKLOAD_LABEL, KIND_LABEL
 
 
@@ -14,7 +15,10 @@ class FixtureEngine:
     def __init__(self):
         self.calls = []
         self.workspace_data = b'recognizable user workspace data'
-        self.info = {'present': True, 'running': False, 'labels': {
+        # containerId is present because the real engine always reports it
+        # (engine.py maps the raw container Id to this key) and
+        # _assert_owned_container reads it to prove ownership before any effect.
+        self.info = {'present': True, 'running': False, 'containerId': 'f' * 64, 'labels': {
             MANAGED_LABEL_KEY: 'true', WORKLOAD_LABEL: 'default-dev', KIND_LABEL: 'workspace'},
             'imageDigest': 'sha256:' + 'a' * 64}
         self.leave_container = False
@@ -33,9 +37,26 @@ class FixtureEngine:
 class FixtureDaemon(ExecutionHostDaemon):
     def __init__(self, state='stopped'):
         self._engine = FixtureEngine()
+        # Built with the contract's own template so the fixture holds a spec the
+        # product could actually have written. A hand-rolled {kind, image} spec
+        # omits the required parameters field, and _op_start indexes it directly,
+        # so the fixture was exercising a shape the ledger can never contain.
         self.entry = {'workloadId': 'default-dev', 'state': state, 'version': 1,
-            'spec': {'kind': 'workspace', 'image': {'reference': 'example@sha256:' + 'a' * 64}}}
-        self._ledger = SimpleNamespace(get=lambda _: self.entry)
+            # A real ledger entry records containerId (ledger writes it on
+            # start), and _container_identity_error only compares against it
+            # when it is present. Without this the identity check in a file named
+            # for control identity was vacuous: mutating the observed container
+            # id to a foreign value left every test passing.
+            'containerId': 'f' * 64,
+            'spec': workspace_template_for_image('example@sha256:' + 'a' * 64)}
+        # The ledger stub carries the terminal-evidence capture the real ledger
+        # performs before a container is removed, so the control paths under test
+        # run against the method they actually call rather than failing on it.
+        self._ledger = SimpleNamespace(
+            get=lambda _: self.entry,
+            capture_source_command_output=lambda entry, engine, *, at, termination_reason: dict(entry),
+            mark_source_termination=lambda entry, *, at, reason: dict(entry),
+        )
         self._config = SimpleNamespace(clock=lambda: '2026-09-05T00:00:00Z')
         self.sessions_closed = 0
     def _close_sessions_for(self, workload_id):

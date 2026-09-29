@@ -99,8 +99,20 @@ def _source_request(source: dict, *, instance_id: str, application_id: str, cata
     return authority.validate_workspace_authority_request(request)
 
 
+@daemon_test.requires_booked_governor
 def test_production_reviewed_source_authority_seeds_and_recovers_rootless_daemon(tmp_path: Path) -> None:
-    """Issue source authority, seed a real capsule, restart, remove, and recover."""
+    """Issue source authority, seed a real capsule, restart, remove, and recover.
+
+    This test calls the real ``daemon_test._governed_engine_environment`` at
+    lines 164 and 242, which raises unless the process sits in a booked
+    governor service.  Commit 86774caa gave the three sibling tests in
+    ``test_execution_host_daemon.py`` that same explicit precondition marker
+    but not this one, so this test kept reporting red on every repository-root
+    ``pytest -q`` for a reason that has nothing to do with the product.  The
+    marker is imported from the module that defines it rather than redefined
+    here, so the two files cannot drift apart.  Under a booking it runs in full
+    and can still fail.
+    """
     from execution_host.application_workspaces import TRANSPORT_FORMAT, catalog_identity
 
     uid = os.geteuid()

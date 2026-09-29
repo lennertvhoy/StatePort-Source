@@ -31,7 +31,20 @@ for source_root in sorted((ROOT / "packages").glob("*/src")):
 
 
 
-def _git(root: Path, *arguments: str) -> str:
+# The generic third template is created here rather than cloned from a real
+# repository, so its Git identity is only a pin if the commit that produces it
+# is reproducible. A bare commit inherits the wall clock, which made the
+# recorded sourceCommit differ between two runs of the same content and left an
+# unverifiable value in a column of pins. These two constants make the commit
+# object a pure function of the content written below.
+GENERIC_TEMPLATE_COMMIT_DATE = "2026-01-01T00:00:00+00:00"
+GENERIC_TEMPLATE_COMMIT = "ba3f348e2f8960e8dce47230c8d6e4ab5505de33"
+
+
+def _git(root: Path, *arguments: str, env: dict[str, str] | None = None) -> str:
+    process_env = None
+    if env is not None:
+        process_env = {**os.environ, **env}
     completed = subprocess.run(
         ["git", *arguments],
         cwd=root,
@@ -40,11 +53,32 @@ def _git(root: Path, *arguments: str) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=process_env,
     )
     return completed.stdout.strip()
 
 
 def _create_generic_template(root: Path) -> Path:
+    # Idempotent: the actual-template journey's restart leg re-enters here in a
+    # new process against the same disposable root, where the template already
+    # exists.  A bare mkdir would raise FileExistsError there, and recreating
+    # the repository would be work whose only effect is to lose the identity
+    # the caller is about to pin.  Reuse is safe because the identity check at
+    # the end still runs on every pass, so a pre-existing checkout that is not
+    # the pinned commit is refused rather than silently accepted.
+    if root.is_dir() and (root / ".git").is_dir():
+        # Reuse only when the existing checkout still IS the pinned template.
+        # Returning early without checking would make the pin decorative and
+        # would let a tampered or re-pointed checkout be adopted silently.
+        existing = _git(root, "rev-parse", "HEAD")
+        dirty = _git(root, "status", "--porcelain")
+        if existing != GENERIC_TEMPLATE_COMMIT or dirty:
+            raise RuntimeError(
+                f"pre-existing generic template at {root} is commit {existing} "
+                f"with status {dirty!r}, not the recorded pin "
+                f"{GENERIC_TEMPLATE_COMMIT}; refusing to reuse it"
+            )
+        return root
     root.mkdir(parents=True)
     (root / "template.yaml").write_text(
         """apiVersion: statedd.stateport.io/v1alpha1
@@ -73,7 +107,26 @@ spec:
     _git(root, "config", "user.name", "StatePort journey")
     _git(root, "config", "user.email", "journey@stateport.invalid")
     _git(root, "add", "--all")
-    _git(root, "commit", "-q", "-m", "generic template")
+    _git(
+        root,
+        "commit",
+        "-q",
+        "-m",
+        "generic template",
+        env={
+            "GIT_AUTHOR_DATE": GENERIC_TEMPLATE_COMMIT_DATE,
+            "GIT_COMMITTER_DATE": GENERIC_TEMPLATE_COMMIT_DATE,
+        },
+    )
+    # Fail loudly when the content above changes, so the recorded pin can never
+    # drift into naming bytes this generator no longer produces.
+    produced = _git(root, "rev-parse", "HEAD")
+    if produced != GENERIC_TEMPLATE_COMMIT:
+        raise RuntimeError(
+            "generic template commit "
+            f"{produced} does not match the recorded pin {GENERIC_TEMPLATE_COMMIT}; "
+            "the template content changed, so the pin must be reviewed and updated"
+        )
     return root
 
 

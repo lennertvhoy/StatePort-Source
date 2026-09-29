@@ -188,6 +188,69 @@ def test_mutation_snapshot_restore_preserves_modes_and_removes_added_directories
         assert not (root / "added").exists()
 
 
+def test_governed_import_guard_keeps_shadowing_loud() -> None:
+    """The guarded import must stay narrow enough to tell absent from shadowed.
+
+    `governed_api/application.py` guards its dependency import and, when the
+    dependency is genuinely ABSENT, nulls `ExecutionPlan`, `InstanceLease`,
+    `InstanceLeaseBusy`, `JobQueue` and `RunLedger` for the rest of the process so
+    every governed call fails closed with 503. Fail-closed is correct; failing
+    *silently* is not, because the symptom is indistinguishable from a product
+    fault -- which is how a 20-row 503 class in the whole-suite run came to be read
+    as twenty product faults.
+
+    The distinction the clause has to preserve is between two failures that both
+    concern the bare name `runner`:
+
+    * **absent**   -- `ModuleNotFoundError`, `exc.name == "runner"`. Nulled, 503.
+    * **shadowed** -- `ImportError`, and -- measured, not assumed -- CPython still
+      reports `exc.name == "runner"` for `cannot import name 'run_instance' from
+      'runner'`. It must re-raise.
+
+    The shadow is real: the package is `apps/runner/src/runner/`, and
+    `infra/qualification/runner.py` also answers to the bare name `runner`.
+    Declaring `apps/runner/src` in `pytest.ini` `pythonpath`, as a first repair
+    attempt for the 503 class, let the shadow win: 23 collection errors. Widening
+    the clause to `except ImportError` to "fix" that was the worse mistake, and was
+    reverted: because `exc.name` is `'runner'` in BOTH cases, it would have
+    converted the loud shadowing failure into a silent 503 on a governance
+    surface. That falsifier is why this assertion exists.
+
+    This is a source-level check on purpose. A live check of
+    `application.ExecutionPlan is not None` is vacuous here, because this file
+    re-injects the paths in its own preamble and passes whatever the session
+    configuration says; the first version of this canary did exactly that and
+    stayed green with the configuration deleted.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    import governed_api.application as application
+
+    source_path = inspect.getsourcefile(application)
+    assert source_path, "cannot locate the governed_api.application source file"
+    source = Path(source_path).read_text(encoding="utf-8")
+    guard = re.search(
+        r"except\s+([A-Za-z_][\w.]*)\s+as\s+\w+:[^\n]*\n\s*if\s+\w+\.name\s+not\s+in\s+\{[^}]*\}",
+        source,
+    )
+    assert guard is not None, (
+        f"could not locate the guarded-import except clause in {source_path}; if it was "
+        "renamed or restructured, re-check that a shadowed dependency still fails "
+        "loudly rather than degrading the governed API to a silent 503."
+    )
+    caught = guard.group(1)
+    assert caught == "ModuleNotFoundError", (
+        f"the guarded import catches {caught!r}. Widening it to ImportError does NOT "
+        "make the guard cover more absent-dependency cases -- ModuleNotFoundError is "
+        "already a subclass -- it only adds the shadowed case, and CPython reports "
+        "exc.name == 'runner' for `cannot import name 'run_instance' from 'runner'`, "
+        "so the shadowing failure that is loud today would be silently swallowed into "
+        "a 503 on a governance surface. Keep the clause at ModuleNotFoundError."
+    )
+
+
 if __name__ == "__main__":
     for name, value in sorted(globals().items()):
         if name.startswith("test_") and callable(value):

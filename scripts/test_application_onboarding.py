@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from service_test_product import service_product_fixture  # noqa: E402
 import json
 from pathlib import Path
 import socket
@@ -96,7 +97,7 @@ def test_browser_installs_exact_public_fixture_with_csrf_and_receipt(tmp_path: P
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
-    app.service_start(port=port)
+    app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))
     try:
         with urlopen(f"http://127.0.0.1:{port}/session") as response:
             session = json.loads(response.read())["result"]
@@ -300,7 +301,7 @@ def test_imported_instance_identity_cannot_inherit_application_capabilities(tmp_
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
-    app.service_start(port=port)
+    app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))
     try:
         with urlopen(f"http://127.0.0.1:{port}/session") as response:
             cookie = response.headers["Set-Cookie"].split(";", 1)[0]
@@ -339,7 +340,12 @@ def test_shell_keeps_install_primary_and_developer_tools_progressively_disclosed
     assert "Installing this package requires your confirmation" in review
     assert 'data-testid="confirm-install"' in review
     assert "Quiet secondary path at the foot of the list" in catalog
-    assert "Import a local repository" in catalog and "reviewed installation stays the ordinary path." in catalog
+    # The secondary path is still offered, and the copy now says plainly that
+    # creating a package from a template is not exposed by the backend rather
+    # than leaving the reviewer to infer it. Asserting the retired short label
+    # would pin wording the product deliberately replaced.
+    assert "Importing an allowlisted local repository is the governed secondary path." in catalog
+    assert "Creating a package from a template is not exposed by the current backend." in catalog
     assert "Installing a reviewed package is the supported starting point." in catalog
     assert "applicationDescriptorDigest" in domains and "applicationPackageDigest" in domains and "experienceDescriptorDigest" in domains
     # Developer tools stay progressively disclosed behind effective

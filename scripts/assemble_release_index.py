@@ -86,6 +86,11 @@ from build_release_images import (  # noqa: E402
 
 TOOLS = ROOT / "config/release-tool-inputs.yaml"
 SCAN_EXCEPTIONS = ROOT / "config/release-scan-exceptions.v1.yaml"
+SCAN_SUPPRESSION = ROOT / "config/release-scan-suppression.v1.yaml"
+SCAN_SUPPRESSION_FILE = "config/release-scan-suppression.v1.yaml"
+SCAN_SUPPRESSION_FORMAT = "stateport.release-scan-suppression/v1"
+_SUPPRESSION_RULE_ID = re.compile(r"^RS-[0-9]{4}-[0-9]{3}$")
+_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SINGLE_BYTE_CONTENT_RANGE = re.compile(r"^bytes 0-0/([1-9][0-9]*)$")
@@ -731,6 +736,168 @@ def _health_evidence_artifact(evidence_dir: Path, image_id: str) -> dict[str, An
     }
 
 
+def _require_declared_suppression(
+    scan_policy: Mapping[str, Any], image_id: str
+) -> dict[str, Any]:
+    """Refuse evidence whose suppressed findings are not declared and justified.
+
+    Grype moves every finding an ignore rule covers into ``ignoredMatches`` and
+    reports success for it, so a scan can pass while hiding Critical and High
+    advisories. The collector records that suppression; this function is the
+    assembly-side enforcement, and it re-derives the accepted rule set from the
+    repository contract instead of trusting the manifest: an evidence manifest
+    is refused unless it binds this exact contract by digest, declares exactly
+    the contract's rule ids, reports no uncovered suppressed finding, no
+    expired or unjustified rule, no undeclared effective rule, and a tool
+    version equal to the pinned scanner.
+
+    Evidence collected before the contract existed carries no suppression
+    record at all and is therefore refused: an undeclared suppression is not a
+    passing suppression.
+
+    Returns the signed-block facts the release has to publish: the counts, the
+    rules that actually covered a threshold finding, and the declaration's own
+    expiry, so a consumer of signed bytes sees the residual instead of trusting
+    the collector.
+    """
+    _require(
+        scan_policy.get("suppressionFile") == SCAN_SUPPRESSION_FILE
+        and scan_policy.get("suppressionDigest") == sha256_file(SCAN_SUPPRESSION),
+        f"scan suppression policy is not bound to the pinned contract for {image_id}",
+    )
+    record = scan_policy.get("suppression")
+    _require(
+        isinstance(record, Mapping)
+        and record.get("policyFile") == SCAN_SUPPRESSION_FILE
+        and record.get("policyFormatVersion") == SCAN_SUPPRESSION_FORMAT,
+        f"scan evaluation for {image_id} records no suppression policy",
+    )
+    contract = _load_yaml(SCAN_SUPPRESSION)
+    _require(
+        contract.get("formatVersion") == SCAN_SUPPRESSION_FORMAT,
+        "pinned scan suppression contract declares an unsupported format",
+    )
+    declared = {
+        str(rule.get("id")): rule
+        for rule in contract.get("rules", [])
+        if isinstance(rule, Mapping)
+    }
+    _require(
+        record.get("declaredRuleIds") == sorted(declared),
+        f"scan suppression rules for {image_id} are not the pinned contract's rules",
+    )
+    _require(
+        all(len(str(rule.get("justification", "")).strip()) >= 16 for rule in declared.values()),
+        "a pinned scan suppression rule carries no justification",
+    )
+    declared_keys = {
+        (
+            str(rule.get("package", "")),
+            str(rule.get("packageType", "")),
+            str(rule.get("matchType", "")),
+        )
+        for rule in declared.values()
+    }
+    effective = record.get("effectiveRules")
+    _require(
+        isinstance(effective, list)
+        and all(isinstance(entry, Mapping) for entry in effective),
+        f"scan evaluation for {image_id} records no effective suppression rules",
+    )
+    for entry in effective:
+        _require(
+            (str(entry.get("package", "")), str(entry.get("packageType", "")), str(entry.get("matchType", "")))
+            in declared_keys,
+            f"scan for {image_id} suppressed findings under an undeclared effective rule: "
+            f"{entry.get('package')!r}/{entry.get('packageType')!r}/{entry.get('matchType')!r}",
+        )
+    for field in (
+        "undeclaredEffectiveRules",
+        "expiredRuleIds",
+        "unjustifiedRuleIds",
+        "refusals",
+    ):
+        _require(
+            record.get(field) == [],
+            f"scan suppression policy for {image_id} reports {field}: {record.get(field)!r}",
+        )
+    uncovered = scan_policy.get("unexplainedSuppressedFindings")
+    _require(
+        isinstance(uncovered, list)
+        and not uncovered
+        and record.get("uncoveredSuppressedCount") == 0,
+        f"scan evaluation for {image_id} has suppressed findings no declared rule explains",
+    )
+    pinned_version = str(_load_yaml(TOOLS)["tools"]["grype"]["version"])
+    _require(
+        record.get("toolName") == "grype"
+        and record.get("toolVersion") == pinned_version
+        and record.get("declaredToolVersion") == pinned_version,
+        f"scan suppression policy for {image_id} is not declared for the pinned scanner "
+        f"{pinned_version!r}",
+    )
+    total = record.get("suppressedTotal")
+    gated = record.get("suppressedGatedTotal")
+    _require(
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and isinstance(gated, int)
+        and not isinstance(gated, bool)
+        and 0 <= gated <= total,
+        f"scan suppression totals for {image_id} are malformed",
+    )
+    applied_rule_ids = sorted(record.get("suppressedCoveredByRule", {}))
+    _require(
+        all(_SUPPRESSION_RULE_ID.fullmatch(item) for item in applied_rule_ids)
+        and applied_rule_ids
+        == sorted(str(identifier) for identifier in declared if identifier in applied_rule_ids),
+        f"scan suppression for {image_id} names rules the pinned contract does not declare",
+    )
+    covered = record.get("suppressedCoveredByRule", {})
+    _require(
+        all(
+            isinstance(count, int) and not isinstance(count, bool) and count > 0
+            for count in covered.values()
+        )
+        and sum(covered.values()) == gated,
+        f"scan suppression coverage for {image_id} does not account for every "
+        "threshold-severity suppressed finding",
+    )
+    _require(
+        isinstance(record.get("declaredExpiresOn"), str)
+        and _DATE.fullmatch(str(record["declaredExpiresOn"])),
+        f"scan suppression record for {image_id} has no usable declaration expiry",
+    )
+    # Empty when no rule had to cover anything; the declaration's own expiry is
+    # then the date the image's residual lapses.
+    applied_expiry = record.get("appliedExpiresOn")
+    _require(
+        applied_expiry == "" or (isinstance(applied_expiry, str) and _DATE.fullmatch(applied_expiry)),
+        f"scan suppression record for {image_id} has no usable applied-rule expiry",
+    )
+    evaluated_on = scan_policy.get("evaluatedOn")
+    _require(
+        isinstance(evaluated_on, str) and _DATE.fullmatch(evaluated_on),
+        f"scan policy for {image_id} names no evaluation date",
+    )
+    # The declaration is judged on the day the scan was evaluated, not on the
+    # day the assembly happens: a rule that lapsed after a legitimate evaluation
+    # stays valid for that evaluation and is stopped by its own expiry later.
+    expires_on = str(applied_expiry) or str(record["declaredExpiresOn"])
+    _require(
+        expires_on >= str(record["policyResolvedOn"]) and expires_on >= evaluated_on,
+        f"scan suppression declaration for {image_id} was already lapsed on its evaluation date",
+    )
+    return {
+        "suppressedFindingsCount": total,
+        "suppressedFindingsAtOrAboveThresholdCount": gated,
+        "unexplainedSuppressedFindingsCount": 0,
+        "appliedSuppressionRuleIds": applied_rule_ids,
+        "suppressionEvaluatedOn": evaluated_on,
+        "suppressionExpiresOn": expires_on,
+    }
+
+
 def _load_evidence(
     request: AssemblyRequest,
     receipt: Mapping[str, Any],
@@ -796,6 +963,7 @@ def _load_evidence(
             and not scan_policy["unexplainedFindings"],
             f"scan evaluation for {image_id} is incomplete or unexplained",
         )
+        _require_declared_suppression(scan_policy, image_id)
         _require(
             image_id in image_set["images"],
             f"{image_id} is not declared by the pinned release image set",
@@ -1610,6 +1778,7 @@ def _assemble_supply_chain(
     comparison_path = write_json_create_only(
         output, "supply-chain/double-build-comparison.json", comparison
     )
+    vulnerability_exceptions = _assemble_vulnerability_exceptions(manifests, output)
     return {
         "tools": tool_entries,
         "doubleBuildComparison": {
@@ -1626,6 +1795,102 @@ def _assemble_supply_chain(
             media_type="application/json",
             expected_digest="sha256:" + candidate["publicManifestSha256"],
         ),
+        "vulnerabilityExceptions": vulnerability_exceptions,
+    }
+
+
+def _assemble_vulnerability_exceptions(
+    manifests: Mapping[str, Mapping[str, Any]],
+    output: Path,
+) -> dict[str, Any]:
+    """Publish the pinned exception ledger and its per-image evaluation.
+
+    The signed payload must let a consumer holding only the signed bytes see
+    which named, expiring, reachability-analysed exception covers every
+    threshold-severity finding. Incomplete evaluations are refused here so a
+    published block can never describe a partial review.
+    """
+
+    exceptions_digest = sha256_file(SCAN_EXCEPTIONS)
+    suppression_digest = sha256_file(SCAN_SUPPRESSION)
+    images: dict[str, Any] = {}
+    distinct: set[str] = set()
+    total = 0
+    for image_id, manifest in sorted(manifests.items()):
+        scan_policy = manifest["scanPolicy"]
+        _require(
+            scan_policy.get("exceptionsFile") == "config/release-scan-exceptions.v1.yaml"
+            and scan_policy.get("exceptionsDigest") == exceptions_digest,
+            f"scan exception policy is not bound to the pinned ledger for {image_id}",
+        )
+        unexplained = scan_policy["unexplainedFindings"]
+        _require(
+            isinstance(unexplained, list),
+            f"scan evaluation for {image_id} is malformed",
+        )
+        _require(
+            not unexplained,
+            f"scan evaluation for {image_id} is incomplete or unexplained",
+        )
+        # The suppression contract is enforced at both places the scan policy is
+        # consumed, and the facts it returns are published: a suppression the
+        # release relies on is declared, visible and expiring in the signed bytes
+        # rather than implied by a scanner binary.
+        suppression = _require_declared_suppression(scan_policy, image_id)
+        applied = sorted({str(item) for item in scan_policy["appliedExceptionIds"]})
+        total += len(applied)
+        distinct.update(applied)
+        entry: dict[str, Any] = {
+            "appliedExceptionIds": applied,
+            "unexplainedFindingsCount": len(unexplained),
+            "threshold": str(scan_policy["threshold"]),
+            "unfixedFindingsIncluded": bool(scan_policy["unfixedFindingsIncluded"]),
+            "suppressionPolicyFile": SCAN_SUPPRESSION_FILE,
+            "suppressionPolicyDigest": suppression_digest,
+            **suppression,
+        }
+        evaluation_artifact = scan_policy.get("evaluationArtifact")
+        if isinstance(evaluation_artifact, str) and evaluation_artifact:
+            artifacts = manifest.get("artifacts")
+            _require(
+                isinstance(artifacts, Mapping)
+                and isinstance(artifacts.get(evaluation_artifact), str)
+                and _DIGEST.fullmatch(str(artifacts[evaluation_artifact])),
+                f"evidence for {image_id} does not digest its scan evaluation artifact",
+            )
+            entry["evaluationArtifact"] = evaluation_artifact
+        images[image_id] = entry
+    ledger = _retained_artifact(
+        SCAN_EXCEPTIONS,
+        output,
+        relative="supply-chain/release-scan-exceptions.v1.yaml",
+        artifact_id="release scan exception ledger",
+        media_type="application/yaml",
+        expected_digest=exceptions_digest,
+    )
+    # The suppression declaration is published as a retained, digested artifact
+    # for the same reason the exception ledger is: the rules a release relies on
+    # to hide advisories from its own gate have to be fetchable and checkable by
+    # whoever holds the signed index.
+    policy = _retained_artifact(
+        SCAN_SUPPRESSION,
+        output,
+        relative="supply-chain/release-scan-suppression.v1.yaml",
+        artifact_id="release scan suppression declaration",
+        media_type="application/yaml",
+        expected_digest=suppression_digest,
+    )
+    return {
+        "formatVersion": "stateport.release-vulnerability-exceptions/v1",
+        "exceptionsFile": "config/release-scan-exceptions.v1.yaml",
+        "exceptionsDigest": exceptions_digest,
+        "ledgerArtifact": ledger,
+        "suppressionPolicyFile": SCAN_SUPPRESSION_FILE,
+        "suppressionPolicyDigest": suppression_digest,
+        "suppressionPolicyArtifact": policy,
+        "images": images,
+        "totalAppliedExceptionIds": total,
+        "distinctAppliedExceptionIds": sorted(distinct),
     }
 
 

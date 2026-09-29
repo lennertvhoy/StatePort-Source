@@ -16,6 +16,8 @@
     "test:watch": "vitest",
     "test:e2e": "python3 ../../scripts/run_web_e2e.py",
     "test:build-isolation": "node --test tests/build-isolation.test.mjs",
+    "test:live-core-collection": "node --test tests/live-core-collection.test.mjs",
+    "test:live-core-surface-claim": "node --test tests/live-core-surface-claim.test.mjs",
     "check:bundle": "python3 ../../scripts/validate_web_bundle_budget.py",
     "test:canonical-source-browser": "npm run build && playwright test --config=playwright.canonical-source.config.ts",
     "test:live-core-browser": "npm run build && playwright test --config=playwright.live-core.config.ts",

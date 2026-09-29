@@ -497,3 +497,96 @@ def test_fresh_materialization_includes_exact_updater_modules(tmp_path: Path, mo
     lines = namespace["manifest_lines"]
     assert f"{hashlib.sha256(b'updater-cli').hexdigest()}  stateport_updater/cli.py" in lines
     assert (fresh / "stateport_updater/cli.py", 0, 0) in ownership
+
+
+def _materialize_block() -> str:
+    """The materialize trust-root block, as the shell actually feeds it to Python."""
+    # The trust-root gate is the SECOND heredoc; index 2 is the unrelated one that
+    # unpacks a different (10-argument) argv, so the index is asserted, not assumed.
+    heredocs = _heredocs()
+    assert "EXPECTED_COSIGN" in heredocs[1], "heredoc layout changed"
+    return heredocs[1]
+
+
+def _run_materialize_trust(tmp_path: Path, *, cosign_bytes: bytes, declared_cosign_digest: str) -> tuple[int, str]:
+    """Run the REAL materialize trust block and return (exit code, combined output).
+
+    Nothing here is simulated: the block is the provisioner's own source, extracted the
+    same way the file's other tests extract it, and executed with the same argument
+    vector ``stateport-execution-host-provision`` passes at :176-184.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    root = tmp_path / "trust"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "cosign").write_bytes(cosign_bytes)
+    (root / "helper").write_bytes(b"helper\n")
+    (root / "wheel").write_bytes(b"wheel\n")
+    (root / "release-index.json").write_bytes(b"{}\n")
+    (root / "bundle").mkdir(exist_ok=True)
+    public_key = ROOT / "config" / "trust" / "alpha-2026-08-cosign.pub"
+    zero = "sha256:" + "0" * 64
+    script = tmp_path / "materialize_trust.py"
+    script.write_text(textwrap.dedent(_materialize_block()), encoding="utf-8")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            str(root / "wheel"),
+            zero,
+            str(root / "release-index.json"),
+            str(root / "bundle"),
+            str(root / "cosign"),
+            declared_cosign_digest,
+            str(public_key),
+            "sha256:" + hashlib.sha256(public_key.read_bytes()).hexdigest(),
+            "stateport-alpha-private-2026-08",
+            "sha256:df24c1ccdcf1ecf72da6d8d81ae8b0ffaca8d399826091b107cc4d6905915ea5",
+            str(root / "helper"),
+            "sha256:" + hashlib.sha256(b"helper\n").hexdigest(),
+            "sha256:" + hashlib.sha256(b"helper\n").hexdigest(),
+            str(root),
+            str(root),
+            str(root),
+            str(root),
+            str(root),
+            str(root / "intent"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+def test_materialize_refuses_a_substituted_cosign_even_when_the_declared_digest_is_the_pin(
+    tmp_path: Path,
+) -> None:
+    """The two trust gates are independent, and this proves the SECOND one by execution.
+
+    ``EXPECTED_COSIGN`` is checked twice in ``stateport-execution-host-provision``:
+    at :216-222 against the digest the caller *declares*, and at :228 against the
+    bytes actually on disk. A source-reading test cannot tell whether the second
+    check is reachable, so this runs the real block and asserts the substitution is
+    refused even in the case that satisfies the first check.
+
+    The substitution is the Homebrew-built cosign shape the provisioner's own comment
+    at :195-196 warns about -- "it must never pin a workstation-built tool" -- so this
+    also keeps the pitfall the existing rendered-string tests cannot see.
+    """
+    substitute = b"#!/bin/sh\n# a workstation-built cosign stand-in\n"
+    pin = "sha256:4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+
+    # The declared digest IS the pin, so the :216-222 gate is satisfied and cannot be
+    # what refuses. The refusal must therefore come from the :228 byte comparison.
+    code, output = _run_materialize_trust(
+        tmp_path, cosign_bytes=substitute, declared_cosign_digest=pin
+    )
+    assert code != 0, f"a substituted cosign was accepted: {output}"
+    assert "materialize trust bytes do not match the compiled Alpha trust root" in output, output
+    assert "trust inputs do not match" not in output, (
+        "the declared-digest gate refused first, so this run did not exercise the "
+        f"byte gate it is meant to isolate: {output}"
+    )

@@ -55,6 +55,21 @@ def _git(repository: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def _committed_paths(repository: Path) -> list[str]:
+    """Every path in the COMMITTED tree at HEAD, never the live index.
+
+    The classification gate must be a function of (HEAD, policy) alone. Reading
+    ``git ls-files --cached`` instead made the verdict depend on each
+    worktree's own index, so the same HEAD with a byte-identical policy file
+    could pass in a worktree where a note was not yet staged and fail in the
+    canonical checkout. That is a silent green, which is worse than a slow red.
+    The fail-closed teeth are preserved rather than traded away: a committed
+    path with no policy entry still fails, and an unclassified path is still
+    refused at export time by the unresolved-blocking default.
+    """
+    return sorted(set(_git(repository, "ls-tree", "-r", "HEAD", "--name-only").splitlines()))
+
+
 def _policy(
     *,
     public_paths: list[str] | None = None,
@@ -664,7 +679,7 @@ def test_repository_policy_exactly_classifies_the_current_source_and_future_path
     policy = load_policy(policy_bytes)
     assert policy.default.classification == "unresolved-blocking"
     assert policy.known_source_review is None
-    source_paths = sorted(set(_git(ROOT, "ls-files", "--cached").splitlines()))
+    source_paths = _committed_paths(ROOT)
     selected_paths = sorted(path for rule in policy.rules for path in rule.paths)
     classifications = Counter(_classify(path, policy).classification for path in source_paths)
     default_matches = sum(_classify(path, policy).identifier == policy.default.identifier for path in source_paths)
@@ -707,6 +722,39 @@ def test_repository_policy_exactly_classifies_the_current_source_and_future_path
     assert _classify("instances/demo-classdd/instance.yaml", policy).classification == "private-internal"
     assert _classify("scripts/materialize_public_snapshot.py", policy).classification == "public-source"
     assert _classify("future/new-file.py", policy).classification == "unresolved-blocking"
+
+
+def test_the_classified_path_set_is_a_function_of_head_and_not_of_each_worktree_index(
+    tmp_path: Path,
+) -> None:
+    """The gate's verdict must not depend on which worktree runs it.
+
+    A committed path is always in the set, so an unclassified committed file
+    still fails the gate. A path that is only staged is not yet part of the
+    tree and is therefore not judged, which is what makes the same HEAD give
+    the same verdict everywhere. The index-based reading this replaces is
+    exactly what made the gate silently green in a worktree.
+    """
+    repository = tmp_path / "clone"
+    _git(tmp_path, "init", "--quiet", str(repository))
+    _write(repository / "committed.txt", "committed\n")
+    _git(repository, "add", "committed.txt")
+    _git(repository, "-c", "user.email=gate@example.invalid", "-c", "user.name=gate", "commit", "--quiet", "-m", "one")
+
+    assert _committed_paths(repository) == ["committed.txt"]
+
+    # Staged but uncommitted: absent from HEAD, so absent from the judged set.
+    _write(repository / "staged-only.txt", "staged\n")
+    _git(repository, "add", "staged-only.txt")
+    assert _committed_paths(repository) == ["committed.txt"], (
+        "a staged-but-uncommitted path must not enter the judged set, otherwise the "
+        "verdict depends on the local index and the gate goes silently green in a "
+        "worktree that has not staged the file"
+    )
+
+    # Once committed it enters the set immediately, so the teeth are not lost.
+    _git(repository, "-c", "user.email=gate@example.invalid", "-c", "user.name=gate", "commit", "--quiet", "-m", "two")
+    assert _committed_paths(repository) == ["committed.txt", "staged-only.txt"]
 
 
 def test_copyable_web_sources_have_a_closed_relative_import_graph() -> None:

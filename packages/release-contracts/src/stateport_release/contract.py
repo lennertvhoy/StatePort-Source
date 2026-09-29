@@ -56,6 +56,56 @@ _ALPHA17_PREDECESSOR_SIGNED_DIGEST = (
 _ALPHA17_PREDECESSOR_INDEX_DIGEST = (
     "sha256:441d05196edb6e4c5e16521b8f723f58941ac6d8fd9b0e6f02c6bd0f9cca0ead"
 )
+# Alpha.15 and Alpha.16 are already-published immutable indices that predate the
+# signed vulnerability-exception attestation. They are pinned here for the same
+# reason Alpha.17 is: so requiring the attestation below cannot retroactively
+# invalidate published bytes. Every other index must carry it.
+_ALPHA15_PREDECESSOR_RELEASE_ID = "stateport-alpha-0.1.0-alpha.15"
+_ALPHA15_PREDECESSOR_VERSION = "0.1.0-alpha.15"
+_ALPHA15_PREDECESSOR_SIGNED_DIGEST = (
+    "sha256:66483f166570dea5135b732bd3c31a05d52691d48a3e8ddd94ae793d3654a47d"
+)
+_ALPHA15_PREDECESSOR_INDEX_DIGEST = (
+    "sha256:825f2ba4eb8757c99f5146de36d4d1fe74646b3d872441201e77baed3bdfff9e"
+)
+_ALPHA16_PREDECESSOR_RELEASE_ID = "stateport-alpha-0.1.0-alpha.16"
+_ALPHA16_PREDECESSOR_VERSION = "0.1.0-alpha.16"
+_ALPHA16_PREDECESSOR_SIGNED_DIGEST = (
+    "sha256:5594dc7dc3711ffdfbd74da271012c02dc23e5fa626d12f59d41a768058b2bac"
+)
+_ALPHA16_PREDECESSOR_INDEX_DIGEST = (
+    "sha256:8695079a651268c9ede50dba9d71f81f110ff5405da688a95f116ba41f335cc7"
+)
+# Alpha.18 was signed as an unpublished candidate before the attestation existed
+# and is embedded verbatim as the predecessor of the Alpha.19 successor, so the
+# successor chain cannot validate unless it is recognised. Pinned on the digest
+# of the EMBEDDED copy, which is not byte-identical to the separate on-disk
+# alpha.18 assembly. Unpublished does not matter here: the reason for the
+# exemption is that these bytes are already signed and therefore immutable, not
+# that they were published.
+_ALPHA18_PREDECESSOR_RELEASE_ID = "stateport-alpha-0.1.0-alpha.18"
+_ALPHA18_PREDECESSOR_VERSION = "0.1.0-alpha.18"
+_ALPHA18_PREDECESSOR_SIGNED_DIGEST = (
+    "sha256:dd86d3fb5d7675d77d2e19ade01e74b5c31836da7ff02661e9708879248dd7d2"
+)
+_ALPHA18_PREDECESSOR_INDEX_DIGEST = (
+    "sha256:fa3241201f34727258e7fc3214cc6bc7c8663099083eac57ff0c340555afd2ad"
+)
+# Alpha.19: signed on 2026-09-25, before the signed vulnerability-exception
+# attestation existed. Same exemption basis as Alpha.18 above: these bytes are
+# already signed and therefore immutable. The owner recorded route (b) on
+# 2026-09-26 - publish these exact bytes, no re-sign - so they must keep
+# validating. The honest consequence is that a published Alpha.19 route does
+# NOT carry the signed exception attestation; the route documentation states that
+# rather than the attestation being back-fitted into bytes that are already signed.
+_ALPHA19_PREDECESSOR_RELEASE_ID = "stateport-alpha-0.1.0-alpha.19"
+_ALPHA19_PREDECESSOR_VERSION = "0.1.0-alpha.19"
+_ALPHA19_PREDECESSOR_SIGNED_DIGEST = (
+    "sha256:562c6afa12f7cf513654cb7c2abf22f41691d5af17cf327c43e56fd92a209d5d"
+)
+_ALPHA19_PREDECESSOR_INDEX_DIGEST = (
+    "sha256:0ccb73d06cc3d3b75d9dbaea742354d78c1b1700cf98a56ec27ff67b3fb3de9b"
+)
 SCHEMA_DIRECTORY = Path(__file__).resolve().parent / "schemas"
 _CONTRACT_SCHEMAS = {
     "stateport.release-index/v1": "release-index.v1.schema.json",
@@ -619,6 +669,43 @@ def _is_legacy_predecessor(document: Mapping[str, Any]) -> bool:
         and canonical_digest(document) == _ALPHA17_PREDECESSOR_INDEX_DIGEST
     ):
         return True
+    # Alpha.15, Alpha.16 and Alpha.18: already signed before the signed
+    # vulnerability-exception attestation existed. Pinned by exact digest so
+    # their immutable bytes keep validating while every later index is required
+    # to carry the attestation.
+    for release_id, version, signed_digest, index_digest in (
+        (
+            _ALPHA15_PREDECESSOR_RELEASE_ID,
+            _ALPHA15_PREDECESSOR_VERSION,
+            _ALPHA15_PREDECESSOR_SIGNED_DIGEST,
+            _ALPHA15_PREDECESSOR_INDEX_DIGEST,
+        ),
+        (
+            _ALPHA16_PREDECESSOR_RELEASE_ID,
+            _ALPHA16_PREDECESSOR_VERSION,
+            _ALPHA16_PREDECESSOR_SIGNED_DIGEST,
+            _ALPHA16_PREDECESSOR_INDEX_DIGEST,
+        ),
+        (
+            _ALPHA18_PREDECESSOR_RELEASE_ID,
+            _ALPHA18_PREDECESSOR_VERSION,
+            _ALPHA18_PREDECESSOR_SIGNED_DIGEST,
+            _ALPHA18_PREDECESSOR_INDEX_DIGEST,
+        ),
+        (
+            _ALPHA19_PREDECESSOR_RELEASE_ID,
+            _ALPHA19_PREDECESSOR_VERSION,
+            _ALPHA19_PREDECESSOR_SIGNED_DIGEST,
+            _ALPHA19_PREDECESSOR_INDEX_DIGEST,
+        ),
+    ):
+        if (
+            release.get("releaseId") == release_id
+            and release.get("version") == version
+            and canonical_digest(signed) == signed_digest
+            and canonical_digest(document) == index_digest
+        ):
+            return True
     return False
 
 
@@ -1082,6 +1169,13 @@ def render_quadlet_bundle(
                 "[Unit]",
                 f"Description=StatePort staged {profile} profile for {service_id}",
                 "",
+                # Quadlet's default network-online wait never completes on WSL2
+                # (nothing activates network-online.target), which delayed every
+                # boot by 90s and left services down when WSL idled first.
+                # Services bind 127.0.0.1 only; they need no online network.
+                "[Quadlet]",
+                "DefaultDependencies=false",
+                "",
                 "[Container]",
                 f"ContainerName={unit_token}",
                 f"Image={image['reference']}",
@@ -1334,6 +1428,10 @@ def render_stable_host_quadlet_bundle(
             lines.append("After=podman.socket")
         lines.extend(
             [
+                "",
+                # See the control-service quadlet above: no network-online wait on WSL2.
+                "[Quadlet]",
+                "DefaultDependencies=false",
                 "",
                 "[Container]",
                 f"ContainerName={service['serviceId']}",
@@ -4876,6 +4974,109 @@ def _validate_same_lane_predecessor_identity(
         )
 
 
+_CALENDAR_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_SUPPRESSION_RULE_ID = re.compile(r"^RS-[0-9]{4}-[0-9]{3}$")
+_SUPPRESSION_POLICY_FILE = "config/release-scan-suppression.v1.yaml"
+
+
+def _validate_scan_suppression(vulnerability_exceptions: Mapping[str, Any]) -> None:
+    """Refuse a scan suppression that is not declared, justified and unexpired.
+
+    Grype moves every finding an ignore rule covers into ``ignoredMatches`` and
+    reports the scan as passed, so a release can hide Critical and High
+    advisories behind its scanner's own defaults. The signed block therefore has
+    to say, per image, how many findings were suppressed, how many of them were
+    at or above the effective threshold, which declared rule covered them, and
+    when that declaration lapses. A candidate that suppresses a threshold finding
+    without a valid declaration is refused here, from the signed bytes alone:
+    the collector's refusal is necessary but not sufficient, because the bytes a
+    consumer validates are not the bytes the collector wrote.
+    """
+    if vulnerability_exceptions.get("suppressionPolicyFile") != _SUPPRESSION_POLICY_FILE:
+        raise ReleaseContractError(
+            "supply-chain vulnerability exceptions must bind the scan suppression "
+            f"declaration at {_SUPPRESSION_POLICY_FILE}"
+        )
+    policy_digest = vulnerability_exceptions.get("suppressionPolicyDigest")
+    if _DIGEST.fullmatch(str(policy_digest)) is None:
+        raise ReleaseContractError(
+            "supply-chain vulnerability exceptions carry no scan suppression digest"
+        )
+    policy_artifact = vulnerability_exceptions.get("suppressionPolicyArtifact")
+    if not isinstance(policy_artifact, Mapping):
+        raise ReleaseContractError(
+            "supply-chain vulnerability exceptions bind no scan suppression artifact"
+        )
+    _validate_uri(
+        policy_artifact["uri"],
+        "signed.supplyChain.vulnerabilityExceptions.suppressionPolicyArtifact.uri",
+    )
+    # The declaration is named by digest twice: once as what the scan evaluation
+    # was judged against, once as the artifact a consumer can fetch. Without the
+    # binding a signer could judge against one declaration and publish another.
+    if policy_artifact["digest"] != policy_digest:
+        raise ReleaseContractError(
+            "supply-chain scan suppression digest must match the digest of the "
+            "bound suppression declaration artifact"
+        )
+    for image_id, evaluation in sorted(vulnerability_exceptions["images"].items()):
+        if evaluation.get("suppressionPolicyDigest") != policy_digest:
+            raise ReleaseContractError(
+                f"supply-chain scan suppression for {image_id} names a different "
+                "declaration than the block"
+            )
+        if evaluation.get("unexplainedSuppressedFindingsCount") != 0:
+            raise ReleaseContractError(
+                f"supply-chain scan suppression for {image_id} leaves suppressed "
+                "findings no declared rule explains"
+            )
+        total = evaluation.get("suppressedFindingsCount")
+        gated = evaluation.get("suppressedFindingsAtOrAboveThresholdCount")
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or not isinstance(gated, int)
+            or isinstance(gated, bool)
+            or not 0 <= gated <= total
+        ):
+            raise ReleaseContractError(
+                f"supply-chain scan suppression totals for {image_id} are malformed"
+            )
+        rule_ids = [str(item) for item in evaluation.get("appliedSuppressionRuleIds", ())]
+        if not all(_SUPPRESSION_RULE_ID.fullmatch(item) for item in rule_ids):
+            raise ReleaseContractError(
+                f"supply-chain scan suppression for {image_id} names a malformed rule"
+            )
+        if len(set(rule_ids)) != len(rule_ids):
+            raise ReleaseContractError(
+                f"supply-chain scan suppression for {image_id} names a rule twice"
+            )
+        # The refusal the whole contract exists for: suppressed at-threshold
+        # findings with no declared rule behind them.
+        if gated > 0 and not rule_ids:
+            raise ReleaseContractError(
+                f"supply-chain scan suppression for {image_id} suppresses {gated} "
+                f"finding(s) at or above the threshold with no declared rule"
+            )
+        evaluated_on = evaluation.get("suppressionEvaluatedOn")
+        expires_on = evaluation.get("suppressionExpiresOn")
+        if _CALENDAR_DATE.fullmatch(str(evaluated_on)) is None or _CALENDAR_DATE.fullmatch(
+            str(expires_on)
+        ) is None:
+            raise ReleaseContractError(
+                f"supply-chain scan suppression for {image_id} has no usable evaluation "
+                "date or expiry"
+            )
+        # Both dates are inside the signed payload, so this check is a pure
+        # function of the index: a declaration already lapsed when the scan was
+        # evaluated explains nothing, however the wall clock reads later.
+        if str(expires_on) < str(evaluated_on):
+            raise ReleaseContractError(
+                f"supply-chain scan suppression for {image_id} relies on a declaration "
+                "that was already expired on its evaluation date"
+            )
+
+
 def _validate_cross_fields(
     index: Mapping[str, Any],
     *,
@@ -5561,6 +5762,65 @@ def _validate_cross_fields(
         )
     for name in ("doubleBuildComparison", "publicExportManifest"):
         _validate_uri(signed["supplyChain"][name]["uri"], f"signed.supplyChain.{name}.uri")
+    vulnerability_exceptions = signed["supplyChain"].get("vulnerabilityExceptions")
+    # A new release index must bind the signed attestation, otherwise a publisher
+    # holding the signing key could ship an index that simply omits its
+    # vulnerability evidence. Exempt are only the already-published immutable
+    # predecessors, identified by exact pinned digest rather than by version
+    # string, so the installer and updater keep loading those bytes unchanged.
+    # ``legacy_predecessor`` is already ANDed with ``_is_legacy_predecessor``
+    # upstream, so it cannot be used to exempt a new index.
+    if vulnerability_exceptions is None and not (
+        legacy_predecessor or _is_legacy_predecessor(index)
+    ):
+        raise ReleaseContractError(
+            "release index must bind a signed vulnerability-exception ledger in "
+            "signed.supplyChain.vulnerabilityExceptions"
+        )
+    if vulnerability_exceptions is not None:
+        _validate_uri(
+            vulnerability_exceptions["ledgerArtifact"]["uri"],
+            "signed.supplyChain.vulnerabilityExceptions.ledgerArtifact.uri",
+        )
+        # The block names the ledger twice: once as the digest the scan evaluation
+        # was bound to, and once as the artifact a consumer can actually fetch.
+        # Without this binding a signer could name one ledger in the digest and
+        # ship a different artifact, so a verifier that only reads the digest and
+        # a consumer that only fetches the artifact would disagree about which
+        # ledger was relied upon.
+        if vulnerability_exceptions["exceptionsDigest"] != vulnerability_exceptions[
+            "ledgerArtifact"
+        ]["digest"]:
+            raise ReleaseContractError(
+                "supply-chain vulnerability exceptions digest must match the "
+                "digest of the bound ledger artifact"
+            )
+        declared_ids = {str(image["imageId"]) for image in images}
+        evaluated_ids = set(vulnerability_exceptions["images"])
+        if not evaluated_ids <= declared_ids:
+            raise ReleaseContractError(
+                "supply-chain vulnerability exceptions name undeclared images"
+            )
+        applied_total = 0
+        applied_distinct: set[str] = set()
+        for image_id, evaluation in sorted(vulnerability_exceptions["images"].items()):
+            if evaluation["unexplainedFindingsCount"] != 0:
+                raise ReleaseContractError(
+                    f"supply-chain vulnerability exceptions for {image_id} leave "
+                    "unexplained findings"
+                )
+            applied = [str(item) for item in evaluation["appliedExceptionIds"]]
+            applied_total += len(applied)
+            applied_distinct.update(applied)
+        if (
+            applied_total != vulnerability_exceptions["totalAppliedExceptionIds"]
+            or sorted(applied_distinct) != list(vulnerability_exceptions["distinctAppliedExceptionIds"])
+        ):
+            raise ReleaseContractError(
+                "supply-chain vulnerability exception totals disagree with the per-image records"
+            )
+        if not legacy_predecessor:
+            _validate_scan_suppression(vulnerability_exceptions)
 
     release = signed["release"]
     publication = signed["publication"]

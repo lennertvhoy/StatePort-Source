@@ -31,6 +31,8 @@ for relative in (
 
 from stateport_persistent_app import AppError, LocalLayout, PersistentApp  # noqa: E402
 import stateport_persistent_app.app as app_module  # noqa: E402
+import stateport_persistent_app.service_launcher as service_launcher  # noqa: E402
+from stateport_persistent_app.service_launcher import ServiceError  # noqa: E402
 from template_validator.validator import validate_instance  # noqa: E402
 from admin_cli.main import main as cli_main  # noqa: E402
 from service_test_product import service_product_fixture  # noqa: E402
@@ -671,7 +673,8 @@ def test_service_exposes_typed_global_and_application_settings_with_receipts(tmp
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
-    app.service_start(port=port)
+    product_root = service_product_fixture(tmp_path, ROOT)
+    app.service_start(port=port, repo_root=product_root)
     base = f"http://127.0.0.1:{port}"
 
     def session() -> tuple[str, str]:
@@ -720,7 +723,7 @@ def test_service_exposes_typed_global_and_application_settings_with_receipts(tmp
         assert stale.value.code == 409
     finally:
         app.service_stop()
-    second = app.service_start(port=port)
+    second = app.service_start(port=port, repo_root=product_root)
     assert second["status"] == "running"
     assert app.service_stop()["status"] == "stopped"
 
@@ -872,3 +875,29 @@ def test_product_status_reports_execution_runtime_truthfully(tmp_path: Path, mon
     runtime = app.product_status()["runtime"]
     assert runtime["status"] == "unavailable"
     assert runtime["reason"] == "execution_socket_not_configured"
+
+
+def test_service_start_says_a_child_that_never_finished_starting_wrote_no_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child that is still importing has written nothing, so say so.
+
+    The old fixed budget of 40 x 0.05s was exactly 2.0s while a cold first start
+    measured 2.68-2.83s, so the first launch after an install was killed mid-import
+    and reported "inspect service logs" against a log that was empty. The positive
+    twin is test_service_stop_waits_for_listener_before_restart, which now passes on
+    the real default budget; this one pins the failure message by shrinking the
+    deadline so the branch is reached in milliseconds.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    monkeypatch.setattr(service_launcher, "_READINESS_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(PersistentApp, "service_status", lambda self: {"status": "stopped"})
+    with pytest.raises(ServiceError, match="never wrote to the service log"):
+        app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))

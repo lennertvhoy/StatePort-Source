@@ -157,6 +157,12 @@ lifecycle.begin_run(
     executor_kind="opencode", claimed_image=image, host="exec-1",
 )
 print("ready", flush=True)
+# Stay alive holding the lease. Without this the child returns from the script
+# immediately, the kernel releases its flock on exit, and the parent begin_run
+# succeeds against a workspace nobody is using - so the test asserted exclusivity
+# while measuring an idle lock file. The parent releases us by writing one
+# newline, which is the protocol the parent already assumes.
+sys.stdin.readline()
 """
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(

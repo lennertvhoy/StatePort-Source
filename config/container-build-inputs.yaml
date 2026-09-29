@@ -6,7 +6,21 @@ builder:
   name: podman
   descriptorFormat: stateport.release-builder-descriptor/v1
   descriptorEnvironment: STATEPORT_RELEASE_BUILDER_DESCRIPTOR
-  observedVersion: 6.1.0
+  # Observed version of the BUILDER podman that runs `podman build`. Distinct from
+  # sourceBuiltTools.podman-remote below, which is the client compiled INTO the
+  # execution-host image and is pinned by source commit, not by host package.
+  # Refreshed 2026-09-28: the host package moved to 6.1.1-1 and this cross-check
+  # was refusing the governed build. Provenance for 6.1.1 comes from
+  # `pacman -Q podman` (podman 6.1.1-1, x86_64), not from a substituted value.
+  observedVersion: 6.1.1
+  # The committed anchor for the builder BINARY. Every digest the build otherwise
+  # checks is between the executable and the operator-supplied descriptor, and the
+  # descriptor is unsigned and uncommitted, so those checks are self-consistency
+  # only: a stand-in executable plus a descriptor hashing itself satisfies all of
+  # them. This digest is reviewed with the repository, which is the only place a
+  # builder identity can be anchored. Verify with `sha256sum /usr/bin/podman`.
+  # After a host Podman upgrade the build refuses until a human re-pins this.
+  observedExecutableDigest: sha256:7cb41329d29492d78f0292a6d0244d5c994a71350201e7a3bb4c298b76408402
   compatibilityFloor: 5.0.0
 
 locks:
@@ -70,8 +84,8 @@ executionHostAlpine:
     aardvark-dns: 2.1.0-r0
     catatonit: 0.2.1-r0
     conmon: 2.2.1-r0
-    container-libs: 0.69.1-r0
-    crun: 1.28-r0
+    container-libs: 0.69.2-r0
+    crun: 1.30.1-r0
     glib: 2.90.0-r0
     json-c: 0.19-r1
     libblkid: 2.42.4-r0
@@ -85,7 +99,7 @@ executionHostAlpine:
     libseccomp: 2.6.0-r2
     linux-pam: 1.7.1-r3
     netavark: 2.1.0-r0
-    passt: 2026.07.28-r0
+    passt: 2026.09.25-r0
     pcre2: 10.48-r0
     skalibs-libs: 2.15.1.0-r0
     shadow-libs: 4.18.0-r1
@@ -144,10 +158,10 @@ buildToolchains:
 
 sourceBuiltTools:
   podman-remote:
-    version: 5.8.7
-    sourceCommit: c593b672bf3db1173aebea565ebf1a724ea196dc
+    version: 6.2.0-dev
+    sourceCommit: 4b94ccce9f4474155b4bf3da1b8218230e898595
     uri: https://github.com/podman-container-tools/podman.git
-    digest: sha256:171238512538a0d6f17c95c1ca132ed46fd2bf3281d3a6c18e88bc9915ed9763
+    digest: sha256:d8829f954519de28563351cda90bb7b9795b935360419d20bf8308a57821c187
     buildToolchain: golang-1.26.6-alpine3.23
     installPath: /usr/bin/podman-remote
 
@@ -205,7 +219,7 @@ definitions:
   apps/worker/Dockerfile: sha256:4fc27944b9f35c9604b596baf4424659b3ed1a6e7c18a406d82e399ff0de317a
   apps/runner/Dockerfile: sha256:3bb9c0535d80d683dfe289958020825d78c7f4cd777e39ab49797ebd3902d881
   images/stateport-dev-workspace/Containerfile: sha256:818f92e2811f92bb6269287390e9d7e172e44b0bca2befd64de74289c28821d0
-  images/stateport-execution-host/Containerfile: sha256:bfbaae20cb2e026ab446b97baad430d7597db854244b96544df04b4e02afe5f3
+  images/stateport-execution-host/Containerfile: sha256:a164eeb8f1279b760b18d7988e0d7f88bbaca110160104b06cf8f0334ad2310a
   images/stateport-playwright/Containerfile: sha256:13af4b32ba753ffe9bc6c8ed003e3af9036fd16bb742861aa2a3b43df8dbbd61
   images/packaged-content.v1.yaml: sha256:1014e6e05083703b45c4f89b26322ff1bbe40d5a1a95891530195cf907531f48
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0

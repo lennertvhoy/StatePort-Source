@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from service_test_product import service_product_fixture  # noqa: E402
 import hashlib
 import json
 import socket
@@ -386,7 +387,7 @@ def test_same_origin_activity_and_receipt_endpoints_require_session_and_csrf(tmp
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
-    app.service_start(port=port)
+    app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))
     base = f"http://127.0.0.1:{port}"
 
     def request(path: str, *, cookie: str | None = None, csrf: str | None = None, body: dict[str, object] | None = None) -> dict[str, object]:

@@ -3975,3 +3975,120 @@ def test_revoked_signed_seed_base_refuses_mixed_ledger_boot_without_adoption(tmp
         assert engine.removed == []
     finally:
         restarted.shutdown()
+
+
+def test_terminal_failed_record_states_its_own_reason(tmp_path):
+    """A retained ledger record must explain its own terminal failure.
+
+    Regression for an undiagnosable qualification artifact: the record read
+    ``state="failed"`` with ``startedAt=None`` and ``exitStatus=None`` and no
+    reason field anywhere, so nothing that survived said why.  The ``extra=``
+    channel of ``OperationLedger.transition`` already persists arbitrary
+    fields, so this asserts the unwired call sites, not a new schema.
+    """
+    budget = 16 * 1024 * 1024
+    workload, archive = _sealed_agent_source(tmp_path, content=b"x" * (budget + 1))
+    workload["resources"]["diskMaxBytes"] = budget
+    engine = FakeEngine()
+    engine.agent_source_commands_supported = True
+    daemon = _boot(tmp_path, engine)
+    try:
+        grant = grant_document([workload])
+        provision_grants(tmp_path, grant)
+        with archive.open("rb") as source:
+            with pytest.raises(ExecutionHostRefusal, match="source-admission-refused"):
+                _client(tmp_path, grant).create_workload(workload, source_fd=source.fileno())
+        entry = OperationLedger(tmp_path / "state").get(workload["workloadId"])
+
+        # The observed failure shape is preserved; only the diagnosis is added.
+        assert entry["state"] == "failed"
+        assert entry["startedAt"] is None
+        assert entry["exitStatus"] is None
+
+        reason = entry.get("failureReason")
+        detail = entry.get("failureDetail")
+        assert isinstance(reason, str) and reason.strip(), entry
+        assert reason == "source-admission-refused"
+        assert isinstance(detail, str) and detail.strip(), entry
+        # The detail is the real staging code, not an invented placeholder.
+        assert detail.startswith("deployment-context-too-large:"), entry
+    finally:
+        daemon.shutdown()
+
+
+def test_post_effect_reconciliation_failure_states_its_own_reason(tmp_path):
+    """The shared reconciliation funnel also has to name the failure."""
+    class StartFailingEngine(FakeEngine):
+        def start(self, workload_id, *, timeout=None, expected_container_id=None):
+            raise EngineError("simulated start outage")
+
+    engine = StartFailingEngine()
+    daemon = _boot(tmp_path, engine)
+    try:
+        workload = spec("wl-start-failure")
+        grant = grant_document([workload])
+        provision_grants(tmp_path, grant)
+        client = _client(tmp_path, grant)
+        client.create_workload(workload)
+        with pytest.raises(ExecutionHostRefusal, match="engine-failure"):
+            client.start(workload["workloadId"])
+        entry = OperationLedger(tmp_path / "state").get(workload["workloadId"])
+
+        assert entry["state"] == "failed"
+        reason = entry.get("failureReason")
+        detail = entry.get("failureDetail")
+        assert isinstance(reason, str) and reason.strip(), entry
+        assert reason == "start-engine-failure"
+        assert isinstance(detail, str) and "simulated start outage" in detail, entry
+        # The specific named cause, never a generic "failed".
+        assert reason != "failed"
+    finally:
+        daemon.shutdown()
+
+
+def test_non_failed_records_carry_no_failure_reason(tmp_path):
+    """The channel is additive: a clean lifecycle must not acquire a reason."""
+    engine = FakeEngine()
+    daemon = _boot(tmp_path, engine)
+    try:
+        workload = spec("wl-clean-lifecycle")
+        grant = grant_document([workload])
+        provision_grants(tmp_path, grant)
+        client = _client(tmp_path, grant)
+        client.create_workload(workload)
+        client.start(workload["workloadId"])
+        client.stop(workload["workloadId"])
+        entry = OperationLedger(tmp_path / "state").get(workload["workloadId"])
+
+        assert entry["state"] in {"stopped", "exited"}
+        assert "failureReason" not in entry
+        assert "failureDetail" not in entry
+    finally:
+        daemon.shutdown()
+
+
+def test_cancelled_reconciliation_does_not_claim_a_failure_reason(tmp_path: Path) -> None:
+    """The shared funnel must only annotate records that really failed.
+
+    ``_record_post_effect_reconciliation`` also carries ``cancelled`` and
+    ``interrupted`` targets, so the reason field is gated on the resolved
+    state rather than written unconditionally.
+    """
+    doc = grant_document(["wl-cancel-no-reason"])
+    engine = StartHookEngine(
+        lambda workload_id: write_revocation(tmp_path, revokedGrantIds=[GRANT_ID])
+    )
+    daemon = _boot(tmp_path, engine, interval=60)
+    try:
+        provision_grants(tmp_path, doc)
+        client = _client(tmp_path, doc)
+        client.create_workload(spec("wl-cancel-no-reason"))
+        with pytest.raises(ExecutionHostRefusal, match="grant-revoked"):
+            client.start("wl-cancel-no-reason")
+        entry = OperationLedger(tmp_path / "state").get("wl-cancel-no-reason")
+        assert entry["state"] == "cancelled"
+        assert entry["receipts"][-1]["kind"] == "start-authority-conflict"
+        assert "failureReason" not in entry
+        assert "failureDetail" not in entry
+    finally:
+        daemon.shutdown()

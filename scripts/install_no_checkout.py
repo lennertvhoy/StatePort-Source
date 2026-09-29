@@ -213,6 +213,26 @@ _WSL_ROOTFS_IDENTITY = {
 UPDATE_TRUST_ROOT_SCHEMA = "stateport.internal-update-trust-root/v1"
 INSTALL_TRUST_SCHEMA = "stateport.internal-install-trust/v1"
 UNINSTALL_RECEIPT_SCHEMA = "stateport.internal-install-uninstall-receipt/v1"
+# The WSL2 target's per-user Windows logon keep-alive task.  WSL does not keep
+# a distro alive for its systemd services and does not start one at Windows
+# logon, so without this task the installed product stops being reachable with
+# the last WSL session and does not return at the next logon.  It is registered
+# through WSL interop as ONE per-user ONLOGON task: no /RU, no /IT, no
+# /RL, and no other Windows-side state is ever touched.
+WINDOWS_KEEPAIVE_RECORD_SCHEMA = "stateport.windows-keepalive/v1"
+_WINDOWS_KEEPAIVE_TASK_NAME = "StatePortKeepAlive"
+_WINDOWS_KEEPAIVE_RECORD_FILE = "windows-keepalive.json"
+# The distro name is interpolated verbatim into the task's command line, so it
+# is only accepted when it is an ordinary WSL distribution name.
+_WINDOWS_KEEPAIVE_DISTRO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# schtasks reports an absent task with the operating system's own
+# "cannot find the file specified" wording (ERROR_FILE_NOT_FOUND, exit 1).
+# Only that known result is convergence; anything else refuses closed, which
+# on a localized Windows degrades to a typed refusal rather than a guess.
+_WINDOWS_TASK_ABSENT_MARKERS = (
+    "cannot find the file specified",
+    "cannot find file",
+)
 _PROVIDER_AUTH_HOME = "/var/lib/stateport-control/provider-auth/opencode"
 _PROVIDER_AUTH_MOUNT = f"Volume={_PROVIDER_AUTH_HOME}:/var/lib/stateport-provider/opencode:rw"
 # The execution host's daemon-owned agent provider material, created by the
@@ -349,6 +369,11 @@ class HostSubstrateFacts:
     proc_version: str
     wsl_interop_present: bool
     wsl_distro_name_present: bool
+    # The observed WSL_DISTRO_NAME value itself.  Empty on a non-WSL substrate
+    # and on a fake probe that only asserts the boolean; a WSL2 target needs
+    # the exact name to build the keep-alive task, so registration refuses
+    # rather than guessing a distribution.
+    wsl_distro_name: str = ""
 
     @property
     def substrate(self) -> str:
@@ -415,6 +440,7 @@ class SystemHostProbe:
             proc_version=proc_version,
             wsl_interop_present=bool(self._environment.get("WSL_INTEROP")),
             wsl_distro_name_present=bool(self._environment.get("WSL_DISTRO_NAME")),
+            wsl_distro_name=self._environment.get("WSL_DISTRO_NAME", ""),
         )
 
     @staticmethod
@@ -1395,7 +1421,11 @@ def verify_podman_package_bundle(
     ) is None:
         raise InstallerRefusal("trust_key_invalid", "package preflight trust identity is malformed")
     if not config.cosign.is_file() or config.cosign.is_symlink():
-        raise InstallerRefusal("cosign_missing", "package preflight requires the pinned Cosign executable")
+        raise InstallerRefusal(
+            "cosign_missing",
+            "package preflight requires a present, non-symlink Cosign executable; its digest is "
+            "pinned by the bootstrap fetch and re-verified against the compiled provisioner trust root",
+        )
     pem = _read_bounded(config.trust_public_key, description="trust public key", maximum=64 * 1024)
     if der_spki_fingerprint(pem) != config.trust_key_fingerprint:
         raise InstallerRefusal("trust_key_invalid", "package preflight trust key fingerprint differs")
@@ -2034,7 +2064,11 @@ def verify_release_admission(
     ) is None:
         raise InstallerRefusal("trust_key_invalid", "release admission trust identity is malformed")
     if not config.cosign.is_file() or config.cosign.is_symlink():
-        raise InstallerRefusal("cosign_missing", "release admission requires pinned Cosign bytes")
+        raise InstallerRefusal(
+            "cosign_missing",
+            "release admission requires a present, non-symlink Cosign executable; its digest is "
+            "pinned by the bootstrap fetch and re-verified against the compiled provisioner trust root",
+        )
     pem = _read_bounded(config.trust_public_key, description="trust public key", maximum=64 * 1024)
     if der_spki_fingerprint(pem) != config.trust_key_fingerprint:
         raise InstallerRefusal("trust_key_invalid", "release admission trust key differs")
@@ -2669,6 +2703,202 @@ def _wait_for_health(
     return evidence
 
 
+@dataclass(frozen=True)
+class _WindowsKeepAlive:
+    """The exact Windows logon task this installation owns, and nothing else."""
+
+    task_name: str
+    command: str
+
+    @property
+    def create_argv(self) -> tuple[str, ...]:
+        return (
+            "schtasks.exe",
+            "/Create",
+            "/TN",
+            self.task_name,
+            "/TR",
+            self.command,
+            "/SC",
+            "ONLOGON",
+            "/F",
+        )
+
+    @property
+    def delete_argv(self) -> tuple[str, ...]:
+        return ("schtasks.exe", "/Delete", "/TN", self.task_name, "/F")
+
+    def as_plan(self) -> dict[str, Any]:
+        """Deterministic plan entry: no timestamp, so a rerun converges."""
+
+        return {
+            "taskName": self.task_name,
+            "command": self.command,
+            "trigger": "logon",
+            "scope": "invoking-user",
+        }
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "schema": WINDOWS_KEEPAIVE_RECORD_SCHEMA,
+            "taskName": self.task_name,
+            "command": self.command,
+            "createArgv": list(self.create_argv),
+            "deleteArgv": list(self.delete_argv),
+        }
+
+
+def _windows_keepalive_for(
+    target: Mapping[str, Any], substrate: HostSubstrateFacts
+) -> _WindowsKeepAlive | None:
+    """Decide the logon keep-alive task for this target, or none.
+
+    Only the WSL2 target needs it; the portable-Linux target registers nothing
+    and refuses nothing.  On WSL2 a missing WSL interop or a missing distro
+    name is a typed refusal: the product would otherwise install and then die
+    with the next closed WSL session, and the remedy is not optional.
+    """
+
+    if str(target.get("targetId")) != WSL2_TARGET_ID:
+        return None
+    if not substrate.wsl_interop_present:
+        raise InstallerRefusal(
+            "windows_keepalive_interop_missing",
+            "the WSL2 target must register a Windows logon keep-alive task through WSL "
+            "interop, but WSL_INTEROP is absent from the install environment",
+        )
+    distro = substrate.wsl_distro_name
+    if not distro:
+        raise InstallerRefusal(
+            "windows_keepalive_distro_missing",
+            "the WSL2 target must register a Windows logon keep-alive task naming the "
+            "exact distribution, but WSL_DISTRO_NAME is absent from the install "
+            "environment",
+        )
+    if _WINDOWS_KEEPAIVE_DISTRO_NAME.fullmatch(distro) is None:
+        raise InstallerRefusal(
+            "windows_keepalive_distro_invalid",
+            "the observed WSL_DISTRO_NAME is not a plain distribution name and cannot "
+            "be placed verbatim in the keep-alive command",
+        )
+    return _WindowsKeepAlive(
+        task_name=_WINDOWS_KEEPAIVE_TASK_NAME,
+        command=f"wsl.exe -d {distro} --exec sleep infinity",
+    )
+
+
+def _register_windows_keepalive(
+    runner: Runner, keepalive: _WindowsKeepAlive, state_root: Path
+) -> None:
+    """Register the per-user logon task and durably record it first.
+
+    The record is written before the effect so a task that exists can never be
+    invisible to uninstall, even if this process dies between the two.
+    """
+
+    _write_json(state_root / _WINDOWS_KEEPAIVE_RECORD_FILE, keepalive.as_record())
+    completed = _run_effect(
+        runner,
+        keepalive.create_argv,
+        timeout=120,
+        code="windows_keepalive_registration_failed",
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()[:200]
+        raise InstallerRefusal(
+            "windows_keepalive_registration_failed",
+            f"could not register the Windows logon task {keepalive.task_name}: {detail}",
+        )
+
+
+def _load_windows_keepalive(state_root: Path) -> _WindowsKeepAlive | None:
+    """Read the installation's own keep-alive record; never guess a task name."""
+
+    path = state_root / _WINDOWS_KEEPAIVE_RECORD_FILE
+    if path.is_symlink() or not path.is_file():
+        return None
+    record = _load_json(path, "windows keep-alive record")
+    if record.get("schema") != WINDOWS_KEEPAIVE_RECORD_SCHEMA:
+        raise InstallerRefusal(
+            "installation_record_invalid",
+            f"the keep-alive record at {path} is not a v1 keep-alive record",
+        )
+    task_name = record.get("taskName")
+    command = record.get("command")
+    # The recorded name must be exactly the task this installer creates, so a
+    # foreign or tampered record can never make uninstall touch another task.
+    if not isinstance(task_name, str) or task_name != _WINDOWS_KEEPAIVE_TASK_NAME:
+        raise InstallerRefusal(
+            "installation_record_invalid",
+            f"the keep-alive record at {path} does not name this installer's exact task",
+        )
+    if not isinstance(command, str) or not command:
+        raise InstallerRefusal(
+            "installation_record_invalid",
+            f"the keep-alive record at {path} lacks the exact task command",
+        )
+    return _WindowsKeepAlive(task_name=task_name, command=command)
+
+
+def _windows_task_absent(completed: Completed) -> bool:
+    """True only for schtasks' own known "no such task" result."""
+
+    if completed.returncode == 0:
+        return False
+    reported = f"{completed.stdout} {completed.stderr}".casefold()
+    return any(marker in reported for marker in _WINDOWS_TASK_ABSENT_MARKERS)
+
+
+def _windows_task_present(runner: Runner, task_name: str) -> bool:
+    """Whether this installation's keep-alive task still exists on the host.
+
+    Asked of the host rather than inferred from our own record: a user or a
+    Windows update can delete the task, and the recorded file is exactly what
+    stays behind when that happens.  An answer that cannot be classified
+    refuses closed instead of assuming the task is gone.
+    """
+
+    completed = _run_effect(
+        runner,
+        ("schtasks.exe", "/Query", "/TN", task_name),
+        timeout=120,
+        code="windows_keepalive_query_failed",
+    )
+    if completed.returncode == 0:
+        return True
+    if _windows_task_absent(completed):
+        return False
+    detail = (completed.stderr or completed.stdout).strip()[:200]
+    raise InstallerRefusal(
+        "windows_keepalive_query_failed",
+        f"could not determine whether the Windows logon task {task_name} exists: {detail}",
+    )
+
+
+def _remove_windows_tasks(runner: Runner, tasks: Sequence[str]) -> list[str]:
+    """Delete exactly the recorded tasks; an already-absent task is convergence."""
+
+    removed: list[str] = []
+    for task in sorted(tasks):
+        completed = _run_effect(
+            runner,
+            ("schtasks.exe", "/Delete", "/TN", task, "/F"),
+            timeout=120,
+            code="windows_task_removal_failed",
+        )
+        if completed.returncode == 0:
+            removed.append(task)
+            continue
+        if _windows_task_absent(completed):
+            continue
+        detail = (completed.stderr or completed.stdout).strip()[:200]
+        raise InstallerRefusal(
+            "windows_task_removal_failed",
+            f"could not delete the recorded Windows task {task}: {detail}",
+        )
+    return removed
+
+
 def install(
     config: InstallConfig,
     *,
@@ -3147,6 +3377,14 @@ def _install_inner(
     if isinstance(package_artifact, Mapping):
         plan["podmanPackageBundle"] = {"digest": str(package_artifact["digest"])}
         plan["podmanPackageInstallation"] = package_installation
+    # WSL does not keep a distro alive for its systemd services and does not
+    # start it at Windows logon, so the WSL2 target declares the per-user
+    # logon keep-alive task in the exact plan the actor confirms.  The entry
+    # is derived from the observed target and distribution only, so an
+    # interrupted rerun still converges on the same plan digest.
+    windows_keepalive = _windows_keepalive_for(target, substrate)
+    if windows_keepalive is not None:
+        plan["windowsKeepAlive"] = windows_keepalive.as_plan()
     # The plan digest binds the exact install identity, not the wall clock:
     # excluding createdAt makes an interrupted rerun converge on the same plan.
     plan_digest = release.canonical_digest(
@@ -3228,6 +3466,16 @@ def _install_inner(
         ):
             if not _live_runtime_present(config, state_root, index.signed_digest):
                 break
+            # The per-user logon keep-alive task is part of the live runtime
+            # this installation created, so it belongs to the same convergence
+            # rule: when the host no longer has it, a converged rerun must fall
+            # through and re-register rather than report success with a dead
+            # keep-alive.  Re-registration is idempotent (``/F`` by name).
+            recorded_keepalive = _load_windows_keepalive(state_root)
+            if recorded_keepalive is not None and not _windows_task_present(
+                runner, recorded_keepalive.task_name
+            ):
+                break
             # A converged rerun still enforces the create-only entry point:
             # identical content is a no-op, foreign content refuses closed.
             _install_update_wrapper(config, state_root)
@@ -3263,6 +3511,8 @@ def _install_inner(
         "images": [item["reference"] for item in plan["images"]],
         "stateRoot": str(state_root),
     }
+    if windows_keepalive is not None:
+        summary["windowsKeepAlive"] = windows_keepalive.as_plan()
     if config.confirmed_plan_digest is not None and config.confirmed_plan_digest != plan_digest:
         raise InstallerRefusal(
             "confirmation_refused", "the supplied exact-plan confirmation names another plan"
@@ -3359,6 +3609,7 @@ def _install_inner(
             clock=clock,
             failure_context=failure_context,
             execution_host_info=execution_host_info,
+            windows_keepalive=windows_keepalive,
         )
     except InstallerRefusal as refusal:
         failure_context.write(refusal)
@@ -4362,6 +4613,7 @@ def _execute_install(
     clock: Callable[[], datetime],
     failure_context: _FailureContext,
     execution_host_info: Mapping[str, Any] | None,
+    windows_keepalive: _WindowsKeepAlive | None = None,
 ) -> InstallOutcome:
     """Effectful phases; every refusal leaves a failure receipt where possible."""
 
@@ -4757,6 +5009,12 @@ def _execute_install(
                 "activation_target_enable_failed",
                 f"could not enable {ACCEPTED_ACTIVATION_TARGET}: {enabled_target.stderr.strip()[:200]}",
             )
+    # The accepted systemd user target only survives while the WSL session
+    # does.  Register the confirmed per-user Windows logon keep-alive task on
+    # the WSL2 target so the distro — and with it the installed product — is
+    # running again at every Windows logon.  Portable Linux registers nothing.
+    if windows_keepalive is not None:
+        _register_windows_keepalive(runner, windows_keepalive, state_root)
     runtime: dict[str, Any] = {
         "releaseId": str(verified.index.release_id),
         "releaseIndexDigest": index.index_digest,
@@ -4930,6 +5188,7 @@ class _RemovalPlan:
     snapshot_volumes: tuple[str, ...]
     control_units: tuple[str, ...] = ()
     preserved_provider_paths: tuple[str, ...] = ()
+    windows_tasks: tuple[str, ...] = ()
 
 
 def _union_removal_plans(plans: Sequence[_RemovalPlan]) -> _RemovalPlan:
@@ -4945,6 +5204,7 @@ def _union_removal_plans(plans: Sequence[_RemovalPlan]) -> _RemovalPlan:
         ),
         control_units=tuple(sorted({unit for plan in plans for unit in plan.control_units})),
         preserved_provider_paths=tuple(sorted({path for plan in plans for path in plan.preserved_provider_paths})),
+        windows_tasks=tuple(sorted({task for plan in plans for task in plan.windows_tasks})),
     )
 
 
@@ -5205,6 +5465,10 @@ def _derive_removal_plan(
                 "validation volume binding is not an exact name pair",
             )
         snapshot_volumes.append(name)
+    # The Windows logon task is not per-release: it comes from the
+    # installation's own keep-alive record and nowhere else, so an
+    # installation without that record removes no task at all.
+    keepalive = _load_windows_keepalive(state_root)
     return _RemovalPlan(
         units=tuple(sorted(units)),
         containers=tuple(sorted(containers)),
@@ -5214,6 +5478,7 @@ def _derive_removal_plan(
         snapshot_volumes=tuple(snapshot_volumes),
         control_units=tuple(sorted(control_units)),
         preserved_provider_paths=tuple(sorted(provider_paths)),
+        windows_tasks=(keepalive.task_name,) if keepalive is not None else (),
     )
 
 
@@ -5617,6 +5882,7 @@ def _uninstall_inner(
     containers_removed = _remove_containers(runner, plan.containers)
     files_removed = _remove_live_quadlet_files(config.live_quadlet_root, plan.quadlet_files)
     target_removed = _remove_activation_target(config, identities=identities)
+    windows_tasks_removed = _remove_windows_tasks(runner, plan.windows_tasks)
     _daemon_reload(runner)
 
     def build_receipt(
@@ -5647,6 +5913,7 @@ def _uninstall_inner(
                 "containers": list(containers_removed),
                 "quadletFiles": list(files_removed),
                 "activationTargets": [plan.activation_target] if target_removed else [],
+                "windowsTasks": list(windows_tasks_removed),
                 "volumes": list(volumes_removed),
                 "stateRootContents": list(state_contents),
             },
@@ -5695,6 +5962,7 @@ def _uninstall_inner(
         or target_removed
         or containers_removed
         or files_removed
+        or windows_tasks_removed
     )
     result = "succeeded" if changed else "already_uninstalled"
     receipt = build_receipt(

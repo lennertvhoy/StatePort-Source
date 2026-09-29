@@ -753,6 +753,14 @@ def default_commands(max_timeout_seconds: int) -> tuple[CommandSpec, ...]:
         CommandSpec("web_typecheck", ("npm", "run", "typecheck"), cwd="apps/web", timeout_seconds=bounded(180)),
         CommandSpec("web_lint", ("npm", "run", "lint"), cwd="apps/web", timeout_seconds=bounded(180)),
         CommandSpec("web_unit_tests", ("npm", "run", "test"), cwd="apps/web", timeout_seconds=bounded(360)),
+        # A vacuous suite (0 specs collected) reports expected 0 / unexpected 0, which reads as a
+        # clean pass; this refuses to treat zero collected work as success.
+        CommandSpec(
+            "web_live_core_collection",
+            ("npm", "run", "test:live-core-collection"),
+            cwd="apps/web",
+            timeout_seconds=bounded(180),
+        ),
         CommandSpec(
             "web_bundle_budget",
             ("npm", "run", "check:bundle"),

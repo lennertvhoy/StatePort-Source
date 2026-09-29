@@ -61,6 +61,38 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# Terminal-failure observability.  A ledger record that reaches a failed state
+# must state why from the record itself: without these fields a retained
+# artifact is indistinguishable from a workload that simply vanished.
+FAILURE_REASON_KEY = "failureReason"
+FAILURE_DETAIL_KEY = "failureDetail"
+FAILURE_DETAIL_MAX = 280
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """Render a caught exception honestly, without inventing a value.
+
+    Refusals and staging failures carry a structured code; anything else is
+    rendered by its exception type so a reader can tell an engine outage from
+    a filesystem error rather than seeing a bare string.
+    """
+    if isinstance(exc, _Refusal):
+        text = f"{exc.reason}: {exc.detail}"
+    elif isinstance(exc, DeploymentStagingError):
+        text = f"{exc.code}: {exc.detail}"
+    else:
+        text = f"{type(exc).__name__}: {exc}"
+    return text[:FAILURE_DETAIL_MAX]
+
+
+def _failure_fields(reason: str, detail: str) -> dict[str, Any]:
+    """The additive ``extra`` payload every failed transition carries."""
+    return {
+        FAILURE_REASON_KEY: reason,
+        FAILURE_DETAIL_KEY: str(detail)[:FAILURE_DETAIL_MAX],
+    }
+
+
 class DaemonBootError(RuntimeError):
     """Boot refusal: the daemon never starts on a failed safety boundary."""
 
@@ -1965,16 +1997,23 @@ class ExecutionHostDaemon:
                     else target_state
                 )
                 extra: dict[str, Any] = {}
+                if state == "failed":
+                    # A terminal failure must explain itself from the record
+                    # alone; the receipt alone is not machine-readable state.
+                    extra.update(_failure_fields(kind, detail))
             else:
                 state = "cleanup_failed"
+                cleanup_target = (
+                    current["state"]
+                    if current["state"] in contract.TERMINAL_STATES
+                    else target_state
+                )
                 extra = {
-                    "cleanupTargetState": (
-                        current["state"]
-                        if current["state"] in contract.TERMINAL_STATES
-                        else target_state
-                    ),
+                    "cleanupTargetState": cleanup_target,
                     "cleanupFinishedAt": self._config.clock(),
                 }
+                if cleanup_target == "failed":
+                    extra.update(_failure_fields(kind, detail))
                 if snapshot_path is not None:
                     extra["validatorSnapshotPath"] = snapshot_path
             try:
@@ -2622,7 +2661,7 @@ class ExecutionHostDaemon:
                             retained_snapshot = None
                     quarantined = seed_effect_attempted or retained_snapshot is not None
                     detail = "source initialization did not complete; partial volume and source evidence retained" if quarantined else "source admission refused before any volume effect; an exact fresh retry remains possible"
-                    self._transition_snapshot(ledger, current, "failed", at=self._config.clock(), receipt={"kind": "workspace-source-seed-refused", "detail": detail}, extra={"sourceSeedStatus": "failed" if quarantined else "not-started", "sourceSnapshotPath": retained_snapshot})
+                    self._transition_snapshot(ledger, current, "failed", at=self._config.clock(), receipt={"kind": "workspace-source-seed-refused", "detail": detail}, extra={"sourceSeedStatus": "failed" if quarantined else "not-started", "sourceSnapshotPath": retained_snapshot, **_failure_fields("workspace-source-seed-refused", _failure_detail(exc))})
                     raise _Refusal("workspace-seed-failed" if quarantined else "workspace-source-admission-refused", detail) from exc
         snapshot = None
         execution_spec = spec
@@ -2649,7 +2688,7 @@ class ExecutionHostDaemon:
                 if snapshot is not None:
                     self._record_post_effect_reconciliation(spec["workloadId"], kind="source-admission-refused", detail=str(exc)[:280], target_state="failed", snapshot_path=str(snapshot["root"]))
                 else:
-                    self._transition_snapshot(ledger, reservation, "failed", at=self._config.clock(), finished_at=self._config.clock(), receipt={"kind": "source-admission-refused", "detail": str(exc)[:280]})
+                    self._transition_snapshot(ledger, reservation, "failed", at=self._config.clock(), finished_at=self._config.clock(), receipt={"kind": "source-admission-refused", "detail": str(exc)[:280]}, extra=_failure_fields("source-admission-refused", _failure_detail(exc)))
                 raise _Refusal("source-admission-refused", "agent source archive or authority failed exact admission") from exc
         resource_enforcement = self._resource_enforcement(spec)
         source_snapshot_path = str(snapshot["root"]) if snapshot is not None else None

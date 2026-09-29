@@ -634,17 +634,38 @@ class LocalLayout:
         }
 
     def uninstall_metadata(self) -> dict[str, Any]:
+        # The install receipts are the ONLY product-owned carrier of an
+        # instance's application binding: each one records the applicationId and
+        # the catalogIdentity that bind the instance to the application
+        # experience policy, and `self.catalog_file.parent` is removed below, so
+        # nothing else survives to say which application an instance belonged
+        # to. `state_root` holds these receipts and is removed wholesale, which
+        # destroyed the only evidence that an instance was ever installed and
+        # made an identical reinstall unreachable. They are therefore carried
+        # across the removal at the SAME path the product reads them from, so no
+        # read path moves and no authority is invented here: this preserves
+        # evidence, it does not reinstate a grant.
+        receipts_root = self.operations_root / "template-imports"
+        preserved_receipts: dict[str, bytes] = {}
+        if receipts_root.is_dir():
+            preserved_receipts = {
+                path.name: path.read_bytes() for path in sorted(receipts_root.glob("*.json"))
+            }
         if self.config_root.exists():
             shutil.rmtree(self.config_root)
         if self.state_root.exists():
             shutil.rmtree(self.state_root)
+        if preserved_receipts:
+            receipts_root.mkdir(parents=True, exist_ok=True)
+            for name, payload in preserved_receipts.items():
+                (receipts_root / name).write_bytes(payload)
         if self.catalog_file.parent.exists():
             shutil.rmtree(self.catalog_file.parent)
         if self.source_cache_root.exists():
             shutil.rmtree(self.source_cache_root)
         if self.settings_root.exists():
             shutil.rmtree(self.settings_root)
-        return {"ok": True, "action": "metadata-removed", "instancesPreserved": self.instances_root.exists(), "backupsPreserved": self.backups_root.exists(), "sourceCacheDisposable": True}
+        return {"ok": True, "action": "metadata-removed", "instancesPreserved": self.instances_root.exists(), "backupsPreserved": self.backups_root.exists(), "sourceCacheDisposable": True, "installReceiptsPreserved": sorted(preserved_receipts)}
 
 
 def _load_json(path: Path, default: Any) -> Any:

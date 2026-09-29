@@ -78,6 +78,54 @@ HEALTH = {
     "stateport-worker": (8791, "/readyz"),
 }
 BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+SCAN_SUPPRESSION = ROOT / "config/release-scan-suppression.v1.yaml"
+
+
+def _suppression_scan_policy(**overrides: object) -> dict[str, object]:
+    """A clean suppression record derived from the repository's own contract.
+
+    The assembler refuses evidence whose suppressed findings are not bound to
+    the pinned suppression contract, so every evidence manifest built here
+    carries that record, derived rather than hand-written.
+    """
+    contract = yaml.safe_load(SCAN_SUPPRESSION.read_text(encoding="utf-8"))
+    record: dict[str, object] = {
+        "suppressionFile": "config/release-scan-suppression.v1.yaml",
+        "suppressionDigest": "sha256:"
+        + hashlib.sha256(SCAN_SUPPRESSION.read_bytes()).hexdigest(),
+        "suppression": {
+            "policyFile": "config/release-scan-suppression.v1.yaml",
+            "policyFormatVersion": contract["formatVersion"],
+            "policyResolvedOn": contract["resolvedOn"],
+            "toolName": "grype",
+            "toolVersion": contract["tool"]["version"],
+            "declaredToolVersion": contract["tool"]["version"],
+            "suppressedTotal": 69,
+            "suppressedBySeverity": {"Critical": 5, "High": 64},
+            "suppressedGatedTotal": 69,
+            "suppressedCoveredByRule": {"RS-2026-003": 69},
+            "uncoveredSuppressedCount": 0,
+            "declaredRuleIds": sorted(rule["id"] for rule in contract["rules"]),
+            "declaredExpiresOn": min(rule["expiresOn"] for rule in contract["rules"]),
+            "appliedExpiresOn": min(rule["expiresOn"] for rule in contract["rules"]),
+            "effectiveRules": [
+                {
+                    "package": rule["package"],
+                    "packageType": rule["packageType"],
+                    "matchType": rule["matchType"],
+                }
+                for rule in contract["rules"]
+            ],
+            "undeclaredEffectiveRules": [],
+            "expiredRuleIds": [],
+            "unjustifiedRuleIds": [],
+            "refusals": [],
+        },
+        "unexplainedSuppressedFindings": [],
+        "suppressionRefusals": [],
+    }
+    record.update(overrides)
+    return record
 
 
 def _rendered_install_invocations(text: str) -> list[list[str]]:
@@ -620,8 +668,10 @@ def _build_inputs(
                 + hashlib.sha256(
                     (ROOT / "config/release-scan-exceptions.v1.yaml").read_bytes()
                 ).hexdigest(),
+                "evaluatedOn": "2026-09-26",
                 "appliedExceptionIds": [],
                 "unexplainedFindings": [],
+                **_suppression_scan_policy(),
             },
             "artifacts": artifacts,
             "signature": {
@@ -803,17 +853,23 @@ class FakeRunner:
         rootless: bool = True,
         health_probe_healthy: bool = True,
         package_status: str = "installed",
+        schtasks_create_returncode: int = 0,
     ) -> None:
         self.cosign_returncode = cosign_returncode
         self.podman_version = podman_version
         self.rootless = rootless
         self.health_probe_healthy = health_probe_healthy
         self.package_status = package_status
+        self.schtasks_create_returncode = schtasks_create_returncode
         self.calls: list[tuple[str, ...]] = []
         self.volumes: set[str] = set()
         self.active_units: set[str] = set()
         self.enabled_units: set[str] = set()
         self.containers: set[str] = set()
+        # The Windows logon tasks this fake host currently owns, exactly as
+        # schtasks would report them.  `/Create ... /F` overwrites by name, so
+        # a rerun converges onto the same single entry.
+        self.scheduled_tasks: set[str] = set()
         # Consumed one per `systemctl --user stop`: an int returncode or an
         # OSError instance models one mid-uninstall interruption.
         self.stop_failures: list[object] = []
@@ -933,6 +989,31 @@ class FakeRunner:
         if call[:3] == ("systemctl", "--user", "disable"):
             self.enabled_units.discard(call[-1])
             return installer.Completed(0, "", "")
+        if call[0] == "schtasks.exe":
+            name = call[call.index("/TN") + 1]
+            if call[1] == "/Create":
+                if self.schtasks_create_returncode != 0:
+                    return installer.Completed(
+                        self.schtasks_create_returncode,
+                        "",
+                        "ERROR: Access is denied.",
+                    )
+                self.scheduled_tasks.add(name)
+                return installer.Completed(0, f"SUCCESS: Created task {name}\n", "")
+            if call[1] == "/Delete":
+                if name not in self.scheduled_tasks:
+                    return installer.Completed(
+                        1, "", "ERROR: The system cannot find the file specified."
+                    )
+                self.scheduled_tasks.discard(name)
+                return installer.Completed(0, f"SUCCESS: Deleted task {name}\n", "")
+            if call[1] == "/Query":
+                if name in self.scheduled_tasks:
+                    return installer.Completed(0, f"TaskName: {name}\n", "")
+                return installer.Completed(
+                    1, "", "ERROR: The system cannot find the file specified."
+                )
+            raise AssertionError(f"unexpected schtasks call: {call}")
         if call[1:4] == ("-m", "stateport_release.execution_host_provisioning", "health-probe"):
             if self.health_probe_healthy:
                 payload = json.dumps(
@@ -1913,6 +1994,7 @@ def test_wsl2_ubuntu_2404_installs_the_separate_signed_target(
         proc_version="Linux version 6.6.87.2-microsoft-standard-WSL2",
         wsl_interop_present=True,
         wsl_distro_name_present=True,
+        wsl_distro_name="Ubuntu",
     )
     outcome = _run_install(
         config,
@@ -1950,6 +2032,7 @@ def test_wsl2_prepare_mode_auto_selects_target_without_runtime_mutation(
         proc_version="Linux version 6.6.87.2-microsoft-standard-WSL2",
         wsl_interop_present=True,
         wsl_distro_name_present=True,
+        wsl_distro_name="Ubuntu",
     )
     runner = FakeRunner()
     probe = FakeProbe(_facts(), occupied=[], substrate=substrate)
@@ -2504,6 +2587,7 @@ def test_alpha11_install_receipt_binds_authenticated_package_results(
         proc_version="Linux version 6.6.87.2-microsoft-standard-WSL2",
         wsl_interop_present=True,
         wsl_distro_name_present=True,
+        wsl_distro_name="Ubuntu",
     )
 
     outcome = _run_install(
@@ -4414,6 +4498,424 @@ def test_uninstall_never_touches_foreign_resources(
     assert "foreign-app" in runner.containers
     assert "foreign-volume" in runner.volumes
     assert not [call for call in runner.calls if any("foreign" in part for part in call)]
+
+
+# ---------------------------------------------------------------------------
+# Windows logon keep-alive (remedy b): WSL does not keep a distro alive for its
+# systemd services and does not start it at Windows logon, so the WSL2 target
+# registers one per-user ONLOGON task and durably records it for uninstall.
+# ---------------------------------------------------------------------------
+
+_KEEPALIVE_TASK = "StatePortKeepAlive"
+_KEEPALIVE_COMMAND = "wsl.exe -d Ubuntu --exec sleep infinity"
+_KEEPALIVE_CREATE_ARGV = (
+    "schtasks.exe",
+    "/Create",
+    "/TN",
+    _KEEPALIVE_TASK,
+    "/TR",
+    _KEEPALIVE_COMMAND,
+    "/SC",
+    "ONLOGON",
+    "/F",
+)
+_KEEPALIVE_DELETE_ARGV = ("schtasks.exe", "/Delete", "/TN", _KEEPALIVE_TASK, "/F")
+_FOREIGN_TASK = "SomeoneElsesBackupTask"
+
+
+def _wsl2_substrate() -> installer.HostSubstrateFacts:
+    return installer.HostSubstrateFacts(
+        kernel_release="6.6.87.2-microsoft-standard-WSL2",
+        proc_version="Linux version 6.6.87.2-microsoft-standard-WSL2",
+        wsl_interop_present=True,
+        wsl_distro_name_present=True,
+        wsl_distro_name="Ubuntu",
+    )
+
+
+def _wsl2_install(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    *,
+    runner: FakeRunner,
+    substrate: installer.HostSubstrateFacts | None = None,
+    confirmer=lambda summary: True,
+    config_changes: Mapping[str, object] | None = None,
+) -> tuple[installer.InstallOutcome, FakeRunner, Fixture, installer.InstallConfig]:
+    fixture = _signed_index(tmp_path / "fixture", trust, target_id=installer.WSL2_TARGET_ID)
+    config = _config(
+        fixture,
+        tmp_path,
+        cosign=cosign_executable,
+        expected_target=installer.WSL2_TARGET_ID,
+        **dict(config_changes or {}),
+    )
+    outcome = _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(), occupied=[], substrate=substrate or _wsl2_substrate()),
+        fetcher=FakeFetcher(),
+        confirmer=confirmer,
+    )
+    return outcome, runner, fixture, config
+
+
+def test_wsl2_install_registers_the_per_user_windows_logon_keepalive_task(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """One per-user ONLOGON task, exactly, and only on the WSL2 target."""
+
+    runner = FakeRunner()
+    shown: list[dict[str, object]] = []
+    outcome, _runner, _fixture, config = _wsl2_install(
+        tmp_path,
+        trust,
+        cosign_executable,
+        runner=runner,
+        confirmer=lambda summary: bool(shown.append(dict(summary))) or True,
+        config_changes={"assume_yes": False},
+    )
+
+    assert outcome.status == "succeeded", outcome.message
+    creates = [call for call in runner.calls if call[:2] == ("schtasks.exe", "/Create")]
+    assert creates == [_KEEPALIVE_CREATE_ARGV]
+    # Per-user and logon only: no /RU, no /IT, no other Windows-side state.
+    assert not {"/RU", "/IT"} & set(creates[0])
+    assert "SYSTEM" not in creates[0]
+    assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
+    # The task is part of the exact plan the actor confirms, and of the
+    # durable record uninstall later reads.
+    assert shown and shown[0]["windowsKeepAlive"] == {
+        "taskName": _KEEPALIVE_TASK,
+        "command": _KEEPALIVE_COMMAND,
+        "trigger": "logon",
+        "scope": "invoking-user",
+    }
+    plan = json.loads((config.state_root / "install-plan.json").read_text(encoding="utf-8"))
+    assert plan["windowsKeepAlive"] == shown[0]["windowsKeepAlive"]
+    record = json.loads(
+        (config.state_root / "windows-keepalive.json").read_text(encoding="utf-8")
+    )
+    assert record["schema"] == "stateport.windows-keepalive/v1"
+    assert record["taskName"] == _KEEPALIVE_TASK
+    assert record["command"] == _KEEPALIVE_COMMAND
+    assert record["deleteArgv"] == list(_KEEPALIVE_DELETE_ARGV)
+
+
+def test_wsl2_keepalive_rerun_converges_on_the_same_plan(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """The digest-bound plan is identical on a rerun, so it converges."""
+
+    # The same host, so the same fake Windows task table: a rerun on a real
+    # machine finds the task this installation registered.
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    assert _KEEPALIVE_TASK in runner.scheduled_tasks
+    first = _convergence_plan(config)
+
+    rerun = _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate()),
+        fetcher=FakeFetcher(),
+    )
+
+    assert rerun.status == "succeeded", rerun.message
+    assert rerun.code == "already_installed"
+    assert _convergence_plan(config) == first
+
+
+def test_wsl2_rerun_re_registers_a_keepalive_task_deleted_off_the_host(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """A converged rerun must not report success with a dead keep-alive.
+
+    A user or a Windows update can delete the scheduled task while the
+    installer's own record survives — that is precisely the case the record
+    cannot see.  The task is live runtime, so it obeys the same convergence
+    rule as the units and containers: absent means the rerun re-registers it.
+    """
+
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    assert _KEEPALIVE_TASK in runner.scheduled_tasks
+
+    # The host loses the task; our durable record and receipt are untouched.
+    runner.scheduled_tasks.discard(_KEEPALIVE_TASK)
+    assert (config.state_root / "windows-keepalive.json").is_file()
+
+    rerun = _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate()),
+        fetcher=FakeFetcher(),
+    )
+
+    assert rerun.status == "succeeded", rerun.message
+    assert rerun.code != "already_installed"
+    # Re-registered, exactly once, by name: idempotent convergence.
+    assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
+    assert [call for call in runner.calls if call == _KEEPALIVE_CREATE_ARGV].count(
+        _KEEPALIVE_CREATE_ARGV
+    ) == 2
+
+
+def _convergence_plan(config: installer.InstallConfig) -> dict[str, object]:
+    """The plan's exact convergent identity: everything the digest binds.
+
+    ``createdAt`` is deliberately excluded from the plan digest, and a fresh
+    one is written on every run, so raw file bytes are not the convergence
+    invariant; the plan digest and the whole digest-bound body are.
+    """
+
+    plan = json.loads(
+        (config.state_root / "install-plan.json").read_text(encoding="utf-8")
+    )
+    assert plan.pop("planDigest") == canonical_digest(
+        {key: value for key, value in plan.items() if key != "createdAt"}
+    )
+    plan.pop("createdAt")
+    return plan
+
+
+def test_wsl2_install_refuses_when_the_logon_task_cannot_be_registered(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """A refused schtasks is a typed refusal, never a silently skipped remedy."""
+
+    runner = FakeRunner(schtasks_create_returncode=1)
+    outcome, _runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=runner
+    )
+
+    assert outcome.status == "refused"
+    assert outcome.code == "windows_keepalive_registration_failed"
+    assert [call for call in runner.calls if call[:2] == ("schtasks.exe", "/Create")] == [
+        _KEEPALIVE_CREATE_ARGV
+    ]
+    assert runner.scheduled_tasks == set()
+    # The record exists, so a task created by a later partial run is still
+    # removable; the failed install itself never reports success.
+    assert (config.state_root / "windows-keepalive.json").is_file()
+
+
+def test_wsl2_install_refuses_without_wsl_interop_or_distro_name(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """Absent interop or an unnameable distribution is a refusal, not a skip."""
+
+    for position, (changed, code) in enumerate(
+        (
+            ({"wsl_interop_present": False}, "windows_keepalive_interop_missing"),
+            (
+                {"wsl_distro_name": "", "wsl_distro_name_present": False},
+                "windows_keepalive_distro_missing",
+            ),
+            ({"wsl_distro_name": "Ubuntu; rm -rf /"}, "windows_keepalive_distro_invalid"),
+        )
+    ):
+        case = tmp_path / f"case{position}"
+        case.mkdir()
+        substrate = replace(_wsl2_substrate(), **changed)
+        runner = FakeRunner()
+        outcome, _runner, _fixture, _config = _wsl2_install(
+            case, trust, cosign_executable, runner=runner, substrate=substrate
+        )
+        assert outcome.status == "refused", changed
+        assert outcome.code == code, changed
+        assert not [call for call in runner.calls if call[0] == "schtasks.exe"], changed
+
+
+def test_portable_linux_install_registers_no_windows_task_and_refuses_nothing(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """The portable-Linux target is untouched by the WSL remedy."""
+
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+
+    assert outcome.status == "succeeded", outcome.message
+    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert not (config.state_root / "windows-keepalive.json").exists()
+
+
+def test_uninstall_deletes_the_recorded_windows_logon_task(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
+    runner.containers.update(_live_container_names(config))
+    runner.active_units.update(_live_unit_names(config))
+    runner.enabled_units.update(_live_unit_names(config))
+    runner.calls.clear()
+
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "succeeded", result.message
+    assert result.code == "uninstalled"
+    assert [call for call in runner.calls if call[:2] == ("schtasks.exe", "/Delete")] == [
+        _KEEPALIVE_DELETE_ARGV
+    ]
+    assert runner.scheduled_tasks == set()
+    assert result.receipt_path is not None
+    receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["removed"]["windowsTasks"] == [_KEEPALIVE_TASK]
+
+
+def test_uninstall_without_a_keepalive_record_touches_no_windows_task(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    runner.containers.update(_live_container_names(config))
+    runner.calls.clear()
+
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "succeeded", result.message
+    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert result.receipt_path is not None
+    receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["removed"]["windowsTasks"] == []
+
+
+def test_uninstall_treats_an_already_absent_windows_task_as_converged(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    runner.containers.update(_live_container_names(config))
+    runner.active_units.update(_live_unit_names(config))
+    runner.enabled_units.update(_live_unit_names(config))
+    first = _run_uninstall(_uninstall_config(config), runner=runner)
+    assert first.status == "succeeded", first.message
+    assert first.code == "uninstalled"
+    runner.calls.clear()
+
+    second = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert second.status == "succeeded", second.message
+    assert second.code == "already_uninstalled"
+    # The recorded task is still offered for deletion and its own known
+    # "no such task" answer is convergence, not an error.
+    assert [call for call in runner.calls if call[:2] == ("schtasks.exe", "/Delete")] == [
+        _KEEPALIVE_DELETE_ARGV
+    ]
+    assert second.receipt_path is not None
+    receipt = json.loads(second.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["removed"]["windowsTasks"] == []
+
+
+def test_uninstall_refuses_an_unreadable_windows_task_deletion(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """A failed schtasks delete is not absence: uninstall refuses closed."""
+
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    runner.containers.update(_live_container_names(config))
+    original = runner.run
+
+    def denied(argv: Sequence[str], *, timeout: int) -> installer.Completed:
+        if argv[0] == "schtasks.exe":
+            runner.calls.append(tuple(argv))
+            return installer.Completed(1, "", "ERROR: Access is denied.")
+        return original(argv, timeout=timeout)
+
+    runner.run = denied  # type: ignore[method-assign]
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "refused"
+    assert result.code == "windows_task_removal_failed"
+
+
+def test_uninstall_refuses_a_tampered_keepalive_record(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """A record naming another task can never make uninstall touch that task."""
+
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    record_path = config.state_root / "windows-keepalive.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["taskName"] = _FOREIGN_TASK
+    record_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    runner.calls.clear()
+
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "refused"
+    assert result.code == "installation_record_invalid"
+    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert not [call for call in runner.calls if any(_FOREIGN_TASK in part for part in call)]
+    # The installation's own task is still present and untouched.
+    assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
+
+
+def test_uninstall_never_follows_a_symlinked_keepalive_record(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """A symlinked record is not our record, and must steer uninstall to nothing.
+
+    The guard treats a symlink as "this installation owns no keep-alive", so
+    uninstall removes no Windows task at all.  The linked record deliberately
+    names our OWN task, so the independent task-name check cannot mask a
+    regression here: following the link would produce a schtasks call.
+    """
+
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    record_path = config.state_root / "windows-keepalive.json"
+    elsewhere = config.state_root.parent / "attacker-record.json"
+    elsewhere.write_text(record_path.read_text(encoding="utf-8"), encoding="utf-8")
+    record_path.unlink()
+    record_path.symlink_to(elsewhere)
+    runner.calls.clear()
+
+    _run_uninstall(_uninstall_config(config), runner=runner)
+
+    # The link was never followed, so our own task was not deleted through it.
+    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
+
+
+def test_uninstall_refuses_a_keepalive_record_of_another_schema(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """The record must be a v1 keep-alive record, not any file that parses."""
+
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    record_path = config.state_root / "windows-keepalive.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["schema"] = "stateport.something-else/v9"
+    record_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    runner.calls.clear()
+
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "refused"
+    assert result.code == "installation_record_invalid"
+    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
 
 
 def test_purge_without_confirmation_refused(

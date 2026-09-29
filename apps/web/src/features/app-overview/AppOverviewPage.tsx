@@ -529,6 +529,32 @@ function ActivityRow({ item, instance, hasReceipts }: { item: ActivityItem; inst
   )
 }
 
+/**
+ * Bounded synthetic validation (`app.synthetic_run`, routed at
+ * POST /v1/instances/:instanceId/synthetic-run) is a real backend capability
+ * that is deliberately NOT executable from this UI. Its own result declares
+ * productionEligible:false and labels itself a synthetic contract inspection
+ * rather than execution evidence, so offering a control for it would invite a
+ * production-readiness inference the backend explicitly refuses.
+ *
+ * The classification is stated statically rather than driven off
+ * `instance.capabilities`, because that projection can never carry a
+ * synthetic-run entry: the capability mapper drops every id outside
+ * KNOWN_CAPABILITY_IDS, and the backend names "synthetic-run" only inside the
+ * `inspect` report, never in the instance capability projection. Rendering it
+ * from `instance.capabilities` would be an unreachable branch.
+ *
+ * This is a statement of classification, not a control: it exposes no button
+ * and no link, and infrastructure configuration validation is performed by the
+ * `validate` plan/run operation instead.
+ */
+const SYNTHETIC_VALIDATION_CLASSIFICATION = {
+  label: 'Synthetic validation',
+  classification: 'Bounded synthetic contract inspection — not executable from this UI',
+  consequence: 'It does not imply production readiness.',
+  alternative: 'Infrastructure configuration validation is performed by the validate plan/run operation.',
+} as const
+
 function CapabilitiesBody({ instance }: { instance: ApplicationInstance }) {
   const available = instance.capabilities.filter((c) => c.status === 'available')
   const gated = instance.capabilities.filter((c) => c.status !== 'available')
@@ -551,6 +577,17 @@ function CapabilitiesBody({ instance }: { instance: ApplicationInstance }) {
             )}
           </li>
         ))}
+        <li
+          className="flex min-h-6 items-center gap-2 text-xs"
+          data-testid="capability-synthetic-run"
+          data-executable="false"
+        >
+          <span className="text-foreground-secondary">{SYNTHETIC_VALIDATION_CLASSIFICATION.label}</span>
+          <span className="text-foreground-tertiary">
+            — {SYNTHETIC_VALIDATION_CLASSIFICATION.classification}. {SYNTHETIC_VALIDATION_CLASSIFICATION.consequence}{' '}
+            {SYNTHETIC_VALIDATION_CLASSIFICATION.alternative}
+          </span>
+        </li>
       </ul>
     </Disclosure>
   )

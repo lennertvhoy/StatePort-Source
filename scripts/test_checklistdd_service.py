@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from service_test_product import service_product_fixture  # noqa: E402
 import json
 from pathlib import Path
 import socket
@@ -31,7 +32,7 @@ def test_checklistdd_fixture_is_installable_through_real_service(tmp_path, monke
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
-    app.service_start(port=port)
+    app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))
     try:
         with urlopen(f"http://127.0.0.1:{port}/session") as response:
             session = json.loads(response.read())["result"]

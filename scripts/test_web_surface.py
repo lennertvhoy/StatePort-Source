@@ -27,9 +27,20 @@ def test_web_surface_has_application_first_navigation_and_api_boundary() -> None
     conversation = _read("client/http/domainsConversation.ts")
     home = _read("features/applications/ApplicationsPage.tsx")
     workbench_shell = _read("shell/WorkbenchShell.tsx")
+    startup = _read("shell/StartupRoute.tsx")
     tokens = _read("styles/tokens.css")
     # Application-first navigation: Applications, Catalog, Approvals, Settings.
-    assert '<Navigate to="/applications" replace' in app
+    # The bare root is a settings-aware resolver rather than a hard redirect: the
+    # index route mounts StartupRoute, whose DEFAULT target is /applications and
+    # which only diverts to a resumed workspace when the operator has explicitly
+    # enabled reopenLastApplication (or defaultLandingPage == 'last_workspace')
+    # and the instance still exists. Asserting the default rather than the retired
+    # <Navigate> literal keeps the property under test and is stronger than the
+    # literal it replaces, because the literal could not tell a default from a
+    # redirect that always fired.
+    assert '<Route index element={<StartupRoute />} />' in app
+    assert "let route = '/applications'" in startup
+    assert "<Navigate to={target} replace />" in startup
     assert "label: 'Applications'" in sidebar and "label: 'Catalog'" in sidebar
     assert "label: 'Approvals'" in sidebar and "label: 'Settings'" in sidebar
     assert "Needs attention" in home and 'title="No applications yet"' in home

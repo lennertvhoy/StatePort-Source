@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from service_test_product import service_product_fixture  # noqa: E402
 from pathlib import Path
 import json
 import socket
@@ -628,7 +629,7 @@ def test_real_local_web_service_exposes_one_app_attached_noncanonical_thread(tmp
         with urlopen(request) as response:
             return json.loads(response.read())["result"]
 
-    app.service_start(port=port)
+    app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))
     try:
         with pytest.raises(HTTPError) as denied:
             get("/v1/instances/project-one/conversation")
@@ -673,7 +674,7 @@ def test_real_local_web_service_exposes_one_app_attached_noncanonical_thread(tmp
 
     # The application service uses the StatePort state-root store. A restart
     # restores operational continuity only; it never becomes canonical state.
-    app.service_start(port=port)
+    app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))
     try:
         cookie, csrf = session_identity()
         restarted = get("/v1/instances/project-one/conversation", cookie)

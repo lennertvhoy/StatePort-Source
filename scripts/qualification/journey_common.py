@@ -20,9 +20,14 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT / "infra" / "qualification") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "infra" / "qualification"))
+for _import_root in (
+    REPO_ROOT / "infra" / "qualification",
+    REPO_ROOT / "packages" / "release-contracts" / "src",
+):
+    if str(_import_root) not in sys.path:
+        sys.path.insert(0, str(_import_root))
 
+from stateport_release.contract import canonical_digest  # noqa: E402
 from wsl2_rehearsal import (  # noqa: E402
     EVIDENCE_CLASS_CANDIDATE_MIRROR,
     IDENTITY_CLASS_CANDIDATE_MIRROR,
@@ -55,10 +60,31 @@ def load_release_facts_from_index(
     ``site_root/download/<version>/release-index.json``.  ``candidateDir`` is
     recorded only when the caller actually has a candidate directory, so a
     staged-site fact set never claims one.
+
+    This is an admission front door, so the detached signature must be bound to
+    the exact signed payload this call read.  Taking ``subjectDigest`` as the
+    payload digest without that binding records an attacker-chosen source
+    commit and tree as the candidate's provenance while reporting the digest of
+    some other payload, so a mismatch is refused here, by name and with both
+    digests in full.
+
+    LIMIT, recorded honestly: this is a BINDING check, not signature
+    verification.  A signature that verifies over a payload the publisher never
+    signed is not detected here; that is the separate ``CosignVerifier`` path
+    used by ``scripts/assemble_release_index.py``, deliberately not added here.
     """
     index = json.loads(index_path.read_text(encoding="utf-8"))
     signed = index["signed"]
     signature = index["signatures"][0]
+    payload_digest = canonical_digest(signed)
+    if signature["subjectDigest"] != payload_digest:
+        raise ValueError(
+            "refusing to bind candidate facts to a release index whose detached "
+            "signature is not bound to the signed payload it was read with: "
+            f"{index_path} (signatures[0].subjectDigest="
+            f"{signature['subjectDigest']} != canonical digest of the signed "
+            f"payload read here={payload_digest})"
+        )
     facts: dict[str, object] = {
         "releaseId": signed["release"]["releaseId"],
         "version": signed["release"]["version"],

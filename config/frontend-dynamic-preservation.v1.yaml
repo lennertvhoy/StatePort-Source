@@ -28,7 +28,9 @@ operations:
   - {id: file-rename, method: POST, operation: renamePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'renamePath', {"}}
   - {id: file-delete, method: POST, operation: deletePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'deletePath', {"}}
 behaviors:
-  - {id: provider-operator-refusal, evidence: {file: apps/web/src/features/settings/ProviderSettings.tsx, contains: 'Provider changes require an authorized platform operator session.'}}
+  - {id: provider-operator-refusal-login-mutation, evidence: {file: apps/web/src/features/settings/ProviderSettings.tsx, contains: "  async function runLoginMutation(action: () => Promise<LoginFlow>) {\n    if (!operator) {"}}
+  - {id: provider-operator-refusal-configuring-mutation, evidence: {file: apps/web/src/features/settings/ProviderSettings.tsx, contains: "  async function perform(action: () => Promise<ProviderStatus>, mutation = true, saveDraft = false) {\n    if (mutation && !operator) {"}}
+  - {id: provider-operator-refusal-credential-write, evidence: {file: apps/web/src/features/settings/ProviderSettings.tsx, contains: "  async function runCredential(action: () => Promise<ProviderStatus>) {\n    if (!operator) {"}}
   - {id: readiness-provider-observations, evidence: {file: apps/web/src/shell/ReadinessSummary.tsx, contains: 'authentication: ${observation.authenticationStatus}; request: ${observation.requestStatus}'}}
   - {id: catalog-durable-install-confirmation, evidence: {file: apps/web/src/features/catalog/InstallReview.tsx, contains: 'The durable installation receipt did not match the created application or digest.'}}
   - {id: editor-lazy-load, evidence: {file: apps/web/src/App.tsx, contains: "lazy(() => import('@/features/files/FilesTool'))"}}

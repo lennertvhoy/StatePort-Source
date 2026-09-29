@@ -124,6 +124,15 @@ jobs:
       - name: Verify production and demo build isolation
         run: npm run test:build-isolation
 
+      - name: Verify the live-core suite still collects tests
+        run: npm run test:live-core-collection
+
+      - name: Verify a live-core surface claim cannot exceed what the run observed
+        run: npm run test:live-core-surface-claim
+
+      - name: Verify a governed live-core batch refuses retained and half-used roots
+        run: node --test scripts/governed_live_core_batch.test.mjs
+
       - name: Validate frontend dependency tree
         run: npm run check:dependencies
 

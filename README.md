@@ -11,11 +11,16 @@ policy, validation, execution-host adapters, and receipts stay behind it.
 
 StatePort has published signed alpha artifacts for **Windows 11, WSL2, Ubuntu
 24.04 AMD64**. Publication is not complete-product or native qualification.
-The current public Alpha.16 installer has a reproduced predecessor-signature
-preflight failure; do not use it for a fresh installation until a corrected
-additive successor is qualified. Earlier published artifacts are immutable.
+The current public release is **Alpha.17**, whose installer command runs through
+this public route with anonymously downloadable images. **Alpha.16 is a superseded
+predecessor**, retained for history: its fresh installation was blocked by a
+signature-check defect, so do not use the Alpha.16 route for a fresh installation.
+Earlier published artifacts are immutable.
 See the [public installation guidance](https://lennertvhoy.github.io/StatePort-Site/)
 and [current release status](https://lennertvhoy.github.io/StatePort-Site/releases/).
+The public site is the authoritative statement of what is currently published; if
+this paragraph and that site ever disagree, the site is correct and this file is
+stale.
 
 The source workflow below is a local development/evaluation lane. It is not the
 anonymous installed-user journey or evidence of support for native Linux.

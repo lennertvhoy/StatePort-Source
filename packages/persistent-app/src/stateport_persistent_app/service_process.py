@@ -61,10 +61,20 @@ from stateport_portable_execution import EnvironmentGatedExecution, PortableExec
 try:
     from governed_api import GovernedAPI
 except ModuleNotFoundError:  # Source-tree consumers may not pre-install sibling packages.
-    for sibling in ("governed-api", "approval-gate", "audit-log", "quota-engine"):
+    # The list must cover everything governed_api imports transitively, not just
+    # its own package: governed_api.application imports governed_runner, which in
+    # turn imports container_runner and runner. Without those, application.py
+    # takes its read-only fallback, permanently sets JobQueue/InstanceLease to
+    # None for the whole process, and still imports "successfully" -- so this
+    # retry never sees an exception and every later caller gets an opaque 503
+    # instead of a working queue.
+    for sibling in ("governed-api", "approval-gate", "audit-log", "quota-engine", "governed-runner", "container-runner"):
         governed_api_src = Path(__file__).resolve().parents[3] / sibling / "src"
         if governed_api_src.is_dir():
             sys.path.insert(0, str(governed_api_src))
+    runner_src = Path(__file__).resolve().parents[4] / "apps" / "runner" / "src"
+    if runner_src.is_dir():
+        sys.path.insert(0, str(runner_src))
     from governed_api import GovernedAPI
 from stateport_context_lifecycle import (
     ContextLifecycleError,
@@ -1392,6 +1402,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(403, "application source inspection is operator-only", "source_inspection_denied")
             else:
                 self._error(403, "file workspace access denied", "file_workspace_access_denied")
+        except ExecutionHostProxyError as exc:
+            # An execution-host refusal already carries its own typed status and
+            # code; report it as itself instead of a generic operation_failed,
+            # matching the do_POST mapping.
+            self._error(exc.status, str(exc)[:512], exc.code)
         except Exception as exc:  # noqa: BLE001 - local boundary redacts non-broker details
             if exc.__class__.__module__.startswith("stateport_file_workspace."):
                 self._error(409, str(exc), "file_workspace_refused")
@@ -2737,8 +2752,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(400, "the local operation failed", "operation_failed")
 
     def log_message(self, fmt: str, *args: object) -> None:
-        self.server.log.write((fmt % args) + "\n")
-        self.server.log.flush()
+        # A log line must never be able to break the request that produced it.
+        # server_close() closes self.log, and AppServer sets daemon_threads, so a
+        # request thread can still be inside send_response -> log_request when the
+        # log goes away. Writing unguarded raised ValueError out of send_response
+        # before any bytes were sent, so the client received no response at all.
+        log = self.server.log
+        if log.closed:
+            return
+        try:
+            log.write((fmt % args) + "\n")
+            log.flush()
+        except (OSError, ValueError):
+            # Shutdown races and a broken log stream are both tolerable; losing the
+            # request is not. Drop the line rather than propagate.
+            pass
 
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
         """Log only the fixed path, never query values or request bodies."""
@@ -3144,6 +3172,9 @@ class AppServer(ThreadingHTTPServer):
         """Derive the global inbox from the existing decision authorities."""
 
         approvals: list[dict[str, object]] = []
+        #: Why plans that the infrastructure surface prepared are absent from this inbox.
+        #: Diagnostic only -- see the comment at the plan branch. Never authoritative.
+        dropped_plans: list[dict[str, object]] = []
         for request in self.pending_template_upgrade_approvals():
             metadata = request.get("metadata")
             plan = metadata.get("planBinding") if isinstance(metadata, Mapping) else None
@@ -3274,10 +3305,34 @@ class AppServer(ThreadingHTTPServer):
                 and isinstance(entry.get("metadata"), Mapping)
                 and entry["metadata"].get("externalRepository") is True
             ):
+                # MEASURED 2026-09-28. A governed run returned 200 with itemCount 0
+                # while the surface had already reported a plan as awaiting approval, and
+                # the response could not distinguish "no plan exists" from "a plan exists
+                # and was dropped". The reader now names the filter that dropped each plan
+                # (infrastructure.last_skipped_plans); this carries those reasons OUT to the
+                # response so an operator can actually read them. It is ADDITIVE and it
+                # changes no admission: `approvals` below is computed exactly as before, and
+                # nothing here can add, remove or make executable an approval.
+                adapter: LocalLibvirtAdapter | None = None
                 try:
-                    infrastructure_sources = self.infrastructure_adapter(instance_id).pending_approval_sources()
-                except (InfrastructureError, OSError, ValueError):
+                    adapter = self.infrastructure_adapter(instance_id)
+                    infrastructure_sources = adapter.pending_approval_sources()
+                except (InfrastructureError, OSError, ValueError) as exc:
                     infrastructure_sources = []
+                    # An unavailable adapter is itself a reason the inbox looks empty, and
+                    # it was previously indistinguishable from an empty store.
+                    dropped_plans.append({
+                        "instanceId": instance_id,
+                        "planDigest": None,
+                        "reason": "infrastructure-unavailable",
+                        "detail": str(exc),
+                    })
+                if adapter is not None:
+                    # getattr with a default so a substituted adapter cannot crash the
+                    # inbox over a diagnostic. The real LocalLibvirtAdapter always has it,
+                    # because it is a class attribute, so our own path is never lossy.
+                    for skipped in getattr(adapter, "last_skipped_plans", []):
+                        dropped_plans.append({"instanceId": instance_id, **dict(skipped)})
                 for source in infrastructure_sources:
                     if source.get("type") == "infrastructure_plan" and isinstance(source.get("plan"), Mapping):
                         plan = source["plan"]
@@ -3420,6 +3475,10 @@ class AppServer(ThreadingHTTPServer):
             "formatVersion": "stateport.approval-index/v1",
             "identity": self.actor_id,
             "approvals": approvals[:250],
+            # Additive diagnostic. Absent reasons mean nothing was dropped, which is what
+            # an empty inbox with no plan ever was; present reasons mean plans existed and
+            # were excluded, and say which filter excluded each one.
+            "droppedPlans": dropped_plans[:50],
         }
 
     def infrastructure_adapter(self, instance_id: str) -> LocalLibvirtAdapter:

@@ -1,5 +1,3 @@
-# Generated from an exact-path internal redistribution review on 2026-07-29.
-# The default remains blocking; no prefix grants public inclusion.
 formatVersion: stateport.public-export-allowlist/v1
 default:
   id: future-file-not-reviewed
@@ -17,8 +15,7 @@ rules:
 - id: reviewed-public-documentation
   classification: public-documentation
   license: CC-BY-4.0
-  provenanceRationale: Exact owner-authored public documentation paths are covered by the repository documentation licensing
-    scope.
+  provenanceRationale: Exact owner-authored public documentation paths are covered by the repository documentation licensing scope.
   paths:
   - CLA.md
   - CODE_OF_CONDUCT.md
@@ -152,8 +149,7 @@ rules:
 - id: reviewed-public-source
   classification: public-source
   license: AGPL-3.0-or-later
-  provenanceRationale: Exact source, build, configuration, schema, fixture, and test paths are covered by the repository code
-    licensing scope.
+  provenanceRationale: Exact source, build, configuration, schema, fixture, and test paths are covered by the repository code licensing scope.
   paths:
   - .dockerignore
   - .github/ISSUE_TEMPLATE/bug_report.yml
@@ -316,6 +312,7 @@ rules:
   - apps/web/src/components/ui/toggle-variants.ts
   - apps/web/src/features/app-overview/AppOverviewPage.tsx
   - apps/web/src/features/app-overview/__tests__/StudyJourney.test.tsx
+  - apps/web/src/features/app-overview/__tests__/SyntheticValidationClassification.test.tsx
   - apps/web/src/features/app-overview/__tests__/app-overview.test.tsx
   - apps/web/src/features/app-overview/__tests__/provenance-authority.test.tsx
   - apps/web/src/features/app-overview/components/FactsStrip.tsx
@@ -578,12 +575,13 @@ rules:
   - apps/web/tests/e2e/settings.spec.ts
   - apps/web/tests/e2e/terminal.spec.ts
   - apps/web/tests/e2e/visual-preferences.spec.ts
-  - apps/web/tests/live-core-fixture.py
+  - apps/web/tests/live-core-collection.test.mjs
   - apps/web/tests/live-core.spec.ts
   - apps/web/tests/platform-statebench-fixture.py
   - apps/web/tsconfig.app.json
   - apps/web/tsconfig.json
   - apps/web/tsconfig.node.json
+  - apps/web/tsconfig.test.json
   - apps/web/vite.config.ts
   - apps/web/vitest.config.ts
   - apps/worker/Dockerfile
@@ -603,6 +601,7 @@ rules:
   - config/functionality-preservation.extensions/bl-ai-vertical-002.yaml
   - config/functionality-preservation.extensions/template-lifecycle-001.yaml
   - config/functionality-preservation.v1.yaml
+  - config/grype-scan.v1.yaml
   - config/local-artifact-policy.v1.json
   - config/provider-runtime-inputs.yaml
   - config/python-dependency-licenses.v1.json
@@ -1132,9 +1131,12 @@ rules:
   - scripts/emit_closure_review_evidence.py
   - scripts/export_public_candidate.py
   - scripts/gitleaks_scan.sh
+  - scripts/immutable_release_set.py
   - scripts/install.sh
   - scripts/install_no_checkout.py
+  - scripts/jsx_accessible_name_audit.mjs
   - scripts/local_closure_gate.py
+  - scripts/qualification/audit_route_install_path.py
   - scripts/run_web_e2e.py
   - scripts/test_run_web_e2e.py
   - scripts/materialize_public_snapshot.py
@@ -1156,6 +1158,7 @@ rules:
   - scripts/qualification/local_readiness_repro.py
   - scripts/qualification/observe_guest.py
   - scripts/qualification/provider_sandbox_probe.py
+  - scripts/qualification/recover_native_stage_receipt.py
   - scripts/qualification/run_agent_result_stage.py
   - scripts/qualification/run_journey_j2.py
   - scripts/qualification/run_journey_j3.py
@@ -1172,6 +1175,8 @@ rules:
   - scripts/statedd_validate_schema.py
   - scripts/studystate_exploratory_proof.py
   - scripts/test_activity_receipts_service.py
+  - scripts/test_actual_template_import_reuse.py
+  - scripts/test_actual_template_restart_identity.py
   - scripts/test_agent_native_cockpit.py
   - scripts/test_agent_routing_policy.py
   - scripts/test_agent_run.py
@@ -1194,7 +1199,6 @@ rules:
   - scripts/test_application_onboarding.py
   - scripts/test_application_registry.py
   - scripts/test_approvals_projection.py
-  - scripts/test_assemble_release_index.py
   - scripts/test_broker_clearance.py
   - scripts/test_build_j1_candidate.py
   - scripts/test_assistant_cancellation.py
@@ -1205,7 +1209,6 @@ rules:
   - scripts/test_authority_policy.py
   - scripts/test_candidate_provenance.py
   - scripts/test_canonical_source_service.py
-  - scripts/test_execution_host_bounded_logs.py
   - scripts/test_execution_host_control_identity.py
   - scripts/test_execution_host_identity.py
   - scripts/test_checklistdd_execution.py
@@ -1253,8 +1256,10 @@ rules:
   - scripts/test_governed_mutations.py
   - scripts/test_governed_restore.py
   - scripts/test_governed_runner.py
+  - scripts/test_grype_scan_config.py
   - scripts/test_guest_choreography.py
   - scripts/test_historical_benchmark.py
+  - scripts/test_immutable_release_set.py
   - scripts/test_install_no_checkout.py
   - scripts/test_instance_backup.py
   - scripts/test_instance_catalog.py
@@ -1295,24 +1300,26 @@ rules:
   - scripts/test_public_snapshot_audit.py
   - scripts/test_python_dependency_policy.py
   - scripts/test_queued_execution_api.py
+  - scripts/test_recover_native_stage_receipt.py
   - scripts/test_recovery_mutation_security.py
-  - scripts/test_release_contracts.py
   - scripts/test_release_images.py
   - scripts/test_release_safe_io.py
   - scripts/test_release_scan_exceptions.py
   - scripts/test_release_tool_inputs.py
   - scripts/test_agent_result_stage.py
-  - scripts/test_native_follow_on.py
   - scripts/test_qualification_candidate.py
   - scripts/test_reboot_stage.py
+  - scripts/test_restart_observed_fields.py
   - scripts/test_routing_deviation_ledger.py
   - scripts/test_run_cancellation.py
   - scripts/test_run_store_recovery.py
+  - scripts/test_run_template_lifecycle_journey.py
   - scripts/test_stage_j1_site.py
   - scripts/test_runner.py
   - scripts/test_runtime_contracts.py
   - scripts/test_sandbox_runtime.py
   - scripts/test_sensitive_data_gateway.py
+  - scripts/test_service_execution_host_get_refusal.py
   - scripts/test_service_lifecycle_identity.py
   - scripts/test_service_process_startup.py
   - scripts/test_settings_service.py
@@ -1358,6 +1365,7 @@ rules:
   - scripts/test_terminal_service.py
   - scripts/test_terminology_policy.py
   - scripts/test_tree_upgrade.py
+  - scripts/test_uninstall_preserves_install_receipts.py
   - scripts/test_usage_ledger.py
   - scripts/test_validate_authority_policy.py
   - scripts/test_validate_release_disposition.py
@@ -1397,11 +1405,21 @@ rules:
   - templates/classdd/template.yaml
   - templates/projectdd/.statedd/manifest.yaml
   - templates/projectdd/template.yaml
+  - scripts/test_execution_host_injection_contract.py
+  - scripts/public_export_unclassified_paths.py
+  - scripts/test_public_export_unclassified_paths.py
+  - apps/web/tests/live-core-surface-claim.test.mjs
+  - apps/web/tests/live-core-surface-claim.ts
+  - config/release-scan-suppression.v1.yaml
+  - scripts/probe_preserved_paths.py
+  - scripts/test_probe_preserved_paths.py
+  - apps/web/tests/live-core-governed-selection.mjs
+  - scripts/governed_live_core_batch.test.mjs
+  - scripts/test_approvals_repository_identity_change.py
 - id: private-operating-and-unverified-assets
   classification: private-internal
   license: NOASSERTION
-  provenanceRationale: Operating state, internal evidence, private instances, archived plans, and assets without established
-    redistribution rights stay private.
+  provenanceRationale: Operating state, internal evidence, private instances, archived plans, and assets without established redistribution rights stay private.
   paths:
   - AGENTS.md
   - BACKLOG.md
@@ -1559,6 +1577,7 @@ rules:
   - brand/source-manifest.json
   - config/candidate-provenance/stateport-public-snapshot-20260730-dcfd4b8c.yaml
   - config/release-guard.v1.yaml
+  - conftest.py
   - docs/BOSS_PITCH.md
   - docs/evidence/2026-07-12-bl-013a-source-boundary/README.md
   - docs/evidence/2026-07-12-bl-013a-source-boundary/git_safety_report.json
@@ -1572,44 +1591,249 @@ rules:
   - docs/evidence/2026-07-12-overnight-program-convergence/changed-contracts.md
   - docs/evidence/2026-07-12-overnight-program-convergence/cto_handoff.md
   - docs/evidence/2026-07-12-overnight-program-convergence/evidence_manifest.json
+  - evidence/one-line-release-001/HANDOFF-20260926T1351Z.md
+  - evidence/one-line-release-001/HANDOFF-20260927T0058Z.md
+  - evidence/one-line-release-001/HANDOFF-20260927T0630Z.md
+  - evidence/one-line-release-001/HANDOFF-20260927T0740Z.md
+  - evidence/one-line-release-001/a11y-dump-owned-by-another-session-20260926.md
+  - evidence/one-line-release-001/absent-absent-absent-diagnosed-grants-survived-workload-records-did-not-20260927T0655Z.md
+  - evidence/one-line-release-001/absent-workloads-four-causes-eliminated-20260927.md
+  - evidence/one-line-release-001/accessibility-tree-dump-20260926.md
+  - evidence/one-line-release-001/accessible-name-surface-corrections-20260926.md
+  - evidence/one-line-release-001/actual-template-mode-blocked-on-heavy-slot-20260927.md
+  - evidence/one-line-release-001/actual-template-mode-passed-20260927T0007Z.md
+  - evidence/one-line-release-001/actual-template-mode-second-gate-and-premise-chain-20260926T2359Z.md
+  - evidence/one-line-release-001/actual-template-pass-independent-verification-20260927T0232Z.md
+  - evidence/one-line-release-001/actual-template-pass-record-corrections-20260927T0019Z.md
   - evidence/one-line-release-001/alpha14-rejection.md
+  - evidence/one-line-release-001/alpha19-immutability-independent-verification-20260926.md
+  - evidence/one-line-release-001/attestation-disclosure-defect-correction-20260926.md
+  - evidence/one-line-release-001/attestation-residual-gaps-known-limitation-20260926.md
+  - evidence/one-line-release-001/audits/audit-20260926.md
+  - evidence/one-line-release-001/audits/trajectory-20260924.md
+  - evidence/one-line-release-001/binDir-declared-is-not-linked-correction-20260926.md
+  - evidence/one-line-release-001/binding2-ready-to-take-20260926.md
+  - evidence/one-line-release-001/bootstrap-generator-premise-proven-20260927T0011Z.md
+  - evidence/one-line-release-001/branch-commit-rate-blocks-browser-verification-20260926.md
+  - evidence/one-line-release-001/browser-proof-blocked-on-verified-release-20260927.md
+  - evidence/one-line-release-001/build-lock-blocker-verified-and-push-trigger-correction-20260927T0915Z.md
+  - evidence/one-line-release-001/bundle-r15-evidence-20260924.md
+  - evidence/one-line-release-001/campaign-handoff-20260927T0950Z.md
+  - evidence/one-line-release-001/canonical-state-guard-has-teeth-20260926.md
+  - evidence/one-line-release-001/check-frontend-passes-20260926.md
+  - evidence/one-line-release-001/collection-admissible-inputs-present-20260926.md
+  - evidence/one-line-release-001/committed-state-guard-test-is-vacuous-20260926.md
+  - evidence/one-line-release-001/constraint-audit-20260926.md
+  - evidence/one-line-release-001/containment-gate-is-a-tautology-20260927.md
+  - evidence/one-line-release-001/correction-binding2-not-independent-20260926.md
+  - evidence/one-line-release-001/correction-expired-ledger-claim-20260926.md
+  - evidence/one-line-release-001/correction-threshold-emission-claim-20260926.md
+  - evidence/one-line-release-001/cross-test-leak-located-os-environ-bindings-20260927.md
+  - evidence/one-line-release-001/ephemeral-test-trust-and-private-resolver-20260926.md
+  - evidence/one-line-release-001/evidence-r7j-r16-r1-20260924.md
+  - evidence/one-line-release-001/forged-index-closed-and-alpha13-binding-20260926T2220Z.md
+  - evidence/one-line-release-001/gen_public_route_alpha16_audit.py
+  - evidence/one-line-release-001/gen_route_stage_alpha19_r1.py
+  - evidence/one-line-release-001/goal-handoff-r12-20260925.md
+  - evidence/one-line-release-001/governed-daemon-boot-cascade-and-repin-20260927.md
+  - evidence/one-line-release-001/grant-survival-gap-splits-20260927.md
+  - evidence/one-line-release-001/group-d-figures-verified-not-unsourced-20260926.md
+  - evidence/one-line-release-001/groupa-build-inputs-precomputed-20260926.md
+  - evidence/one-line-release-001/groupa-containerfile-migration-recipe-20260926.md
+  - evidence/one-line-release-001/groupa-injection-assertion-proposed-20260926.md
+  - evidence/one-line-release-001/groupa-ldflags-assertion-gap-20260926.md
+  - evidence/one-line-release-001/groupa-option-b-does-not-assemble-20260926T2241Z.md
+  - evidence/one-line-release-001/groupa-quadlet-condition-enforced-20260926.md
+  - evidence/one-line-release-001/groupa-quadlet-surface-delta-20260926.md
+  - evidence/one-line-release-001/groupa-remediation-measurement-20260926.md
+  - evidence/one-line-release-001/groupa-route-decision-brief-20260926.md
+  - evidence/one-line-release-001/grype-config-blocker-refuted-20260926.md
+  - evidence/one-line-release-001/grype-config-pin-probe-20260926.py
+  - evidence/one-line-release-001/live-site-contradicts-itself-on-native-qualification-20260927.md
+  - evidence/one-line-release-001/livecore-stale-codex-expectation-repaired-20260926T2344Z.md
+  - evidence/one-line-release-001/manifest-digest-is-canonical-not-bytes-20260927.md
+  - evidence/one-line-release-001/manifest-gap-already-closed-20260927.md
+  - evidence/one-line-release-001/nameless-360-what-is-actually-known-20260926.md
+  - evidence/one-line-release-001/native-admission-forged-index-admitted-20260926T2158Z.md
   - evidence/one-line-release-001/native-advisory-reconciliation-20260912.md
   - evidence/one-line-release-001/native-assurance-inputs-20260911.md
   - evidence/one-line-release-001/native-coverage-20260911.md
   - evidence/one-line-release-001/native-coverage-reconciliation-20260911.md
   - evidence/one-line-release-001/native-cpe-followthrough-20260911.md
+  - evidence/one-line-release-001/native-lane-admission-premises-20260926T2055Z.md
   - evidence/one-line-release-001/native-source-advisories-interrupted-20260911.md
+  - evidence/one-line-release-001/native-stage-receipt-recovered-2026-09-14-1.json
+  - evidence/one-line-release-001/next-action-stale-gate-reason-20260926.md
+  - evidence/one-line-release-001/one-admission-spent-run-failed-at-real-gate-20260927T0520Z.md
   - evidence/one-line-release-001/orphan-inventory-20260912c.txt
+  - evidence/one-line-release-001/owner-decision-brief-group-a-shape-20260926.md
+  - evidence/one-line-release-001/owner-decision-brief-reinstall-readoption-20260927.md
+  - evidence/one-line-release-001/owner-decisions-20260926-gates-1-2-3.md
+  - evidence/one-line-release-001/owner-groups-vs-ledger-20260926.md
+  - evidence/one-line-release-001/owner-tlog-decision-20260926.md
   - evidence/one-line-release-001/phase1-completion-handoff-20260912.md
   - evidence/one-line-release-001/handoff-20260916-c4-signing.md
   - evidence/one-line-release-001/handoff-20260917-step5-native.md
   - evidence/one-line-release-001/handoff-20260918-successor-cycle.md
+  - evidence/one-line-release-001/orphan-sweep-delta-20260927.md
+  - evidence/one-line-release-001/pinned-worktree-verification-and-second-failure-20260926.md
+  - evidence/one-line-release-001/podman-pin-premise-20260926.md
+  - evidence/one-line-release-001/probe_attestation_rederivation.py
+  - evidence/one-line-release-001/probe_exception_enforcement.py
+  - evidence/one-line-release-001/probe_verify_ledger_binding.py
+  - evidence/one-line-release-001/public-route-alpha16-reference-audit.json
+  - evidence/one-line-release-001/public-route-alpha17-reference-audit-20260926T2035Z.json
+  - evidence/one-line-release-001/published-route-digest-audit-20260926.md
+  - evidence/one-line-release-001/quota-cluster-reconciliation-20260927T1147Z.md
+  - evidence/one-line-release-001/r12-signing-success-20260925.md
+  - evidence/one-line-release-001/r7j-build-evidence-20260924.md
+  - evidence/one-line-release-001/record-corrections-and-vulnerability-gate-20260925.md
+  - evidence/one-line-release-001/rederivation-demonstrated-20260926.md
   - evidence/one-line-release-001/release-continuation-handoff-20260912.md
   - evidence/one-line-release-001/handoff-20260919-step4-signing-blocked.md
+  - evidence/one-line-release-001/handoff-20260927T0216Z.md
+  - evidence/one-line-release-001/immutable-set-generator-20260926.md
+  - evidence/one-line-release-001/inflight-pin-is-correct-20260927.md
+  - evidence/one-line-release-001/last-surface-gap-closed-by-explanation-20260927.md
+  - evidence/one-line-release-001/ledger-coverage-horizon-20260926.md
+  - evidence/one-line-release-001/ledger-renewal-20260926.md
+  - evidence/one-line-release-001/native-admission-residual-downgraded-trust-chain-20260926T2231Z.md
+  - evidence/one-line-release-001/native-journey-preconditions/local-authority-repro-20260925.json
+  - evidence/one-line-release-001/r3-run-rename-hang-20260927T0735Z.md
+  - evidence/one-line-release-001/restart-artifact-regenerated-20260927T1305Z.md
+  - evidence/one-line-release-001/restart-flags-derived-input-not-retained-20260927.md
+  - evidence/one-line-release-001/restart-leg-pass-artifact-verified-20260927.md
+  - evidence/one-line-release-001/restart-pass-verified-manifest-survival-measured-20260927.md
+  - evidence/one-line-release-001/restart-survival-measured-pass-20260927T0845Z.md
+  - evidence/one-line-release-001/retraction-877-not-reproduced-20260926.md
+  - evidence/one-line-release-001/route-note-independent-verification-20260926.md
+  - evidence/one-line-release-001/run-actual-restart.sh
+  - evidence/one-line-release-001/scan-evaluation-artifact-prerequisite-correction-20260926.md
+  - evidence/one-line-release-001/service-log-retention-chain-20260927.md
+  - evidence/one-line-release-001/service-restart-leg-measured-fails-401-20260927T0620Z.md
+  - evidence/one-line-release-001/service-slice-failure-triage-20260927T0210Z.md
+  - evidence/one-line-release-001/session-handoff-2026-09-26T22-55Z.md
+  - evidence/one-line-release-001/session-handoff-20260926-1755Z.md
+  - evidence/one-line-release-001/session-handoff-20260927T0500Z.md
+  - evidence/one-line-release-001/site-qualification-guard-bypass-20260926.md
+  - evidence/one-line-release-001/site-qualification-guard-widening-20260926.md
+  - evidence/one-line-release-001/site-readiness-class-sweep-20260926.md
+  - evidence/one-line-release-001/source-publication-378305e-20260924.md
   - evidence/one-line-release-001/stage1-advisory-notice-completion-20260912.md
   - evidence/one-line-release-001/stage1-continuation-handoff-20260912b.md
   - evidence/one-line-release-001/stage1-f3-advisory-consolidation-r1.md
   - evidence/one-line-release-001/batch-item2-ui-audit-handoff-20260912.md
+  - evidence/one-line-release-001/ldflags-var-const-discrepancy-20260926.md
+  - evidence/one-line-release-001/ledger-binding-failclosed-20260926.md
+  - evidence/one-line-release-001/native-template-restart-survival-20260927.md
   - evidence/one-line-release-001/product-completeness-batch-handoff-20260912.md
+  - evidence/one-line-release-001/public-export-classification-is-312-paths-20260927.md
+  - evidence/one-line-release-001/restart-log-assertion-unfalsifiable-20260927.md
   - evidence/one-line-release-001/session-discipline-contract-20260912.md
+  - evidence/one-line-release-001/site-guard-round-3-critical-bypass-and-unpinned-fix-20260927T0650Z.md
   - evidence/one-line-release-001/stage1-exit-review-20260912.md
   - evidence/one-line-release-001/stage1-f3-advisory-consolidation-r2.md
   - evidence/one-line-release-001/stage1-handoff-20260912c.md
   - evidence/one-line-release-001/stage1-handoff-go-20260912.md
   - evidence/one-line-release-001/stage1-production-binding-plan-20260912.md
   - config/release-scan-exceptions.v1.yaml
+  - evidence/one-line-release-001/actual-template-restart-run-20260927T0313Z.md
+  - evidence/one-line-release-001/actual-template-restart-survival-PASSED-20260927T0635Z.md
+  - evidence/one-line-release-001/actual-template-restart-survival-computed-flags-20260927T0727Z.md
+  - evidence/one-line-release-001/admission-gate-aimed-at-wrong-repair-20260927.md
+  - evidence/one-line-release-001/admission-premise-guard-teeth-restored-20260927T0041Z.md
   - evidence/one-line-release-001/stage1-producer-build-procedure-r1.md
   - evidence/one-line-release-001/stage1-producer-build-procedure-r2.md
   - evidence/one-line-release-001/standard-source-and-notices-20260911.md
+  - evidence/one-line-release-001/suite-basis-and-tmp-quota-20260927T0745Z.md
   - evidence/one-line-release-001/summary.md
   - evidence/one-line-release-001/admission-repair-20260921.md
+  - evidence/one-line-release-001/admission-worked-repair-held-product-400-is-the-blocker-20260927.md
+  - evidence/one-line-release-001/alpha16-live-page-verification-20260926.md
+  - evidence/one-line-release-001/alpha16-route-correction-review-20260926.md
+  - evidence/one-line-release-001/alpha16-route-overstatement-correction-20260926.md
+  - evidence/one-line-release-001/alpha16-six-defect-disposition-20260926.md
+  - evidence/one-line-release-001/alpha19-bootstrap-scope-20260926T2253Z.md
+  - evidence/one-line-release-001/attestation-binding-gap-measurement-20260926.md
+  - evidence/one-line-release-001/attestation-disclosure-runtime-verification-20260926.md
+  - evidence/one-line-release-001/attestation-rederivation-adversarial-20260926.md
+  - evidence/one-line-release-001/attestation-rederivation-proof-20260926.md
   - evidence/one-line-release-001/audits/audit-20260922.md
   - evidence/one-line-release-001/audits/audit-20260923.md
+  - evidence/one-line-release-001/audits/audit-20260925.md
+  - evidence/one-line-release-001/audits/audit-20260927.md
   - evidence/one-line-release-001/autonomy-convergence-20260920.md
+  - evidence/one-line-release-001/await-is-void-timeout-was-retry-failure-undiagnosable-20260927T0535Z.md
+  - evidence/one-line-release-001/binding2-attempt-2-fixture-scope-20260926.md
+  - evidence/one-line-release-001/bootstrap-provenance-slot-binding-and-attribution-20260927.md
+  - evidence/one-line-release-001/browser-a11y-premises-20260926.md
+  - evidence/one-line-release-001/browser-cascade-second-failure-20260926.md
+  - evidence/one-line-release-001/browser-lane-open-first-run-failure-20260926.md
+  - evidence/one-line-release-001/browser-suite-serial-suppression-explained-20260926.md
+  - evidence/one-line-release-001/build-lock-drift-and-governed-false-red-20260927.md
+  - evidence/one-line-release-001/bundle-r16-evidence-20260924.md
   - evidence/one-line-release-001/checkpoint-history-through-20260920.md
+  - evidence/one-line-release-001/dump-test-contaminates-serial-suite-20260926.md
   - evidence/one-line-release-001/external-review-20260922-opencode.md
+  - evidence/one-line-release-001/groupa-podman-pin-feasibility-independent-check-20260926.md
+  - evidence/one-line-release-001/harness-repair-drafted-unproven-20260926.md
+  - evidence/one-line-release-001/live-core-provenance-guard-20260926.md
   - evidence/one-line-release-001/local-rootless-auth-repro-20260922.md
+  - evidence/one-line-release-001/owner-decision-brief-exception-ledger-20260926.md
+  - evidence/one-line-release-001/preservation-inventory-staleness-20260927T0310Z.md
+  - evidence/one-line-release-001/published-archive-config-gap-verified-20260926.md
+  - evidence/one-line-release-001/release-index-sweep-20260926.json
+  - evidence/one-line-release-001/route-note-attestation-disclosure-verification-20260926.md
+  - evidence/one-line-release-001/session-handoff-2026-09-26T22-05Z.md
+  - evidence/one-line-release-001/site-readiness-guard-has-a-copula-hole-20260927.md
+  - evidence/one-line-release-001/stale-dist-class-closed-20260927.md
   - evidence/one-line-release-001/state-addenda-archive-20260922.md
+  - evidence/one-line-release-001/test_ledger_binding_gap.py
+  - evidence/one-line-release-001/tmp-quota-blocked-measurement-20260927T1140Z.md
+  - evidence/one-line-release-001/tmp-relocation-resolves-blocker-20260927T0500Z.md
+  - evidence/one-line-release-001/tmp-usrquota-root-cause-20260927T0247Z.md
+  - evidence/one-line-release-001/two-open-threads-closed-20260926.md
+  - evidence/one-line-release-001/ui-inventory-batch-effects-20260926.md
+  - evidence/one-line-release-001/ui-inventory-label-field-unreliable-20260926.md
+  - evidence/one-line-release-001/ui-inventory-labels-from-ast-20260926.md
+  - evidence/one-line-release-001/ui-inventory-overcounts-collapsed-20260926.md
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/build_alpha19_inventory.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/collapse_overcounts.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/derive_container_effects.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/derive_partD_effects.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/derive_partF_effects.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/execution-authority-effects.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/import_closure_analysis.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/partD-effects.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/partD/pinned_EditorPane.tsx
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/partD/pinned_PreviewRoutesPage.tsx
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/partF-effects.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/save-preview-effects.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/NOTES.md
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/acceptance.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/analyze.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/compare_rules.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/match.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/reconciliation.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/validate_predicate.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA2/acceptance_coordinator.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA2/behaviour.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA2/index_jsx.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/NOTES.md
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/analyse.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/behaviour.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/build.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/index_jsx.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/probe_behaviour.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/rows.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/validate_alpha19_inventory.py
+  - evidence/one-line-release-001/ui-inventory-reconciliation-partA-20260926.md
+  - evidence/one-line-release-001/ui-inventory-staleness-vs-alpha19-20260926.md
+  - evidence/one-line-release-001/ui-inventory-substantive-provider-effects-20260926.md
+  - evidence/one-line-release-001/uninstall-and-identical-reinstall-measured-20260927.md
+  - evidence/one-line-release-001/uninstall-reinstall-20260927.md
+  - evidence/one-line-release-001/uninstall-reinstall-20260927/02-measure-uninstall-reinstall.py
+  - evidence/one-line-release-001/uninstall-reinstall-20260927/04-measure-readoption-authority.py
   - evidence/one-line-release-001/visual-observer-smoke.json
   - evidence/one-line-release-001/vm-r23-harness-diagnosis-20260921.md
   - evidence/one-line-release-001/vm-r23-refusal-diagnosis-20260921.md
@@ -1849,6 +2073,171 @@ rules:
   - docs/superpowers/specs/2026-07-05-sp-001a-design.md
   - docs/superpowers/specs/2026-07-05-statedd-mode-phase-invariant-design.md
   - docs/superpowers/specs/2026-07-07-sp-001b-runner-design.md
+  - evidence/one-line-release-001/candidate-web-bundle-builds-clean-20260926.md
+  - evidence/one-line-release-001/cascade-walk-interrupted-and-fragile-20260926.md
+  - evidence/one-line-release-001/ci-root-pytest-collection-collision-20260926.md
+  - evidence/one-line-release-001/ci-suite-is-red-triage-20260927.md
+  - evidence/one-line-release-001/ci-suite-red-premise-is-unreproduced-20260927.md
+  - evidence/one-line-release-001/collection-sequencing-constraint-20260926.md
+  - evidence/one-line-release-001/consistent-forgery-boundary-premise-20260927.md
+  - evidence/one-line-release-001/container-restart-leg-does-not-exist-20260927T1010Z.md
+  - evidence/one-line-release-001/control-identity-test-was-vacuous-20260927T0830Z.md
+  - evidence/one-line-release-001/correction-evidence-claim-scope-20260926.md
+  - evidence/one-line-release-001/correction-rederivation-blocker-misidentified-20260926.md
+  - evidence/one-line-release-001/correction-vulnerability-claim-20260926.md
+  - evidence/one-line-release-001/documentation-drift-audit-20260926.md
+  - evidence/one-line-release-001/dump-test-residue-mechanism-named-20260926.md
+  - evidence/one-line-release-001/evaluation-timestamp-prerequisite-20260926.md
+  - evidence/one-line-release-001/exception-ledger-enforcement-verification-20260926.md
+  - evidence/one-line-release-001/failed-run-retention-and-the-hole-in-my-first-fix-20260927T0635Z.md
+  - evidence/one-line-release-001/fixture-resume-idempotence-20260927T0550Z.md
+  - evidence/one-line-release-001/fresh-evidence-run-premises-20260926.md
+  - evidence/one-line-release-001/gen_public_route_alpha17_audit.py
+  - evidence/one-line-release-001/generic-template-identity-is-a-real-pin-20260927T0050Z.md
+  - evidence/one-line-release-001/goal-requirements-single-dependency-20260926.md
+  - evidence/one-line-release-001/governed-daemon-tests-need-a-booked-scope-20260927.md
+  - evidence/one-line-release-001/group-a-remediation-premise-20260926.md
+  - evidence/one-line-release-001/groupa-brief-silent-loss-correction-20260926.md
+  - evidence/one-line-release-001/groupa-clearing-threshold-20260926.md
+  - evidence/one-line-release-001/groupa-independent-verification-20260926.md
+  - evidence/one-line-release-001/groupa-injection-assertion-proposed-20260926.patch
+  - evidence/one-line-release-001/groupa-option-a-pin-verification-20260926.md
+  - evidence/one-line-release-001/groupa-podman-pin-feasibility-20260926.md
+  - evidence/one-line-release-001/groupa-premise-recheck-20260926T2232Z.md
+  - evidence/one-line-release-001/groupa-quadlet-helper-unreachable-20260926.md
+  - evidence/one-line-release-001/groupa-remediation-measure-script-20260926.py
+  - evidence/one-line-release-001/groupa-remediation-table-20260926.json
+  - evidence/one-line-release-001/groupa-v612-clearing-criterion-correction-20260926.md
+  - evidence/one-line-release-001/grype-config-pin-assembler-tolerance-20260926.py
+  - evidence/one-line-release-001/grype-config-pin-verified-20260926.md
+  - evidence/one-line-release-001/handoff-20260927T0612Z.md
+  - evidence/one-line-release-001/heavy-lock-is-flock-not-existence-20260927.md
+  - evidence/one-line-release-001/inflight-concurrent-increment-20260926.md
+  - evidence/one-line-release-001/jsx-ast-accessible-name-audit-20260926.md
+  - evidence/one-line-release-001/ldflags-and-fork-corrections-20260926.md
+  - evidence/one-line-release-001/ledger-binding-design-assessment-20260926.md
+  - evidence/one-line-release-001/ledger-binding-verifiability-assessment-20260926.md
+  - evidence/one-line-release-001/ledger-enforcement-correction-20260926.md
+  - evidence/one-line-release-001/ledger-unpinned-rule-retired-by-groupa-20260926.md
+  - evidence/one-line-release-001/live-repo-callsites-closed-20260927T0445Z.md
+  - evidence/one-line-release-001/live-site-qualified-overstatement-20260926.md
+  - evidence/one-line-release-001/local-service-cold-start-readiness-20260927T0138Z.md
+  - evidence/one-line-release-001/log-assertion-fresh-run-case-20260927.md
+  - evidence/one-line-release-001/main-red-against-declared-ci-gate-20260926.md
+  - evidence/one-line-release-001/manifest-digest-is-not-a-republication-20260927.md
+  - evidence/one-line-release-001/nameless-326-attempts-and-corrections-20260926.md
+  - evidence/one-line-release-001/native-admission-cosign-trust-input-20260926.md
+  - evidence/one-line-release-001/native-admission-provenance-binding-closed-residual-measured-20260926T2215Z.md
+  - evidence/one-line-release-001/native-journey-preconditions/README-20260925.md
+  - evidence/one-line-release-001/native-journey-preconditions/local-readiness-repro-20260925.json
+  - evidence/one-line-release-001/native-receipt-recovery-20260926T2052Z.md
+  - evidence/one-line-release-001/native-stage-receipt-recovered-2026-09-14-2.json
+  - evidence/one-line-release-001/native-vs-simulation-boundary-now-has-teeth-20260927T0213Z.md
+  - evidence/one-line-release-001/next-action-supersession-provenance-20260926.md
+  - evidence/one-line-release-001/orphan-sweep-superseded-predecessors-20260927T0222Z.md
+  - evidence/one-line-release-001/owner-decision-brief-figures-reproduced-20260926.md
+  - evidence/one-line-release-001/owner-decision-brief-preservation-coverage-claim-20260927.md
+  - evidence/one-line-release-001/owner-decisions-20260926-gates-1-2-3-correction-notice-20260926.md
+  - evidence/one-line-release-001/owner-gate-1-independent-verification-20260926.md
+  - evidence/one-line-release-001/owner-path-refusal-coverage-20260927T0150Z.md
+  - evidence/one-line-release-001/phase4-r10-signing-prep-20260924.md
+  - evidence/one-line-release-001/podman-candidate-commits-20260926.md
+  - evidence/one-line-release-001/preservation-api-inventory-20260927T0335Z.md
+  - evidence/one-line-release-001/prior-next-action-admission-provenance-record-20260926.md
+  - evidence/one-line-release-001/probe_attestation_rederivation_adversarial.py
+  - evidence/one-line-release-001/probe_ledger_binding_failclosed.py
+  - evidence/one-line-release-001/public-evidence-claim-overstatement-20260926.md
+  - evidence/one-line-release-001/public-guidance-criterion-audit-20260926.md
+  - evidence/one-line-release-001/public-route-alpha17-recheck-20260926T2035Z.md
+  - evidence/one-line-release-001/publication-payload-completeness-20260925.md
+  - evidence/one-line-release-001/published-index-signature-reverification-20260926.md
+  - evidence/one-line-release-001/pytest-per-test-mise-install-bloat-20260926.md
+  - evidence/one-line-release-001/r11-failure-r12-repair-20260925.md
+  - evidence/one-line-release-001/r3-real-failure-is-a-refused-create-20260927T0750Z.md
+  - evidence/one-line-release-001/r3-tested-the-repair-401-persists-20260927.md
+  - evidence/one-line-release-001/reboot-survival-unmeasured-native-only-driver-20260927.md
+  - evidence/one-line-release-001/record-created-has-no-production-caller-20260927.md
+  - evidence/one-line-release-001/rederivation-non-vacuity-check-20260926.md
+  - evidence/one-line-release-001/restart-artifact-observed-fields-20260927T1250Z.md
+  - evidence/one-line-release-001/restart-daemon-root-reuse-already-present-20260927.md
+  - evidence/one-line-release-001/restart-leg-handoff-20260927T0350Z.md
+  - evidence/one-line-release-001/restart-leg-reached-workloads-absent-20260927T0625Z.md
+  - evidence/one-line-release-001/restart-pass-adversarially-verified-20260927T0905Z.md
+  - evidence/one-line-release-001/restart-run-failed-on-harness-idempotency-20260927T0340Z.md
+  - evidence/one-line-release-001/resume-path-verified-and-three-gaps-closed-20260927.md
+  - evidence/one-line-release-001/root-cause-877-stale-expectation-20260926.md
+  - evidence/one-line-release-001/route-note-exception-attestation-disclosure-20260926.md
+  - evidence/one-line-release-001/route-staging-alpha19-20260926.md
+  - evidence/one-line-release-001/scan-config-reproduction-20260926.md
+  - evidence/one-line-release-001/second-exclusive-create-blocks-resume-20260927.md
+  - evidence/one-line-release-001/service-logs-where-20260927.md
+  - evidence/one-line-release-001/service-restart-leg-passes-with-same-workload-ids-20260927.md
+  - evidence/one-line-release-001/session-handoff-2026-09-26T20-10Z.md
+  - evidence/one-line-release-001/session-handoff-2026-09-26T22-30Z.md
+  - evidence/one-line-release-001/session-handoff-20260925-1636Z.md
+  - evidence/one-line-release-001/session-handoff-20260927T0045Z.md
+  - evidence/one-line-release-001/signature-binding-fixture-not-guard-20260927T0900Z.md
+  - evidence/one-line-release-001/site-guard-two-verification-rounds-and-the-lexical-limit-20260927T0514Z.md
+  - evidence/one-line-release-001/site-qualification-guard-reverification-20260926.md
+  - evidence/one-line-release-001/site-qualification-guard-widening-proposed-20260926.patch
+  - evidence/one-line-release-001/site-readiness-guard-closed-and-its-regressions-20260927T0054Z.md
+  - evidence/one-line-release-001/slice-contract-20260925.md
+  - evidence/one-line-release-001/staged-route-independent-review-20260926.md
+  - evidence/one-line-release-001/stale-dist-not-product-defects-20260927.md
+  - evidence/one-line-release-001/stop-failure-is-a-too-short-timeout-20260927.md
+  - evidence/one-line-release-001/stop-timeout-fix-is-one-site-of-eighteen-20260927.md
+  - evidence/one-line-release-001/test-suite-live-dist-dependency-20260927T0410Z.md
+  - evidence/one-line-release-001/threshold-gap-remedy-20260926.md
+  - evidence/one-line-release-001/tmp-relocation-correction-20260927T0755Z.md
+  - evidence/one-line-release-001/tmp-remedy-proven-restart-fails-later-20260927.md
+  - evidence/one-line-release-001/tmpdir-remedy-violates-retained-root-20260927T0203Z.md
+  - evidence/one-line-release-001/ui-control-inventory.alpha19.json
+  - evidence/one-line-release-001/ui-inventory-container-effects-20260926.md
+  - evidence/one-line-release-001/ui-inventory-label-reextraction-20260926.md
+  - evidence/one-line-release-001/ui-inventory-newly-enumerated-complete-20260926.md
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/MANIFEST.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/MANIFEST.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/container-effects.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/derive_execution_authority_effects.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/derive_partE_effects.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/derive_save_preview_effects.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/import-closure-analysis.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/label-reextraction-report.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/partD/pinned_CodeEditor.tsx
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/partD/pinned_OrchestrationTool.tsx
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/partE-effects.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/reextract_labels.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/later-lane-artifacts/validate_alpha19_inventory.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/acceptance.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/analysis.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/build.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/index_jsx.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/matches.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA/spotcheck.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA2/acceptance-coordinator.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA2/behaviour-classification.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA2/build.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partA2/verify.py
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/acceptance.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/analyse.py.orig
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/behaviour.py.orig
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/build.py.orig
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/index_jsx.py.orig
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/reconciliation.json
+  - evidence/one-line-release-001/ui-inventory-receipts-20260926/partB/verify.py
+  - evidence/one-line-release-001/ui-inventory-reconciliation-complete-20260926.md
+  - evidence/one-line-release-001/ui-inventory-reconciliation-review-20260926.md
+  - evidence/one-line-release-001/ui-inventory-statusbar-effects-20260926.md
+  - evidence/one-line-release-001/ui-inventory-unlabelled-pass-unsafe-20260926.md
+  - evidence/one-line-release-001/uninstall-preserves-instances-reinstall-does-not-readopt-20260927.md
+  - evidence/one-line-release-001/uninstall-reinstall-20260927/01-produce-populated-root.py
+  - evidence/one-line-release-001/uninstall-reinstall-20260927/03-probe-after-uninstall.py
+  - evidence/one-line-release-001/verifications/r7j-independent-verify-20260924.json
+  - evidence/one-line-release-001/vulnerability-exception-ledger-draft-20260926.md
+  - evidence/one-line-release-001/web-unit-suite-green-20260926.md
+  - evidence/one-line-release-001/which-routes-bypass-the-release-gate-20260927.md
+  - evidence/one-line-release-001/workloads-owned-but-ledger-empty-20260927.md
+  - evidence/one-line-release-001/workspace-journey-artifact-observes-rather-than-asserts-20260927T0250Z.md
   - scripts/projectstate_gate.py
   - scripts/release_guard.py
   - scripts/test_release_guard.py
@@ -1865,11 +2254,691 @@ rules:
   - instances/demo-classdd/state/class.yaml
   - instances/demo-classdd/state/students.yaml
   - instances/demo-classdd/state/topics.yaml
+  - pytest.ini
+  - scripts/test_projectstate_state_parses.py
+  - scripts/test_qualification_package_resolution.py
+  - evidence/one-line-release-001/all-published-routes-audited-20260926T0035Z.md
+  - evidence/one-line-release-001/alpha13-not-presented-criterion-audited-20260926T0037Z.md
+  - evidence/one-line-release-001/bootstrap-generator-is-pure-and-provable-20260926T2352Z.md
+  - evidence/one-line-release-001/option-c-is-a-complete-path-20260926T2255Z.md
+  - evidence/one-line-release-001/publication-scope-WITHDRAWN-20260926T2301Z.md
+  - evidence/one-line-release-001/publication-scope-is-real-but-undeclared-20260926T2259Z.md
+  - evidence/one-line-release-001/session-handoff-2026-09-26T1422Z.md
+  - evidence/one-line-release-001/session-handoff-2026-09-26T1842Z.md
+  - evidence/one-line-release-001/staged-a19-satisfies-the-install-path-20260926T0004Z.md
+  - evidence/one-line-release-001/staged-r12-route-is-70-of-71-20260926T2256Z.md
+  - evidence/one-line-release-001/public-export-allowlist-20260927.md
+  - evidence/one-line-release-001/blocked-state-audited-20260927T1220Z.md
+  - evidence/one-line-release-001/governor-gated-20260927/governor-receipt.json
+  - evidence/one-line-release-001/governor-gated-20260927/pytest.log
+  - evidence/one-line-release-001/governor-gated-tests-pass-20260927T1157Z.md
+  - evidence/one-line-release-001/superseded-6e00963a-and-r8-20260927T1212Z.md
+  - evidence/one-line-release-001/adopted-run-green-booked-measurement-blocked-20260927.md
+  - evidence/one-line-release-001/session-handoff-2026-09-27T1500Z.md
+  - evidence/one-line-release-001/governed-daemon-tests-measured-20260927.md
+  - evidence/one-line-release-001/governed-daemon-20260927T123248Z/pytest.log
+  - evidence/one-line-release-001/governed-daemon-20260927T123248Z/governor-receipt.json
+  - evidence/one-line-release-001/governed-daemon-20260927T123248Z/guard-receipt.json
+  - evidence/one-line-release-001/governed-daemon-20260927T123248Z/guard-receipt.consumed
+  - evidence/one-line-release-001/unclassified-path-reporter-20260927.md
+  - evidence/one-line-release-001/RETRACTION-r8-measured-the-restart-20260927.md
+  - evidence/one-line-release-001/adoption-identity-is-universal-20260927.md
+  - evidence/one-line-release-001/capability-grant-is-derived-20260927.md
+  - evidence/one-line-release-001/capability-grant-lives-only-in-catalog-20260927.md
+  - evidence/one-line-release-001/container-restart-leg-unrunnable-20260927T1345Z.md
+  - evidence/one-line-release-001/container-restart-marker-reverted-20260927T1330Z.md
+  - evidence/one-line-release-001/correction-the-crash-was-the-quota-20260927T1140Z.md
+  - evidence/one-line-release-001/durable-grant-readback-was-inert-20260927T1040Z.md
+  - evidence/one-line-release-001/governed-container-tests-pass-under-booked-scope-20260927.md
+  - evidence/one-line-release-001/governed-daemon-booked-first-run-20260927.md
+  - evidence/one-line-release-001/groupa-admission-blocked-and-two-rows-triaged-20260927T1550Z.md
+  - evidence/one-line-release-001/groupa-assembly-proof-prepared-and-quota-binding-20260927T1820Z.md
+  - evidence/one-line-release-001/groupa-rebuild-admission-premises-20260927T1600Z.md
+  - evidence/one-line-release-001/import-route-writes-no-identity-20260927.md
+  - evidence/one-line-release-001/imported-template-has-no-manifest-digest-20260927.md
+  - evidence/one-line-release-001/native-target-availability-20260927.md
+  - evidence/one-line-release-001/ordering-leak-is-not-an-environment-write-20260927.md
+  - evidence/one-line-release-001/owner-decision-brief-control-population-boundary-20260927.md
+  - evidence/one-line-release-001/owner-delegation-pin-decision-20260927.md
+  - evidence/one-line-release-001/probe_governed_cgroup_growth.py
+  - evidence/one-line-release-001/r7-cause-was-a-missing-clone-source-20260927.md
+  - evidence/one-line-release-001/r7-failed-clone-into-existing-dir-20260927.md
+  - evidence/one-line-release-001/r8-passed-the-import-leg-20260927.md
+  - evidence/one-line-release-001/r9-failure-undiagnosable-and-unenforced-quota-20260927.md
+  - evidence/one-line-release-001/r9-in-flight-and-recipe-cannot-run-restart-20260927.md
+  - evidence/one-line-release-001/restart-artifact-regenerated-20260927T1310Z.md
+  - evidence/one-line-release-001/restart-measurement-lives-in-rename-test-20260927.md
+  - evidence/one-line-release-001/signed-image-evaluation-gap-premise-corrected-20260927.md
+  - evidence/one-line-release-001/uninstall-reinstall-20260927/05-measure-adoption-route-split.py
+  - evidence/one-line-release-001/validator-stub-container-identity-20260927T1140Z.md
+  - evidence/one-line-release-001/whole-suite-basis-20260927T1205Z.md
+  - evidence/one-line-release-001/whole-suite-two-raised-rows-closed-20260927.md
+  - evidence/one-line-release-001/workspace-restart-validated-20260927T1430Z.md
+  - evidence/one-line-release-001/workspace-restart-was-driven-20260927T1400Z.md
+  - evidence/one-line-release-001/r10-observed-fields-validated-20260927T1155Z.md
+  - evidence/one-line-release-001/typecheck-tests-coverage-premise-20260927.md
+  - evidence/one-line-release-001/site-readiness-residual-diagnosed-two-repairs-withdrawn-20260927.md
+  - evidence/one-line-release-001/typecheck-covers-tests-and-my-lint-fix-was-a-silent-break-20260927.md
+  - evidence/one-line-release-001/canonical-source-my-parallel-basetemp-and-an-unlocated-five-20260928T0440Z.md
+  - evidence/one-line-release-001/command-digest-rule-confirmed-on-live-admission-20260928.md
+  - evidence/one-line-release-001/groupa-execution-host-assembles-grpc-1-83-2-20260928T0047Z.md
+  - evidence/one-line-release-001/groupa-rescan-clears-rx-2026-237-20260928T0300Z.md
+  - evidence/one-line-release-001/image-build-command-digest-binding-diagnosed-20260927.md
+  - evidence/one-line-release-001/journal/20260928-digest-resolved-and-cost-premise.md
+  - evidence/one-line-release-001/journal/20260928-playwright-cost-47s-refutes-premise.md
+  - evidence/one-line-release-001/journal/20260928T011248Z-image-build-digest-refusal-resolved.md
+  - evidence/one-line-release-001/mise-row-was-my-misclassification-20260928T0410Z.md
+  - evidence/one-line-release-001/owner-decision-brief-foreign-container-availability-20260927.md
+  - evidence/one-line-release-001/root-identity-second-verification-not-merge-ready-20260927.md
+  - evidence/one-line-release-001/scan-gate-passes-zero-unexplained-20260928T0400Z.md
+  - evidence/one-line-release-001/unadjudicated-findings-reachability-20260928T0330Z.md
+  - evidence/one-line-release-001/one-leaked-container-poisoned-every-run-20260928T0505Z.md
+  - evidence/one-line-release-001/site-residual-correction-and-batch-blocked-20260927.md
+  - evidence/one-line-release-001/journal/20260928T011623Z-vacuity-regression-resolved.md
+  - evidence/one-line-release-001/provisional-credits-read-to-assertion-five-confirmed-20260928.md
+  - evidence/one-line-release-001/blocker-journal-to-20260927.md
+  - evidence/one-line-release-001/admission-cross-lane-gated-and-suppression-orphan-20260928T0000Z.md
+  - evidence/one-line-release-001/adoption-gates-are-not-three-20260927.md
+  - evidence/one-line-release-001/cgroup-discriminator-answered-20260927T1407Z.md
+  - evidence/one-line-release-001/correction-both-triage-rows-closed-20260927T2330Z.md
+  - evidence/one-line-release-001/credit-probe-repaired-and-reprobed-20260928.md
+  - evidence/one-line-release-001/credit-probe-scaled-sample-20260928.md
+  - evidence/one-line-release-001/cross-test-leak-falsified-stable-red-is-three-20260927T1205Z.md
+  - evidence/one-line-release-001/failure-reason-wiring-verified-and-vacuity-cleared-20260927.md
+  - evidence/one-line-release-001/frontend-credits-were-filter-misses-20260928.md
+  - evidence/one-line-release-001/governed-api-is-a-lock-rewriter-20260927.md
+  - evidence/one-line-release-001/import-route-already-has-a-manifest-digest-20260927.md
+  - evidence/one-line-release-001/journal/20260927-candidate-audit-and-blocked-disposition.md
+  - evidence/one-line-release-001/journal/20260927-cgroup-discriminator-answered.md
+  - evidence/one-line-release-001/journal/20260927-cgroup-reproducer-refutes-per-container.md
+  - evidence/one-line-release-001/journal/20260927-circular-import-handoff.md
+  - evidence/one-line-release-001/journal/20260927-coordinator-record-defects.md
+  - evidence/one-line-release-001/journal/20260927-execution-host-bindings-preempt-transport.md
+  - evidence/one-line-release-001/journal/20260927-export-policy-selection-mismatch.md
+  - evidence/one-line-release-001/journal/20260927-gate-failure-is-one-absent-environment.md
+  - evidence/one-line-release-001/journal/20260927-governor-argv-diagnostic-and-coupled-consume.md
+  - evidence/one-line-release-001/journal/20260927-groupa-command-digest-is-an-argv-mismatch.md
+  - evidence/one-line-release-001/journal/20260927-groupa-command-digest-two-form-binding.md
+  - evidence/one-line-release-001/journal/20260927-independent-artifact-audit-no-vacuous-passes.md
+  - evidence/one-line-release-001/journal/20260927-lint-blocker-was-stale-and-zero-collection-is-unguarded.md
+  - evidence/one-line-release-001/journal/20260927-orphan-branch-disposition.md
+  - evidence/one-line-release-001/journal/20260927-r9-restart-leg-verified.md
+  - evidence/one-line-release-001/journal/20260927-tmp-pressure-is-live-work-not-abandoned.md
+  - evidence/one-line-release-001/journal/20260927-two-phantom-items-in-my-own-next-action.md
+  - evidence/one-line-release-001/journal/20260927-zero-collection-guard-on-main.md
+  - evidence/one-line-release-001/lint-fix-made-the-journey-vacuous-20260927T1235Z.md
+  - evidence/one-line-release-001/mutation-probe-measured-the-wrong-test-20260927.md
+  - evidence/one-line-release-001/my-23-prediction-was-a-subtraction-20260928.md
+  - evidence/one-line-release-001/native-wsl2-target-unavailable-established-20260927T1450Z.md
+  - evidence/one-line-release-001/pointer-defect-scaling-my-error-and-the-real-bound-20260927.md
+  - evidence/one-line-release-001/probe_credit.py
+  - evidence/one-line-release-001/probe_credit_candidate.py
+  - evidence/one-line-release-001/probe_credit_candidate_result.json
+  - evidence/one-line-release-001/probe_credit_result.json
+  - evidence/one-line-release-001/proxy-cluster-eliminated-suite-still-red-20260927.md
+  - evidence/one-line-release-001/r9-restart-leg-passes-at-the-repair-pin-20260927T1520Z.md
+  - evidence/one-line-release-001/real-studydd-mirror-and-route-d-readoption-20260927.md
+  - evidence/one-line-release-001/restart-leg-pass-independent-verification-20260927.md
+  - evidence/one-line-release-001/retake-whole-suite-basis-20260928.md
+  - evidence/one-line-release-001/scan-exception-expiry-horizon-20260928T0020Z.md
+  - evidence/one-line-release-001/six-credits-repointed-20260928.md
+  - evidence/one-line-release-001/twelve-credits-do-not-detect-20260928T0005Z.md
+  - evidence/one-line-release-001/two-records-one-untracked-artifact-20260928.md
+  - evidence/one-line-release-001/two-same-layer-credits-repointed-20260928.md
+  - evidence/one-line-release-001/whole-suite-number-must-name-its-tree-20260927.md
+  - evidence/one-line-release-001/foreign-container-discriminator-refuted-20260927.md
+  - evidence/one-line-release-001/journal/20260927-site-hyphen-and-subject-layers.md
+  - evidence/one-line-release-001/journal/20260927-site-pending-adjunct-guard.md
+  - evidence/one-line-release-001/journal/20260928-groupa-imagebuild-digest-binding.md
+  - evidence/one-line-release-001/journal/20260928-two-harness-classes-reconciled.md
+  - evidence/one-line-release-001/pinned-run-128-is-124-harness-20260928T0220Z.md
+  - evidence/one-line-release-001/pinned-sweep-decomposed-20260928.md
+  - evidence/one-line-release-001/pythonpath-block-cost-284-collections-20260928T0245Z.md
+  - evidence/one-line-release-001/site-pending-adjunct-guard-20260927.md
+  - evidence/one-line-release-001/journal/20260928-groupa-r1-failed-r2-inflight.md
+  - evidence/one-line-release-001/journal/20260928-groupa-r2-succeeded.md
+  - evidence/one-line-release-001/ledger-holes-still-open-and-scope-cuts-both-ways-20260928T0355Z.md
+  - evidence/one-line-release-001/root-identity-verifier-refutes-safety-claim-20260927.md
+  - evidence/one-line-release-001/whole-suite-basis-46-at-4f1fd1a9-20260928T0335Z.md
+  - evidence/one-line-release-001/audit-was-already-closed-and-the-goal-requirements-bottom-out-20260928.md
+  - evidence/one-line-release-001/batch-blocked-by-user-quota-20260928.md
+  - evidence/one-line-release-001/groupa-set-build-adopted-all-five-built-receipt-missing-20260928.md
+  - evidence/one-line-release-001/two-build-reproducibility-proven-20260928T0430Z.md
+  - evidence/one-line-release-001/journal/20260928-measured-publication-contract-before-signing.md
+  - evidence/one-line-release-001/heavy-slot-inflight-adoption-20260928T0124Z.md
+  - evidence/one-line-release-001/HANDOFF-groupa-rebuild-running-20260928T0420Z.md
+  - evidence/one-line-release-001/STATE.yaml.concurrent-writes-20260928.yaml
+  - evidence/one-line-release-001/actor-mirror-guard-verified-20260928.md
+  - evidence/one-line-release-001/all-23-exist-and-are-untested-20260928.md
+  - evidence/one-line-release-001/all-seven-images-reproducible-20260928T0700Z.md
+  - evidence/one-line-release-001/assemble-and-sign-prerequisites-measured-20260927.md
+  - evidence/one-line-release-001/batch5-vacuity-measured-20260928T0405Z.md
+  - evidence/one-line-release-001/builder-gate-anchor-fix-verified-20260928.md
+  - evidence/one-line-release-001/builder-realpath-guard-shadows-three-older-guards-20260928.md
+  - evidence/one-line-release-001/canonical-state-guards-do-cover-20260927T1625Z.md
+  - evidence/one-line-release-001/collector-refusal-unreferenced-kept-20260927T1645Z.md
+  - evidence/one-line-release-001/colocation-works-one-in-six-20260928.md
+  - evidence/one-line-release-001/correction-builder-version-security-framing-20260928T0500Z.md
+  - evidence/one-line-release-001/count-without-its-unit-seven-instances-20260928.md
+  - evidence/one-line-release-001/eighty-exceptions-lapse-2026-09-30-20260928.md
+  - evidence/one-line-release-001/frontend-half-is-measurable-by-markers-20260928T0720Z.md
+  - evidence/one-line-release-001/frontend-marker-probe-counts-not-reproducible-20260928.md
+  - evidence/one-line-release-001/governed-daemon-20260927/README.md
+  - evidence/one-line-release-001/governed-daemon-20260927/SHA256SUMS
+  - evidence/one-line-release-001/governed-daemon-20260927/governed-run.txt
+  - evidence/one-line-release-001/governed-daemon-20260927/governor-receipt.json
+  - evidence/one-line-release-001/governed-daemon-20260927/guard-authorize.json
+  - evidence/one-line-release-001/governed-daemon-20260927/guard-qualification.json
+  - evidence/one-line-release-001/groupa-rebuild-killed-receipt-says-succeeded-20260928T0720Z.md
+  - evidence/one-line-release-001/groupa-repin-clears-all-execution-host-advisories-20260928T0110Z.md
+  - evidence/one-line-release-001/groupa-repin-proven-live-20260928T0700Z.md
+  - evidence/one-line-release-001/guard-experiment-inconclusive-contaminated-baseline-20260928T0850Z.md
+  - evidence/one-line-release-001/http-resolver-exists-but-is-the-wrong-instrument-20260928T0655Z.md
+  - evidence/one-line-release-001/inflight-heavy-run-20260928T0631Z.md
+  - evidence/one-line-release-001/journal/20260927-cgroup-line-was-a-phantom-r9-passed.md
+  - evidence/one-line-release-001/journal/20260927-one-receipt-one-consumer.md
+  - evidence/one-line-release-001/journal/20260927-stale-bytecache-faked-a-product-defect.md
+  - evidence/one-line-release-001/journal/20260928-absorption-and-foreign-sequencer.md
+  - evidence/one-line-release-001/journal/20260928-batch6-corrections-and-two-repairs-absent-from-main.md
+  - evidence/one-line-release-001/journal/20260928-batch6-derived-claim-observed-and-blocking-leg-moved.md
+  - evidence/one-line-release-001/journal/20260928-correction-67-conflicts-were-my-scan.md
+  - evidence/one-line-release-001/journal/20260928-count-units-convergence-and-merge.md
+  - evidence/one-line-release-001/journal/20260928-diagnostic-budget-and-actor-aware-approver.md
+  - evidence/one-line-release-001/journal/20260928-full-suite-baseline-and-order-dependence.md
+  - evidence/one-line-release-001/journal/20260928-manifest-question-premises-moved.md
+  - evidence/one-line-release-001/journal/20260928-orphan-register-53-unmerged-branches.md
+  - evidence/one-line-release-001/journal/20260928-owner-decision-infrastructure-plan-approval-visibility.md
+  - evidence/one-line-release-001/journal/20260928-preflight-sweep-and-approvals-claim-defect.md
+  - evidence/one-line-release-001/journal/20260928-r9-already-evidences-real-actual-templates.md
+  - evidence/one-line-release-001/journal/20260928-requirement-audit-and-constraint-proofs.md
+  - evidence/one-line-release-001/journal/20260928-session-instruction-history.md
+  - evidence/one-line-release-001/journal/20260928-signing-premise-read-only.md
+  - evidence/one-line-release-001/journal/20260928-staging-audit-exists-but-its-generator-does-not.md
+  - evidence/one-line-release-001/journal/20260928-staging-digest-rederivation-69-of-71.md
+  - evidence/one-line-release-001/journal/20260928-staging-root-is-digest-clean-71-of-71.md
+  - evidence/one-line-release-001/journal/20260928-superseded-next-action-module-guards.md
+  - evidence/one-line-release-001/journal/20260928-superseded-next-action-peer-clobber.md
+  - evidence/one-line-release-001/journal/20260928-surface-claim-is-derived-and-a-failed-run-certifies-nothing.md
+  - evidence/one-line-release-001/journal/20260928-two-recorded-premises-re-measured.md
+  - evidence/one-line-release-001/journal/20260928T013009Z-eleven-path-gap-resolved.md
+  - evidence/one-line-release-001/journal/20260928T0412Z-web-repro-and-quota-cleared.md
+  - evidence/one-line-release-001/journal/20260928T0432Z-batch1-13-collected-1-failed.md
+  - evidence/one-line-release-001/journal/20260928T0442Z-platform-denial-forced-operator-actor.md
+  - evidence/one-line-release-001/journal/20260928T0446Z-vacuous-batch2-and-guard-scope-correction.md
+  - evidence/one-line-release-001/journal/20260928T0900Z-superseded-next-action-narrative-archived.md
+  - evidence/one-line-release-001/journal/20260928T0940Z-stop-wait-on-owner-verified-unchanged.md
+  - evidence/one-line-release-001/legacy-predecessor-carve-out-is-pinned-not-a-bypass-20260928T0910Z.md
+  - evidence/one-line-release-001/live-core-batch1-13-collected-1-failed-20260928T0432Z.md
+  - evidence/one-line-release-001/marker-bearing-frontend-fully-covered-20260928T0730Z.md
+  - evidence/one-line-release-001/module-duplication-hazard-scoped-20260927T1505Z.md
+  - evidence/one-line-release-001/module-guard-teeth-unproven-20260927T1520Z.md
+  - evidence/one-line-release-001/module-reuse-guard-is-one-name-not-sixteen-files-20260928T0820Z.md
+  - evidence/one-line-release-001/native-blocker-zero-images-claim-is-now-stale-20260928.md
+  - evidence/one-line-release-001/orphan-preservation-20260928/installed-provider-wiring-wt-work_w17-installed-provider-wiring-20260917-7b0a1313-untracked/w17-installed-provider-wiring-r1-REPORT.md
+  - evidence/one-line-release-001/orphan-preservation-20260928/installed-provider-wiring-wt-work_w17-installed-provider-wiring-20260917-7b0a1313-untracked/w17-installed-provider-wiring-r1-canonical-render.txt
+  - evidence/one-line-release-001/orphan-preservation-20260928/installed-provider-wiring-wt-work_w17-installed-provider-wiring-20260917-7b0a1313-untracked/w17-installed-provider-wiring-r1-plan.txt
+  - evidence/one-line-release-001/orphan-preservation-20260928/installed-provider-wiring-wt-work_w17-installed-provider-wiring-20260917-7b0a1313-untracked/w17-installed-provider-wiring-r1-rendered.txt
+  - evidence/one-line-release-001/orphan-preservation-20260928/installed-provider-wiring-wt-work_w17-installed-provider-wiring-20260917-7b0a1313.patch
+  - evidence/one-line-release-001/orphan-preservation-20260928/wt-probe-b2-work_credit-probe-scale-b2-20260928-08d0ee31.patch
+  - evidence/one-line-release-001/orphan-preservation-20260928/wt-probe-b3-work_credit-probe-scale-b3-20260928-08d0ee31.patch
+  - evidence/one-line-release-001/owner-decision-brief-builder-gate-bypass-20260928.md
+  - evidence/one-line-release-001/pin-stale-but-rows-live-per-file-20260928.md
+  - evidence/one-line-release-001/platform-denial-forced-operator-actor-diagnosed-20260928T0442Z.md
+  - evidence/one-line-release-001/privacy-routes-untested-verified-20260928.md
+  - evidence/one-line-release-001/prose-copy-entries-census-20260928T0750Z.md
+  - evidence/one-line-release-001/record-vs-tree-instance-confirmed-20260928.md
+  - evidence/one-line-release-001/rederive_staged_route_digests.py
+  - evidence/one-line-release-001/release-guard-binding-solved-and-builder-descriptor-gate-20260928T0405Z.md
+  - evidence/one-line-release-001/release-surface-measures-zero-failures-and-the-three-are-skips-20260928.md
+  - evidence/one-line-release-001/repin-nine-advisories-independent-verification-20260928.md
+  - evidence/one-line-release-001/runner-matched-candidates-20260928.md
+  - evidence/one-line-release-001/scan-suppression-merged-with-teeth-20260927T1340Z.md
+  - evidence/one-line-release-001/seven-unadjudicated-adjudication-triage-20260928T0425Z.md
+  - evidence/one-line-release-001/seven-unadjudicated-triage-prepared-20260928.md
+  - evidence/one-line-release-001/stateport-api-two-build-reproducible-20260928T0500Z.md
+  - evidence/one-line-release-001/stateport-web-two-build-reproducible-20260928T0412Z.md
+  - evidence/one-line-release-001/suppression-branch-vacuous-guard-20260927T1305Z.md
+  - evidence/one-line-release-001/suppression-five-more-refusals-covered-20260927T1445Z.md
+  - evidence/one-line-release-001/suppression-gate-proven-no-failopen-20260927T1600Z.md
+  - evidence/one-line-release-001/suppression-gating-rederived-loadbearing-20260927T1535Z.md
+  - evidence/one-line-release-001/suppression-guard-teeth-measured-20260928.md
+  - evidence/one-line-release-001/suppression-matchtype-guard-has-no-teeth-20260928.md
+  - evidence/one-line-release-001/suppression-order-dependence-verified-20260928.md
+  - evidence/one-line-release-001/suppression-paths-mutated-and-groupA-unchanged-20260927T1405Z.md
+  - evidence/one-line-release-001/table-driven-dispatch-resolved-20260928T0700Z.md
+  - evidence/one-line-release-001/teeth-checks-closed-and-cost-corrected-20260928.md
+  - evidence/one-line-release-001/twenty-eight-cannot-be-split-by-literal-search-20260928T0640Z.md
+  - evidence/one-line-release-001/twenty-three-entries-name-untested-behaviour-20260928.md
+  - evidence/one-line-release-001/two-real-privacy-route-ledger-defects-20260928T0800Z.md
+  - evidence/one-line-release-001/unprobed-population-structural-defect-20260928.md
+  - evidence/one-line-release-001/unpushed-commits-preserved-off-main-20260928T0646Z.md
+  - evidence/one-line-release-001/vacuous-batch2-13-skipped-and-guard-scope-correction-20260928T0446Z.md
+  - evidence/one-line-release-001/verifier-found-four-errors-in-my-own-commits-20260928.md
+  - evidence/one-line-release-001/whole-suite-559-is-a-moving-tree-artefact-20260928T0620Z.md
+  - evidence/one-line-release-001/whole-suite-basis-basetemp-20260928T0015Z.md
+  - evidence/one-line-release-001/whole-suite-basis-does-not-sum-to-its-headline-20260928.md
+  - evidence/one-line-release-001/wrong-runner-candidates-20260928.md
+  - evidence/one-line-release-001/all-seven-images-scan-gate-clean-20260928T0800Z.md
+  - evidence/one-line-release-001/i-mis-classified-117-paths-and-the-import-graph-caught-it-20260927.md
+  - evidence/one-line-release-001/journal/20260928-push-blocked-by-peer-in-flight-file.md
+  - evidence/one-line-release-001/dead-collector-refusal-verified-independently-20260928.md
+  - evidence/one-line-release-001/collector-main-refusal-now-covered-20260928T0520Z.md
+  - evidence/one-line-release-001/journal/20260928T0520Z-collector-main-refusal-covered-and-its-neighbour-is-dead.md
+  - evidence/one-line-release-001/correction-the-coupling-was-already-guarded-by-four-tests-20260928.md
+  - evidence/one-line-release-001/verifier-corrections-devworkspace-contingency-20260928T0845Z.md
+  - evidence/one-line-release-001/rs-2026-003-build-does-not-allow-removal-20260928T0915Z.md
+  - evidence/one-line-release-001/single-suppression-rule-guard-20260928.md
+  - evidence/one-line-release-001/runtime-images-serve-declared-health-20260928T0955Z.md
+  - evidence/one-line-release-001/journal/20260928-33-unpushed-commits-preserved.md
+  - evidence/one-line-release-001/service-name-dns-is-a-harness-artifact-verified-20260928.md
+  - evidence/one-line-release-001/dead-refusal-removed-and-build-verdict-corrected-20260928T0545Z.md
+  - evidence/one-line-release-001/execution-host-composed-run-operator-gated-20260928T1045Z.md
+  - evidence/one-line-release-001/groupa-candidate2-build-succeeded-verdict-corrected-20260928T0545Z.md
+  - evidence/one-line-release-001/journal/20260928T0545Z-deletion-nearly-wrong-and-the-fail-open-it-found.md
+  - evidence/one-line-release-001/runtime-services-interoperate-and-persist-20260928T1020Z.md
+  - evidence/one-line-release-001/image-reproducibility-audit-20260928T0135Z.md
+  - evidence/one-line-release-001/journal/20260928T053757Z-undeclared-control-measured.md
+  - evidence/one-line-release-001/requirement-audit-and-gate-picture-correction-20260928T1100Z.md
+  - evidence/one-line-release-001/journal/20260928T054744Z-undeclared-control-measurement-superseded.md
+  - evidence/one-line-release-001/main-reconciliation-is-one-file-and-non-structural-20260928.md
+  - evidence/one-line-release-001/twenty-three-cost-classes-20260928.md
+  - evidence/one-line-release-001/batch-coverage-census-6-of-13-measured-20260928.md
+  - evidence/one-line-release-001/criterion-6-cited-test-guard-independently-verified-20260928.md
+  - evidence/one-line-release-001/governed-selection-grounding-verified-with-one-imprecise-citation-20260928.md
+  - evidence/one-line-release-001/journal/20260928-push-reconciliation-pending.md
+  - evidence/one-line-release-001/main-divergence-two-conflicts-one-mine-20260928.md
+  - evidence/one-line-release-001/resume-verdict-residual-is-the-signature-20260928.md
+  - evidence/one-line-release-001/shipped-digests-differ-from-proven-images-20260928T1145Z.md
+  - evidence/one-line-release-001/approvals-inbox-empty-at-navigation-20260928.md
+  - evidence/one-line-release-001/infrastructure-plan-approval-product-gap-refuted-20260928.md
+  - evidence/one-line-release-001/journal/20260927-credit-probe-was-unsound-for-every-frontend-credit.md
+  - evidence/one-line-release-001/journal/20260928-abandoned-sequencer-phantom.md
+  - evidence/one-line-release-001/journal/20260928-at-risk-local-only-content.md
+  - evidence/one-line-release-001/journal/20260928-governed-guard-third-attempt-reverted.md
+  - evidence/one-line-release-001/journal/20260928-handoff-everything-remaining-is-blocked.md
+  - evidence/one-line-release-001/journal/20260928-phantom-route-verified-three-sources.md
+  - evidence/one-line-release-001/journal/20260928-preservation-ref-and-phantom-route-correction.md
+  - evidence/one-line-release-001/journal/20260928-provenance-sweep-is-6.8-percent-not-every.md
+  - evidence/one-line-release-001/journal/20260928-reduction-safety-spec.md
+  - evidence/one-line-release-001/journal/20260928T0645Z-verdict-re-derived-and-what-it-is-not.md
+  - evidence/one-line-release-001/journal/20260928T0710Z-reproduce-the-evaluation-and-the-sweep.md
+  - evidence/one-line-release-001/resume-reproduces-the-scan-evaluation-20260928T0710Z.md
+  - evidence/one-line-release-001/resume-verdict-re-derived-from-evaluation-20260928T0645Z.md
+  - evidence/one-line-release-001/run-approval-probe.sh
+  - evidence/one-line-release-001/tmpdir-manufactured-failures-20260927T1530Z.md
+  - evidence/one-line-release-001/validation-readonly-volume-boundary-holds-20260928T1215Z.md
+  - evidence/one-line-release-001/approvals-projection-five-gates-narrowed-20260928.md
+  - evidence/one-line-release-001/incremental-reconciliation-guard-confirmed-and-cascade-measured-20260928T0611Z.md
+  - evidence/one-line-release-001/infrastructure-plan-approval-dropped-by-identity-drift-20260928.md
+  - evidence/one-line-release-001/shipped-installer-pins-seven-digests-none-proven-20260928.md
+  - evidence/one-line-release-001/approvals-silent-drop-on-live-identity-20260928.md
+  - evidence/one-line-release-001/image-set-7-of-7-recomputationally-verified-20260928T0614Z.md
+  - evidence/one-line-release-001/journal/20260928-audit-stands-gap-was-already-closed-on-main.md
+  - evidence/one-line-release-001/journal/20260928-plan-branch-behind-14-silent-gates.md
+  - evidence/one-line-release-001/plan-drop-reproduced-with-a-real-repository-20260928.md
+  - evidence/one-line-release-001/probe_which_plan_filter_moved.py
+  - evidence/one-line-release-001/my-wake-condition-named-a-path-not-a-property-20260928.md
+  - evidence/one-line-release-001/all-seven-images-scanned-highs-excepted-db-build-missing-20260928T0616Z.md
+  - evidence/one-line-release-001/journal/20260928-gate10-real-path-found-and-two-self-corrections.md
+  - evidence/one-line-release-001/dropped-plans-covers-five-of-six-filters-20260928.md
+  - evidence/one-line-release-001/journal/20260928-gate11-binds-plan-to-transient-worktree.md
+  - evidence/one-line-release-001/journal/20260928-telemetry-names-the-drop-plan-not-current.md
+  - evidence/one-line-release-001/plan-drop-is-now-reported-20260928.md
+  - evidence/one-line-release-001/dropped-plans-residual-persists-in-committed-code-20260928.md
+  - evidence/one-line-release-001/plan-drop-is-readable-in-the-inbox-response-20260928.md
+  - evidence/one-line-release-001/candidate-scan-repair-has-no-teeth-20260928.md
+  - evidence/one-line-release-001/journal/20260928-inflight-approval-run-cannot-answer-the-question.md
+  - evidence/one-line-release-001/journal/20260928-sixth-filter-now-records-and-tmpfs-is-exhausted.md
+  - evidence/one-line-release-001/candidate-scan-repair-now-has-teeth-20260928.md
+  - evidence/one-line-release-001/decision-dropped-plans-product-surface-20260928.md
+  - evidence/one-line-release-001/journal/20260928-ten-capabilities-adjudicated-per-entry.md
+  - evidence/one-line-release-001/journal/20260928-two-transient-environment-conditions-withdrawn.md
+  - evidence/one-line-release-001/journal/20260928-approvals-drop-reproduced-pinned-and-a-testimony-i-caused.md
+  - evidence/one-line-release-001/defect-no-reason-vocabulary-census-20260928.md
+  - evidence/one-line-release-001/drop-log-absent-and-my-diagnostic-swallows-its-own-failure-20260928.md
+  - evidence/one-line-release-001/journal/20260928-both-mis-credits-were-wrong-repo-wide-check.md
+  - evidence/one-line-release-001/plan-drop-cause-reproduced-in-a-second-run-20260928.md
+  - evidence/one-line-release-001/defect-dropped-plans-silently-truncated-20260928.md
+  - evidence/one-line-release-001/drop-instrument-writes-and-therefore-the-reader-was-never-reached-20260928.md
+  - evidence/one-line-release-001/journal/20260928-local-line-lacks-required-summary-sections.md
+  - evidence/one-line-release-001/journal/20260928-six-source-literal-rechecked-four-more-wrong-citations.md
+  - evidence/one-line-release-001/probe_drop_instrument_writes.py
+  - evidence/one-line-release-001/defect-dropped-plans-renders-nowhere-20260928.md
+  - evidence/one-line-release-001/correction-i-measured-the-wrong-repository-20260928.md
+  - evidence/one-line-release-001/journal/20260928-capability-class-closed-10-of-10-wrong-citations.md
+  - evidence/one-line-release-001/journal/20260928-legacy-aliases-1-wrong-citation-9-sound.md
+  - evidence/one-line-release-001/resume-ledger-date-defect-closed-and-limit-analysed-20260928T0745Z.md
+  - evidence/one-line-release-001/byte-for-byte-assertions-now-falsifiable-20260928.md
+  - evidence/one-line-release-001/journal/20260928-ui-batch1-terminal-6-wrong-2-sound-0-gaps.md
+  - evidence/one-line-release-001/journal/20260928-ui-class-instrument-unreliable-in-both-directions.md
+  - evidence/one-line-release-001/re-audit-control-identity-and-coupling-findings-20260928.md
+  - evidence/one-line-release-001/instrument-verified-and-my-own-conclusion-is-now-in-tension-20260928.md
+  - evidence/one-line-release-001/journal/20260928-audit-closes-31-wrong-citations-zero-gaps.md
+  - evidence/one-line-release-001/journal/20260928-ui-batch2-7-wrong-3-unresolved.md
+  - evidence/one-line-release-001/journal/20260928-ui-batch3-3-wrong-2-sound-4-no-importer.md
+  - evidence/one-line-release-001/plan-branch-is-entered-and-the-response-reports-it-20260928.md
+  - evidence/one-line-release-001/probe_drop_instrument_self_reporting.py
+  - evidence/one-line-release-001/probe_plan_branch_admission.py
+  - evidence/one-line-release-001/resume-guard-proven-on-real-data-20260928T0820Z.md
+  - evidence/one-line-release-001/audit-peer-claims-superseded-inference-20260928.md
+  - evidence/one-line-release-001/journal/20260928-audit-complete-33-wrong-citations-0-gaps.md
+  - evidence/one-line-release-001/defect-written-vs-surviving-not-closed-20260928.md
+  - evidence/one-line-release-001/governor-receipt-durable-per-run-20260928T0850Z.md
+  - evidence/one-line-release-001/journal/20260928-guard-refusal-receipt-owned-but-not-by-me.md
+  - evidence/one-line-release-001/requirement-audit-verified-and-tmp-pressure-20260928.md
+  - evidence/one-line-release-001/governor-refusal-receipt-20260928T0905Z.md
+  - evidence/one-line-release-001/journal/20260928-fourth-run-blocked-quota-recurrence.md
+  - evidence/one-line-release-001/journal/20260928-governor-measured-266gb-free-while-the-record-claimed-a-quota.md
+  - evidence/one-line-release-001/journal/20260928-guard-refusal-test-not-run-lock-is-gated.md
+  - evidence/one-line-release-001/journal/20260928-probe-reprobe-confirms-and-probe4-is-running.md
+  - evidence/one-line-release-001/the-quota-blocker-is-misdiagnosed-and-its-wake-condition-can-never-succeed-20260928.md
+  - evidence/one-line-release-001/site-guard-reconstruction-verified-20260928.md
+  - evidence/one-line-release-001/journal/20260928-coverage-ruling-scope-is-not-measurable-by-keyword.md
+  - evidence/one-line-release-001/measurement-stability-psi-is-contended-20260928.md
+  - evidence/one-line-release-001/journal/20260928-apiOperations-first-pass-and-a-population-slip.md
+  - evidence/one-line-release-001/journal/20260928-reclaimed-11g-of-tmpfs-by-move-not-delete.md
+  - evidence/one-line-release-001/correction-23-is-citation-not-behaviour-20260928.md
+  - evidence/one-line-release-001/governor-refusal-text-captured-20260928T0935Z.md
+  - evidence/one-line-release-001/journal/20260928-canonical-state-contention-and-a-lost-next-action.md
+  - evidence/one-line-release-001/journal/20260928-per-test-2-of-25-behavioural-not-a-validator.md
+  - evidence/one-line-release-001/journal/20260928-per-test-axis-immediately-pays-38-entries-4-paths.md
+  - evidence/one-line-release-001/journal/20260928-the-38-credit-test-is-a-manifest-shape-validator.md
+  - evidence/one-line-release-001/journal/20260928-the-governor-gates-on-stall-rate-not-availability.md
+  - evidence/one-line-release-001/journal/20260928T0955Z-two-next-action-lines-and-why-one-remains.md
+  - evidence/one-line-release-001/guard-receipt-is-not-owner-issued-20260928T1020Z.md
+  - evidence/one-line-release-001/journal/20260928-committed-projection-survives-peer-edits.md
+  - evidence/one-line-release-001/STATE.yaml.concurrent-writes-20260928-stateport-worker.yaml
+  - evidence/one-line-release-001/audit-untested-cause-distribution-20260928.md
+  - evidence/one-line-release-001/audits/audit-20260928.md
+  - evidence/one-line-release-001/credit-result-self-disagreement-measured-20260928.md
+  - evidence/one-line-release-001/journal/20260928-approval-absent-from-disk-while-plan-requires-it.md
+  - evidence/one-line-release-001/journal/20260928-approval-drop-is-located-in-the-adapter-and-a-lane-already-diagnosed-it.md
+  - evidence/one-line-release-001/journal/20260928-approval-probe-fails-with-zero-approvals-not-a-stale-label.md
+  - evidence/one-line-release-001/journal/20260928-correction-my-root-cause-came-from-my-own-truncated-print.md
+  - evidence/one-line-release-001/journal/20260928-correction-the-probe-recipe-is-not-on-main-at-all.md
+  - evidence/one-line-release-001/journal/20260928-gate10-refuted-gate11-binds-plan-to-transient-worktree.md
+  - evidence/one-line-release-001/journal/20260928-governor-change-verified-as-the-group-a-argv-repair.md
+  - evidence/one-line-release-001/journal/20260928-group-a-cleared-and-slot-held-by-a-peer.md
+  - evidence/one-line-release-001/journal/20260928-main-collection-guard-verified-4-of-4.md
+  - evidence/one-line-release-001/journal/20260928-no-admission-has-run-under-the-unpinned-governor.md
+  - evidence/one-line-release-001/journal/20260928-per-test-3-of-25-converges-with-the-per-entry-pass.md
+  - evidence/one-line-release-001/journal/20260928-probe-pin-predates-the-diagnostic-so-a-rerun-could-not-answer.md
+  - evidence/one-line-release-001/journal/20260928-roster-gate-red-governor-drifted-and-i-pushed-anyway.md
+  - evidence/one-line-release-001/journal/20260928-three-stop-lines-triaged-none-actionable-at-source.md
+  - evidence/one-line-release-001/preservation-row-must-prove-measured-20260928.md
+  - evidence/one-line-release-001/provenance-correction-via-peer-round-commit-20260928.md
+  - evidence/one-line-release-001/FINDING-governor-receipt-reads-wrapper-exit-only-20260928T0750Z.md
+  - evidence/one-line-release-001/HANDOFF-20260928T0806Z.md
+  - evidence/one-line-release-001/HANDOFF-20260928T0824Z.md
+  - evidence/one-line-release-001/HANDOFF-governor-pin-drift-20260928T0700Z.md
+  - evidence/one-line-release-001/OPERATIONAL-main-diverged-20260928T0720Z.md
+  - evidence/one-line-release-001/authoritative-twelve-credit-position-20260928.md
+  - evidence/one-line-release-001/automated-tests-failed-was-mostly-scratch-placement-20260928.md
+  - evidence/one-line-release-001/both-execution-host-credits-are-sound-20260928.md
+  - evidence/one-line-release-001/command-palette-open-bypasses-the-control-20260928.md
+  - evidence/one-line-release-001/daemon-boot-blockers-are-22-release-registries-20260928.md
+  - evidence/one-line-release-001/eleventh-failure-is-not-recoverable-from-retained-evidence-20260928.md
+  - evidence/one-line-release-001/first-triage-that-sums-and-the-playwright-scope-splinter-20260928.md
+  - evidence/one-line-release-001/five-of-twelve-were-probed-against-the-wrong-suite-20260928.md
+  - evidence/one-line-release-001/fourth-vacuous-verdict-path-in-the-probe-20260928.md
+  - evidence/one-line-release-001/governor-drift-confirmed-and-my-own-stale-green-retracted-20260928.md
+  - evidence/one-line-release-001/governor-pin-drift-admission-scoping-20260928T1045Z.md
+  - evidence/one-line-release-001/governor-recovery-copy-is-intermittent-20260928.md
+  - evidence/one-line-release-001/guard-receipt-strength-for-signing-and-publication-20260928.md
+  - evidence/one-line-release-001/inert-mutation-explained-and-a-fail-open-default-20260928.md
+  - evidence/one-line-release-001/inflight-heavy-run-outcome-20260928T0657Z.md
+  - evidence/one-line-release-001/journal/20260928-RECOVERY-HANDOFF-main-diverged.md
+  - evidence/one-line-release-001/journal/20260928-cross-ledger-delete-verified-foreign-bucket-unread.md
+  - evidence/one-line-release-001/journal/20260928-daemonboot-was-a-test-leak-and-the-fix-was-incomplete.md
+  - evidence/one-line-release-001/journal/20260928-empty-inbox-measured-in-operator-role.md
+  - evidence/one-line-release-001/journal/20260928-fail-open-dispatch-verified-and-refined.md
+  - evidence/one-line-release-001/journal/20260928-governor-drift-holds-its-hardening.md
+  - evidence/one-line-release-001/journal/20260928-groupa-got-past-the-guard-and-my-argv-rule-was-wrong.md
+  - evidence/one-line-release-001/journal/20260928-guard-receipt-strength-signing-and-publication.md
+  - evidence/one-line-release-001/journal/20260928-next-action-stale-reporting-defect-already-fixed.md
+  - evidence/one-line-release-001/journal/20260928-orphan-worktree-branch-inventory.md
+  - evidence/one-line-release-001/journal/20260928-root-identity-branch-integration-surface.md
+  - evidence/one-line-release-001/journal/20260928-root-identity-contract-validation.md
+  - evidence/one-line-release-001/journal/20260928-root-identity-suite-is-bound-to-the-branch-commit.md
+  - evidence/one-line-release-001/journal/20260928-surface-caveat-honest-for-1-of-17.md
+  - evidence/one-line-release-001/journal/20260928-the-inbox-was-the-gate-working-gate1-confirmed.md
+  - evidence/one-line-release-001/main-merge-conflict-is-union-shaped-20260928.md
+  - evidence/one-line-release-001/new-basis-also-does-not-sum-by-one-20260928.md
+  - evidence/one-line-release-001/one-real-defect-is-an-owner-decision-20260928.md
+  - evidence/one-line-release-001/owner-decision-brief-approvals-visibility-boundary-20260928.md
+  - evidence/one-line-release-001/peer-23-is-18-correction-independently-confirmed-20260928.md
+  - evidence/one-line-release-001/peer-open-cause-1-is-settled-by-measurement-20260928.md
+  - evidence/one-line-release-001/probe-admissibility-and-ledger-clobber-20260928T0155Z.md
+  - evidence/one-line-release-001/probe-records-the-population-it-was-asked-about-20260928.md
+  - evidence/one-line-release-001/probe-replaces-first-occurrence-two-credits-are-sound-20260928.md
+  - evidence/one-line-release-001/probe_credit_candidate_pinned-fef0e2ab.json
+  - evidence/one-line-release-001/reconcile-branches-do-not-contain-origin-main-20260928.md
+  - evidence/one-line-release-001/reconciliation-claim-independently-reverified-20260928.md
+  - evidence/one-line-release-001/requirement-audit-20260928.md
+  - evidence/one-line-release-001/roster-pin-fails-on-the-held-governor-20260928.md
+  - evidence/one-line-release-001/runbooks/whole-suite-measurement.md
+  - evidence/one-line-release-001/self-audit-of-my-own-numbers-20260928.md
+  - evidence/one-line-release-001/the-derived-populations-were-never-persisted-20260928.md
+  - evidence/one-line-release-001/the-eighteen-is-also-not-final-a-vacuous-verdict-fed-it-20260928.md
+  - evidence/one-line-release-001/three-credits-two-false-one-sound-20260928.md
+  - evidence/one-line-release-001/unclassified-paths-are-checked-not-assumed-20260928.md
+  - evidence/one-line-release-001/updater-wheel-cause-3-is-green-not-a-failure-20260928.md
+  - evidence/one-line-release-001/settled-zero-gaps-and-my-own-error-rate-20260928.md
+  - evidence/one-line-release-001/journal/20260928-fixture-escalates-actor-role.md
+  - evidence/one-line-release-001/journal/20260928-the-harness-cannot-launch-local-user-at-all.md
+  - evidence/one-line-release-001/probe4-landed-refutes-my-thread-premise-20260928.md
+  - evidence/one-line-release-001/journal/20260928-18-of-38-credits-have-no-trace-in-their-cited-test.md
+  - evidence/one-line-release-001/journal/20260928-all-18-are-mis-cited-not-gaps.md
+  - evidence/one-line-release-001/journal/20260928-apiOperations-25-tests-classified-98-of-156-on-anomalous-tests.md
+  - evidence/one-line-release-001/journal/20260928-correction-seven-literals-not-four.md
+  - evidence/one-line-release-001/journal/20260928-inbox-decomposed-both-branches-measured.md
+  - evidence/one-line-release-001/journal/20260928-probe4-landed-the-branch-is-entered-and-nothing-was-ever-dropped.md
+  - evidence/one-line-release-001/signing-receipt-is-replayable-and-unsigned-20260928T1045Z.md
+  - evidence/one-line-release-001/plans-directory-prediction-and-heads-silent-paths-20260928.md
+  - evidence/one-line-release-001/FIVE-FILES-CORRECTED-after-independent-verification-20260928.md
+  - evidence/one-line-release-001/HANDOFF-20260928-preservation-audit-and-five-owner-decisions.md
+  - evidence/one-line-release-001/HANDOFF-coordinator-lane-20260928T0900Z.md
+  - evidence/one-line-release-001/all-16-failures-are-environmental-not-product-20260928.md
+  - evidence/one-line-release-001/alpha19-bootstrap-rendered-not-published/bootstrap.sh
+  - evidence/one-line-release-001/alpha19-bootstrap-rendered-not-published/bootstrap.sha256
+  - evidence/one-line-release-001/alpha19-stage-complete-without-install-sh-independent-check-20260928.md
+  - evidence/one-line-release-001/alpha19-the-build-recorded-the-wrong-cosign-question-20260928.md
+  - evidence/one-line-release-001/approval-drop-answer-plan-not-current-stateport-identity-20260928.md
+  - evidence/one-line-release-001/approval-handoff-four-causes-ruled-out-20260928.md
+  - evidence/one-line-release-001/apps-web-failure-not-reproduced-across-8-files-20260928.md
+  - evidence/one-line-release-001/audit-governor-receipts-20260928T0800Z.md
+  - evidence/one-line-release-001/authorize-and-digest-disagree-on-a-bare-separator-20260928.md
+  - evidence/one-line-release-001/bundle-layout-diagnosis-confirmed-from-the-resolver-20260928.md
+  - evidence/one-line-release-001/completed-admission-receipt-45cb3bf3.json
+  - evidence/one-line-release-001/completed-admission-receipt-45cb3bf3.json.used
+  - evidence/one-line-release-001/completed-admission-under-repinned-governor-20260928.md
+  - evidence/one-line-release-001/contributing-build-prereq-verified-20260928.md
+  - evidence/one-line-release-001/correction-23-is-18-playwright-was-omitted-20260928.md
+  - evidence/one-line-release-001/cosign-pin-re-derived-not-carried-independent-check-20260928.md
+  - evidence/one-line-release-001/cross-layer-census-61-candidates-not-verdicts-20260928.md
+  - evidence/one-line-release-001/daemon-boot-failures-do-not-reproduce-20260928.md
+  - evidence/one-line-release-001/daemon-boot-host-state-hypothesis-is-not-supported-20260928.md
+  - evidence/one-line-release-001/daemon-boot-reproduction-requires-a-governed-admission-20260928.md
+  - evidence/one-line-release-001/fail-open-was-live-on-main-and-is-now-repaired-20260928.md
+  - evidence/one-line-release-001/five-entries-probed-three-detect-only-textually-20260928.md
+  - evidence/one-line-release-001/global-path-wiring-was-tried-and-failed-23-collection-errors-20260928.md
+  - evidence/one-line-release-001/governed-admissions-reclaim-residual-risk-check-20260928.md
+  - evidence/one-line-release-001/web-421-is-by-design-and-consistently-applied-20260928.md
+  - evidence/one-line-release-001/twenty-three-causes-measured-20260928.md
+  - evidence/one-line-release-001/journal/20260928-overlong-blockers-archived-verbatim.md
+  - evidence/one-line-release-001/failure-sensitivity-and-expression-census-20260928.md
+  - evidence/one-line-release-001/governor-pin-drift-roster-exits-2-20260928.md
+  - evidence/one-line-release-001/heavy-slot-resolved-and-remedy-inexercised-20260928T0820Z.md
+  - evidence/one-line-release-001/journal/20260928-an-approval-required-plan-exists-on-the-host-while-the-inbox-showed-zero.md
+  - evidence/one-line-release-001/journal/20260928T064254Z-undeclared-control-measurement-complete.md
+  - evidence/one-line-release-001/journal/20260928T065447Z-twenty-three-superseded-by-measurement.md
+  - evidence/one-line-release-001/wrong-layer-test-citation-repoint-recommendation-20260928.md
+  - evidence/one-line-release-001/automated-test-failures-measured-20260928.md
+  - evidence/one-line-release-001/governed-daemon-20260928/README.md
+  - evidence/one-line-release-001/governed-daemon-20260928/SHA256SUMS
+  - evidence/one-line-release-001/governed-daemon-20260928/governed-run-failed.txt
+  - evidence/one-line-release-001/governed-daemon-20260928/governed-run-passed.txt
+  - evidence/one-line-release-001/governed-daemon-20260928/governor-receipt.json
+  - evidence/one-line-release-001/governed-daemon-20260928/guard-authorize.json
+  - evidence/one-line-release-001/governed-daemon-20260928/guard-qualification-3.json
+  - evidence/one-line-release-001/governed-daemon-20260928/guard-qualification.json
+  - evidence/one-line-release-001/governed-daemon-20260928/per-run-receipt-passed.json
+  - evidence/one-line-release-001/governed-daemon-20260928/per-run-receipt.json
+  - evidence/one-line-release-001/governed-runs-unblocked-by-a-clean-worktree-20260928.md
+  - evidence/one-line-release-001/governor-unblock-confirmed-by-my-own-check-20260928.md
+  - evidence/one-line-release-001/governor-wake-condition-met-20260928.md
+  - evidence/one-line-release-001/heavy-path-verified-but-the-admitted-command-was-a-no-op-20260928.md
+  - evidence/one-line-release-001/in-flight-governed-qualification-job-20260928.md
+  - evidence/one-line-release-001/independent-verification-signing-coverage-gap-20260928.md
+  - evidence/one-line-release-001/journal/20260928-governor-red-window-independently-verified.md
+  - evidence/one-line-release-001/journal/20260928-local-user-branch-works-4237-attributed.md
+  - evidence/one-line-release-001/journal/20260928-peer-non-reproduction-claim-refuted.md
+  - evidence/one-line-release-001/journal/20260928-polluter-found-import-degraded-the-queue.md
+  - evidence/one-line-release-001/journal/20260928-the-live-writer-was-me.md
+  - evidence/one-line-release-001/journal/20260928-three-of-five-subcommands-is-correct-behaviour.md
+  - evidence/one-line-release-001/journal/20260928T1510Z-the-unguarded-signing-path-is-unreachable-dead-code.md
+  - evidence/one-line-release-001/journal/20260928T1535Z-the-set-build-receipt-exists-and-two-runs-were-conflated.md
+  - evidence/one-line-release-001/journal/20260928T1550Z-provenance-re-verifies-and-the-images-are-317-commits-stale.md
+  - evidence/one-line-release-001/journal/20260928T1605Z-install-sh-was-never-staged-not-missing.md
+  - evidence/one-line-release-001/journal/20260928T1615Z-main-diverged-289-ahead-96-behind.md
+  - evidence/one-line-release-001/journal/20260928T1620Z-correction-install-sh-is-a-site-pointer-and-is-published.md
+  - evidence/one-line-release-001/journal/20260928T1640Z-the-alpha19-bootstrap-renders-and-provenance-passes.md
+  - evidence/one-line-release-001/journal/20260928T1700Z-publishing-alpha19-would-repoint-the-live-install-route-at-an-unqualified-candidate.md
+  - evidence/one-line-release-001/journal/20260928T1720Z-the-recorded-passing-native-receipt-is-alpha16-failed-and-simulation-only.md
+  - evidence/one-line-release-001/journal/20260928T1740Z-the-native-install-failure-is-a-known-diagnosed-boundary-already-fixed-in-the-rendered-bootstrap.md
+  - evidence/one-line-release-001/journal/20260928T1800Z-executed-the-alpha19-preflight-passes-every-signature-boundary.md
+  - evidence/one-line-release-001/journal/20260928T1820Z-correction-wrong-cosign-binary-and-fallback-manifest-carrier.md
+  - evidence/one-line-release-001/journal/20260928T1845Z-both-cosign-digests-are-true-the-signed-index-names-the-wrong-one-for-the-bootstrap.md
+  - evidence/one-line-release-001/journal/20260928T1925Z-executed-with-pinned-verifier-and-production-carrier-fallback-withheld.md
+  - evidence/one-line-release-001/journal/20260928T1950Z-correction-inverted-carrier-precedence-unenforced-cosign-pin-and-the-control-experiment.md
+  - evidence/one-line-release-001/journal/20260928T2015Z-the-installer-discards-the-bootstraps-cosign-pin-and-substitutes-an-observed-digest.md
+  - evidence/one-line-release-001/journal/20260928T2030Z-correction-the-cosign-pin-is-enforced-at-the-consumer.md
+  - evidence/one-line-release-001/journal/20260928T2040Z-correction-the-cosign-pin-is-enforced-twice-in-the-root-helper.md
+  - evidence/one-line-release-001/journal/20260928T2055Z-the-full-installed-agent-readiness-gate-reproduces-green-with-three-negative-controls.md
+  - evidence/one-line-release-001/journal/20260928T2115Z-correction-the-readiness-result-is-a-reconfirmation-and-full-qualifies-the-gate-not-its-arms.md
+  - evidence/one-line-release-001/journal/20260928T2140Z-the-standings-directive-full-local-gate-set-is-green-all-three.md
+  - evidence/one-line-release-001/journal/20260928T2220Z-local-public-rehearsal-is-pinned-to-alpha16-and-would-fail-its-own-preflight.md
+  - evidence/one-line-release-001/journal/20260928T2245Z-correction-main-is-an-unpinned-version-parameterised-rehearsal-lane.md
+  - evidence/one-line-release-001/native-substrate-is-a-qemu-shim-not-a-wsl2-target-20260928.md
+  - evidence/one-line-release-001/native-win11-wsl2-20260928/summary.md
+  - evidence/one-line-release-001/native-win11-wsl2-20260928/run4-install-transcript.txt
+  - evidence/one-line-release-001/native-win11-wsl2-20260928/run4-install-receipt.json
+  - evidence/one-line-release-001/native-win11-wsl2-20260928/vm-substrate-notes.md
+  - evidence/one-line-release-001/native-win11-wsl2-20260928/run-vm.sh
+  - evidence/one-line-release-001/native-win11-wsl2-20260928/fresh-run.sh
+  - evidence/one-line-release-001/native-win11-wsl2-20260928/drive_install.py
+  - evidence/one-line-release-001/new-governor-first-run-passed-and-chain-verifies-20260928.md
+  - evidence/one-line-release-001/one-lanes-scratch-blocks-the-shared-heavy-slot-20260928.md
+  - evidence/one-line-release-001/outcome-source-inner-receipt-is-observed-not-self-reported-20260928.md
+  - evidence/one-line-release-001/owner-decision-brief-alpha19-verifier-record-divergence-20260928.md
+  - evidence/one-line-release-001/owner-decision-brief-no-fresh-candidate-constructible-20260928.md
+  - evidence/one-line-release-001/owner-decision-brief-signing-admission-scope-20260928.md
+  - evidence/one-line-release-001/owner-decision-signing-asymmetry-measured-20260928.md
+  - evidence/one-line-release-001/peer-untracked-file-blocks-governed-admission-20260928.md
+  - evidence/one-line-release-001/preflight-stop-shared-checkout-race-20260928T1105Z.md
+  - evidence/one-line-release-001/provisioned-rerun-my-prediction-was-wrong-20260928.md
+  - evidence/one-line-release-001/provisioning-preconditions-measured-and-one-is-a-path-fix-20260928.md
+  - evidence/one-line-release-001/reconcile-branch-diverged-39-commits-not-on-it-20260928.md
+  - evidence/one-line-release-001/retraction-the-runner-pythonpath-prerequisite-was-never-supported-20260928.md
+  - evidence/one-line-release-001/runner-and-lease-503s-are-silent-optional-import-degradation-20260928.md
+  - evidence/one-line-release-001/runner-imports-need-workspace-src-on-the-path-20260928.md
+  - evidence/one-line-release-001/runner-unavailable-is-a-silent-import-degradation-20260928.md
+  - evidence/one-line-release-001/session-handoff-20260928T2300Z.md
+  - evidence/one-line-release-001/shared-checkout-reconciliation-state-20260928.md
+  - evidence/one-line-release-001/signing-receipt-is-replayable-CORRECTED-20260928T1110Z.md
+  - evidence/one-line-release-001/two-correct-fail-closed-designs-and-no-reaper-20260928.md
+  - evidence/one-line-release-001/two-pointer-defects-have-covering-tests-needing-a-runner-20260928.md
+  - evidence/one-line-release-001/unguarded-signing-path-verified-and-bounded-in-code-20260928.md
+  - evidence/one-line-release-001/unsound-assertion-was-live-on-main-and-is-now-repaired-20260928.md
+  - evidence/one-line-release-001/validate-repo-red-82-unclassified-paths-20260928.md
+  - evidence/one-line-release-001/whole-suite-basis-20260928T1533Z-16-failed-sums-to-its-headline.md
+  - evidence/one-line-release-001/plans-dir-missing-or-symlink-measured-20260928.md
+  - evidence/one-line-release-001/journal/20260928T1650Z-the-heavy-slot-is-contended-and-no-receipt-can-be-minted-on-a-dirty-canonical-checkout.md
+  - evidence/one-line-release-001/branch-entered-writer-is-single-channel-20260928.md
+  - evidence/one-line-release-001/journal/20260928-my-38-credit-adjudication-is-superseded-by-a-strengthened-test.md
+  - evidence/one-line-release-001/journal/20260928T1120Z-peer-next-action-archived-before-the-signing-correction.md
+  - evidence/one-line-release-001/journal/20260928T135947Z-undeclared-control-measurement-complete-2.md
+  - evidence/one-line-release-001/journal/20260928T140403Z-terminal-end-contradiction-refined.md
+  - evidence/one-line-release-001/canary-prefix-remedy-is-blocked-by-the-loader-invariant-20260928.md
+  - apps/web/tests/live-core-fixture.py
+  - evidence/one-line-release-001/alpha18-is-already-signed-20260929.md
+  - evidence/one-line-release-001/alpha20-build-left-artifacts-but-no-receipt-20260929.md
+  - evidence/one-line-release-001/attempted-the-definitive-suite-run-and-it-does-not-fit-20260928.md
+  - evidence/one-line-release-001/audits/audit-20260929.md
+  - evidence/one-line-release-001/booked-four-pass-on-origin-main-two-earlier-failures-explained-20260928.md
+  - evidence/one-line-release-001/booked-measurement-on-origin-main-is-3-failed-1-passed-20260928.md
+  - evidence/one-line-release-001/boundary-property-pins-20260929.md
+  - evidence/one-line-release-001/capture-claims-are-now-an-executing-test-20260928T1230Z.md
+  - evidence/one-line-release-001/command-digest-is-reproducible-and-my-open-limit-is-closed-20260929.md
+  - evidence/one-line-release-001/completed-admission-proof-partly-executed-20260928T1200Z.md
+  - evidence/one-line-release-001/coupled-window-test-skipped-and-watch-covered-20260928T1315Z.md
+  - evidence/one-line-release-001/cross-layer-rate-18-of-42-probed-20260928.md
+  - evidence/one-line-release-001/cross-layer-stratum-complete-61-of-61-20260929.md
+  - evidence/one-line-release-001/d2-keepalive-remedy-reviewed-and-its-injection-boundary-holds-20260929.md
+  - evidence/one-line-release-001/daemon-class-is-context-dependent-not-intrinsic-20260928.md
+  - evidence/one-line-release-001/daemon-unit-failures-are-af-unix-path-length-20260928.md
+  - evidence/one-line-release-001/four-live-receipts-one-is-mis-split-and-digest-cannot-bind-argv0-20260929.md
+  - evidence/one-line-release-001/governor-record-contradicts-itself-on-a-successful-build-20260929.md
+  - evidence/one-line-release-001/heavy-path-blocked-by-a-host-memory-preflight-20260929.md
+  - evidence/one-line-release-001/immutable-set-intermittent-guard-is-quiescent-20260928T1250Z.md
+  - evidence/one-line-release-001/journal/20260928-a-compound-filter-needs-each-alternative-validated.md
+  - evidence/one-line-release-001/journal/20260928-apiOperations-table-re-derived-95-of-156.md
+  - evidence/one-line-release-001/journal/20260928-fullsuite-baseline-override-footprint.md
+  - evidence/one-line-release-001/journal/20260928-reads-is-not-asserts-circular-group-is-2-tests-not-7.md
+  - evidence/one-line-release-001/journal/20260928-second-session-mode-binding.md
+  - evidence/one-line-release-001/journal/20260928-validated-filter-circular-is-1-test-28-credits.md
+  - evidence/one-line-release-001/journal/20260928T1325Z-a-two-line-next-action-broke-the-gate-and-it-was-mine.md
+  - evidence/one-line-release-001/journal/20260929-alpha20-build-succeeded-and-served-site-claim-fixed-branch-copy.md
+  - evidence/one-line-release-001/journal/20260929-alpha20-build-succeeded-and-served-site-claim-fixed.md
+  - evidence/one-line-release-001/journal/20260929-d2-keepalive-implemented-hiddenness-unmeasured.md
+  - evidence/one-line-release-001/journal/20260929-gate-repaired-unparseable-state-moved-out-of-blockers.md
+  - evidence/one-line-release-001/journal/20260929-shared-index-absorption-record-my-own.md
+  - evidence/one-line-release-001/journal/20260929-the-nine-unevidenced-stages-are-gated-and-all-or-nothing.md
+  - evidence/one-line-release-001/journal/20260929-thirteen-is-twelve-verified-against-REQUIRED_STAGES.md
+  - evidence/one-line-release-001/journal/20260929T071623Z-terminal-end-finding-WITHDRAWN.md
+  - evidence/one-line-release-001/journal/20260929T072037Z-terminal-end-measured-and-closed.md
+  - evidence/one-line-release-001/journal/20260929T072450Z-three-decisions-measured.md
+  - evidence/one-line-release-001/journal/20260929T074621Z-two-closed-threads-moved.md
+  - evidence/one-line-release-001/journal/20260929T074924Z-undeclared-control-blindspot-superseded.md
+  - evidence/one-line-release-001/journal/20260929T1005Z-host-conditions-converge-on-the-shared-lock-only.md
+  - evidence/one-line-release-001/measured-test-option-cost-20260929.md
+  - evidence/one-line-release-001/native-target-exists-and-alpha18-collides-20260929.md
+  - evidence/one-line-release-001/non-reproduction-refutation-confirmed-with-a-four-vs-three-correction-20260928.md
+  - evidence/one-line-release-001/owner-decision-index-20260729.md
+  - evidence/one-line-release-001/peer-readiness-gate-claim-is-narrower-than-stated-independent-check-20260928.md
+  - evidence/one-line-release-001/restart-reconciliation-is-global-discovery-and-local-authority-20260928.md
+  - evidence/one-line-release-001/retraction-the-native-target-existed-all-along-20260929.md
+  - evidence/one-line-release-001/root-cause-booked-failures-is-shared-host-managed-container-20260928.md
+  - evidence/one-line-release-001/seven-daemonbooterror-count-is-unproven-independent-check-20260928.md
+  - evidence/one-line-release-001/state-yaml-reader-census-20260929.md
+  - evidence/one-line-release-001/terminal-process-survival-on-socket-close-20260928.md
+  - evidence/one-line-release-001/the-journey-instrument-implements-install-and-nothing-else-20260929.md
+  - evidence/one-line-release-001/the-journey-is-thirteen-stages-and-only-three-are-evidenced-20260929.md
+  - evidence/one-line-release-001/the-offered-argv-is-mis-split-and-that-is-the-exit2-root-20260929.md
+  - evidence/one-line-release-001/the-runner-cannot-record-this-journey-four-guests-required-20260929.md
+  - evidence/one-line-release-001/the-sum-check-is-working-95-of-156-verified-20260929.md
+  - evidence/one-line-release-001/the-two-deliberate-reds-do-not-enter-ci-20260929.md
+  - evidence/one-line-release-001/verifier-found-inverted-lock-and-my-wrong-reason-20260928T0610Z.md
+  - evidence/one-line-release-001/what-each-stage-must-produce-and-which-receipts-exist-20260929.md
+  - evidence/one-line-release-001/whole-suite-3-failures-and-my-tmpdir-artifact-20260928T0935Z.md
+  - evidence/one-line-release-001/whole-suite-4-names-3-causes-and-a-measured-flake-20260929.md
+  - evidence/one-line-release-001/whole-suite-triage-complete-20260928T0950Z.md
+  - evidence/one-line-release-001/why-the-native-journey-failed-the-wsl2-tier-is-a-constant-20260929.md
+  - evidence/one-line-release-001/worktree-root-admission-is-supported-my-workaround-claim-was-wrong-20260928.md
+  - scripts/audit_citation_proxies.py
+  - scripts/check_state_yaml.py
+  - scripts/governed_live_core_batch.mjs
+  - scripts/immutable_set_watch.py
+  - scripts/test_fail_closed_boundary_properties.py
+  - scripts/test_native_follow_on.py
+  - scripts/test_release_contracts.py
+  - scripts/test_assemble_release_index.py
+  - scripts/test_execution_host_bounded_logs.py
+  - scripts/test_governor_receipt_durability.py
 - id: excluded-unscannable-or-sensitive-fixtures
   classification: excluded
   license: NOASSERTION
-  provenanceRationale: Binary media and exact text fixtures that trigger private-path, canary, or credential detectors are
-    excluded from the text-only snapshot.
+  provenanceRationale: Binary media and exact text fixtures that trigger private-path, canary, or credential detectors are excluded from the text-only snapshot.
   paths:
   - apps/web/src/client/__tests__/integration.test.ts
   - apps/web/src/client/http/__tests__/instanceProvenance.test.ts
@@ -1884,15 +2953,21 @@ rules:
   - docs/adr/0001-canonical-template-source-boundary.md
   - docs/operations/stateware-public-naming-migration.md
   - packages/goal-execution/tests/test_cto_backend.py
+  - scripts/qualification/test_run_native_follow_on.py
+  - scripts/release_index_sweep.py
+  - scripts/test_audit_route_install_path.py
   - scripts/test_canonical_source.py
+  - scripts/test_immutable_release_set_live.py
   - scripts/test_infrastructure.py
   - scripts/test_opencode_adapter.py
   - scripts/test_operational_evidence_store.py
+  - scripts/test_release_index_sweep.py
+  - scripts/test_render_wsl2_install_bootstrap_provenance.py
   - scripts/test_repository_import.py
+  - scripts/test_route_trust_disclosure.py
   - scripts/test_run_bundle.py
   - scripts/test_source_lifecycle_integration.py
   - scripts/test_statepack_distribution.py
-
 - id: reviewed-product-completion-source-20260905
   classification: public-source
   license: AGPL-3.0-or-later
@@ -1914,8 +2989,22 @@ rules:
   paths:
   - evidence/one-line-release-001/alpha16-rehearsal-failure.json
   - evidence/one-line-release-001/product-completion-three-template.json
+  - evidence/one-line-release-001/leak-class-is-one-file-and-a-second-leak-inverts-the-risk-20260928T0525Z.md
+  - evidence/one-line-release-001/provisional-credits-resolved-twelve-read-a-correction-20260928.md
+  - evidence/one-line-release-001/classification-gate-is-a-function-of-head-20260927.md
+  - evidence/one-line-release-001/run-actual-restart-batch1.sh
+  - evidence/one-line-release-001/cited-test-field-is-validated-and-the-undeclared-half-is-owner-gated-20260927.md
+  - evidence/one-line-release-001/journal/20260928-set-build-5-of-5.md
+  - evidence/one-line-release-001/owner-decision-brief-site-readiness-vocabulary-20260928.md
+  - evidence/one-line-release-001/publication-contract-measured-before-signing-20260927.md
+  - evidence/one-line-release-001/publication-contract-failopen-probe-20260927/probe_fail_open.py
   - scripts/test_provider_setup.py
   - scripts/test_template_lifecycle_journey_controller.py
+  - evidence/one-line-release-001/resume-fail-open-closed-20260928T0620Z.md
+  - evidence/one-line-release-001/main-has-diverged-and-peers-own-integration-20260928.md
+  - evidence/one-line-release-001/journal/20260928T0620Z-resume-fail-open-closed-and-what-it-still-trusts.md
+  - evidence/one-line-release-001/gate-now-warns-at-the-documented-blocker-length-20260928.md
+  - evidence/one-line-release-001/blockers-reduction-precondition-holds-for-one-of-four-20260928.md
 - id: reviewed-xterm-ligatures-fallback
   classification: third-party-reviewed
   license: MIT

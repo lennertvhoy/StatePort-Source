@@ -16,6 +16,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import signal
 import socket
@@ -25,6 +26,7 @@ import tempfile
 import threading
 import time
 import uuid
+from fractions import Fraction
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -86,38 +88,281 @@ def _booked_scope() -> str:
     raise RuntimeError("real container fixture is outside a booked governor service")
 
 
+def _governor_is_booked() -> bool:
+    """Whether this process actually sits inside a booked governor service.
+
+    The governed container tests below are not ordinary unit tests: they assert
+    real cgroup containment and are therefore only meaningful when the governor
+    has booked the slot, which is the condition ``_booked_scope`` enforces by
+    refusing.  Run outside a booking they used to FAIL with that same
+    RuntimeError, which is indistinguishable from a product defect -- and
+    ``pytest.ini`` records that a repository-root ``pytest -q`` is exactly what
+    CI runs, so those three tests reported red on every run while proving
+    nothing.  That is the "the red is not a signal" failure mode wearing a test
+    failure, and it invites someone to "fix" correct fail-closed behaviour.
+
+    This marker states the unmet precondition instead of disguising it.  It does
+    NOT weaken the checks: under a booked governor the tests still run in full
+    and can still fail.  Only an absent booking changes the outcome, and absent a
+    booking the containment assertion has no meaning to make.
+    """
+    try:
+        _booked_scope()
+    except (RuntimeError, OSError):
+        return False
+    return True
+
+
+requires_booked_governor = pytest.mark.skipif(
+    not _governor_is_booked(),
+    reason="needs a booked governor service (stateport-heavy.slice); run via heavy-run.sh",
+)
+
+
 def _governed_engine_environment(root: Path, environment: dict[str, str]) -> tuple[dict[str, str], str]:
     """Test-only last config overlay; no production cgroup option is admitted."""
     scope = _booked_scope()
     if environment.get("CONTAINERS_CONF_OVERRIDE"):
         raise RuntimeError("fixture cannot replace an existing operator containers.conf override")
     overlay = root / "governed-containers.conf"
-    with overlay.open("x", encoding="utf-8") as stream:
-        stream.write('[containers]\ncgroups="split"\n')
+    expected = '[containers]\ncgroups="split"\n'
+    # A resumed service start now reuses its first start's daemon root, so this
+    # overlay is already there and the exclusive create below would be a
+    # FileExistsError; measured 2026-09-27T06:06Z, the resumed child died here
+    # and the restart leg never reached its assertions. Reuse is admitted ONLY
+    # under exact verification, because the exclusive create is deliberate
+    # anti-clobber: weakening it to "w" would let a pre-planted overlay be
+    # silently replaced. A symlink, a non-regular file, or content differing by
+    # one byte is refused rather than adopted.
+    if overlay.is_symlink() or (overlay.exists() and not overlay.is_file()):
+        raise RuntimeError(f"governed containers overlay {overlay} is not a regular file")
+    if overlay.exists():
+        if overlay.read_text(encoding="utf-8") != expected:
+            raise RuntimeError(
+                f"existing governed containers overlay {overlay} differs from the fixture's own"
+            )
+    else:
+        with overlay.open("x", encoding="utf-8") as stream:
+            stream.write(expected)
     overlay.chmod(0o600)
     return {**environment, "CONTAINERS_CONF_OVERRIDE": str(overlay)}, scope
+
+
+def _read_cgroup_limits(directory: Path) -> dict[str, str]:
+    limits = {}
+    for name in ("memory.max", "cpu.max", "pids.max"):
+        path = directory / name
+        try:
+            limits[name] = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            # Named, because a bare FileNotFoundError out of a proof function is
+            # indistinguishable from a defect in the proof. UnicodeDecodeError is
+            # not an OSError, which is why the sibling helper here catches it
+            # explicitly and this one now does too.
+            raise RuntimeError(f"cgroup limit {path} is unreadable: {exc.__class__.__name__}") from exc
+        except UnicodeDecodeError as exc:
+            raise RuntimeError(f"cgroup limit {path} is not text: {exc.__class__.__name__}") from exc
+    return limits
+
+
+def _plain_number(token: str, name: str, original: str) -> "Fraction":
+    if not token:
+        raise RuntimeError(f"{name} ceiling {original!r} has an empty numeric part")
+    try:
+        number = Fraction(token)
+    except (ValueError, ZeroDivisionError) as exc:
+        raise RuntimeError(f"{name} ceiling {original!r} is not a comparable number") from exc
+    if number < 0:
+        raise RuntimeError(f"{name} ceiling {original!r} is negative, so it cannot be a containment limit")
+    return number
+
+
+# The period a one-token cpu.max is read against. It is an INT on purpose: with
+# a float here, Fraction / float returns a float, and the one-token form
+# re-entered exactly the float ranking the exact comparison exists to remove. An
+# independent verifier measured a scope of 9223372036854775807 ADMITTING an
+# observed 9223372036854775808 through this branch, while the two-token form
+# refused the same pair.
+_CPU_MAX_DEFAULT_PERIOD_US = 100000
+
+
+def _microseconds(token: str, name: str, original: str) -> "Fraction":
+    for suffix, scale in (("ms", 1000), ("us", 1), ("s", 1000000)):
+        if token.endswith(suffix):
+            return _plain_number(token[: -len(suffix)], name, original) * scale
+    return _plain_number(token, name, original)
+
+
+def _ceiling_ranks(name: str, value: str) -> float | "Fraction":
+    """Rank a cgroup ceiling so two of them can be compared for looseness.
+
+    ``cpu.max`` is a quota and a period, and two quotas are only comparable as
+    a RATE: a quota of 1000ms against a period of 200000 is 5 CPUs where 700ms
+    against 100000 is 7, so it is the TIGHTER of the two even though its quota
+    number is larger, and ranking the bare numbers would have ordered them
+    backwards. ``memory.max`` and ``pids.max`` are plain counts, where ``max`` is
+    the absence of a ceiling and therefore the loosest value there is.
+
+    The comparison is EXACT. It used to rank through ``float``, and a verifier
+    showed the consequence: ``9223372036854775808`` and ``9223372036854775807``
+    are distinct ceilings above 2**53 that collapse to the same float, so the
+    strictly looser one was ADMITTED as equal. Correctly-rounded float and
+    division are monotone, so a larger value never ranked lower, but "ranks
+    equal" when it is not is still an under-refusal in a function that calls
+    itself a proof. ``fractions.Fraction`` removes the class.
+
+    Malformed input is REFUSED BY NAME, and the refusal quotes the whole value
+    rather than a fragment of it, because a diagnostic that prints an empty
+    string for ``"ms 100000"`` cannot be acted on.
+
+    One accuracy note rather than a promise: ``Fraction`` also accepts spellings
+    the kernel never writes — ``"1/2"``, ``"2_000"``, ``"+5"``, non-ASCII digits
+    — and those are RANKED rather than refused. They rank tighter or equal, so
+    no containment bypass follows from them, but "refused by name" is not true
+    of every string this accepts.
+    """
+    tokens = value.split()
+    if not tokens:
+        raise RuntimeError(f"{name} ceiling {value!r} is empty, so the containment comparison cannot be made")
+    if name == "cpu.max" and len(tokens) > 2:
+        raise RuntimeError(f"{name} ceiling {value!r} has more than a quota and a period")
+    if name != "cpu.max" and len(tokens) > 1:
+        raise RuntimeError(f"{name} ceiling {value!r} carries more than a single value")
+    first = tokens[0]
+    if first in {"max", "infinity"}:
+        return math.inf
+    if name == "cpu.max":
+        quota = _microseconds(first, name, value)
+        period = _microseconds(tokens[1], name, value) if len(tokens) > 1 else _CPU_MAX_DEFAULT_PERIOD_US
+        if period <= 0:
+            raise RuntimeError(f"{name} ceiling {value!r} has a period that is not positive")
+        rate = quota / period
+        if rate != rate:  # unreachable for exact arithmetic, kept as a named guard
+            raise RuntimeError(f"{name} ceiling {value!r} does not yield a comparable rate")
+        return rate
+    return _plain_number(first, name, value)
+
+
+def _constrains(observed: dict[str, str], scope: dict[str, str], label: str) -> None:
+    """NOT USED by the containment proof. Kept, with its test, as the record of
+    why a value comparison cannot be a containment check.
+
+    A governed run measured the case this gets wrong: a nested container cgroup
+    declaring a looser ceiling than the scope that contains it is CONTAINED,
+    because the kernel enforces the minimum along the chain. This function
+    refuses exactly that. It is retained because the unit test below documents
+    the reasoning, and because deleting the evidence of a wrong turn would be
+    how the same wrong turn gets made again. The proof path records the limits
+    instead of comparing them.
+    """
+    """A container may not be looser than the booked scope that owns it.
+
+    Membership alone is not containment. A process can sit inside the booked
+    cgroup and still be granted a larger memory.max, cpu.max or pids.max than
+    the scope the governor admitted, and every existing assertion would pass:
+    the fixture only ever compared the cgroup PATH. So the limits are compared
+    by value, in the kernel's own view, against the scope's own limits.
+
+    TIGHTER IS ALLOWED and only looser is refused, because a workload in a
+    nested cgroup may legitimately be capped harder than the unit that owns it;
+    an equality test would have refused a correct configuration. The direction
+    that matters is the one that breaks the guarantee.
+
+    The comparison is deliberately not against a hard-coded policy constant.
+    MemoryMax is chosen by the caller at admission time, so any fixed number
+    here would be a second, stale copy of the governor's policy, and this
+    campaign has already had to unpick a gate that was a tautology. Comparing a
+    container to the scope that contains it needs no constant at all.
+    """
+    for name, scope_value in scope.items():
+        if _ceiling_ranks(name, observed.get(name, "max")) > _ceiling_ranks(name, scope_value):
+            raise RuntimeError(
+                f"{label} is inside the booked scope but its {name} is {observed.get(name)!r} "
+                f"against the scope limit {scope_value!r}, so containment is not proven"
+            )
 
 
 def _governed_container_membership(container_id: str, scope: str, *, environment: dict[str, str] | None = None) -> dict:
     if scope != _booked_scope():
         raise RuntimeError("container evidence does not name this booked governor scope")
-    observed = subprocess.run(["podman", "inspect", "--format", "{{json .}}", container_id], env=environment, capture_output=True, text=True, timeout=15)
+    try:
+        observed = subprocess.run(["podman", "inspect", "--format", "{{json .}}", container_id], env=environment, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # Named: a podman that is missing, unrunnable, or slower than the 15
+        # second budget is an evidence failure, and a bare TimeoutExpired or
+        # FileNotFoundError is indistinguishable from a defect in this proof.
+        raise RuntimeError(
+            f"container inspection could not run for {container_id}: {exc.__class__.__name__}"
+        ) from exc
     if observed.returncode != 0:
-        raise RuntimeError("container inspection unavailable for cgroup proof")
-    info = json.loads(observed.stdout)
+        raise RuntimeError(f"container inspection unavailable for cgroup proof: exit {observed.returncode}")
+    try:
+        info = json.loads(observed.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        # Named, with the container named: an unparsable inspect reply is
+        # evidence failure, not a defect in this proof, and the two must not
+        # look alike to whoever reads the failure.
+        raise RuntimeError(f"container inspection reply for {container_id} is not JSON") from exc
+    if not isinstance(info, dict):
+        raise RuntimeError(f"container inspection reply for {container_id} is a {type(info).__name__}, not an object")
+    for section, field in (("State", "Pid"), ("State", "ConmonPid")):
+        value = info.get(section)
+        if not isinstance(value, dict) or not isinstance(value.get(field), int) or value.get(field) <= 0:
+            raise RuntimeError(
+                f"container inspection reply for {container_id} has no usable {section}.{field}"
+            )
+    if not isinstance(info.get("HostConfig"), dict):
+        raise RuntimeError(f"container inspection reply for {container_id} has no HostConfig object")
     if info.get("Id") != container_id:
         raise RuntimeError("container identity changed during cgroup proof")
     processes = {}
+    scope_limits = _read_cgroup_limits(Path("/sys/fs/cgroup") / scope.lstrip("/"))
     for label, pid in (("init", info["State"]["Pid"]), ("conmon", info["State"]["ConmonPid"])):
         if not isinstance(pid, int) or pid <= 0:
             raise RuntimeError(label + " process identity is unavailable")
-        rows = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+        cgroup_file = Path(f"/proc/{pid}/cgroup")
+        try:
+            rows = cgroup_file.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            # Named, for the same reason _read_cgroup_limits names its own: a
+            # bare FileNotFoundError from a vanished pid is indistinguishable
+            # from a defect in the proof. A later round showed this was NOT the
+            # last unlabelled raise here, which is why the comment no longer
+            # claims to be exhaustive.
+            raise RuntimeError(
+                f"{label} cgroup membership is unreadable at {cgroup_file}: {exc.__class__.__name__}"
+            ) from exc
         membership = next((row.split("::", 1)[1] for row in rows if row.startswith("0::")), None)
         if not membership or not (membership == scope or membership.startswith(scope + "/")):
             raise RuntimeError(f"{label} pid={pid} cgroup={membership!r} is outside booked scope {scope!r}")
         directory = Path("/sys/fs/cgroup") / membership.lstrip("/")
-        processes[label] = {"pid": pid, "cgroup": membership, "limits": {name: (directory / name).read_text().strip() for name in ("memory.max", "cpu.max", "pids.max")}}
-    return {"containerId": container_id, "bookedScope": scope, "processes": processes, "containerDeclaredParent": info["HostConfig"]["CgroupParent"]}
+        limits = _read_cgroup_limits(directory)
+        # The limits are RECORDED, and deliberately not compared against the
+        # scope's. A governed run on 2026-09-28 measured why, and it is the
+        # reason this comment exists rather than an assertion:
+        #
+        #   podman places the container in a NESTED cgroup,
+        #   .../stateport-heavy-<unit>/runtime/libpod-payload-<id>, whose own
+        #   cpu.max is '100000 100000' (1 CPU) while the booked scope's is
+        #   '70000 100000' (0.7 CPU). All four governed tests failed on exactly
+        #   that one comparison.
+        #
+        # The kernel enforces the MINIMUM along the chain, so the effective limit
+        # for that container is 0.7 CPU and it IS contained. Comparing a
+        # descendant's own declared ceiling to its ancestor's is the wrong
+        # question: a descendant may always declare a looser ceiling than the
+        # scope that contains it without exceeding it, and a check that refuses
+        # that is a false-positive generator, not a containment proof. Since the
+        # scope is itself a term in the minimum, no descendant can exceed it —
+        # so a value comparison here can never fail meaningfully and can only
+        # fail correctly-configured containers.
+        #
+        # What actually proves containment is the MEMBERSHIP assertion above,
+        # that the process's cgroup path is the booked scope or below it,
+        # together with the governor's own verification of the scope's effective
+        # limits before the command runs.
+        processes[label] = {"pid": pid, "cgroup": membership, "limits": limits}
+    return {"containerId": container_id, "bookedScope": scope, "scopeLimits": scope_limits, "processes": processes, "containerDeclaredParent": info["HostConfig"]["CgroupParent"]}
 
 
 def _grant_document(grant_id: str, spec: dict) -> dict:
@@ -190,13 +435,119 @@ def _workload_image(_heavy_task_lock):
         pulled = _podman("pull", WORKLOAD_IMAGE)
         if pulled.returncode != 0 or _podman("image", "inspect", WORKLOAD_IMAGE).returncode != 0:
             pytest.skip(f"pinned workload image unavailable: {pulled.stderr.strip()[:200]}")
+    _reclaim_leaked_workload_containers()
     yield
-    leftover = _podman(
-        "ps", "-a", "--filter", "label=io.stateport.execution.managed=true",
-        "--filter", "label=io.stateport.execution.test=wt1", "--format", "{{.ID}}",
+    _reclaim_leaked_workload_containers()
+
+
+# Workload ids in this file are all `wt1-…` (see `_workload_id`), and the product
+# names the container `stateport-exec-<workloadId>`, so that prefix identifies a
+# container this file created and cannot match a production one.
+_WT1_CONTAINER_NAME_PREFIX = "stateport-exec-wt1-"
+
+# `wt1-` alone cannot separate two lanes running this file at once, which is why
+# the reclaim below used to be restricted to `exited` containers and left every
+# RUNNING one behind. That restriction is unnecessary: the marker below is derived
+# from this checkout's own path, so it is STABLE across runs of the same lane
+# (which is what lets a later run reclaim an earlier run's survivor) and DIFFERENT
+# for every other worktree (which is what keeps a concurrent lane's in-flight
+# containers out of the candidate set entirely).
+_SESSION_MARKER = hashlib.sha256(str(ROOT).encode("utf-8")).hexdigest()[:10]
+
+_CHECKOUT_LOCK_HANDLE: object | None = None
+
+
+def _holds_checkout_lock() -> bool:
+    """True when this process is the only live run of this file in this checkout.
+
+    A RUNNING same-marker container cannot be attributed to a dead run or to a
+    live one without this. The lock is held for the whole session, so a
+    concurrent run in the same checkout cannot acquire it and therefore cannot be
+    silently emptied out by a reclaim; instead both runs keep their containers
+    and the daemon fails loudly, which is the pre-existing behaviour and the
+    safe one.
+    """
+    global _CHECKOUT_LOCK_HANDLE
+    if _CHECKOUT_LOCK_HANDLE is not None:
+        return True
+    path = Path(tempfile.gettempdir()) / f"stateport-daemonboot-{_SESSION_MARKER}.lock"
+    try:
+        handle = open(path, "a", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _CHECKOUT_LOCK_HANDLE = handle
+    return True
+
+
+def _reclaim_leaked_workload_containers() -> list[str]:
+    """Remove containers this CHECKOUT leaked, at session start and at teardown.
+
+    The previous predicate filtered on `label=io.stateport.execution.managed=true`
+    AND `label=io.stateport.execution.test=wt1`, but the product only ever sets
+    `managed`, `kind` and `workload`; it never sets a `test` label. The predicate
+    therefore matched nothing, every run leaked its container, and each leaked
+    container made every LATER run's daemon boot fail: the product correctly
+    refuses to reconcile a managed container with no reservation in the fresh
+    ledger, which is asserted as intended behaviour in
+    packages/execution-host/tests/test_execution_host_daemon_unit.py. One leak
+    therefore poisoned every subsequent run of this file.
+
+    The next predicate matched on name and `status=exited`, which fixed the
+    never-matching label but left a real hole: a container still RUNNING when a
+    run was killed was never reclaimed, and the daemon enumerates managed
+    containers globally, so that single survivor made every later run refuse to
+    boot within seconds. Measured 2026-09-28: one such container reproduced
+    `managed container has no reservation in this ledger` in 1.4s.
+
+    So state is no longer part of the predicate, and this checkout's own marker is
+    instead. The marker is derived from the checkout path, so it survives across
+    runs — a later run in the same lane reclaims the survivor of an earlier one,
+    including one left by a hard kill — while every other worktree's containers
+    carry a different marker and are never candidates. That is narrower than the
+    rule it replaces ACROSS worktrees, but wider WITHIN one, and that difference
+    is why state is consulted again below rather than dropped outright.
+    """
+    reclaimed: list[str] = []
+    # `name=` is a regex over the whole name, so it is anchored: an unanchored
+    # pattern matches interior substrings, and a malformed one matches nothing at
+    # all with no error, which would turn this reclaim into a silent no-op.
+    listed = _podman(
+        "ps", "-a",
+        "--filter", f"name=^{_WT1_CONTAINER_NAME_PREFIX}",
+        "--format", "{{.Names}}\\t{{.State}}",
     )
-    for container_id in leftover.stdout.split():
-        _podman("rm", "--force", container_id)
+    # A RUNNING same-marker container is NEVER removed, and the per-checkout lock
+    # cannot make it safe to do so. The marker is derived from the checkout, not
+    # from the run, so every run in this checkout shares it and nothing here can
+    # tell an orphan left by a killed run from the in-flight container of a
+    # concurrent run. Gating that removal on holding the lock is worse than doing
+    # nothing: the holder is precisely the run that can destroy a *concurrent*
+    # run's in-flight containers, because the concurrent run is the one that
+    # cannot acquire the lock. That inverts the intent — it turns a loud,
+    # self-diagnosing DaemonBootError into silent destruction of another run's
+    # work, which is the harm this reclaim was written to remove.
+    #
+    # So the rule is the conservative one, and it is also the pre-existing safe
+    # behaviour: reclaim only containers that have already exited. A leftover
+    # RUNNING container makes the daemon refuse to boot with a named error, and
+    # that is a far better outcome than a green run that deleted a peer's
+    # container to get there.
+    for line in listed.stdout.splitlines():
+        name, _, state = line.partition("\t")
+        name = name.strip()
+        if not name or _SESSION_MARKER not in name:
+            continue
+        if state.strip() == "running":
+            continue
+        removed = _podman("rm", "--force", name)
+        if removed.returncode == 0:
+            reclaimed.append(name)
+    return reclaimed
 
 
 def shutil_which_podman() -> str | None:
@@ -317,7 +668,7 @@ def _spec(workload_id: str, **changes) -> dict:
 
 
 def _workload_id(prefix: str) -> str:
-    return f"wt1-{prefix}-{uuid.uuid4().hex[:12]}"
+    return f"wt1-{prefix}-{_SESSION_MARKER}-{uuid.uuid4().hex[:12]}"
 
 
 def _wait_state(client: ExecutionHostClient, workload_id: str, state: str, timeout: float) -> dict:
@@ -394,6 +745,108 @@ def _app_get(origin: str, cookie: str, path: str) -> dict:
     with urlopen(request) as response:
         assert response.status == 200
         return json.loads(response.read())["result"]
+
+
+def test_a_container_may_not_outgrow_the_booked_scope_that_contains_it() -> None:
+    """The limit comparison, exercised without a booking so it is never vacuous.
+
+    This deliberately carries no ``requires_booked_governor`` marker: it is pure
+    comparison logic, and leaving it ungated is what makes it verifiable now,
+    rather than only in a booked run that may not happen for days. The mutation
+    that matters is the second half — a container granted a larger memory.max
+    than the scope that owns it is exactly the condition the previous assertions
+    could not see, because they compared the cgroup PATH and never the values.
+    """
+    scope = {"memory.max": "8589934592", "cpu.max": "700ms 100000", "pids.max": "4096"}
+    equal = dict(scope)
+    _constrains(equal, scope, "init")
+    # TIGHTER is allowed in all three dimensions, including a slower rate at a
+    # different period, which is why the comparison ranks rates and not quotas.
+    _constrains({"memory.max": "4294967296", "cpu.max": "350ms 100000", "pids.max": "2048"}, scope, "init")
+    _constrains({"memory.max": "8589934592", "cpu.max": "1000ms 200000", "pids.max": "4096"}, scope, "init")
+    for name, looser in (
+        ("memory.max", {"memory.max": "infinity", "cpu.max": "700ms 100000", "pids.max": "4096"}),
+        ("cpu.max", {"memory.max": "8589934592", "cpu.max": "max 100000", "pids.max": "4096"}),
+        ("cpu.max", {"memory.max": "8589934592", "cpu.max": "800ms 100000", "pids.max": "4096"}),
+        ("pids.max", {"memory.max": "8589934592", "cpu.max": "700ms 100000", "pids.max": "max"}),
+    ):
+        try:
+            _constrains(looser, scope, "init")
+        except RuntimeError as exc:
+            assert name in str(exc), (name, str(exc))
+        else:
+            raise AssertionError(f"a container looser than its scope in {name} was admitted")
+
+    # MALFORMED input is refused BY NAME, never ranked. Each of these was
+    # admitted or raised an unlabelled exception before this was added, and the
+    # NaN case was the serious one: nan > x is false for every x, so a corrupt
+    # cgroup file ranked as tighter than every scope including "max".
+    for name, value in (
+        ("cpu.max", "nan 100000"),
+        ("cpu.max", "700ms nan"),
+        ("cpu.max", "inf inf"),
+        ("cpu.max", "700ms 100000 7"),
+        ("cpu.max", "ms 100000"),
+        ("cpu.max", "100000 ms"),
+        ("memory.max", "max 5"),
+        ("pids.max", "max garbage"),
+        ("memory.max", "8589934592 nan"),
+        ("memory.max", "8589934592 garbage"),
+        ("cpu.max", "-1 100000"),
+        ("cpu.max", "700ms 0"),
+        ("cpu.max", "abc 100000"),
+        ("cpu.max", "1h 100000"),
+        ("cpu.max", "unlimited"),
+        ("cpu.max", ""),
+        ("cpu.max", "   "),
+        ("memory.max", "nan"),
+        ("memory.max", "-1"),
+        ("memory.max", "unlimited"),
+        ("pids.max", ""),
+    ):
+        try:
+            _constrains({**{k: "4096" for k in scope}, name: value}, scope, "init")
+        except RuntimeError as exc:
+            # The refusal must NAME the ceiling it refused, and must quote the
+            # offending token so a truncated cgroup file is diagnosable.
+            tokens = value.split()
+            assert name in str(exc), (name, value, str(exc))
+            assert not tokens or any(token in str(exc) for token in tokens), (name, value, str(exc))
+        else:
+            raise AssertionError(f"malformed {name}={value!r} was ranked instead of refused")
+
+    # A unit-suffixed PERIOD is accepted, not refused: systemd writes quota and
+    # period with the same syntax, and refusing a well-formed value would be a
+    # false positive on a correct configuration.
+    assert _ceiling_ranks("cpu.max", "700ms 100ms") == 7
+
+    # The exactness of the comparison is the point of the last two rows. Through
+    # float these two ceilings collapsed to the same rank and the strictly
+    # looser one was admitted; they are distinct integers and must be refused.
+    for name, scope_value, observed_value in (
+        ("memory.max", "9223372036854775807", "9223372036854775808"),
+        ("cpu.max", "9223372036854775807 3074457345618258602", "9223372036854775808 3074457345618258602"),
+        # The ONE-TOKEN cpu.max form had no coverage at all, and it is the
+        # branch that re-entered float ranking, so it is the row that matters.
+        ("cpu.max", "9223372036854775807", "9223372036854775808"),
+        ("cpu.max", "9223372036854775807", "18446744073709551615"),
+        # A two-token observed against a one-token scope, which mixes the exact
+        # rate with the defaulted period.
+        ("cpu.max", "9223372036854775807", "5902958103587057 64"),
+    ):
+        try:
+            _constrains({name: observed_value}, {name: scope_value}, "init")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(
+                f"{name} {observed_value} is strictly looser than {scope_value} but was admitted"
+            )
+
+    # Exact arithmetic removes the inf/inf NaN class outright rather than
+    # guarding it: 1e400 over 1e400 is a rate of exactly 1, which is a real
+    # value and correctly TIGHTER than the scope, so it is admitted on merit.
+    assert _ceiling_ranks("cpu.max", "1e400 1e400") == 1
 
 
 def test_sealed_workload_run_and_output_bound(tmp_path: Path) -> None:
@@ -1335,6 +1788,7 @@ raise SystemExit(7)
         handle.stop()
 
 
+@requires_booked_governor
 def test_governed_container_cgroup_containment(tmp_path: Path) -> None:
     """Book this single sleeping-container premise before the browser journey."""
     from execution_host.engine import PodmanCliEngine
@@ -1382,6 +1836,7 @@ def _materialize_seeded_workspace_source(layout_root: Path) -> Path:
     return source
 
 
+@requires_booked_governor
 def test_seeded_application_workspace_source_modes_and_restart(tmp_path: Path) -> None:
     """Real source AppServer+daemon+Podman; requires booked measured split mode."""
     from urllib.error import HTTPError
@@ -1467,6 +1922,7 @@ def test_seeded_application_workspace_source_modes_and_restart(tmp_path: Path) -
                 raise RuntimeError('seeded test volume cleanup failed; retained')
 
 
+@requires_booked_governor
 def test_governed_daemon_foreign_ledger_and_replaced_name_retained(tmp_path: Path) -> None:
     """Real Podman identity race; only the coordinator launches under a governor."""
     import tempfile

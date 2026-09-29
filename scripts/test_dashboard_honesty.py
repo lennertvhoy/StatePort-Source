@@ -85,7 +85,12 @@ def test_visible_buttons_have_real_actions_or_disabled_semantics() -> None:
     assert 'data-testid="approve-button"' in detail and 'data-testid="confirm-reject"' in detail
     assert "runApprove" in execution and "runProposalReject" in execution
     # The repository-import secondary path is honest about its availability.
-    assert "Import a local repository" in catalog
+    # The entry label was deliberately consolidated at ce693db6 ("Expose public and
+    # local repository import through consistent entry labels"); the visible
+    # affordance is "Import a repository", used by both the dropdown item and the
+    # empty-state action. This assertion keeps its teeth: it is a substring check
+    # against the rendered source, so removing or renaming the affordance fails it.
+    assert "Import a repository" in catalog
     assert "reviewed installation stays the ordinary path." in catalog
 
 

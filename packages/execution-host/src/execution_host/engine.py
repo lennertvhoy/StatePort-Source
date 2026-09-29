@@ -37,6 +37,15 @@ from .daemon_contract import MAX_OUTPUT_BYTES, MAX_REQUEST_TIMEOUT_SECONDS, DEVE
 
 
 MANAGED_LABEL_KEY = "io.stateport.execution.managed"
+
+# Bound on untrusted engine output embedded in an EngineError, which reaches a
+# durable ledger receipt. Bounded on purpose; see _require_ok for why the value
+# is a named policy number rather than an inline literal, and why truncation is
+# declared rather than silent. 2000 comfortably carries a full cgroup2 path plus
+# the runc message that names it, which is the smallest evidence that made the
+# r9 start failure diagnosable at all.
+MAX_ERROR_DETAIL_CHARS = 2000
+
 MANAGED_LABEL = f"{MANAGED_LABEL_KEY}=true"
 WORKLOAD_LABEL = "io.stateport.execution.workload"
 KIND_LABEL = "io.stateport.execution.kind"
@@ -747,7 +756,23 @@ class PodmanCliEngine:
     def _require_ok(self, completed: subprocess.CompletedProcess[str], action: str) -> str:
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
-            raise EngineError(f"{action} failed: {detail[:300]}")
+            # MEASURED 2026-09-27: a 300-character bound silently destroyed the
+            # only evidence of a real start failure. In the retained r9 ledger the
+            # receipt read "error setting cgroup config for procHooks process:
+            # openat2 /sys/fs/cgroup/user.slice/u" -- the failing cgroup path is cut
+            # mid-string, so the defect that stopped the run could not be located
+            # from the evidence the product itself kept. The bound stays (engine
+            # output is untrusted text that reaches a durable receipt), but it is
+            # now a NAMED policy value, large enough to carry a full cgroup path
+            # plus the runc message, and truncation is declared instead of silent.
+            #
+            # This is not a new redaction weakening: unlike `logs`, which
+            # deliberately redacts engine stderr, this path never redacted -- it
+            # embedded raw engine text and merely cut it short. The asymmetry
+            # between the two is recorded rather than resolved here.
+            if len(detail) > MAX_ERROR_DETAIL_CHARS:
+                detail = detail[:MAX_ERROR_DETAIL_CHARS] + f" [truncated at {MAX_ERROR_DETAIL_CHARS} characters]"
+            raise EngineError(f"{action} failed: {detail}")
         return completed.stdout.strip()
 
     def version(self) -> dict[str, str]:

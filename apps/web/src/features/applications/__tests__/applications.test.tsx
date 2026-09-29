@@ -281,6 +281,36 @@ describe('Applications home', () => {
   )
 
   it(
+    'dispatches the getting-started dismiss control and proves the dismissal persists across a reload',
+    async () => {
+      useSessionStore.getState().setActiveScenario('no_applications')
+      const user = userEvent.setup()
+      const first = renderPage()
+      expect(await screen.findByTestId('onboarding-strip', undefined, { timeout: LONG })).toBeTruthy()
+
+      // Dispatch the real control by its accessible name, not by test id, so the
+      // assertion covers the control a user actually operates.
+      await user.click(screen.getByRole('button', { name: 'Dismiss getting started' }))
+      await waitFor(() => expect(screen.queryByTestId('onboarding-strip')).toBeNull())
+      expect(useApplicationsPrefs.getState().onboardingDismissed).toBe(true)
+      const persisted = localStorage.getItem(APPLICATIONS_PREFS_STORAGE_KEY)!
+
+      // Persistence is the claim that matters: the guided path must not silently
+      // return on the next load. Reset memory, keep only what was written to
+      // storage, rehydrate, and require the strip to stay gone.
+      first.unmount()
+      useApplicationsPrefs.setState({ onboardingDismissed: false })
+      localStorage.setItem(APPLICATIONS_PREFS_STORAGE_KEY, persisted)
+      await useApplicationsPrefs.persist.rehydrate()
+      expect(useApplicationsPrefs.getState().onboardingDismissed).toBe(true)
+      renderPage()
+      await screen.findByTestId('empty-state', undefined, { timeout: LONG })
+      await waitFor(() => expect(screen.queryByTestId('onboarding-strip')).toBeNull())
+    },
+    LONG,
+  )
+
+  it(
     'service offline renders read-only notice and hides mutating actions',
     async () => {
       useSessionStore.setState({ serviceStatus: { state: 'offline', endpoint: '', detail: 'No answer.' } })

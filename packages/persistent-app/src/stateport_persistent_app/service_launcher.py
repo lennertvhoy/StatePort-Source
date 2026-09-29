@@ -11,6 +11,11 @@ from typing import Any
 
 from stateport_persistent_app.app import PersistentApp as BasePersistentApp, ServiceError
 
+# How long service_start waits for the child to publish a running runtime record.
+# Measured cold first start on this host is 2.68-2.83s, so anything near the old
+# 2.0s fixed iteration count failed the first launch after an install.
+_READINESS_TIMEOUT_SECONDS = 30.0
+
 
 class PersistentApp(BasePersistentApp):
     """Use the thin assistant-aware entry while preserving service semantics."""
@@ -126,7 +131,14 @@ class PersistentApp(BasePersistentApp):
                 env=env,
                 cwd=root,
             )
-        for _ in range(40):
+        # A cold first start has to import the whole service graph, and that
+        # measured 2.68-2.83s on this host. The previous budget of 40 x 0.05s was
+        # exactly 2.0s, so the first launch after an install deterministically
+        # missed it and was killed while still starting up. 30s keeps more than
+        # ten times the measured margin for slower office hardware while staying
+        # bounded, so a genuinely hung service still fails rather than blocking.
+        deadline = time.monotonic() + _READINESS_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
             time.sleep(0.05)
             status = self.service_status()
             if status.get("status") == "running":
@@ -146,8 +158,21 @@ class PersistentApp(BasePersistentApp):
                 return status
             if process.poll() is not None:
                 break
+        # Distinguish the two ways this fails. A child that is still importing has
+        # written nothing to the log, so "inspect service logs" pointed at an empty
+        # file and named no cause.
+        still_starting = process.poll() is None
         self._terminate_spawned_service(process)
-        raise ServiceError("local service did not become ready; inspect service logs")
+        if still_starting:
+            raise ServiceError(
+                f"local service did not become ready within {_READINESS_TIMEOUT_SECONDS:g}s and never "
+                "wrote to the service log, so it most likely did not finish starting. Retry, and "
+                "inspect the log only if a retry fails."
+            )
+        raise ServiceError(
+            "local service did not become ready; it exited, so inspect the service log at "
+            f"{log_path}"
+        )
 
 
 __all__ = ["PersistentApp"]

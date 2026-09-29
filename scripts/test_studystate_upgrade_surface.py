@@ -59,6 +59,7 @@ from governed_api import GovernedAPI  # noqa: E402
 from governed_runner import InstanceLease  # noqa: E402
 import journey_common  # noqa: E402
 import run_journey_j4  # noqa: E402
+from stateport_release.contract import canonical_digest  # noqa: E402
 from journey_common import (  # noqa: E402
     boot_retained_vm,
     discover_services,
@@ -597,6 +598,12 @@ def _retained_candidate_fixture(tmp_path: Path) -> dict[str, Path]:
         },
         "signatures": [{"subjectDigest": "sha256:" + "c" * 64}],
     }
+    # The detached signature must bind the exact payload it ships with. A
+    # placeholder subjectDigest is precisely the stale/borrowed signature the
+    # admission guard refuses, so the fixture signs the payload it actually
+    # built rather than asserting a digest that was never computed.
+    signed_payload_digest = canonical_digest(release_index["signed"])
+    release_index["signatures"][0]["subjectDigest"] = signed_payload_digest
     release_index_bytes = (json.dumps(release_index, sort_keys=True) + "\n").encode()
     release_index_digest = "sha256:" + hashlib.sha256(release_index_bytes).hexdigest()
     (candidate_dir / "release-index.json").write_bytes(release_index_bytes)
@@ -621,7 +628,7 @@ def _retained_candidate_fixture(tmp_path: Path) -> dict[str, Path]:
         "candidateSourceCommit": "a" * 40,
         "candidateSourceTree": "b" * 40,
         "releaseIndexSha256": release_index_digest,
-        "signedPayloadDigest": "sha256:" + "c" * 64,
+        "signedPayloadDigest": signed_payload_digest,
         "buildReceipt": str(build_receipt),
         "buildReceiptSha256": build_receipt_digest,
     }
@@ -651,8 +658,12 @@ def _retained_candidate_fixture(tmp_path: Path) -> dict[str, Path]:
         },
         "binding": {
             "releaseIndexDigest": release_index_digest,
-            "signedPayloadDigest": "sha256:" + "c" * 64,
+            "signedPayloadDigest": signed_payload_digest,
             "bootstrapDigest": bootstrap_digest,
+            # The retained receipt binds the image set the index declares, keyed
+            # by imageId exactly as the admission check reads it, so a receipt
+            # cannot claim a run for images the candidate never declared.
+            "images": {"stateport-web": manifest_digest},
             "archives": {
                 "stateport-web": {
                     "manifestDigest": manifest_digest,
@@ -953,11 +964,20 @@ def _production_retained_fixture(tmp_path: Path) -> tuple[dict, Path]:
         "digest": journey_common._sha256_file(proof_path), "size": proof_path.stat().st_size,
         "mediaType": "application/json",
     }}
+    # Adding supply-chain evidence changes the signed payload, so the signature
+    # is re-bound to the new payload exactly as a publisher re-signs after
+    # changing content. Leaving the old subjectDigest here would make this test
+    # assert a refusal rather than the acceptance it is written to check.
+    index["signatures"][0]["subjectDigest"] = canonical_digest(index["signed"])
     index_path.write_text(json.dumps(index))
     (paths["site_root"] / "download" / "0.1.0-test.1" / "release-index.json").write_bytes(index_path.read_bytes())
     receipt_path = paths["vm_dir"].parent / "receipt.json"
     receipt = json.loads(receipt_path.read_text())
     receipt["binding"]["releaseIndexDigest"] = journey_common._sha256_file(index_path)
+    # The retained receipt binds the same payload, so it is re-bound alongside the
+    # signature. Re-binding only the index digest would leave a receipt claiming a
+    # run for the pre-supply-chain payload.
+    receipt["binding"]["signedPayloadDigest"] = canonical_digest(index["signed"])
     receipt_path.write_text(json.dumps(receipt))
     archive_path = paths["archive_root"] / "stateport-web.oci.tar"
     build_path = tmp_path / "production-build-receipt.json"

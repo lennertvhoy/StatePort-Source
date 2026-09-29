@@ -70,6 +70,62 @@ become required merely because a documentation-only change exists. A local
 pass is not remote CI, release, production, independent-review, or human
 acceptance evidence.
 
+### Build the production frontend before the Python suite
+
+Parts of the Python suite boot the application and require the built production
+bundle. Without it they fail closed with
+`ValueError: StatePort production web build is missing` rather than skipping,
+because the product refuses to serve a mislabelled artifact when
+`apps/web/dist/index.html` is absent. A fresh clone has no `apps/web/dist` and
+no `apps/web/node_modules`, so build it once before running the suite:
+
+```bash
+cd apps/web
+npm ci --no-audit --no-fund
+npm run build
+cd ../..
+```
+
+CI runs `npm run build` in the "Build production frontend" step, which is why a
+remote run and a local run otherwise disagree. Note that CI installs with
+`npm ci --ignore-scripts` while the command above was measured with
+`--no-audit --no-fund`; if one form fails for you, try the other, and prefer
+whichever leaves you with a bundle that passes `npm run check:bundle`.
+
+This is a build prerequisite for the test suite only. A locally built bundle is
+a prepared-machine artifact and is **not** evidence of an installed, qualified,
+or human-accepted product; the release journey and its evidence requirements are
+unchanged by anything on this page.
+
+### Give pytest a short scratch directory
+
+Tests that bind a Unix socket put that socket's path inside the scratch
+directory, and `sockaddr_un.sun_path` is limited to about **108 characters** on
+Linux. A nested `--basetemp` can push it past that, and the failure is not
+obviously a path problem:
+
+```
+OSError: AF_UNIX path too long
+ExecutionHostTransportError: socket-refused: cannot connect to
+  .../test_.../daemon/execution-control/control.sock: AF_UNIX path too long
+```
+
+Measured on this repository: that socket path was 111 characters and the test
+failed; the identical test at the identical commit passed with a 12-character
+`--basetemp`. 57 test files reference `AF_UNIX` or `.sock`, so this is not one
+test's quirk.
+
+Pass an explicit short scratch root rather than accepting the default:
+
+```bash
+python3 -m pytest -q --basetemp=/tmp/sp
+```
+
+pytest's own default names directories after the test, so a default
+`/tmp/pytest-of-<user>/pytest-<n>/<long-test-name>/…` is already long before any
+socket subpath is added. This is an environment concern, not a repository
+requirement, and it is not a product defect.
+
 ## Conduct, security, and support
 
 Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). The

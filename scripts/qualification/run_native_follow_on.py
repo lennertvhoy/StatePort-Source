@@ -25,6 +25,13 @@ Fail-closed rules:
   binding and the signed index; the lifecycle artifacts themselves are only
   ever fetched anonymously over HTTPS from the candidate URLs (host mirror
   under the prepublication lane), never copied from a local path;
+- the staged signed payload must additionally be AUTHENTICATED by the pinned
+  Cosign trust root, through the product's own ``CosignVerifier``, against an
+  explicit operator trust input (pinned executable, key path, DER SPKI
+  fingerprint, key id and bundle root).  The binding guard above is
+  self-consistency on candidate-writable bytes; only the private key's
+  signature refuses a payload and ``signatures[]`` rewritten together.  An
+  absent trust input is refused, never defaulted;
 - the uninstall must report a durable ``uninstall`` receipt for this exact
   release identity, leave zero accepted units and still keep the state root;
 - the reinstall must produce a *new* ``install_receipt_*.json`` that binds the
@@ -41,11 +48,13 @@ endpoint, and that refusal is evidence, not a reason to fabricate a run.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import re
 import shlex
 import sys
 from pathlib import Path
+from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -63,6 +72,10 @@ from journey_common import (  # noqa: E402
     verify_installed_image_digests,
     wait_service_healthy,
 )
+# ``journey_common`` above puts the release-contracts source root on ``sys.path``;
+# the Cosign seam below is the product's own verifier, consumed read-only.
+from stateport_release.contract import PinnedPublicKeyIdentity  # noqa: E402
+from stateport_release.cosign import CosignVerifier, signature_bundle_name  # noqa: E402
 from run_agent_result_stage import execute_agent_result_stage  # noqa: E402
 from run_journey_j4 import (  # noqa: E402
     LIFECYCLE_ENV,
@@ -78,6 +91,23 @@ PACKAGE_CONFIRMATIONS = ["install-packages", "install-exact"]
 LEGACY_CONFIRMATIONS = ["install"]
 VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TOOL_INPUTS = REPO_ROOT / "config" / "release-tool-inputs.yaml"
+# The published signed payload is written beside the envelope by the release
+# assembler; admission reads the EXACT bytes cosign signed, never the envelope.
+SIGNED_PAYLOAD_NAME = "release-index.signed-payload.json"
+TRUST_INPUT_FIELDS = (
+    "cosign",
+    "public_key",
+    "public_key_fingerprint",
+    "key_id",
+    "bundle_root",
+)
+TRUST_INPUT_ABSENT = (
+    "native admission requires an explicit Cosign trust input "
+    "(cosign executable, public key path, pinned DER SPKI fingerprint, key id and an "
+    "operator-controlled bundle root)"
+)
 LIMITATIONS = (
     "One bounded objective through the installed control plane, one WSL2 "
     "shutdown/reboot, one retain-state uninstall and one identical reinstall, "
@@ -88,7 +118,7 @@ LIMITATIONS = (
 )
 
 
-def load_staged_candidate_inputs(
+def _staged_candidate_premises(
     j1_receipt: Path,
     site_root: Path,
     *,
@@ -101,6 +131,14 @@ def load_staged_candidate_inputs(
     ``download/<version>/release-index.json``); everything else this driver
     consumes is fetched over the lane's anonymous HTTPS transport.  No guest
     call happens here: a refused premise must never touch the distro.
+
+    PRIVATE, and deliberately so: this settles SELF-CONSISTENCY on
+    candidate-writable bytes only.  Every guard above can be satisfied by an
+    author who rewrites the payload and ``signatures[]`` together, so this
+    function on its own is not an admission.  The one public admission entry
+    point of this module is :func:`admit_staged_candidate_inputs`, which requires
+    an explicit trust input and verifies the exact signed payload bytes through
+    the product's real ``CosignVerifier``; it is the only caller here.
     """
     j1_receipt = _exact_file(j1_receipt, "retained full-J1 receipt")
     site_root = _exact_directory(site_root, "staged candidate site root")
@@ -150,6 +188,200 @@ def load_staged_candidate_inputs(
         "installerDigest": installer_digest,
         "bootstrapUrl": bootstrap_url,
     }
+    return facts, evidence
+
+
+@dataclass(frozen=True)
+class CosignTrustInput:
+    """The operator's explicit trust root for one native admission.
+
+    Every field is required and none carries a default.  The fingerprint and
+    the key id are the ones the release tool manifest pins; the bundle root is
+    operator-controlled on purpose -- a bundle retained inside the staged site
+    would be attacker-writable in exactly the threat model this gate exists to
+    refuse, so the durable, digest-keyed retention root is named by the
+    operator and never derived from the candidate under test.
+    """
+
+    cosign: Path
+    public_key: Path
+    public_key_fingerprint: str
+    key_id: str
+    bundle_root: Path | None
+
+
+def _require_trust_input(trust: Any) -> CosignTrustInput:
+    """Refuse an absent or malformed trust input by name; never substitute one.
+
+    Only the declared :class:`CosignTrustInput` shape is accepted, and every
+    field of it must be present and non-empty.  A mapping is refused rather than
+    coerced, so no duck-typed object can satisfy the gate with different types
+    than the one its fields were pinned and reviewed as.
+    """
+    if not isinstance(trust, CosignTrustInput):
+        raise ValueError(
+            f"{TRUST_INPUT_ABSENT}; refusing to admit a candidate with no "
+            f"{', '.join(TRUST_INPUT_FIELDS)}"
+        )
+    missing = [
+        name
+        for name in TRUST_INPUT_FIELDS
+        if getattr(trust, name, None) in (None, "")
+    ]
+    if missing:
+        raise ValueError(
+            f"{TRUST_INPUT_ABSENT}; refusing to admit a candidate with no "
+            f"{', '.join(missing)}"
+        )
+    return trust
+
+
+def pinned_cosign_trust(bundle_root: Path | None) -> CosignTrustInput:
+    """Build the trust input from the COMMITTED release tool manifest.
+
+    The key path, the pinned canonical DER SPKI fingerprint, the key id and the
+    pinned Cosign executable are read from ``config/release-tool-inputs.yaml``
+    rather than restated here, so this gate cannot drift from the trust root the
+    release pipeline publishes with.  Only ``bundle_root`` is operator-supplied.
+
+    An absent ``bundle_root`` is NOT resolved here: it is carried through to
+    ``_require_trust_input`` so the refusal is raised by the front door itself,
+    after the premise guards have had their say, which keeps every existing
+    named premise refusal unambiguous instead of shadowed by a trust error.
+    """
+    import yaml  # imported here: the driver needs no YAML parser unless it admits
+
+    try:
+        manifest = yaml.safe_load(TOOL_INPUTS.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"release tool manifest is unreadable: {TOOL_INPUTS}") from exc
+    if not isinstance(manifest, Mapping):
+        raise ValueError(f"release tool manifest is not a mapping: {TOOL_INPUTS}")
+    tools = manifest.get("tools")
+    policy = manifest.get("policy")
+    signature = policy.get("signature") if isinstance(policy, Mapping) else None
+    if not isinstance(tools, Mapping) or not isinstance(signature, Mapping):
+        raise ValueError(
+            f"release tool manifest has no tools/policy.signature trust pins: {TOOL_INPUTS}"
+        )
+    cosign = tools.get("cosign")
+    if not isinstance(cosign, Mapping) or not isinstance(cosign.get("executablePath"), str):
+        raise ValueError(
+            f"release tool manifest pins no tools.cosign.executablePath: {TOOL_INPUTS}"
+        )
+    public_key_path = signature.get("publicKeyPath")
+    if not isinstance(public_key_path, str):
+        raise ValueError(
+            f"release tool manifest pins no policy.signature.publicKeyPath: {TOOL_INPUTS}"
+        )
+    return CosignTrustInput(
+        cosign=Path(cosign["executablePath"]),
+        public_key=REPO_ROOT / public_key_path,
+        public_key_fingerprint=str(signature.get("publicKeyFingerprint") or ""),
+        key_id=str(signature.get("keyId") or ""),
+        bundle_root=bundle_root,
+    )
+
+
+def verify_staged_candidate_signature(
+    site_root: Path,
+    version: str,
+    trust: Any,
+) -> dict[str, object]:
+    """Authenticate the staged signed payload against the pinned trust root.
+
+    This is the cryptographic half of admission.  The binding guard in
+    ``load_release_facts_from_index`` proves that an envelope's ``subjectDigest``
+    matches the payload it was read with; that is self-consistency on bytes the
+    candidate author controls, and a payload plus ``signatures[]`` rewritten
+    together satisfies it.  Only the private key's signature refuses that, so
+    the exact signed payload bytes are handed to the real ``CosignVerifier``
+    here.  The retained bundle is digest-keyed under the operator's bundle
+    root before verification, which is safe: retention is inert until a
+    signature over it verifies.
+    """
+    trust = _require_trust_input(trust)
+    site_root = _exact_directory(site_root, "staged candidate site root")
+    index_path = _exact_file(
+        site_root / "download" / version / "release-index.json", "staged release index"
+    )
+    try:
+        document = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"staged release index is unreadable: {index_path}") from exc
+    signatures = document.get("signatures") if isinstance(document, dict) else None
+    if not isinstance(signatures, list) or len(signatures) != 1:
+        raise ValueError(
+            f"staged release index does not carry exactly one detached signature: {index_path}"
+        )
+    signature = signatures[0]
+    payload_path = _exact_file(
+        index_path.parent / SIGNED_PAYLOAD_NAME, "staged signed release payload"
+    )
+    bundle_path = _exact_file(
+        index_path.parent / signature_bundle_name(signature), "staged signature bundle"
+    )
+    # Construction is a refusal, not a repair: a key that is not the pinned
+    # fingerprint, a malformed key id or a bundle root that is missing, a
+    # symlink or not a directory all raise here, before any candidate byte is
+    # treated as bound.
+    verifier = CosignVerifier(
+        cosign=trust.cosign,
+        public_key=trust.public_key,
+        identity=PinnedPublicKeyIdentity(
+            trust.public_key_fingerprint, trust.key_id
+        ),
+        bundle_root=trust.bundle_root,
+    )
+    retained = verifier.retain_bundle(bundle_path, signature)
+    payload_bytes = payload_path.read_bytes()
+    proof = verifier.verify_blob(payload_bytes, signature)
+    return {
+        "cosignTrust": {
+            "cosign": str(verifier.cosign),
+            "publicKey": str(trust.public_key),
+            "publicKeyFingerprint": proof.identity_primary,
+            "publicKeyId": proof.identity_secondary,
+            "trustMode": proof.trust_mode,
+            "transparencyLog": proof.transparency_log_mode,
+            "bundleRoot": str(trust.bundle_root),
+            "retainedBundle": str(retained),
+            "bundleDigest": proof.bundle_digest,
+            "signedPayloadPath": str(payload_path),
+            "subjectDigest": proof.subject_digest,
+            "verified": True,
+        }
+    }
+
+
+def admit_staged_candidate_inputs(
+    j1_receipt: Path,
+    site_root: Path,
+    *,
+    native_distro_name: str,
+    prepublication_mirror: bool,
+    trust: Any,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """The admission front door of this driver: premises AND authenticity.
+
+    ``_staged_candidate_premises`` settles the retained receipt, the staged
+    bootstrap and the receipt/binding identity; this adds the one thing those
+    guards cannot do, which is prove the signed payload was signed by the
+    pinned key.  The premise guards run first so their named refusals stay
+    unambiguous, and no guest call, stage receipt or candidate-byte fetch is
+    reachable from either order.  ``trust`` is required and is refused by name
+    when absent.
+    """
+    facts, evidence = _staged_candidate_premises(
+        j1_receipt,
+        site_root,
+        native_distro_name=native_distro_name,
+        prepublication_mirror=prepublication_mirror,
+    )
+    version = facts.get("version")
+    if not isinstance(version, str):
+        raise ValueError("staged release index has no usable release version")
+    evidence.update(verify_staged_candidate_signature(site_root, version, trust))
     return facts, evidence
 
 
@@ -533,6 +765,11 @@ def main() -> int:
                         help="retained native full-J1 receipt (guest vm_dir/receipt.json)")
     parser.add_argument("--site-root", type=Path, required=True,
                         help="staged candidate site root (guest C:\\StatePort-r2\\site)")
+    parser.add_argument("--cosign-bundle-root", type=Path,
+                        help="operator-controlled directory the signed-index bundle is "
+                             "retained under before verification; never a path inside "
+                             "the staged site.  Omitting it is refused by name and "
+                             "recorded as a durable preflight failure, never defaulted")
     parser.add_argument("--vm-dir", type=Path, required=True,
                         help="native work directory holding the retained J1 receipt")
     parser.add_argument("--native-wsl2", action="store_true")
@@ -560,11 +797,17 @@ def main() -> int:
     j1_receipt = args.j1_receipt
     site_root = args.site_root
     try:
-        facts, evidence = load_staged_candidate_inputs(
+        # An absent --cosign-bundle-root is an absent trust input.  It is
+        # carried into the front door rather than resolved here, so the refusal
+        # is raised by name after the premise guards and recorded in the durable
+        # preflight receipt instead of shadowing another named refusal.
+        trust = pinned_cosign_trust(args.cosign_bundle_root)
+        facts, evidence = admit_staged_candidate_inputs(
             j1_receipt,
             site_root,
             native_distro_name=args.wsl_distro_name,
             prepublication_mirror=args.prepublication_mirror,
+            trust=trust,
         )
     except Exception as exc:  # noqa: BLE001 - preflight failure must be durable
         _write_preflight_failure(args, exc, j1_receipt=j1_receipt, site_root=site_root)

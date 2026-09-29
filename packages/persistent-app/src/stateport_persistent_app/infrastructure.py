@@ -623,6 +623,10 @@ class LocalLibvirtAdapter:
                            "message": "Stored infrastructure runs have no matching valid plan; inspection is required."})
         return result, errors
 
+    #: Why each plan was not offered, filled by :meth:`pending_approval_sources`.
+    #: Diagnostic only: nothing here grants authority and no filter is relaxed.
+    last_skipped_plans: list[dict[str, Any]] = []
+
     @property
     def _plans(self) -> Path:
         return self.state_root / "plans"
@@ -1897,6 +1901,13 @@ class LocalLibvirtAdapter:
 
         if not self._plans.is_dir() or self._plans.is_symlink():
             return sources
+        self.last_skipped_plans = []
+
+        def _record_skip(digest: str, reason: str, detail: str | None = None) -> None:
+            self.last_skipped_plans.append(
+                {"planDigest": digest, "reason": reason, "detail": detail}
+            )
+
         candidates: list[tuple[float, Path]] = []
         for path in self._plans.iterdir():
             if (
@@ -1908,32 +1919,58 @@ class LocalLibvirtAdapter:
             try:
                 details = path.stat()
                 if details.st_size > 512 * 1024:
+                    _record_skip(
+                        "sha256:" + path.stem,
+                        "plan-too-large",
+                        f"{details.st_size} bytes exceeds the 512 KiB cap",
+                    )
                     continue
-            except OSError:
+            except OSError as exc:
+                _record_skip("sha256:" + path.stem, "plan-stat-failed", str(exc))
                 continue
             candidates.append((details.st_mtime, path))
         candidates.sort(key=lambda item: item[0], reverse=True)
+        # MEASURED 2026-09-28. Six filters below can each drop a plan, and until now all
+        # six ended in a BARE `continue`, so a plan the surface had already reported as
+        # awaiting approval could disappear from the inbox with nothing recorded anywhere.
+        # That is how a governed run produced a 200 with itemCount 0 and no way to tell
+        # "no plan exists" from "a plan exists and was dropped". The reader is now
+        # SELF-DESCRIBING. The BINDING IS UNCHANGED -- this adds no admission and removes
+        # none: the same six filters still skip the same plans, fail-closed, including the
+        # repository identity that carries `dirty`/`dirtyDigest`, because running commands
+        # against content that changed since the plan was computed is a real hazard and
+        # weakening that is a security decision, not a repair. What changes is only that
+        # the drop is now REPORTED instead of silent.
         for _modified_at, path in candidates[:maximum_plans]:
             plan_digest = "sha256:" + path.stem
+
+            def _skip(reason: str, detail: str | None = None) -> None:
+                _record_skip(plan_digest, reason, detail)
+
             try:
                 plan = self._load_plan(plan_digest)
                 if plan.get("approvalRequired") is not True:
+                    _skip("not-approval-required")
                     continue
                 try:
                     self._load_approval(plan_digest)
                 except InfrastructureError:
                     pass
                 else:
+                    _skip("already-approved")
                     continue
                 if self.project_identity().to_dict() != plan.get("repository"):
+                    _skip("repository-identity-changed")
                     continue
                 self._assert_plan_target_current(plan)
                 if (
                     str(plan.get("operation")) in {"start", "restart"}
                     and plan.get("sshVerification", {}).get("status") != "enrolled"
                 ):
+                    _skip("ssh-not-enrolled")
                     continue
-            except InfrastructureError:
+            except InfrastructureError as exc:
+                _skip("plan-not-current", str(exc))
                 continue
             sources.append({"type": "infrastructure_plan", "plan": plan})
         return sources

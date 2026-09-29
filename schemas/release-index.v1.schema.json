@@ -1920,6 +1920,153 @@
         },
         "publicExportManifest": {
           "$ref": "#/$defs/artifact"
+        },
+        "vulnerabilityExceptions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "formatVersion",
+            "exceptionsFile",
+            "exceptionsDigest",
+            "ledgerArtifact",
+            "suppressionPolicyFile",
+            "suppressionPolicyDigest",
+            "suppressionPolicyArtifact",
+            "images",
+            "totalAppliedExceptionIds",
+            "distinctAppliedExceptionIds"
+          ],
+          "properties": {
+            "formatVersion": {
+              "const": "stateport.release-vulnerability-exceptions/v1"
+            },
+            "exceptionsFile": {
+              "const": "config/release-scan-exceptions.v1.yaml"
+            },
+            "exceptionsDigest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "ledgerArtifact": {
+              "$ref": "#/$defs/artifact"
+            },
+            "suppressionPolicyFile": {
+              "const": "config/release-scan-suppression.v1.yaml"
+            },
+            "suppressionPolicyDigest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "suppressionPolicyArtifact": {
+              "$ref": "#/$defs/artifact"
+            },
+            "images": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "appliedExceptionIds",
+                  "unexplainedFindingsCount",
+                  "threshold",
+                  "unfixedFindingsIncluded",
+                  "suppressionPolicyFile",
+                  "suppressionPolicyDigest",
+                  "suppressedFindingsCount",
+                  "suppressedFindingsAtOrAboveThresholdCount",
+                  "unexplainedSuppressedFindingsCount",
+                  "appliedSuppressionRuleIds",
+                  "suppressionEvaluatedOn",
+                  "suppressionExpiresOn"
+                ],
+                "properties": {
+                  "appliedExceptionIds": {
+                    "type": "array",
+                    "maxItems": 256,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^RX-[0-9]{4}-[0-9]{3}$"
+                    }
+                  },
+                  "unexplainedFindingsCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "threshold": {
+                    "enum": [
+                      "negligible",
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "unfixedFindingsIncluded": {
+                    "type": "boolean"
+                  },
+                  "evaluationArtifact": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  },
+                  "suppressionPolicyFile": {
+                    "const": "config/release-scan-suppression.v1.yaml"
+                  },
+                  "suppressionPolicyDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$"
+                  },
+                  "suppressedFindingsCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "suppressedFindingsAtOrAboveThresholdCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unexplainedSuppressedFindingsCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "appliedSuppressionRuleIds": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^RS-[0-9]{4}-[0-9]{3}$"
+                    }
+                  },
+                  "suppressionEvaluatedOn": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                  },
+                  "suppressionExpiresOn": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                  }
+                }
+              }
+            },
+            "totalAppliedExceptionIds": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "distinctAppliedExceptionIds": {
+              "type": "array",
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^RX-[0-9]{4}-[0-9]{3}$"
+              }
+            }
+          }
         }
       }
     },

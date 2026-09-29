@@ -21,9 +21,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 spec = spec_from_file_location("build_release_images", ROOT / "scripts/build_release_images.py")
 assert spec and spec.loader
-build_release_images = module_from_spec(spec)
-sys.modules[spec.name] = build_release_images
-spec.loader.exec_module(build_release_images)
+if spec.name in sys.modules:
+    # Reuse the one registered copy. scripts/assemble_release_index.py imports
+    # build_release_images normally, so executing the file here unconditionally would
+    # leave the process holding two copies, and the 29 rebindings below could land on
+    # the one assemble_release_index does not read.
+    build_release_images = sys.modules[spec.name]
+else:
+    build_release_images = module_from_spec(spec)
+    sys.modules[spec.name] = build_release_images
+    spec.loader.exec_module(build_release_images)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -856,3 +863,431 @@ def test_opencode_platform_binary_is_pinned_lock_verified_and_version_asserted()
     # against, so both packages must be installed and exactly pinned.
     for package in ("libstdc++=15.2.0-r2", "libgcc=15.2.0-r2"):
         assert package in web
+
+
+# --------------------------------------------------------------------------
+# the builder BINARY is anchored to a committed digest, not to its own descriptor
+# --------------------------------------------------------------------------
+#
+# Added 2026-09-28 after independent verification of 86218b34. Every digest check the
+# builder gate performs is between the executable and the operator-supplied
+# descriptor, and that descriptor is unsigned, uncommitted and supplied by the same
+# party as the executable. A 41-byte stand-in plus a descriptor hashing itself
+# satisfies all of them, so `verify_podman_builder` had no committed anchor at all
+# and, per the same verification, no test called it: a probe recorded a call count of
+# 0 while the suite reported 35 passed. These tests call it for real.
+
+
+def _builder_inputs(monkeypatch: pytest.MonkeyPatch, **builder: object) -> dict:
+    """A minimal build-inputs mapping, with builder fields overridable per test."""
+    base: dict = {
+        "name": "podman",
+        "observedVersion": "6.1.1",
+        "observedExecutableDigest": "sha256:" + "11" * 32,
+        "compatibilityFloor": "5.0.0",
+    }
+    base.update(builder)
+    return {"builder": base}
+
+
+def _descriptor_for(path: Path, digest: str, version: str = "6.1.1") -> dict:
+    return {
+        "formatVersion": "stateport.release-builder-descriptor/v1",
+        "name": "podman",
+        "executablePath": str(path),
+        "executableDigest": digest,
+        "version": version,
+        "artifact": {"uri": "arch://extra-x86_64/podman-6.1.1-1", "digest": digest},
+    }
+
+
+def test_builder_binary_must_match_the_committed_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A descriptor that hashes ITSELF is not enough: the committed digest decides.
+
+    This is the exact bypass the verification demonstrated. Executable, descriptor
+    digest and artifact digest all agree with each other and are wholly
+    operator-controlled, so without the committed comparison they prove only that the
+    descriptor describes whatever was handed over.
+    """
+    import hashlib
+    import json
+
+    stand_in = tmp_path / "podman"
+    stand_in.write_text("#!/bin/sh\nexit 0\n")
+    stand_in.chmod(0o755)
+    real = "sha256:" + hashlib.sha256(stand_in.read_bytes()).hexdigest()
+
+    descriptor = tmp_path / "builder.json"
+    descriptor.write_text(json.dumps(_descriptor_for(stand_in, real)))
+    monkeypatch.setenv(build_release_images.BUILDER_DESCRIPTOR_ENV, str(descriptor))
+    monkeypatch.setattr(build_release_images, "PODMAN", str(stand_in))
+    monkeypatch.setattr(
+        build_release_images, "BUILD_INPUTS", tmp_path / "inputs.yaml"
+    )
+    monkeypatch.setattr(
+        build_release_images,
+        "_load_yaml",
+        lambda _p: _builder_inputs(monkeypatch, observedExecutableDigest="sha256:" + "22" * 32),
+    )
+    monkeypatch.setattr(
+        build_release_images,
+        "_run",
+        lambda *a, **k: json.dumps({"Client": {"Version": "6.1.1"}}),
+    )
+
+    with pytest.raises(
+        build_release_images.ReleaseBuildError, match="committed, reviewed builder"
+    ):
+        build_release_images.verify_podman_builder()
+
+
+def test_builder_gate_refuses_when_no_committed_digest_is_declared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing anchor must refuse, not silently skip the check."""
+    import hashlib
+    import json
+
+    stand_in = tmp_path / "podman"
+    stand_in.write_text("#!/bin/sh\nexit 0\n")
+    stand_in.chmod(0o755)
+    real = "sha256:" + hashlib.sha256(stand_in.read_bytes()).hexdigest()
+    descriptor = tmp_path / "builder.json"
+    descriptor.write_text(json.dumps(_descriptor_for(stand_in, real)))
+    monkeypatch.setenv(build_release_images.BUILDER_DESCRIPTOR_ENV, str(descriptor))
+    monkeypatch.setattr(build_release_images, "PODMAN", str(stand_in))
+    monkeypatch.setattr(build_release_images, "BUILD_INPUTS", tmp_path / "inputs.yaml")
+    monkeypatch.setattr(
+        build_release_images,
+        "_load_yaml",
+        lambda _p: {
+            "builder": {"name": "podman", "observedVersion": "6.1.1", "compatibilityFloor": "5.0.0"}
+        },
+    )
+    monkeypatch.setattr(
+        build_release_images,
+        "_run",
+        lambda *a, **k: json.dumps({"Client": {"Version": "6.1.1"}}),
+    )
+
+    with pytest.raises(
+        build_release_images.ReleaseBuildError, match="no committed builder executable digest"
+    ):
+        build_release_images.verify_podman_builder()
+
+
+def test_committed_builder_digest_matches_the_real_host_builder() -> None:
+    """The committed anchor must equal the digest of the builder it claims to pin.
+
+    Guards the value itself, so a re-pin cannot be a copy-paste of a stale digest
+    and the field cannot rot unnoticed the way observedVersion did for 57 days.
+    """
+    import hashlib
+
+    import yaml as _yaml
+
+    inputs = _yaml.safe_load(
+        (Path(build_release_images.__file__).resolve().parent.parent
+         / "config" / "container-build-inputs.yaml").read_text()
+    )
+    declared = str(inputs["builder"]["observedExecutableDigest"])
+    assert declared.startswith("sha256:") and len(declared) == len("sha256:") + 64
+    # Resolve the builder the way the GATE resolves it, not via a hardcoded path.
+    # A hardcoded /usr/bin/podman made this host-coupled and could never detect that
+    # the file the build would actually run is a different one; using the module's
+    # own resolution means this test and the gate cannot disagree about which file
+    # is meant, and it honours STATEPORT_PODMAN_PATH the same way the gate does.
+    resolved = Path(build_release_images.PODMAN)
+    if resolved.is_symlink() or not resolved.is_file():
+        pytest.skip(f"no regular builder binary at the resolved path {resolved}")
+    actual = "sha256:" + hashlib.sha256(resolved.read_bytes()).hexdigest()
+    assert declared == actual, (
+        f"the committed builder digest does not match the builder the build would "
+        f"run ({resolved}); the host Podman was upgraded and the builder must be "
+        f"re-pinned by a human"
+    )
+
+
+# --------------------------------------------------------------------------
+# the compatibility floor is enforced, not decorative
+# --------------------------------------------------------------------------
+#
+# Added 2026-09-28. `compatibilityFloor` was emitted into the plan and the receipt but
+# compared by nothing: `grep -n Floor scripts/build_release_images.py` found only three
+# emission sites and no comparison, and a 0.0.1 stand-in builder sailed straight past
+# 5.0.0. The honest scope of this check is narrower than it looks, and the tests say so:
+# because `observedVersion` is compared for exact equality against a committed value,
+# a substituted binary cannot reach the floor check at all. What the floor catches is a
+# COMMITTED CONFIGURATION ERROR -- a build-inputs edit that declares an observedVersion
+# below its own floor -- which would otherwise build and sign a release with a builder
+# the project had already declared unsupported.
+
+
+@pytest.mark.parametrize(
+    ("version", "floor", "expected"),
+    [
+        ("6.1.1", "5.0.0", True),
+        ("5.0.0", "5.0.0", True),   # exactly at the floor is sufficient
+        ("4.9.9", "5.0.0", False),
+        ("6.2.0-dev", "5.0.0", True),  # pre-release suffix is not a downgrade
+        ("0.0.1", "5.0.0", False),     # the value the bypass actually used
+        ("10.0.0", "9.0.0", True),     # numeric, not lexicographic
+        ("9.0.0", "10.0.0", False),    # the case a string compare would get wrong
+        ("6.1", "5.0.0", True),        # short form padded with zeros
+        ("6.1.1", "", None),           # unparsable floor refuses rather than passes
+        ("not-a-version", "5.0.0", None),
+    ],
+)
+def test_version_at_least_is_numeric_and_fails_closed(
+    version: str, floor: str, expected: bool | None
+) -> None:
+    assert build_release_images._version_at_least(version, floor) is expected
+
+
+def test_builder_below_the_committed_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A committed observedVersion under its own floor must refuse the build."""
+    import hashlib
+    import json
+
+    stand_in = tmp_path / "podman"
+    stand_in.write_text("#!/bin/sh\nexit 0\n")
+    stand_in.chmod(0o755)
+    real = "sha256:" + hashlib.sha256(stand_in.read_bytes()).hexdigest()
+
+    descriptor = tmp_path / "builder.json"
+    descriptor.write_text(json.dumps(_descriptor_for(stand_in, real, version="4.9.9")))
+    monkeypatch.setenv(build_release_images.BUILDER_DESCRIPTOR_ENV, str(descriptor))
+    monkeypatch.setattr(build_release_images, "PODMAN", str(stand_in))
+    monkeypatch.setattr(build_release_images, "BUILD_INPUTS", tmp_path / "inputs.yaml")
+    monkeypatch.setattr(
+        build_release_images,
+        "_load_yaml",
+        lambda _p: {
+            "builder": {
+                "name": "podman",
+                "observedVersion": "4.9.9",
+                "observedExecutableDigest": real,
+                "compatibilityFloor": "5.0.0",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        build_release_images,
+        "_run",
+        lambda *a, **k: json.dumps({"Client": {"Version": "4.9.9"}}),
+    )
+
+    with pytest.raises(build_release_images.ReleaseBuildError, match="below the committed"):
+        build_release_images.verify_podman_builder()
+
+
+# --------------------------------------------------------------------------
+# the verified builder must be the builder that actually gets executed
+# --------------------------------------------------------------------------
+#
+# Added 2026-09-28 after a second independent verification, which showed the first F1
+# fix raised the cost of the DESCRIPTOR attack while leaving the PATH attack open: the
+# gate hashed the descriptor's path while the build executed the module-level PODMAN
+# resolved from PATH, and the only guard between them tested STATEPORT_PODMAN_PATH,
+# which nothing in the repository sets. The verifier demonstrated it end to end -- an
+# honest descriptor verified /usr/bin/podman, PATH supplied a substituted binary, every
+# committed check passed, and the substituted binary built the images. The first three
+# tests above had to be given an explicit PODMAN because this check now runs first.
+
+
+def _builder_gate_stubs(monkeypatch, stand_in, real, version="6.1.1"):
+    """Wire verify_podman_builder's collaborators for a synthetic builder binary."""
+    import json
+
+    monkeypatch.setattr(build_release_images, "PODMAN", str(stand_in))
+    monkeypatch.setattr(
+        build_release_images, "_load_yaml", lambda _p: _builder_inputs(
+            monkeypatch, observedExecutableDigest=real
+        )
+    )
+
+    def fake_run(_argv, **_kwargs):
+        return json.dumps(
+            {"Client": {"Version": version},
+             "host": {"os": "linux", "arch": "amd64", "cgroupVersion": "v2",
+                      "security": {"rootless": True}},
+             "store": {"graphDriverName": "overlay"}}
+        )
+
+    monkeypatch.setattr(build_release_images, "_run", fake_run)
+
+
+def _synthetic_builder(tmp_path, name, body="#!/bin/sh\nexit 0\n"):
+    import hashlib
+
+    path = tmp_path / name
+    path.write_text(body)
+    path.chmod(0o755)
+    return path, "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_builder_refuses_when_path_resolves_to_a_different_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact substitution that survived the first fix must be refused."""
+    import json
+
+    honest, real = _synthetic_builder(tmp_path, "honest-podman")
+    attacker, _ = _synthetic_builder(
+        tmp_path, "attacker-podman", "#!/bin/sh\necho SUBSTITUTED-BUILDER-ACTUALLY-RAN\n"
+    )
+
+    descriptor = tmp_path / "builder.json"
+    descriptor.write_text(json.dumps(_descriptor_for(honest, real)))
+    monkeypatch.setenv(build_release_images.BUILDER_DESCRIPTOR_ENV, str(descriptor))
+    monkeypatch.delenv("STATEPORT_PODMAN_PATH", raising=False)
+    monkeypatch.setattr(build_release_images, "BUILD_INPUTS", tmp_path / "inputs.yaml")
+    # PODMAN is what the build executes; the descriptor names a different file.
+    monkeypatch.setattr(build_release_images, "PODMAN", str(attacker))
+    monkeypatch.setattr(
+        build_release_images, "_load_yaml", lambda _p: _builder_inputs(
+            monkeypatch, observedExecutableDigest=real
+        )
+    )
+    monkeypatch.setattr(
+        build_release_images, "_run",
+        lambda *a, **k: json.dumps({"Client": {"Version": "6.1.1"}}),
+    )
+
+    with pytest.raises(
+        build_release_images.ReleaseBuildError, match="not the verified builder"
+    ):
+        build_release_images.verify_podman_builder()
+
+
+def test_builder_accepts_an_honest_path_resolving_to_the_verified_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new check must not refuse an honest host where both sides agree."""
+    import json
+
+    honest, real = _synthetic_builder(tmp_path, "honest-podman")
+    descriptor = tmp_path / "builder.json"
+    descriptor.write_text(json.dumps(_descriptor_for(honest, real)))
+    monkeypatch.setenv(build_release_images.BUILDER_DESCRIPTOR_ENV, str(descriptor))
+    monkeypatch.delenv("STATEPORT_PODMAN_PATH", raising=False)
+    monkeypatch.setattr(build_release_images, "BUILD_INPUTS", tmp_path / "inputs.yaml")
+    _builder_gate_stubs(monkeypatch, honest, real)
+
+    value = build_release_images.verify_podman_builder()
+    assert value["executablePath"] == str(honest)
+    assert value["executableDigest"] == real
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("٦.١.١", None),   # Arabic-Indic digits satisfy isdigit() but are not ascii
+        ("1." * 40 + "1", None),  # oversized after v-prefix stripping; int() would raise
+    ],
+)
+def test_version_parsing_refuses_without_crashing(
+    version: str, expected: bool | None
+) -> None:
+    """Unparsable input must return None, never raise and never pass."""
+    assert build_release_images._version_at_least(version, "5.0.0") is expected
+
+
+# --------------------------------------------------------------------------
+# PATH-precedence symlink alias, and the two gaps the second pass found
+# --------------------------------------------------------------------------
+#
+# Added 2026-09-28 after a second independent verification pass, which found a bypass
+# that survived the realpath fix. The gate validated and hashed `executable`, the
+# descriptor's path, but never hashed or type-checked `PODMAN`, which is what all
+# fourteen exec sites actually run. A PATH-precedence SYMLINK pointing at the honest
+# file satisfied realpath equality, was never hashed, and could be repointed after the
+# check to swap the builder for a thirty-minute build whose provenance already named
+# the honest digest. The governor's own PATH begins in user-owned directories, so this
+# was reachable rather than theoretical.
+
+
+def test_builder_refuses_a_symlinked_path_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlink that resolves to the honest file is still an alias, not the builder."""
+    import json
+
+    honest, real = _synthetic_builder(tmp_path, "honest-podman")
+    alias = tmp_path / "bin"
+    alias.mkdir()
+    link = alias / "podman"
+    link.symlink_to(honest)  # resolves to the honest file at check time
+
+    descriptor = tmp_path / "builder.json"
+    descriptor.write_text(json.dumps(_descriptor_for(honest, real)))
+    monkeypatch.setenv(build_release_images.BUILDER_DESCRIPTOR_ENV, str(descriptor))
+    monkeypatch.delenv("STATEPORT_PODMAN_PATH", raising=False)
+    monkeypatch.setattr(build_release_images, "BUILD_INPUTS", tmp_path / "inputs.yaml")
+    _builder_gate_stubs(monkeypatch, honest, real)
+    # set AFTER the stubs, which pin PODMAN to the honest file themselves.
+    monkeypatch.setattr(build_release_images, "PODMAN", str(link))
+
+    with pytest.raises(build_release_images.ReleaseBuildError, match="symlink"):
+        build_release_images.verify_podman_builder()
+
+
+def test_realpath_comparison_is_pinned_and_cannot_be_replaced_by_string_equality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the realpath normalisation itself, which no other test pins.
+
+    Second-pass finding: replacing `realpath(PODMAN) != realpath(executable)` with
+    plain string equality left the ENTIRE suite green, so the normalisation could be
+    deleted as cosmetic. A non-canonical spelling of the same honest file is accepted
+    only while realpath is in use, which is what makes this test fail if it is not.
+    """
+    import json
+    import os
+
+    honest, real = _synthetic_builder(tmp_path, "honest-podman")
+    descriptor = tmp_path / "builder.json"
+    descriptor.write_text(json.dumps(_descriptor_for(honest, real)))
+    monkeypatch.setenv(build_release_images.BUILDER_DESCRIPTOR_ENV, str(descriptor))
+    monkeypatch.delenv("STATEPORT_PODMAN_PATH", raising=False)
+    monkeypatch.setattr(build_release_images, "BUILD_INPUTS", tmp_path / "inputs.yaml")
+    _builder_gate_stubs(monkeypatch, honest, real)
+
+    non_canonical = os.path.join(str(tmp_path), "..", os.path.basename(str(tmp_path)),
+                                 "honest-podman")
+    assert non_canonical != str(honest), "the spelling must differ textually"
+    assert os.path.realpath(non_canonical) == str(honest), "but name the same file"
+    monkeypatch.setattr(build_release_images, "PODMAN", non_canonical)
+
+    value = build_release_images.verify_podman_builder()
+    assert value["executableDigest"] == real
+
+
+def test_builder_gate_is_called_before_images_are_executed() -> None:
+    """The success path must call the gate before executing any image command.
+
+    Second-pass finding: deleting the only call to verify_podman_builder from the
+    success path left the whole suite green, because both existing monkeypatch sites
+    assert `calls == []` and therefore only ever exercise REFUSAL paths. Reaching the
+    gate at runtime needs the full governor harness, so this pins the ordering in the
+    source instead: the call must exist, and must precede image execution. Deleting
+    the call, or moving it after execution, fails here.
+    """
+    source = Path(build_release_images.__file__).read_text()
+    body = source[source.index("def build_release("):]
+    verify_at = body.index("verify_podman_builder()")
+    assert "build_release_images.verify_podman_builder" not in body, (
+        "the gate must be called as a module attribute so tests can intercept it"
+    )
+    for marker in ("_execute_image_builds", "podman", "imageCommands"):
+        if marker in body:
+            assert verify_at < body.index(marker), (
+                f"the builder gate must run before {marker} is reached"
+            )
+            break
+    else:
+        raise AssertionError("no image execution site found after the gate")

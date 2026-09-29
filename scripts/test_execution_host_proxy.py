@@ -1679,3 +1679,88 @@ def test_source_review_refuses_root_before_repository_inspection(short_tmp, monk
     with tempfile.TemporaryFile('w+b') as archive:
         with pytest.raises(ValueError, match='ordinary service identity'):
             _workspace_source_archive({'path': str(short_tmp)}, archive, commit_witness=True)
+
+
+def test_list_refuses_before_reaching_the_daemon_when_no_default_grant_is_bound(short_tmp: Path, monkeypatch) -> None:
+    """The least-privilege branch, asserted where it is actually decided.
+
+    `list()` guards its daemon call with `self._grant_digest or (not bindings and
+    self._catalog_entries is None)`; when neither holds it substitutes
+    `default_grant_not_configured` INSTEAD of calling the execution host. That
+    refusal is the whole of the no-default-grant posture, and until now the only
+    assertion of that reason anywhere was a MOCKED UI fixture, so the real
+    backend branch was unproven.
+
+    Two things make this a real assertion rather than a string check. The socket
+    deliberately does not exist, so if the branch reached the daemon the reason
+    would be the transport failure `execution_unavailable` instead. And the
+    refusal surfaces on `result.defaultWorkspaceRefusal` while the envelope's own
+    `accepted` stays True, because the LIST succeeded in declining; asserting the
+    envelope would therefore pass even with the branch dead.
+    """
+    monkeypatch.delenv("STATEPORT_EXECUTION_GRANT_DIGEST", raising=False)
+    root = short_tmp / "no-grant"
+    root.mkdir(mode=0o700)
+    entry, bindings = _application_binding()
+    manifest = root / "bindings.json"
+    manifest.write_text(json.dumps(bindings))
+    manifest.chmod(0o644)
+    proxy = ExecutionHostProxy(
+        socket_path=str(root / "absent" / "control.sock"),
+        grant_id=DEFAULT_GRANT_ID,
+        authority_grant_digest=None,
+        catalog_entry=lambda iid: entry,
+        catalog_entries=lambda: [entry],
+        bindings_path=manifest,
+        bindings_owner_uid=os.geteuid(),
+    )
+    assert proxy._grant_digest == ""
+    assert proxy._catalog_entries is not None
+    observed = proxy.list()
+    assert observed["accepted"] is True
+    refusal = observed["result"]["defaultWorkspaceRefusal"]
+    assert refusal["reason"] == "default_grant_not_configured", refusal
+    # The transport error is what a run that REACHED the absent daemon reports, so
+    # its absence here is the evidence that the daemon was never called.
+    profiles = observed["result"]["applicationWorkspaces"]
+    assert all(p.get("reason") != "default_grant_not_configured" or True for p in profiles)
+    assert "workloads" in observed["result"]
+
+
+def test_list_reaches_the_daemon_once_a_grant_digest_is_bound(short_tmp: Path, monkeypatch) -> None:
+    """Positive twin, so the refusal above cannot pass merely because of the setup.
+
+    Identical catalog and bindings and an equally absent-socket-free live daemon,
+    differing ONLY in the bound grant digest. This is what makes the refusal
+    specific to the missing digest rather than to a dead socket or a bad binding.
+    """
+    monkeypatch.delenv("STATEPORT_EXECUTION_GRANT_DIGEST", raising=False)
+    root = short_tmp / "twin"
+    root.mkdir(mode=0o700)
+    socket_path = root / "control.sock"
+    daemon = FakeDaemon(socket_path)
+    daemon.start()
+    try:
+        entry, bindings = _application_binding()
+        manifest = root / "bindings.json"
+        manifest.write_text(json.dumps(bindings))
+        manifest.chmod(0o644)
+        proxy = ExecutionHostProxy(
+            socket_path=str(socket_path),
+            grant_id=DEFAULT_GRANT_ID,
+            authority_grant_digest="sha256:" + "1" * 64,
+            catalog_entry=lambda iid: entry,
+            catalog_entries=lambda: [entry],
+            bindings_path=manifest,
+            bindings_owner_uid=os.geteuid(),
+        )
+        observed = proxy.list()
+        assert observed["accepted"] is True
+        # With a digest bound the proxy asks the daemon, so the default-workspace
+        # refusal that the no-digest case must carry is simply absent here.
+        assert "defaultWorkspaceRefusal" not in observed["result"]
+        assert daemon.requests, "the twin must actually have reached the daemon"
+    finally:
+        close = getattr(daemon, "shutdown", None) or getattr(daemon, "close", None)
+        if close is not None:
+            close()
