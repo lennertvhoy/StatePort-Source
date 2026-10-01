@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a bounded product improvement with a clear user outcome.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        StatePort is not yet publicly released. This form records a proposal;
+        it does not authorize implementation, contribution intake, or release.
+        Never include secrets or private data, and never use this form for
+        security reports — see SECURITY.md. Filing a proposal is not a code
+        contribution; external contributions are not currently accepted (see
+        CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the user-facing problem without private data.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed outcome
+      description: State the observable result and any safety or ownership boundary.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain why an existing capability or workflow does not solve the problem.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I have not included secrets, personal data, private paths, or restricted material.
+          required: true

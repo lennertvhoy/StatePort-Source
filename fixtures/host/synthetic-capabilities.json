@@ -1,0 +1,9 @@
+{
+  "formatVersion": "stateport.backend-capabilities/v1",
+  "backend": {"id": "synthetic"},
+  "adapter": {"id": "synthetic-test", "version": "1.0.0", "testOnly": true, "productionEligible": false},
+  "integrationTier": "portable",
+  "capabilities": {"structuredEvents": "supported", "nonInteractiveExecution": "supported", "cancellation": "supported", "sessionResume": "supported", "repositoryInstructions": "supported", "customTools": "supported", "mcpEquivalent": "supported", "approvalIntegration": "supported", "sandboxSupport": "supported", "changedFileReporting": "supported", "tokenTelemetry": "supported", "costTelemetry": "supported"},
+  "authenticationRouteClasses": ["external_manual"],
+  "adapterPermissions": []
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-activation-pointer.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "generation", "previousGeneration", "previousPointerDigest", "operationPlanDigest", "decisionDigest", "terminalAcceptanceReceiptDigest", "dataPromotionReceiptDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "acceptedDataGeneration", "acceptedDataGenerationDigest", "activationTarget", "routeProjectionDigest", "ownerBundleDigests", "state", "writtenAt", "pointerDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-activation-pointer/v1"},
+    "generation": {"type": "integer", "minimum": 1},
+    "previousGeneration": {"type": "integer", "minimum": 0},
+    "previousPointerDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "decisionDigest": {"$ref": "#/$defs/digest"},
+    "terminalAcceptanceReceiptDigest": {"$ref": "#/$defs/digest"},
+    "dataPromotionReceiptDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "acceptedDataGeneration": {"type": "string", "pattern": "^data_[0-9a-f]{32}$"},
+    "acceptedDataGenerationDigest": {"$ref": "#/$defs/digest"},
+    "activationTarget": {"const": "stateport-accepted.target"},
+    "routeProjectionDigest": {"$ref": "#/$defs/digest"},
+    "ownerBundleDigests": {"$ref": "#/$defs/ownerBundles"},
+    "state": {"const": "accepted"},
+    "writtenAt": {"$ref": "#/$defs/timestamp"},
+    "pointerDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "ownerBundles": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["owner", "digest"], "properties": {"owner": {"const": "stateport-control"}, "digest": {"$ref": "#/$defs/digest"}}}}
+  }
+}

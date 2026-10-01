@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/preview-route-receipt.v1.schema.json",
+  "title": "StatePort preview route receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "receiptId",
+    "routeId",
+    "sequence",
+    "event",
+    "actor",
+    "createdAt",
+    "data",
+    "previousReceiptDigest",
+    "receiptDigest"
+  ],
+  "properties": {
+    "schema": {
+      "const": "stateport.preview-route-receipt/v1"
+    },
+    "receiptId": {
+      "type": "string",
+      "pattern": "^receipt_[0-9a-f]{24}$"
+    },
+    "routeId": {
+      "type": "string",
+      "pattern": "^route_[0-9a-f]{24}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "event": {
+      "enum": [
+        "registered",
+        "rewritten",
+        "revoked"
+      ]
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "data": {
+      "type": "object"
+    },
+    "previousReceiptDigest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "receiptDigest": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  }
+}

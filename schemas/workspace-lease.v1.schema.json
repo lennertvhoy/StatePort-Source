@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/workspace-lease.v1.schema.json",
+  "title": "StatePort workspace lease v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "processObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observedAt", "ownerPid", "active", "pids"],
+      "properties": {
+        "observedAt": {"type": "string", "format": "date-time"},
+        "ownerPid": {"type": "integer", "minimum": 1},
+        "active": {"type": "boolean"},
+        "pids": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "worktreeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trackedDirty", "trackedStatusDigest", "untrackedCount", "untrackedDigest", "ignoredCount", "ignoredDigest", "stateDigest"],
+      "properties": {
+        "trackedDirty": {"type": "boolean"},
+        "trackedStatusDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "untrackedCount": {"type": "integer", "minimum": 0},
+        "untrackedDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "ignoredCount": {"type": "integer", "minimum": 0},
+        "ignoredDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "stateDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "leaseId",
+    "sliceId",
+    "ownerAgentId",
+    "repositoryIdentity",
+    "worktreePath",
+    "branch",
+    "baseHead",
+    "createdHead",
+    "currentHead",
+    "createdAt",
+    "expiresAt",
+    "status",
+    "purpose",
+    "temporary",
+    "cleanupRequired",
+    "processObservation",
+    "closureState",
+    "branchDisposition",
+    "evidenceExportLocation",
+    "creationReceipt",
+    "cleanupReceipt",
+    "retainedException"
+  ],
+  "properties": {
+    "schema": {"const": "stateport.workspace-lease/v1"},
+    "leaseId": {"type": "string", "pattern": "^lease_[0-9a-f]{32}$"},
+    "sliceId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "ownerAgentId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "repositoryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositoryKey", "repositoryRoot", "commonGitDir", "objectFormat", "origin"],
+      "properties": {
+        "repositoryKey": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "repositoryRoot": {"type": "string", "minLength": 1},
+        "commonGitDir": {"type": "string", "minLength": 1},
+        "objectFormat": {"enum": ["sha1", "sha256"]},
+        "origin": {"type": ["string", "null"]}
+      }
+    },
+    "worktreePath": {"type": "string", "minLength": 1},
+    "branch": {"type": "string", "minLength": 1},
+    "baseHead": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "createdHead": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "currentHead": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["active", "integrated_and_removed", "rejected_and_removed", "archived_and_removed", "retained_exception"]},
+    "purpose": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "temporary": {"const": true},
+    "cleanupRequired": {"type": "boolean"},
+    "processObservation": {"$ref": "#/$defs/processObservation"},
+    "closureState": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requestedDisposition", "trackedState", "processObservation", "classifications", "closedAt", "worktreeRemoved", "branchRetired"],
+          "properties": {
+            "requestedDisposition": {"enum": ["integrated", "rejected", "archived", "retained_exception"]},
+            "trackedState": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/worktreeState"}]},
+            "processObservation": {"$ref": "#/$defs/processObservation"},
+            "classifications": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "closedAt": {"type": "string", "format": "date-time"},
+            "worktreeRemoved": {"type": "boolean"},
+            "branchRetired": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "branchDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "integrationRef", "archiveBundle", "archiveDigest"],
+      "properties": {
+        "status": {"enum": ["pending", "integrated", "rejected", "archived", "retained_exception"]},
+        "integrationRef": {"type": ["string", "null"]},
+        "archiveBundle": {"type": ["string", "null"]},
+        "archiveDigest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "evidenceExportLocation": {"type": ["string", "null"]},
+    "creationReceipt": {"type": ["string", "null"]},
+    "cleanupReceipt": {"type": ["string", "null"]},
+    "retainedException": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason", "classifications", "expiresAt"],
+          "properties": {
+            "reason": {"type": "string", "minLength": 1},
+            "classifications": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "expiresAt": {"type": "string", "format": "date-time"}
+          }
+        }
+      ]
+    }
+  }
+}

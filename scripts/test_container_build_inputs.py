@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import re
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_locked_build_inputs_match_exact_repository_bytes() -> None:
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    assert value["resolvedOn"] == "2026-09-16"
+    for lock in value["locks"].values():
+        assert _digest(ROOT / lock["path"]) == lock["digest"]
+    for path, expected in value["definitions"].items():
+        assert _digest(ROOT / path) == expected
+
+
+def test_ubuntu_packages_are_exact_and_snapshot_bound() -> None:
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    containerfile = (ROOT / "images/stateport-dev-workspace/Containerfile").read_text()
+    assert value["ubuntuSnapshot"]["timestamp"] == "20260801T000000Z"
+    for package, version in value["ubuntuSnapshot"]["packages"].items():
+        assert f"{package}={version}" in containerfile
+    assert "apt-get install --no-install-recommends" in containerfile
+    assert "|| true" not in containerfile
+
+
+def test_upstream_tools_are_pinned_in_containerfile() -> None:
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    containerfile = (ROOT / "images/stateport-dev-workspace/Containerfile").read_text()
+    tools = value["upstreamTools"]
+    assert tools, "upstreamTools must not be empty"
+    go = value["buildToolchains"]["go"]
+    assert go["version"] == "1.27.1"
+    assert go["uri"] in containerfile
+    assert go["digest"].removeprefix("sha256:") in containerfile
+    for name, tool in tools.items():
+        digest = tool["digest"]
+        assert digest.startswith("sha256:")
+        assert digest.removeprefix("sha256:") in containerfile
+        assert tool["uri"] in containerfile
+        install_path = tool["installPath"]
+        assert install_path.startswith("/usr/local")
+        if install_path != "/usr/local":
+            # Single-binary tools install to a path named after the tool;
+            # prefix installs (e.g. Node.js) target /usr/local itself.
+            assert install_path.rsplit("/", 1)[-1] == name
+        if "sourceCommit" in tool:
+            assert tool["sourceCommit"] in containerfile
+            assert tool["buildToolchain"] == "go1.27.1"
+    assert tools["gh"] == {
+        "version": "2.101.0",
+        "sourceCommit": "0cf1092493af067646fc5f3db9421c6a6ec9c938",
+        "uri": "https://github.com/cli/cli.git",
+        "digest": "sha256:4632cfbb1c66183ef50aba9773f973dfb9e5a00e9446e629a864003d71339240",
+        "buildToolchain": "go1.27.1",
+        "installPath": "/usr/local/bin/gh",
+    }
+    assert containerfile.count('go version -m /usr/local/bin/') == 2
+    assert containerfile.count('grep -F "go1.27.1"') == 2
+    assert 'grep -aqF "golang.org/x/mod/sumdb/note" /usr/local/bin/gh' in containerfile
+    assert "sumdb\\.Client|sumdb/client|sumdb/tlog|tlog\\." in containerfile
+    assert "GOTOOLCHAIN=local" in containerfile
+    assert "/root/.config/go /root/.local/state/gh" in containerfile
+    assert "|| true" not in containerfile
+
+
+def test_playwright_browser_asset_is_exact_and_pinned() -> None:
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    containerfile = (ROOT / "images/stateport-playwright/Containerfile").read_text()
+    browser = value["browserAssets"]["chrome-for-testing"]
+
+    assert browser["version"] in containerfile
+    assert browser["uri"] in containerfile
+    assert browser["digest"].removeprefix("sha256:") in containerfile
+
+
+def test_alpine_packages_are_exact_and_repository_bound() -> None:
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    dockerfile = (ROOT / "apps/web/Dockerfile").read_text()
+    snapshot = value["alpinePackages"]
+    assert snapshot["release"] == "3.23"
+    assert snapshot["repository"].endswith("/alpine/v3.23/main")
+    for package, version in snapshot["packages"].items():
+        assert f"{package}={version}" in dockerfile
+    assert "apk add --no-cache" in dockerfile
+    assert "|| true" not in dockerfile
+
+
+def test_web_image_pins_exact_maintained_libexpat_cve_fix() -> None:
+    # CVE-2026-93990 is fixed upstream in Alpine v3.23-main at libexpat
+    # 2.8.5-r0; the fresh r3 scan refused stateport-web for shipping the
+    # vulnerable 2.8.4-r0 pulled in transitively by git. The exact
+    # fail-closed pin is the maintained-upstream repair: exactly one
+    # libexpat pin in the web Dockerfile, exactly the fix version, and the
+    # locked input record must state the same exact version so a rebuild
+    # can never silently reintroduce the vulnerable release.
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    dockerfile = (ROOT / "apps/web/Dockerfile").read_text()
+    assert value["alpinePackages"]["packages"]["libexpat"] == "2.8.5-r0"
+    assert re.findall(r"libexpat=\S+", dockerfile) == ["libexpat=2.8.5-r0"]
+    assert "libexpat=2.8.4-r0" not in dockerfile
+
+
+def test_execution_host_alpine_packages_are_exact_and_fully_pinned() -> None:
+    value = yaml.safe_load((ROOT / "config/container-build-inputs.yaml").read_text())
+    containerfile = (ROOT / "images/stateport-execution-host/Containerfile").read_text()
+    snapshot = value["executionHostAlpine"]
+    assert snapshot["repositories"] == [
+        "https://dl-cdn.alpinelinux.org/alpine/edge/main",
+        "https://dl-cdn.alpinelinux.org/alpine/edge/community",
+    ]
+    for repository in snapshot["repositories"]:
+        assert f"--repository {repository}" in containerfile
+    for package, version in snapshot["packages"].items():
+        assert f"{package}={version}" in containerfile
+    assert "apk add --no-cache" in containerfile
+    assert "podman-remote" in containerfile
+    assert "podman-remote=5.8.3-r1" not in containerfile
+    tool = value["sourceBuiltTools"]["podman-remote"]
+    assert tool["uri"] in containerfile
+    assert tool["digest"].removeprefix("sha256:") in containerfile
+    assert tool["buildToolchain"] == "golang-1.26.6-alpine3.23"
+    assert 'go version -m /out/podman-remote | grep -F "go1.26.6"' in containerfile
+    assert 'grep -aqF "golang.org/x/crypto/ssh.NewClientConn"' in containerfile
+    assert (
+        "if grep -aEq 'golang.org/x/crypto/ssh\\.NewServerConn|"
+        "golang.org/x/crypto/ssh\\.\\(\\*connection\\)\\.serverAuthenticate' "
+        "/out/podman-remote; then \\\n"
+        "         exit 1; \\\n"
+        "       else \\\n"
+        '         status=$?; test "$status" -eq 1; \\\n'
+        "       fi"
+    ) in containerfile
+    assert "|| true" not in containerfile
+
+
+def test_control_plane_runtime_lock_has_no_provider_sdk_or_best_effort_install() -> None:
+    runtime = (ROOT / "requirements/runtime-linux-amd64.txt").read_text()
+    assert "--hash=sha256:" in runtime
+    assert not re.search(r"openai|anthropic|google-generative|provider", runtime, re.I)
+    for path in (ROOT / "apps/api/Dockerfile", ROOT / "apps/worker/Dockerfile"):
+        text = path.read_text()
+        assert "--require-hashes" in text
+        assert "|| true" not in text
+        assert "podman" not in text.lower()
+        assert "/var/run/docker.sock" not in text.lower()
+        assert not re.search(r"(?:apk|apt-get)\s+[^\n]*(?:podman|docker|git)", text, re.I)
+
+
+def test_opencode_platform_pins_are_exact_and_containerfile_bound() -> None:
+    inputs = yaml.safe_load((ROOT / "config/provider-runtime-inputs.yaml").read_text())
+    opencode = inputs["opencode"]
+    assert opencode["package"] == "opencode-ai"
+    assert opencode["version"] == "1.18.31"
+    lock = json.loads((ROOT / "config/opencode-runtime/package-lock.json").read_text())
+    for flavor, recipe in (
+        ("musl", "apps/web/Dockerfile"),
+        ("glibc", "images/stateport-dev-workspace/Containerfile"),
+    ):
+        platform = opencode["platforms"][flavor]
+        assert re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==$", platform["integrity"])
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", platform["observedBinarySha256"])
+        # The audited lock entry consumed by the build must equal the pin.
+        entry = lock["packages"]["node_modules/" + platform["package"]]
+        assert entry["resolved"] == platform["tarball"]
+        assert entry["integrity"] == platform["integrity"]
+        text = (ROOT / recipe).read_text()
+        assert platform["tarball"] in text
+        assert platform["integrity"] in text
+        assert platform["binaryMember"] in text
+        assert platform["observedBinarySha256"] in text
+        assert "opencode --version" in text
+        assert "config/opencode-runtime/package-lock.json" in text
+    # The musl web image needs the C++ runtime the OpenCode binary links.
+    alpine = yaml.safe_load(
+        (ROOT / "config/container-build-inputs.yaml").read_text()
+    )["alpinePackages"]["packages"]
+    assert alpine["libgcc"] == "15.2.0-r2"
+    assert alpine["libstdc++"] == "15.2.0-r2"
+    assert "libgcc=15.2.0-r2" in (ROOT / "apps/web/Dockerfile").read_text()
+    assert "libstdc++=15.2.0-r2" in (ROOT / "apps/web/Dockerfile").read_text()

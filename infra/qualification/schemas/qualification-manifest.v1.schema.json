@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/qualification-manifest.v1.schema.json",
+  "title": "StatePort aggregate clean-host qualification receipt manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "runId", "startedAt", "finishedAt", "harness", "candidate", "acceptedReceiptDigests", "guests", "claims", "manifestDigest"],
+  "properties": {
+    "schema": {"const": "stateport.qualification-receipt-manifest/v1"},
+    "runId": {"type": "string", "pattern": "^run_[0-9a-f]{32}$"},
+    "startedAt": {"$ref": "#/$defs/timestamp"},
+    "finishedAt": {"$ref": "#/$defs/timestamp"},
+    "harness": {"type": "object", "additionalProperties": false, "required": ["version", "runnerDigest"], "properties": {"version": {"type": "string", "minLength": 1}, "runnerDigest": {"$ref": "#/$defs/digest"}}},
+    "candidate": {"$ref": "#/$defs/candidate"},
+    "acceptedReceiptDigests": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}},
+    "guests": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/guestResult"}},
+    "claims": {"type": "object", "additionalProperties": false, "required": ["validatedBaselineGuestIds", "compatibleUnvalidatedGuestIds", "missingEvidenceGuestIds"], "properties": {"validatedBaselineGuestIds": {"type": "array", "items": {"type": "string"}}, "compatibleUnvalidatedGuestIds": {"type": "array", "items": {"type": "string"}}, "missingEvidenceGuestIds": {"type": "array", "items": {"type": "string"}}}},
+    "manifestDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["releaseId", "version", "targetId", "releaseIndexUri", "releaseIndexDigest", "signedPayloadDigest", "sourceCommit", "sourceTree", "imageDigests"],
+      "properties": {"releaseId": {"type": "string"}, "version": {"type": "string"}, "targetId": {"const": "linux-amd64-rootless-podman-quadlet"}, "releaseIndexUri": {"type": "string"}, "releaseIndexDigest": {"$ref": "#/$defs/digest"}, "signedPayloadDigest": {"$ref": "#/$defs/digest"}, "sourceCommit": {"$ref": "#/$defs/sha1"}, "sourceTree": {"$ref": "#/$defs/sha1"}, "imageDigests": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}}}
+    },
+    "stage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stageId", "status", "evidenceClass", "receiptDigest", "receiptPath"],
+      "properties": {"stageId": {"type": "string"}, "status": {"enum": ["passed", "failed", "not_executed", "missing"]}, "evidenceClass": {"enum": ["real_guest", "missing_real_guest"]}, "receiptDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}, "receiptPath": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "commandDigest": {"$ref": "#/$defs/digest"}, "durationMs": {"type": "integer", "minimum": 0}, "error": {"type": "string"}}
+    },
+    "guestResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["guestId", "requestedDistribution", "requestedVersion", "evidenceClass", "status", "supportTier", "observedGuestIdentityDigest", "capabilityFacts", "receiptDigest", "receiptPath", "stages", "error", "candidateDigest"],
+      "properties": {"guestId": {"type": "string"}, "requestedDistribution": {"enum": ["ubuntu", "debian", "fedora", "rolling"]}, "requestedVersion": {"type": "string"}, "evidenceClass": {"enum": ["real_guest", "missing_real_guest"]}, "status": {"enum": ["complete", "failed", "ineligible", "missing_real_guest_evidence"]}, "supportTier": {"enum": ["validated_baseline", "compatible_unvalidated", "ineligible", "failed", "missing_real_guest_evidence"]}, "observedGuestIdentityDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}, "guestIdentity": {"oneOf": [{"$ref": "#/$defs/guestIdentity"}, {"type": "null"}]}, "capabilityFacts": {"oneOf": [{"type": "object"}, {"type": "null"}]}, "receiptDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}, "receiptPath": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "stages": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"$ref": "#/$defs/stage"}}, "error": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "candidateDigest": {"$ref": "#/$defs/digest"}}
+    },
+    "guestIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observedAt", "machineIdDigest", "bootIdDigest", "osId", "versionId", "prettyName", "kernel", "kernelRelease", "architecture"],
+      "properties": {"observedAt": {"$ref": "#/$defs/timestamp"}, "machineIdDigest": {"$ref": "#/$defs/digest"}, "bootIdDigest": {"$ref": "#/$defs/digest"}, "osId": {"type": ["string", "null"]}, "versionId": {"type": ["string", "null"]}, "prettyName": {"type": ["string", "null"]}, "kernel": {"type": "string"}, "kernelRelease": {"type": "string"}, "architecture": {"type": "string"}}
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "formatVersion": "stateport.execution-host-identity-contract/v1",
+  "contractId": "stateport-execution-host-identity",
+  "identityFields": [
+    "workspacePathDigest",
+    "repositoryIdentityDigest",
+    "sourceCommit",
+    "sourceTree",
+    "stagingSnapshotDigest",
+    "toolIdentityDigest"
+  ],
+  "atomicRead": {
+    "required": true,
+    "symlinkPolicy": "reject",
+    "stability": "same-node-size-mtime"
+  },
+  "detectorScan": {
+    "required": true,
+    "scope": "public-export-candidate"
+  }
+}

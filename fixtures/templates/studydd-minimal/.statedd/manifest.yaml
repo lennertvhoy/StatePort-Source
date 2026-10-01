@@ -1,0 +1,77 @@
+formatVersion: statedd.template-manifest/v2
+template:
+  id: stateport.fixture.studydd-minimal
+  releaseVersion: 0.0.1
+  stateddSpecVersion: statedd.stateport.io/v1alpha1
+  instanceSchemaVersion: statedd.stateport.io/instance/v1alpha1
+source:
+  class: synthetic_fixture
+  productionEligible: false
+modules:
+  - id: fixture-core
+    contractVersion: "1.0"
+    dependencies: []
+    conflicts: []
+    capabilities:
+      - read_state
+    assets:
+      - fixture-readme
+      - instance-definition
+      - fixture-state
+      - lifecycle-lock
+    selfTests:
+      - id: lifecycle-fixture-validation
+    order: 10
+selectedModules:
+  - fixture-core
+assets:
+  - id: fixture-readme
+    path: README.md
+    kind: file
+    owner: template
+    role: fixture_documentation
+    provisionPolicy: copy_from_template
+    updatePolicy: replace_if_unmodified
+    required: true
+    schema: null
+    sensitivity: public
+    source: README.md
+    selectingModules:
+      - fixture-core
+  - id: instance-definition
+    path: instance.yaml
+    kind: file
+    owner: instance
+    role: instance_definition
+    provisionPolicy: create_if_missing
+    updatePolicy: preserve
+    required: true
+    schema: statedd.stateport.io/instance/v1alpha1
+    sensitivity: private
+    selectingModules:
+      - fixture-core
+  - id: fixture-state
+    path: state
+    kind: tree
+    owner: instance
+    role: fixture_state
+    provisionPolicy: create_if_missing
+    updatePolicy: preserve
+    required: true
+    schema: null
+    sensitivity: private
+    selectingModules:
+      - fixture-core
+  - id: lifecycle-lock
+    path: .statedd/lock.yaml
+    kind: file
+    owner: generated
+    role: lifecycle_lock
+    provisionPolicy: generated_output
+    updatePolicy: generated
+    required: true
+    schema: statedd.stateport.io/lock/v1
+    sensitivity: internal
+    generator: materializer
+    selectingModules:
+      - fixture-core

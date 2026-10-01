@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "statedd.stateport.io/lock/v1",
+  "title": "StateSpec lifecycle lock v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "instanceId", "template", "files"],
+  "properties": {
+    "formatVersion": {"const": "statedd.lock/v1"},
+    "instanceId": {"type": "string", "minLength": 1},
+    "template": {"$ref": "#/$defs/template"},
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/file"}
+    },
+    "trees": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/tree"}
+    },
+    "retired": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/retired"}
+    },
+    "history": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/history"}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "optionalDigest": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "sourceV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formatVersion", "kind", "path", "identity"],
+      "properties": {
+        "formatVersion": {"const": "statedd.source/v1"},
+        "kind": {"const": "local"},
+        "path": {"type": "string", "minLength": 1},
+        "identity": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "sourceV2Local": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formatVersion", "kind", "sourceClass", "productionEligible",
+        "checkoutLocation", "resolvedCommit", "sourceDigest"
+      ],
+      "properties": {
+        "formatVersion": {"const": "statedd.source/v2"},
+        "kind": {"const": "local_development"},
+        "sourceClass": {
+          "enum": ["canonical_source", "synthetic_fixture", "compatibility_fixture"]
+        },
+        "productionEligible": {"type": "boolean"},
+        "checkoutLocation": {"type": "string", "minLength": 1},
+        "resolvedCommit": {"type": "null"},
+        "sourceDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "sourceV2Git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formatVersion", "kind", "sourceClass", "productionEligible",
+        "repository", "requestedRef", "resolvedCommit", "resolvedTree",
+        "checkoutLocation", "manifestDigest", "sourceDigest"
+      ],
+      "properties": {
+        "formatVersion": {"const": "statedd.source/v2"},
+        "kind": {"const": "git"},
+        "sourceClass": {"const": "canonical_source"},
+        "productionEligible": {"const": true},
+        "repository": {"type": "string", "minLength": 1},
+        "requestedRef": {"type": "string", "minLength": 1},
+        "resolvedCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "resolvedTree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "checkoutLocation": {"type": "string", "minLength": 1},
+        "manifestDigest": {"$ref": "#/$defs/digest"},
+        "sourceDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "template": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "sourceRevision"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "sourcePath": {"type": "string", "minLength": 1},
+        "sourceRevision": {"$ref": "#/$defs/digest"},
+        "source": {
+          "oneOf": [
+            {"$ref": "#/$defs/sourceV1"},
+            {"$ref": "#/$defs/sourceV2Local"},
+            {"$ref": "#/$defs/sourceV2Git"}
+          ]
+        },
+        "manifestFormatVersion": {"const": "statedd.template-manifest/v2"},
+        "stateddSpecVersion": {"type": "string", "minLength": 1},
+        "instanceSchemaVersion": {
+          "oneOf": [
+            {"const": "statedd.stateport.io/instance/v1alpha1"},
+            {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[a-z][a-z0-9.-]{0,47}\\.instance-layout/v[a-z0-9._-]{0,31}$"
+            }
+          ]
+        },
+        "selectedModules": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "owner", "merge", "required", "sensitivity"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "owner": {"enum": ["template", "instance", "generated"]},
+        "merge": {"enum": ["replace", "preserve", "append_only"]},
+        "required": {"type": "boolean"},
+        "sensitivity": {"enum": ["public", "internal", "private", "secret"]},
+        "retirementPolicy": {"enum": ["retain", "remove_if_unmodified"]},
+        "tree": {"type": ["string", "null"]},
+        "sourceHash": {"$ref": "#/$defs/optionalDigest"},
+        "materializedHash": {"$ref": "#/$defs/optionalDigest"}
+      }
+    },
+    "tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "owner", "required", "sensitivity"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "owner": {"enum": ["template", "instance", "generated"]},
+        "required": {"type": "boolean"},
+        "sensitivity": {"enum": ["public", "internal", "private", "secret"]},
+        "updatePolicy": {
+          "enum": [
+            "replace_if_unmodified", "preserve", "generated", "compose",
+            "append_only", "schema_migrate", "retire"
+          ]
+        },
+        "retirementPolicy": {"enum": ["retain", "remove_if_unmodified"]},
+        "baselineHash": {"$ref": "#/$defs/optionalDigest"},
+        "materializedHash": {"$ref": "#/$defs/optionalDigest"}
+      }
+    },
+    "retired": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "owner", "disposition"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "owner": {"enum": ["template", "instance", "generated"]},
+        "retirementPolicy": {"enum": ["retain", "remove_if_unmodified"]},
+        "disposition": {"enum": ["retained", "removed"]},
+        "baselineHash": {"$ref": "#/$defs/optionalDigest"},
+        "currentHash": {"$ref": "#/$defs/optionalDigest"},
+        "reason": {"type": "string"}
+      }
+    },
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "planDigest", "from", "target", "retirements", "appliedAt"],
+      "properties": {
+        "event": {"const": "upgrade"},
+        "planDigest": {"$ref": "#/$defs/digest"},
+        "from": {"type": "object"},
+        "target": {"type": "object"},
+        "retirements": {"type": "array", "items": {"type": "object"}},
+        "appliedAt": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

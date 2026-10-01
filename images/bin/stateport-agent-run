@@ -1,0 +1,100 @@
+#!/bin/sh
+# StatePort developer-workspace agent wrapper.
+#
+# Runs one bounded OpenCode objective inside the read-only-root workspace
+# container. Operator provider material is mounted read-only at
+# /stateport-provider; the credential from provider.env is exported into the
+# child environment only and is never echoed, logged, or written to disk.
+#
+# Overridable for unprivileged tests (production defaults shown):
+#   STATEPORT_AGENT_PROVIDER_DIR  provider mount      (/stateport-provider)
+#   STATEPORT_AGENT_OPENCODE_BIN  opencode executable (/usr/local/bin/opencode)
+#   STATEPORT_AGENT_STATE_DIR     writable state root (/workspace/.stateport)
+set -eu
+
+usage() {
+    echo "usage: stateport-agent-run <objective>" >&2
+}
+
+fail() {
+    echo "stateport-agent-run: $1" >&2
+    exit 2
+}
+
+if [ "$#" -ne 1 ]; then
+    usage
+    exit 2
+fi
+objective=$1
+
+provider_dir=${STATEPORT_AGENT_PROVIDER_DIR:-/stateport-provider}
+opencode_bin=${STATEPORT_AGENT_OPENCODE_BIN:-/usr/local/bin/opencode}
+state_dir=${STATEPORT_AGENT_STATE_DIR:-/workspace/.stateport}
+
+# Resolve the model and the executable before any provider secret is read so a
+# configuration refusal cannot export a credential and then fail.
+model=
+model_file=$provider_dir/model
+if [ -f "$model_file" ]; then
+    IFS= read -r model < "$model_file" || true
+    model=${model%"$(printf '\r')"}
+fi
+if [ -z "$model" ]; then
+    model=${STATEPORT_AGENT_MODEL:-}
+fi
+if [ -z "$model" ]; then
+    fail "no model configured: provide <provider>/model or STATEPORT_AGENT_MODEL"
+fi
+
+if [ ! -f "$opencode_bin" ] || [ ! -x "$opencode_bin" ]; then
+    fail "opencode binary is missing or not executable: $opencode_bin"
+fi
+
+# The container root is read-only, so all agent state lives under the
+# daemon-owned writable workspace. HOME/XDG must exist before OpenCode starts.
+data_home=$state_dir/data
+config_home=$state_dir/config
+home_dir=$state_dir/home
+mkdir -p "$data_home" "$config_home" "$home_dir" \
+    || fail "cannot create writable agent state under $state_dir"
+chmod 0700 "$state_dir" "$data_home" "$config_home" "$home_dir" \
+    || fail "cannot secure agent state under $state_dir"
+XDG_DATA_HOME=$data_home
+XDG_CONFIG_HOME=$config_home
+HOME=$home_dir
+export XDG_DATA_HOME XDG_CONFIG_HOME HOME
+
+# provider.env carries exactly one ENV_VAR=value line. Read the first
+# non-empty, non-comment line; validate its shape and absence of control
+# characters; export it without ever printing or persisting the value.
+provider_env=$provider_dir/provider.env
+if [ -f "$provider_env" ]; then
+    provider_line=
+    provider_found=0
+    while IFS= read -r candidate || [ -n "$candidate" ]; do
+        case "$candidate" in
+            ''|\#*) continue ;;
+        esac
+        provider_line=$candidate
+        provider_found=1
+        break
+    done < "$provider_env"
+    if [ "$provider_found" -ne 1 ]; then
+        fail "provider.env has no usable ENV_VAR=value line"
+    fi
+    if ! printf '%s\n' "$provider_line" | LC_ALL=C grep -Eq '^[A-Z][A-Z0-9_]*=[^[:cntrl:]]+$'; then
+        fail "provider.env is malformed: expected one ENV_VAR=value line"
+    fi
+    provider_name=${provider_line%%=*}
+    provider_value=${provider_line#*=}
+    export "$provider_name=$provider_value"
+    unset provider_line provider_value
+fi
+
+provider_config=$provider_dir/opencode.json
+if [ -f "$provider_config" ]; then
+    OPENCODE_CONFIG=$provider_config
+    export OPENCODE_CONFIG
+fi
+
+exec "$opencode_bin" run --format json --model "$model" --dir /workspace "$objective"

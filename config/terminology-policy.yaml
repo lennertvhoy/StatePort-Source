@@ -1,0 +1,97 @@
+formatVersion: stateport.terminology-policy/v1
+policyVersion: 1
+category:
+  publicName: Stateware
+  definition: Software whose durable inspectable state and governed lifecycle contracts form the application boundary while agents and models remain replaceable processors.
+methodology:
+  publicName: State-Centric Engineering
+  abbreviation: SCE
+  legacyNames:
+    - State-Driven Development
+    - State Driven Development
+portableSpecification:
+  publicName: StateSpec
+  legacyNames:
+    - StateDD
+products:
+  - publicName: StatePort
+    legacyNames: []
+    machineIdentifiers:
+      - stateport
+  - publicName: StateBench
+    legacyNames: []
+    machineIdentifiers:
+      - statebench
+  - publicName: StatePack
+    legacyNames: []
+    machineIdentifiers:
+      - statepack
+  - publicName: StateIR
+    legacyNames: []
+    machineIdentifiers:
+      - stateir
+  - publicName: StateSpec Template
+    legacyNames:
+      - StateDD Template
+    machineIdentifiers:
+      - StateDD_Template
+      - statedd-template-v5
+  - publicName: StudyState
+    legacyNames:
+      - StudyDD
+    machineIdentifiers:
+      - studydd
+      - StudyDD_Template
+  - publicName: ClassState
+    legacyNames:
+      - ClassDD
+    machineIdentifiers:
+      - classdd
+      - ClassDD
+  - publicName: InfraState
+    legacyNames:
+      - InfraDD
+    machineIdentifiers:
+      - InfraDD
+  - publicName: ProjectState
+    legacyNames:
+      - ProjectDD
+    machineIdentifiers:
+      - projectdd
+  - publicName: ClientState
+    legacyNames:
+      - ClientDD
+    machineIdentifiers:
+      - clientdd
+  - publicName: LifeState
+    legacyNames:
+      - LifeDD
+    machineIdentifiers:
+      - lifedd
+  - publicName: ChecklistState
+    legacyNames:
+      - ChecklistDD
+    machineIdentifiers:
+      - checklistdd
+compatibility:
+  strategy: additive_aliases_before_physical_renames
+  publicMigrationStatus: in_progress
+  publicIntroductionText: formerly called
+  preserveUntilVersionedMigration:
+    - repository_names_and_remote_urls
+    - schema_ids_and_format_versions
+    - package_and_module_names
+    - filesystem_paths_and_dot_directories
+    - command_names_and_environment_variables
+    - database_fields_and_persisted_event_ids
+    - backlog_ids_branch_names_and_git_history
+    - locks_receipts_bundles_fixtures_and_release_digests
+  allowedRemainingCategories:
+    - compatibility_alias
+    - machine_identifier
+    - historical_record
+    - legal_text
+    - archived_reference
+  completionGate: no_unclassified_legacy_public_or_operator_usage
+  legalTextRequiresSeparateReview: true
+  archivesRemainFrozen: true

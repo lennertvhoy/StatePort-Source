@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/upgrade-receipt.v1.schema.json",
+  "title": "StatePort upgrade receipt v1",
+  "type": "object",
+  "required": ["formatVersion", "status", "planDigest", "approval", "appliedAt", "current", "target", "files"],
+  "properties": {
+    "formatVersion": {"const": "statedd.upgrade-receipt/v1"},
+    "status": {"const": "applied"},
+    "planDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "approval": {"type": "object", "required": ["planDigest"]},
+    "appliedAt": {"type": "string", "minLength": 1},
+    "files": {"type": "array"}
+  },
+  "additionalProperties": true
+}

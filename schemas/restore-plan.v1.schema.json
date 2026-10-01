@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stateport.restore-plan/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "operation", "sourceInstanceId", "destinationInstanceId", "destinationName", "identityPolicy", "backup", "preconditions", "dryRun", "effects", "limitations", "createdAt", "expiresAt", "planDigest"],
+  "properties": {
+    "formatVersion": {"const": "stateport.restore-plan/v1"},
+    "operation": {"const": "restore_new_instance"},
+    "sourceInstanceId": {"$ref": "#/$defs/id"},
+    "destinationInstanceId": {"$ref": "#/$defs/id"},
+    "destinationName": {"type": "string", "minLength": 1, "maxLength": 120},
+    "identityPolicy": {"const": "reidentify"},
+    "backup": {"$ref": "#/$defs/backup"},
+    "preconditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceBindingDigest", "destinationRootClass", "destinationAbsent", "destinationCatalogIdentityAbsent"],
+      "properties": {
+        "sourceBindingDigest": {"$ref": "#/$defs/digest"},
+        "destinationRootClass": {"const": "stateport_managed_instances_root"},
+        "destinationAbsent": {"const": true},
+        "destinationCatalogIdentityAbsent": {"const": true}
+      }
+    },
+    "dryRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "instanceId", "fileCount", "archiveDigest"],
+      "properties": {
+        "status": {"const": "verified"},
+        "instanceId": {"$ref": "#/$defs/id"},
+        "fileCount": {"type": "integer", "minimum": 1},
+        "archiveDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceCanonicalState", "destinationCanonicalState", "externalEffectsRestored", "overwriteAllowed", "sourceAccess"],
+      "properties": {
+        "sourceCanonicalState": {"const": "unchanged"},
+        "destinationCanonicalState": {"const": "new_instance_created"},
+        "externalEffectsRestored": {"const": false},
+        "overwriteAllowed": {"const": false},
+        "sourceAccess": {"$ref": "#/$defs/sourceAccess"}
+      }
+    },
+    "limitations": {"type": "array", "minItems": 3, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "createdAt": {"type": "string", "minLength": 20},
+    "expiresAt": {"type": "string", "minLength": 20},
+    "planDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sourceAccess": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition"],
+          "properties": {"disposition": {"const": "not_propagated"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sourceAccessClass", "productionInstallAllowed", "sourceReceiptDigest"],
+          "properties": {
+            "disposition": {"const": "propagate_exact_receipt"},
+            "sourceAccessClass": {"enum": ["canonical_release", "development_candidate"]},
+            "productionInstallAllowed": {"type": "boolean"},
+            "sourceReceiptDigest": {"$ref": "#/$defs/digest"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"sourceAccessClass": {"const": "canonical_release"}}},
+              "then": {"properties": {"productionInstallAllowed": {"const": true}}},
+              "else": {"properties": {"productionInstallAllowed": {"const": false}}}
+            }
+          ]
+        }
+      ]
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receiptId", "receiptDigest", "createdAt", "archiveDigest", "archiveFileDigest", "manifestDigest", "sourceLockDigest", "fileCount", "storageLocation"],
+      "properties": {
+        "receiptId": {"type": "string", "pattern": "^backup-[0-9a-f]{24}$"},
+        "receiptDigest": {"$ref": "#/$defs/digest"},
+        "createdAt": {"type": "string", "minLength": 20},
+        "archiveDigest": {"$ref": "#/$defs/digest"},
+        "archiveFileDigest": {"$ref": "#/$defs/digest"},
+        "manifestDigest": {"$ref": "#/$defs/digest"},
+        "sourceLockDigest": {"$ref": "#/$defs/digest"},
+        "fileCount": {"type": "integer", "minimum": 1},
+        "storageLocation": {"const": "stateport_managed_backup_root"}
+      }
+    }
+  }
+}

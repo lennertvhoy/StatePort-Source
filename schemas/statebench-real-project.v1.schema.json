@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/statebench-real-project.v1.schema.json",
+  "title": "StateBench RealProjectScenario v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "identity", "project", "milestones", "execution", "evaluation"],
+  "properties": {
+    "formatVersion": {"const": "statebench.real-project/v1"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "fixtureDigest"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 32},
+        "fixtureDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositoryBundle", "initialStateDigest", "initialCommit", "initialTree", "architectureContract", "backlog", "modules", "privacyClassification", "productionEligible"],
+      "properties": {
+        "repositoryBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "digest"],
+          "properties": {
+            "path": {"$ref": "#/$defs/path"},
+            "digest": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "initialStateDigest": {"$ref": "#/$defs/digest"},
+        "initialCommit": {"$ref": "#/$defs/gitIdentity"},
+        "initialTree": {"$ref": "#/$defs/gitIdentity"},
+        "architectureContract": {"$ref": "#/$defs/digest"},
+        "backlog": {"$ref": "#/$defs/digest"},
+        "modules": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "privacyClassification": {"const": "public_safe"},
+        "productionEligible": {"const": false}
+      }
+    },
+    "milestones": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["formatVersion", "id", "objective", "acceptance"],
+        "properties": {
+          "formatVersion": {"const": "statebench.real-project-milestone/v1"},
+          "id": {"$ref": "#/$defs/id"},
+          "objective": {"type": "string", "minLength": 1, "maxLength": 512},
+          "acceptance": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1, "maxLength": 512}
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "maximumAttempts", "interruptionPolicy", "humanApprovalPolicy"],
+      "properties": {
+        "mode": {"const": "agent_native"},
+        "maximumAttempts": {"type": "integer", "minimum": 2, "maximum": 8},
+        "interruptionPolicy": {"$ref": "#/$defs/id"},
+        "humanApprovalPolicy": {"$ref": "#/$defs/id"}
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hiddenTests", "evaluatorPackageDigest", "invariantChecks", "gitChecks", "handoffChecks"],
+      "properties": {
+        "hiddenTests": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "evaluatorPackageDigest": {"$ref": "#/$defs/digest"},
+        "invariantChecks": {"$ref": "#/$defs/idArray"},
+        "gitChecks": {"$ref": "#/$defs/idArray"},
+        "handoffChecks": {"$ref": "#/$defs/idArray"}
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitIdentity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "idArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/id"}
+    }
+  }
+}

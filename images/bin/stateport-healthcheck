@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+kind=
+host=
+port=
+path=
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --kind)
+            [ "$#" -ge 2 ] || exit 2
+            kind=$2
+            shift 2
+            ;;
+        --host)
+            [ "$#" -ge 2 ] || exit 2
+            host=$2
+            shift 2
+            ;;
+        --port)
+            [ "$#" -ge 2 ] || exit 2
+            port=$2
+            shift 2
+            ;;
+        --path)
+            [ "$#" -ge 2 ] || exit 2
+            path=$2
+            shift 2
+            ;;
+        *)
+            exit 2
+            ;;
+    esac
+done
+
+case "$kind" in
+    unix-socket)
+        [ -n "$path" ] && [ -S "$path" ]
+        ;;
+    http)
+        [ "$host" = "127.0.0.1" ] || exit 2
+        case "$port" in
+            ''|*[!0-9]*) exit 2 ;;
+        esac
+        case "$path" in
+            /*) ;;
+            *) exit 2 ;;
+        esac
+        if command -v python3 >/dev/null 2>&1; then
+            exec python3 - "$host" "$port" "$path" <<'PY'
+import sys
+import urllib.request
+
+host, port, path = sys.argv[1:]
+with urllib.request.urlopen(f"http://{host}:{port}{path}", timeout=2) as response:
+    if not 200 <= response.status < 400:
+        raise SystemExit(1)
+PY
+        fi
+        if command -v node >/dev/null 2>&1; then
+            exec node -e '
+const http = require("http");
+const [host, port, path] = process.argv.slice(1);
+const request = http.get({host, port: Number(port), path, timeout: 2000}, response => {
+  response.resume();
+  process.exit(response.statusCode >= 200 && response.statusCode < 400 ? 0 : 1);
+});
+request.on("timeout", () => request.destroy(new Error("timeout")));
+request.on("error", () => process.exit(1));
+' "$host" "$port" "$path"
+        fi
+        if command -v curl >/dev/null 2>&1; then
+            exec curl --fail --silent --show-error --max-time 2 \
+                "http://$host:$port$path" >/dev/null
+        fi
+        exit 2
+        ;;
+    *)
+        exit 2
+        ;;
+esac

@@ -1,0 +1,4 @@
+formatVersion: stateport.development.state/v1
+status: ready
+approvedSlice: inspect-the-governed-workbench
+nextAction: Open the optional Workbench when development controls are needed.

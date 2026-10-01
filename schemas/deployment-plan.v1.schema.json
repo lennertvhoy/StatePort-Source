@@ -1,0 +1,1008 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/deployment-plan.v1.schema.json",
+  "title": "StatePort exact deployment plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "planId",
+    "planDigest",
+    "operation",
+    "predecessorRevision",
+    "createdAt",
+    "expiresAt",
+    "spec",
+    "sourceInventory",
+    "changes",
+    "risks",
+    "destructiveEffects",
+    "dataRetentionEffects",
+    "authorityDecision",
+    "overlay",
+    "evidencePath"
+  ],
+  "properties": {
+    "schema": {
+      "const": "stateport.deployment-plan/v1"
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^plan_[a-z0-9._-]{1,64}$"
+    },
+    "planDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "operation": {
+      "enum": [
+        "apply",
+        "update",
+        "rollback",
+        "backup_data",
+        "restore_data",
+        "purge_data"
+      ]
+    },
+    "predecessorRevision": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "createdAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "spec": {
+      "allOf": [
+        {
+          "$ref": "deployment.v1.schema.json"
+        },
+        {
+          "properties": {
+            "source": {
+              "properties": {
+                "repositoryIdentity": {
+                  "$ref": "#/$defs/digest"
+                },
+                "repositoryRoot": {
+                  "type": "string",
+                  "pattern": "^/",
+                  "maxLength": 4096
+                },
+                "commit": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40,64}$"
+                },
+                "treeDigest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "dirty": {
+                  "const": false
+                },
+                "dirtyDigest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "descriptorDigest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            },
+            "target": {
+              "properties": {
+                "identityDigest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            },
+            "authority": {
+              "properties": {
+                "grantId": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceInventory": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "mode",
+          "objectId",
+          "contentDigest"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?!/)(?!\\.?\\.?$)(?!\\./)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*//).+$"
+          },
+          "mode": {
+            "enum": [
+              "100644",
+              "100755"
+            ]
+          },
+          "objectId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40,64}$"
+          },
+          "contentDigest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "changes": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/networkChange"
+          },
+          {
+            "$ref": "#/$defs/serviceChange"
+          },
+          {
+            "$ref": "#/$defs/imageChange"
+          },
+          {
+            "$ref": "#/$defs/portChange"
+          },
+          {
+            "$ref": "#/$defs/storageMountChange"
+          },
+          {
+            "$ref": "#/$defs/storagePurgeChange"
+          },
+          {
+            "$ref": "#/$defs/secretBindingChange"
+          },
+          {
+            "$ref": "#/$defs/sourceChange"
+          },
+          {
+            "$ref": "#/$defs/storageBackupChange"
+          }
+        ]
+      }
+    },
+    "risks": {
+      "type": "array",
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "destructiveEffects": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "$ref": "#/$defs/purgeEffect"
+      }
+    },
+    "dataRetentionEffects": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/applyRetentionEffect"
+          },
+          {
+            "$ref": "#/$defs/purgeRetentionEffect"
+          },
+          {
+            "$ref": "#/$defs/backupRetentionEffect"
+          }
+        ]
+      }
+    },
+    "authorityDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "required",
+        "reason"
+      ],
+      "properties": {
+        "status": {
+          "const": "awaiting_approval"
+        },
+        "required": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "first_apply",
+              "non_loopback_port",
+              "secret_binding",
+              "destructive_replacement",
+              "data_backup",
+              "data_restore",
+              "data_purge"
+            ]
+          }
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "overlay": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^(?!/)(?!\\.?\\.?$)(?!\\./)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*//).+$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "evidencePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/"
+    },
+    "revisionId": {
+      "$ref": "#/$defs/digest"
+    },
+    "supersedes": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rollbackOf": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/digest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "backupId": {
+      "$ref": "#/$defs/id"
+    },
+    "backupDigest": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "apply"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "predecessorRevision": {
+            "type": "null"
+          },
+          "risks": {
+            "items": {
+              "enum": [
+                "non_loopback_port",
+                "secret_binding_unavailable_in_slice_a"
+              ]
+            }
+          },
+          "destructiveEffects": {
+            "maxItems": 0
+          },
+          "dataRetentionEffects": {
+            "items": {
+              "$ref": "#/$defs/applyRetentionEffect"
+            }
+          }
+        },
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "revisionId"
+              ]
+            },
+            {
+              "required": [
+                "supersedes"
+              ]
+            },
+            {
+              "required": [
+                "rollbackOf"
+              ]
+            },
+            {
+              "required": [
+                "backupId"
+              ]
+            },
+            {
+              "required": [
+                "backupDigest"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "update",
+              "rollback"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "revisionId",
+          "supersedes",
+          "rollbackOf"
+        ],
+        "properties": {
+          "predecessorRevision": {
+            "$ref": "#/$defs/digest"
+          },
+          "revisionId": {
+            "$ref": "#/$defs/digest"
+          },
+          "supersedes": {
+            "$ref": "#/$defs/digest"
+          },
+          "risks": {
+            "items": {
+              "enum": [
+                "non_loopback_port",
+                "secret_binding_unavailable_in_slice_a"
+              ]
+            }
+          },
+          "destructiveEffects": {
+            "maxItems": 0
+          },
+          "dataRetentionEffects": {
+            "items": {
+              "$ref": "#/$defs/applyRetentionEffect"
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "const": "update"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "rollbackOf": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "const": "rollback"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "rollbackOf": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "anyOf": [
+            {"required": ["backupId"]},
+            {"required": ["backupDigest"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "purge_data"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "predecessorRevision": {
+            "$ref": "#/$defs/digest"
+          },
+          "changes": {
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/storagePurgeChange"
+            }
+          },
+          "risks": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "const": "irreversible_data_loss"
+            }
+          },
+          "destructiveEffects": {
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/purgeEffect"
+            }
+          },
+          "dataRetentionEffects": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "$ref": "#/$defs/purgeRetentionEffect"
+            }
+          },
+          "authorityDecision": {
+            "properties": {
+              "required": {
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {
+                  "const": "data_purge"
+                }
+              }
+            }
+          }
+        },
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "revisionId"
+              ]
+            },
+            {
+              "required": [
+                "supersedes"
+              ]
+            },
+            {
+              "required": [
+                "rollbackOf"
+              ]
+            },
+            {
+              "required": [
+                "backupId"
+              ]
+            },
+            {
+              "required": [
+                "backupDigest"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": ["backup_data", "restore_data"]
+          }
+        }
+      },
+      "then": {
+        "required": ["backupId"],
+        "properties": {
+          "predecessorRevision": {"$ref": "#/$defs/digest"},
+          "changes": {
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/storageBackupChange"}
+          },
+          "risks": {
+            "minItems": 1,
+            "items": {"enum": ["service_pause", "data_replacement"]}
+          },
+          "dataRetentionEffects": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/backupRetentionEffect"}
+          }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"operation": {"const": "backup_data"}}},
+            "then": {
+              "properties": {
+                "risks": {"minItems": 1, "maxItems": 1, "items": {"const": "service_pause"}},
+                "destructiveEffects": {"maxItems": 0},
+                "authorityDecision": {"properties": {"required": {"minItems": 1, "maxItems": 1, "items": {"const": "data_backup"}}}},
+                "dataRetentionEffects": {"items": {"properties": {"to": {"const": "snapshot_available"}}}}
+              },
+              "not": {"required": ["backupDigest"]}
+            }
+          },
+          {
+            "if": {"properties": {"operation": {"const": "restore_data"}}},
+            "then": {
+              "required": ["backupDigest"],
+              "properties": {
+                "risks": {"minItems": 2, "maxItems": 2},
+                "destructiveEffects": {"minItems": 1, "items": {"$ref": "#/$defs/purgeEffect"}},
+                "authorityDecision": {"properties": {"required": {"minItems": 1, "maxItems": 1, "items": {"const": "data_restore"}}}},
+                "dataRetentionEffects": {"items": {"properties": {"to": {"const": "restored_from_snapshot"}}}}
+              }
+            }
+          }
+        ],
+        "not": {
+          "anyOf": [
+            {"required": ["revisionId"]},
+            {"required": ["supersedes"]},
+            {"required": ["rollbackOf"]}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "sourceChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id",
+        "fromCommit",
+        "toCommit",
+        "fromTreeDigest",
+        "toTreeDigest",
+        "fromDirtyDigest",
+        "toDirtyDigest",
+        "fromDescriptorDigest",
+        "toDescriptorDigest"
+      ],
+      "properties": {
+        "kind": {"const": "source"},
+        "action": {"const": "update"},
+        "id": {"const": "source"},
+        "fromCommit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "toCommit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "fromTreeDigest": {"$ref": "#/$defs/digest"},
+        "toTreeDigest": {"$ref": "#/$defs/digest"},
+        "fromDirtyDigest": {"$ref": "#/$defs/digest"},
+        "toDirtyDigest": {"$ref": "#/$defs/digest"},
+        "fromDescriptorDigest": {"$ref": "#/$defs/digest"},
+        "toDescriptorDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "networkChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id",
+        "public"
+      ],
+      "properties": {
+        "kind": {
+          "const": "network"
+        },
+        "action": {
+          "enum": [
+            "create",
+            "update",
+            "remove"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "public": {
+          "const": false
+        }
+      }
+    },
+    "serviceChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id",
+        "buildMode",
+        "networks"
+      ],
+      "properties": {
+        "kind": {
+          "const": "service"
+        },
+        "action": {
+          "enum": [
+            "create",
+            "update",
+            "remove"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "buildMode": {
+          "enum": [
+            "source",
+            "image"
+          ]
+        },
+        "networks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "imageChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id",
+        "serviceId",
+        "reference",
+        "acceptedDigest"
+      ],
+      "properties": {
+        "kind": {
+          "const": "image"
+        },
+        "action": {
+          "enum": [
+            "build",
+            "pull",
+            "update",
+            "remove"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acceptedDigest": {
+          "type": "null"
+        }
+      }
+    },
+    "portChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id",
+        "serviceId",
+        "name",
+        "containerPort",
+        "hostAddress",
+        "hostPort"
+      ],
+      "properties": {
+        "kind": {
+          "const": "port"
+        },
+        "action": {
+          "enum": [
+            "bind",
+            "update",
+            "remove"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "containerPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "hostAddress": {
+          "enum": [
+            "127.0.0.1",
+            "::1"
+          ]
+        },
+        "hostPort": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "storageMountChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id",
+        "serviceId",
+        "storageId",
+        "mountPath",
+        "persistence"
+      ],
+      "properties": {
+        "kind": {
+          "const": "storage"
+        },
+        "action": {
+          "enum": [
+            "mount",
+            "update",
+            "remove"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storageId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mountPath": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "persistence": {
+          "enum": [
+            "ephemeral",
+            "retained",
+            "backup_required",
+            "externally_managed"
+          ]
+        }
+      }
+    },
+    "storagePurgeChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "storage"
+        },
+        "action": {
+          "const": "purge"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "storageBackupChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "action", "id", "backupId"],
+      "properties": {
+        "kind": {"const": "storage"},
+        "action": {"enum": ["backup", "restore"]},
+        "id": {"type": "string", "minLength": 1},
+        "backupId": {"$ref": "#/$defs/id"}
+      }
+    },
+    "secretBindingChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "action",
+        "id",
+        "serviceId",
+        "secretId",
+        "binding"
+      ],
+      "properties": {
+        "kind": {
+          "const": "secret_binding"
+        },
+        "action": {
+          "enum": [
+            "bind",
+            "update",
+            "remove"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "binding": {
+          "type": "string",
+          "pattern": "^secret-broker://"
+        }
+      }
+    },
+    "applyRetentionEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storageId",
+        "persistence",
+        "ordinaryRemove"
+      ],
+      "properties": {
+        "storageId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "persistence": {
+          "enum": [
+            "ephemeral",
+            "retained",
+            "backup_required",
+            "externally_managed"
+          ]
+        },
+        "ordinaryRemove": {
+          "enum": [
+            "removed",
+            "retained"
+          ]
+        }
+      }
+    },
+    "purgeRetentionEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ],
+      "properties": {
+        "from": {
+          "enum": [
+            "retained",
+            "retained_after_failed_apply"
+          ]
+        },
+        "to": {
+          "const": "purged"
+        }
+      }
+    },
+    "backupRetentionEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backupId", "from", "to"],
+      "properties": {
+        "backupId": {"$ref": "#/$defs/id"},
+        "from": {"const": "present"},
+        "to": {"enum": ["snapshot_available", "restored_from_snapshot"]}
+      }
+    },
+    "purgeEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name",
+        "irreversible"
+      ],
+      "properties": {
+        "kind": {
+          "const": "volume"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "irreversible": {
+          "const": true
+        }
+      }
+    }
+  }
+}

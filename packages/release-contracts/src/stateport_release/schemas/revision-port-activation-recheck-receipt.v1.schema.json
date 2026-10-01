@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-port-activation-recheck-receipt.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "operationPlanDigest", "activationPlanDigest", "portAllocationReceiptDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "hostIdentityDigest", "allocations", "occupiedInputs", "hostObservationReceiptDigest", "checkedAt", "validUntil", "result", "receiptDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-port-activation-recheck-receipt/v1"},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "activationPlanDigest": {"$ref": "#/$defs/digest"},
+    "portAllocationReceiptDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "hostIdentityDigest": {"$ref": "#/$defs/digest"},
+    "allocations": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"type": "object", "additionalProperties": false, "required": ["serviceId", "profile", "portName", "revisionId", "port", "probeAttempt"], "properties": {"serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"}, "profile": {"enum": ["validation", "accepted"]}, "portName": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"}, "revisionId": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "probeAttempt": {"type": "integer", "minimum": 0, "maximum": 511}}}},
+    "occupiedInputs": {"type": "array", "maxItems": 65535, "items": {"type": "object", "additionalProperties": false, "required": ["class", "port", "identityDigest"], "properties": {"class": {"enum": ["current", "predecessor", "candidate", "observed-host"]}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "identityDigest": {"$ref": "#/$defs/digest"}}}},
+    "hostObservationReceiptDigest": {"$ref": "#/$defs/digest"},
+    "checkedAt": {"$ref": "#/$defs/timestamp"},
+    "validUntil": {"$ref": "#/$defs/timestamp"},
+    "result": {"const": "collision-free-immediate-pre-effect"},
+    "receiptDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}}
+}

@@ -1,0 +1,53 @@
+formatVersion: checklistdd.actions/v1
+application:
+  id: checklistdd
+  descriptorVersion: checklistdd.application/v1
+actions:
+  - formatVersion: checklistdd.action/v1
+    id: checklistdd.plan-next-item/v1
+    displayName: Plan next checklist item
+    purpose: Select the next incomplete item without mutating canonical state.
+    executorCommand: scripts/checklist_actions.py
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, item]}
+    contextPolicy:
+      id: checklistdd.context/v1
+      categoryPaths: {checklist_state: [state/CHECKLIST.yaml]}
+      includeCategories: [instance_descriptor, checklist_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 300
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 300, costMinor: 0, timeSeconds: 5, steps: 1}
+  - formatVersion: checklistdd.action/v1
+    id: checklistdd.complete-item/v1
+    displayName: Complete checklist item
+    purpose: Propose completion of one identified checklist item.
+    executorCommand: scripts/checklist_actions.py
+    inputSchema:
+      type: object
+      required: [itemId]
+      properties: {itemId: {type: string, minLength: 1}}
+      additionalProperties: false
+    outputSchema: {type: object, required: [actionId, stateChangeProposals]}
+    contextPolicy:
+      id: checklistdd.context/v1
+      categoryPaths: {checklist_state: [state/CHECKLIST.yaml]}
+      includeCategories: [instance_descriptor, checklist_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 300
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 300, costMinor: 0, timeSeconds: 5, steps: 1}

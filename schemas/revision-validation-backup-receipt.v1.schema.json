@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-validation-backup-receipt.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "operationPlanDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "backupReceiptDigest", "snapshotSetDigest", "volumeBindings", "createdAt", "consistencyMode", "consistencyEvidenceDigest", "result", "receiptDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-validation-backup-receipt/v1"},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "backupReceiptDigest": {"$ref": "#/$defs/digest"},
+    "snapshotSetDigest": {"$ref": "#/$defs/digest"},
+    "volumeBindings": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["volumeKey", "snapshotVolumeName", "sourceDataGeneration", "readOnly"], "properties": {"volumeKey": {"type": "string", "pattern": "^stateport-[a-z0-9-]+:[a-z][a-z0-9-]{0,62}$"}, "snapshotVolumeName": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{2,127}$"}, "sourceDataGeneration": {"oneOf": [{"type": "string", "pattern": "^data_[0-9a-f]{32}$"}, {"type": "null"}]}, "readOnly": {"const": true}}}},
+    "createdAt": {"$ref": "#/$defs/timestamp"},
+    "consistencyMode": {"enum": ["quiesced", "application-consistent"]},
+    "consistencyEvidenceDigest": {"$ref": "#/$defs/digest"},
+    "result": {"const": "succeeded"},
+    "receiptDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}}
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-owner-bundle.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "owner", "rootIdentity", "operationPlanDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "profile", "acceptedDataGeneration", "acceptedDataGenerationDigest", "artifacts", "reconciliationSteps", "crossUserAtomic", "bundleDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-owner-bundle/v1"},
+    "owner": {"const": "stateport-control"},
+    "rootIdentity": {"const": "xdg-config-containers-systemd"},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "profile": {"const": "accepted"},
+    "acceptedDataGeneration": {"type": "string", "pattern": "^data_[0-9a-f]{32}$"},
+    "acceptedDataGenerationDigest": {"$ref": "#/$defs/digest"},
+    "artifacts": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["kind", "sourcePath", "liveRelativePath", "contentDigest"], "properties": {"kind": {"enum": ["container", "network", "volume"]}, "sourcePath": {"type": "string", "pattern": "^accepted/[0-9a-f]{64}/[^\\s]+$"}, "liveRelativePath": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\s\\\\]+$"}, "contentDigest": {"$ref": "#/$defs/digest"}}}},
+    "reconciliationSteps": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "string", "minLength": 1}},
+    "crossUserAtomic": {"const": false},
+    "bundleDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

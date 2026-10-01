@@ -1,0 +1,26 @@
+formatVersion: stateport.template.generic.actions/v1
+application:
+  id: stateport.template.generic
+  descriptorVersion: stateport.application/v1
+actions:
+  - formatVersion: stateport.template.generic.action/v1
+    id: stateport.template.generic.inspect/v1
+    displayName: Inspect template
+    purpose: Validate and summarize a declarative template without executing repository-supplied commands.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, digest, summary]}
+    contextPolicy:
+      id: stateport.template.generic.context/v1
+      categoryPaths: {application_descriptor: [application.yaml], template_descriptor: [template.yaml]}
+      includeCategories: [application_descriptor, template_descriptor]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 800
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 10
+    budgetDefaults: {token: 800, costMinor: 0, timeSeconds: 10, steps: 1}

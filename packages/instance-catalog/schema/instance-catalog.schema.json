@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/instance-catalog/v1",
+  "title": "StatePort local instance catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "root", "entries"],
+  "properties": {
+    "formatVersion": {
+      "const": "stateport.instance-catalog/v1"
+    },
+    "root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1}
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instanceId",
+        "name",
+        "path",
+        "status",
+        "adoption",
+        "filesystem",
+        "pathState",
+        "previousPaths",
+        "createdAt",
+        "updatedAt",
+        "lastValidatedAt",
+        "metadata"
+      ],
+      "properties": {
+        "instanceId": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "status": {"enum": ["active", "archived"]},
+        "adoption": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "readOnly"],
+          "properties": {
+            "mode": {"enum": ["registered", "imported"]},
+            "readOnly": {"const": true}
+          }
+        },
+        "filesystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["device", "inode", "kind"],
+          "properties": {
+            "device": {"type": "integer", "minimum": 0},
+            "inode": {"type": "integer", "minimum": 0},
+            "kind": {"const": "directory"}
+          }
+        },
+        "pathState": {"enum": ["present", "moved", "stale", "missing", "unsafe"]},
+        "previousPaths": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "createdAt": {"type": "string", "minLength": 1},
+        "updatedAt": {"type": "string", "minLength": 1},
+        "lastValidatedAt": {"type": "string", "minLength": 1},
+        "metadata": {"type": "object", "additionalProperties": true}
+      }
+    }
+  }
+}

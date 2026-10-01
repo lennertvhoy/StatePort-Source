@@ -1,0 +1,38 @@
+formatVersion: stateport.application-experience/v1
+applicationId: atm10.speedrun-guide
+displayName: ATM10 6.1 Speedrun Guide
+description: A source-backed ATM10 6.1 speedrun guide with an operator conversation.
+capabilities:
+  - conversation
+  - progress_dashboard
+views:
+  - viewId: atm10-guide-home
+    label: Overview
+    component: application_home
+    route: /application
+    capability: progress_dashboard
+  - viewId: atm10-guide-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+navigation:
+  - contributionId: atm10-guide-home-nav
+    label: Overview
+    viewId: atm10-guide-home
+    placement: application
+    order: 10
+  - contributionId: atm10-guide-conversation-nav
+    label: Conversation
+    viewId: atm10-guide-conversation
+    placement: conversation
+    order: 20
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: ATM10 guide conversation
+  emptyState: Ask about the current ATM10 6.1 speedrun route and its verified evidence.
+advancedControls: []
+platformOperations: []
+legacyAliases: []
