@@ -1,0 +1,21 @@
+apiVersion: statedd.stateport.io/v1alpha1
+kind: Template
+metadata:
+  id: stateport.fixture.studystate-sample
+  name: StatePort StudyState sample synthetic fixture
+  version: 0.2.0
+  description: Invented public-safe learning fixture revision 0002 adding the read-only study-tip action.
+spec:
+  domain: test-fixture
+  lifecycle:
+    - draft
+  allowedActions:
+    - name: read_state
+      level: L0
+  schemas: []
+  agentContract:
+    role: fixture-validator
+    responsibilities:
+      - Exercise governed fixture installation and upgrade journeys
+    forbiddenActions:
+      - Treat this fixture as canonical content

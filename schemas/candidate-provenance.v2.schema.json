@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/candidate-provenance.v2.schema.json",
+  "title": "StatePort public successor candidate provenance v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "candidateId",
+    "classification",
+    "authorityClass",
+    "authoritativeForInstallation",
+    "repository",
+    "materialization",
+    "artifacts",
+    "verification",
+    "retention"
+  ],
+  "properties": {
+    "schema": {"const": "stateport.candidate-provenance/v2"},
+    "candidateId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,127}$"},
+    "classification": {"enum": ["public_successor_release_candidate", "local_qualification_candidate"]},
+    "authorityClass": {"enum": ["public_git_authority_and_local_build_evidence", "local_qualification_git_authority_and_local_build_evidence"]},
+    "authoritativeForInstallation": {"const": false},
+    "repository": {"$ref": "#/$defs/repository"},
+    "materialization": {"$ref": "#/$defs/materialization"},
+    "artifacts": {"$ref": "#/$defs/artifacts"},
+    "verification": {"$ref": "#/$defs/verification"},
+    "retention": {"$ref": "#/$defs/retention"}
+  },
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"},
+    "https": {
+      "type": "string",
+      "pattern": "^https://[^\\s?#]+$",
+      "not": {"pattern": "^https://[^/]*@"}
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gitBlob", "sha256"],
+      "properties": {
+        "gitBlob": {"$ref": "#/$defs/sha1"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "receiptId": {"type": "string", "pattern": "^clone_receipt_[0-9a-f]{32}$"},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorityUrl",
+        "ref",
+        "commit",
+        "tree",
+        "objectFormat",
+        "normalCloneVerification"
+      ],
+      "properties": {
+        "authorityUrl": {"$ref": "#/$defs/https"},
+        "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"},
+        "commit": {"$ref": "#/$defs/sha1"},
+        "tree": {"$ref": "#/$defs/sha1"},
+        "objectFormat": {"const": "sha1"},
+        "normalCloneVerification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "receiptId", "receiptSha256", "url", "ref", "commit", "tree"],
+          "properties": {
+            "status": {"enum": ["verified_anonymous_normal_clone", "verified_local_qualification_clone"]},
+            "receiptId": {"$ref": "#/$defs/receiptId"},
+            "receiptSha256": {"$ref": "#/$defs/sha256"},
+            "url": {"$ref": "#/$defs/https"},
+            "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"},
+            "commit": {"$ref": "#/$defs/sha1"},
+            "tree": {"$ref": "#/$defs/sha1"}
+          }
+        }
+      }
+    },
+    "materialization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRepository", "sourceCommit", "sourceTree", "materializer", "exporter", "policy"],
+      "properties": {
+        "sourceRepository": {"$ref": "#/$defs/https"},
+        "sourceCommit": {"$ref": "#/$defs/sha1"},
+        "sourceTree": {"$ref": "#/$defs/sha1"},
+        "materializer": {"$ref": "#/$defs/tool"},
+        "exporter": {"$ref": "#/$defs/tool"},
+        "policy": {"$ref": "#/$defs/tool"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicManifest",
+        "licensingInventory",
+        "normalCloneReceipt",
+        "sourceArchive",
+        "gitBundle",
+        "installer",
+        "executionHostProvisioner",
+        "updaterWheel",
+        "candidateInputManifest",
+        "releaseTreeManifest"
+      ],
+      "properties": {
+        "publicManifest": {"$ref": "#/$defs/artifact"},
+        "licensingInventory": {"$ref": "#/$defs/artifact"},
+        "normalCloneReceipt": {"$ref": "#/$defs/artifact"},
+        "sourceArchive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes", "embeddedGitIdentity"],
+          "properties": {
+            "path": {"$ref": "#/$defs/path"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "bytes": {"type": "integer", "minimum": 1},
+            "embeddedGitIdentity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["authorityUrl", "ref", "commit", "tree", "manifestSha256"],
+              "properties": {
+                "authorityUrl": {"$ref": "#/$defs/https"},
+                "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"},
+                "commit": {"$ref": "#/$defs/sha1"},
+                "tree": {"$ref": "#/$defs/sha1"},
+                "manifestSha256": {"$ref": "#/$defs/sha256"}
+                }
+            }
+          }
+        },
+        "gitBundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes", "ref", "commit", "tree"],
+          "properties": {
+            "path": {"$ref": "#/$defs/path"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "bytes": {"type": "integer", "minimum": 1},
+            "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"},
+            "commit": {"$ref": "#/$defs/sha1"},
+            "tree": {"$ref": "#/$defs/sha1"}
+          }
+        },
+        "installer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes", "sourceCommit", "sourcePath"],
+          "properties": {
+            "path": {"$ref": "#/$defs/path"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "bytes": {"type": "integer", "minimum": 1},
+            "sourceCommit": {"$ref": "#/$defs/sha1"},
+            "sourcePath": {"const": "scripts/install_no_checkout.py"}
+          }
+        },
+        "executionHostProvisioner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes", "sourceCommit", "sourcePath"],
+            "properties": {
+              "path": {"$ref": "#/$defs/path"},
+              "sha256": {"$ref": "#/$defs/sha256"},
+              "bytes": {"type": "integer", "minimum": 1},
+              "sourceCommit": {"$ref": "#/$defs/sha1"},
+              "sourcePath": {"const": "scripts/stateport-execution-host-provision"},
+              "qualificationDerivedFromSourceSha256": {"$ref": "#/$defs/sha256"}
+            }
+        },
+        "podmanPackageBundle": {"$ref": "#/$defs/artifact"},
+        "updaterWheel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "bytes", "firstPath", "secondPath", "reproducible", "firstSha256", "secondSha256", "firstBytes", "secondBytes", "buildEvidence"],
+          "properties": {
+            "path": {"$ref": "#/$defs/path"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "bytes": {"type": "integer", "minimum": 1},
+            "firstPath": {"$ref": "#/$defs/path"},
+            "secondPath": {"$ref": "#/$defs/path"},
+            "reproducible": {"const": true},
+            "firstSha256": {"$ref": "#/$defs/sha256"},
+            "secondSha256": {"$ref": "#/$defs/sha256"},
+            "firstBytes": {"type": "integer", "minimum": 1},
+            "secondBytes": {"type": "integer", "minimum": 1},
+            "qualificationDerivedFromSourceSha256": {"$ref": "#/$defs/sha256"},
+            "buildEvidence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "formatVersion", "sourceTree", "lockedInputsSha256", "runtime"],
+              "properties": {
+                "path": {"const": "stateport_updater/_build_identity.py"},
+                "formatVersion": {"const": "stateport.updater-build-evidence/v1"},
+                "sourceTree": {"$ref": "#/$defs/sha1"},
+                "lockedInputsSha256": {"$ref": "#/$defs/sha256"},
+                "runtime": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["python", "implementation", "pip", "pythonExecutable", "pipExecutable", "setuptools", "wheel"],
+                  "properties": {
+                    "python": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+                    "implementation": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "pip": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$"},
+                    "pythonExecutable": {"const": "build-venv/bin/python"},
+                    "pipExecutable": {"const": "build-venv/bin/python -m pip"},
+                    "setuptools": {"const": "80.10.2"},
+                    "wheel": {"const": "0.45.1"}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "candidateInputManifest": {"$ref": "#/$defs/artifact"},
+        "releaseTreeManifest": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["normalClone", "sourceArchive", "gitBundle", "updaterWheel", "signing"],
+      "properties": {
+          "normalClone": {"enum": ["verified_anonymous_normal_clone", "verified_local_qualification_clone"]},
+        "sourceArchive": {"const": "verified_contents_and_embedded_git_identity"},
+        "gitBundle": {"const": "verified_ref_commit_tree_recovery"},
+        "updaterWheel": {"const": "verified_twice_byte_equal_from_locked_inputs"},
+        "signing": {"const": "pending_owner_authorized_signing"}
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "retainUntil", "deletionRequiresExplicitOwnerApproval"],
+      "properties": {
+        "status": {"const": "local_candidate_not_published"},
+        "retainUntil": {"const": "explicit_owner_disposition_or_superseding_verified_candidate"},
+        "deletionRequiresExplicitOwnerApproval": {"const": true}
+      }
+    }
+  }
+}

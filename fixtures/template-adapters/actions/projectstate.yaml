@@ -1,0 +1,26 @@
+formatVersion: stateport.template.projectstate.actions/v1
+application:
+  id: stateport.template.projectstate
+  descriptorVersion: stateport.application/v1
+actions:
+  - formatVersion: stateport.template.projectstate.action/v1
+    id: stateport.template.projectstate.inspect/v1
+    displayName: Inspect project outcome
+    purpose: Validate and summarize the current ProjectState outcome and slice without mutating it.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, digest, summary]}
+    contextPolicy:
+      id: stateport.template.projectstate.context/v1
+      categoryPaths: {project_outcome: [PROJECT.md], project_state: [STATE.yaml]}
+      includeCategories: [project_outcome, project_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 1200
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 10
+    budgetDefaults: {token: 1200, costMinor: 0, timeSeconds: 10, steps: 1}

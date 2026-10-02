@@ -1,0 +1,105 @@
+formatVersion: statedd.template-manifest/v2
+template:
+  id: stateport.fixture.studystate-sample
+  releaseVersion: 0.1.0
+  stateddSpecVersion: statedd.stateport.io/v1alpha1
+  instanceSchemaVersion: statedd.stateport.io/instance/v1alpha1
+source:
+  class: synthetic_fixture
+  productionEligible: false
+modules:
+  - id: core
+    contractVersion: "1.0"
+    dependencies: []
+    conflicts: []
+    capabilities:
+      - read_state
+      - write_state
+    assets:
+      - actions-contract
+      - agent-guide
+      - action-scripts
+      - durable-state
+      - instance-definition
+      - lifecycle-lock
+    selfTests:
+      - id: studystate-sample-fixture
+    order: 10
+selectedModules:
+  - core
+assets:
+  - id: actions-contract
+    path: actions.yaml
+    kind: file
+    owner: template
+    role: application_action_contract
+    provisionPolicy: copy_from_template
+    updatePolicy: replace_if_unmodified
+    required: true
+    schema: null
+    sensitivity: public
+    source: actions.yaml
+    selectingModules:
+      - core
+  - id: agent-guide
+    path: AGENTS.md
+    kind: file
+    owner: template
+    role: operator_guide
+    provisionPolicy: copy_from_template
+    updatePolicy: replace_if_unmodified
+    required: true
+    schema: null
+    sensitivity: public
+    source: AGENTS.md
+    selectingModules:
+      - core
+  - id: action-scripts
+    path: scripts
+    kind: tree
+    owner: template
+    role: application_scripts
+    provisionPolicy: create_if_missing
+    updatePolicy: preserve
+    required: true
+    schema: null
+    sensitivity: public
+    selectingModules:
+      - core
+  - id: durable-state
+    path: state
+    kind: tree
+    owner: template
+    role: durable_state
+    provisionPolicy: create_if_missing
+    updatePolicy: preserve
+    required: true
+    schema: null
+    sensitivity: private
+    selectingModules:
+      - core
+  - id: instance-definition
+    path: instance.yaml
+    kind: file
+    owner: instance
+    role: instance_definition
+    provisionPolicy: create_if_missing
+    updatePolicy: preserve
+    required: true
+    schema: statedd.stateport.io/instance/v1alpha1
+    sensitivity: private
+    selectingModules:
+      - core
+  - id: lifecycle-lock
+    path: .statedd/lock.yaml
+    kind: file
+    owner: generated
+    role: lifecycle_lock
+    provisionPolicy: generated_output
+    updatePolicy: generated
+    required: true
+    schema: statedd.stateport.io/lock/v1
+    sensitivity: internal
+    generator: materializer
+    selectingModules:
+      - core

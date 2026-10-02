@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-port-allocation-receipt.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "operationPlanDigest", "activationPlanDigest", "proposalDigest", "reservationReceiptDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "hostIdentityDigest", "rangeStart", "rangeEnd", "inventoryDigests", "recheckInventoryDigest", "occupiedInputs", "allocations", "observedHostCollision", "allocatedAt", "reservationExpiresAt", "result", "receiptDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-port-allocation-receipt/v1"},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "activationPlanDigest": {"$ref": "#/$defs/digest"},
+    "proposalDigest": {"$ref": "#/$defs/digest"},
+    "reservationReceiptDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "hostIdentityDigest": {"$ref": "#/$defs/digest"},
+    "rangeStart": {"type": "integer", "minimum": 1024, "maximum": 60000},
+    "rangeEnd": {"type": "integer", "minimum": 1025, "maximum": 65535},
+    "inventoryDigests": {"type": "object", "additionalProperties": false, "required": ["current", "predecessor", "candidate", "observedHost"], "properties": {"current": {"$ref": "#/$defs/digest"}, "predecessor": {"$ref": "#/$defs/digest"}, "candidate": {"$ref": "#/$defs/digest"}, "observedHost": {"$ref": "#/$defs/digest"}}},
+    "recheckInventoryDigest": {"$ref": "#/$defs/digest"},
+    "occupiedInputs": {"type": "array", "maxItems": 65535, "items": {"type": "object", "additionalProperties": false, "required": ["class", "port", "identityDigest"], "properties": {"class": {"enum": ["current", "predecessor", "candidate", "observed-host"]}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "identityDigest": {"$ref": "#/$defs/digest"}}}},
+    "allocations": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"type": "object", "additionalProperties": false, "required": ["serviceId", "profile", "portName", "revisionId", "port", "probeAttempt"], "properties": {"serviceId": {"type": "string", "pattern": "^stateport-[a-z0-9][a-z0-9-]{1,62}$"}, "profile": {"enum": ["validation", "accepted"]}, "portName": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"}, "revisionId": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "probeAttempt": {"type": "integer", "minimum": 0, "maximum": 511}}}},
+    "observedHostCollision": {"const": "refused-before-start"},
+    "allocatedAt": {"$ref": "#/$defs/timestamp"},
+    "reservationExpiresAt": {"$ref": "#/$defs/timestamp"},
+    "result": {"const": "collision-free"},
+    "receiptDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}}
+}

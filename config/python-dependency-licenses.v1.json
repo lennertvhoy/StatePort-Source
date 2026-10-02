@@ -1,0 +1,99 @@
+{
+  "schema": "stateport.python-dependency-licenses/v1",
+  "reviewStatus": "metadata_inventory_not_legal_advice",
+  "metadataObservedAt": "2026-08-01",
+  "packages": [
+    {
+      "name": "attrs",
+      "version": "26.1.0",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "scopes": ["development_test_windows"],
+      "licenseExpression": "NOASSERTION",
+      "declaredLicense": "BSD License",
+      "metadataSource": "wheel_classifier_and_license_file"
+    },
+    {
+      "name": "iniconfig",
+      "version": "2.3.0",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "jsonschema",
+      "version": "4.26.0",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "packaging",
+      "version": "26.2",
+      "scopes": ["development_test"],
+      "licenseExpression": "Apache-2.0 OR BSD-2-Clause",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "pluggy",
+      "version": "1.6.0",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "pygments",
+      "version": "2.20.0",
+      "scopes": ["development_test"],
+      "licenseExpression": "BSD-2-Clause",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "pytest",
+      "version": "9.0.3",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "pyyaml",
+      "version": "6.0.3",
+      "scopes": ["runtime", "development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "referencing",
+      "version": "0.37.0",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "rpds-py",
+      "version": "2026.6.3",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "wheel_core_metadata"
+    },
+    {
+      "name": "ruff",
+      "version": "0.16.0",
+      "scopes": ["development_test"],
+      "licenseExpression": "MIT",
+      "metadataSource": "upstream_repository_license_and_wheel_core_metadata"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stateport.restore-approval/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "operation", "sourceInstanceId", "destinationInstanceId", "planDigest", "actor", "decision", "approvedAt", "expiresAt", "approvalDigest"],
+  "properties": {
+    "formatVersion": {"const": "stateport.restore-approval/v1"},
+    "operation": {"const": "restore_new_instance"},
+    "sourceInstanceId": {"$ref": "#/$defs/id"},
+    "destinationInstanceId": {"$ref": "#/$defs/id"},
+    "planDigest": {"$ref": "#/$defs/digest"},
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actorId", "actorRole"],
+      "properties": {
+        "actorId": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+        "actorRole": {"enum": ["platform_operator", "local_operator"]}
+      }
+    },
+    "decision": {"const": "approved"},
+    "approvedAt": {"type": "string", "minLength": 20},
+    "expiresAt": {"type": "string", "minLength": 20},
+    "approvalDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

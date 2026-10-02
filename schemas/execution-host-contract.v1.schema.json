@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionHostContract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion",
+    "contractVersion",
+    "clientCompatibility",
+    "transport",
+    "workloadKinds",
+    "operations",
+    "sealedWorkloadsOnly",
+    "providerAccess",
+    "publicNetwork",
+    "peerIdentity",
+    "limits"
+  ],
+  "properties": {
+    "formatVersion": {"const": "stateport.execution-host-contract/v1"},
+    "contractVersion": {"const": 2},
+    "clientCompatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "maximum"],
+      "properties": {
+        "minimum": {"const": 1},
+        "maximum": {"const": 2}
+      }
+    },
+    "transport": {"const": "confined-host-unix-socket"},
+    "workloadKinds": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "agent-run",
+          "capsule-service",
+          "browser-journey",
+          "terminal",
+          "workspace",
+          "validator-run"
+        ]
+      }
+    },
+    "operations": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "describeCapabilities",
+          "createWorkload",
+          "start",
+          "stop",
+          "status",
+          "logs",
+          "cancel",
+          "removeWorkload",
+          "openTerminal",
+          "resizeTerminal",
+          "signalTerminal",
+          "closeTerminal",
+          "execWorkload",
+          "listWorkloads",
+          "collectGarbage",
+          "runValidator",
+          "probeDeploymentTarget",
+          "applyDeployment",
+          "updateDeployment",
+          "observeDeployment",
+          "collectDeploymentLogs",
+          "restartDeployment",
+          "removeDeploymentRuntime",
+          "backupDeploymentData",
+          "restoreDeploymentData",
+          "purgeDeploymentData"
+        ]
+      }
+    },
+    "sealedWorkloadsOnly": {"const": true},
+    "providerAccess": {"const": false},
+    "publicNetwork": {"const": false},
+    "peerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mechanism",
+        "runtimeUid",
+        "runtimeGid",
+        "socketGroupGid",
+        "allowedClientUid",
+        "allowedClientGid"
+      ],
+      "properties": {
+        "mechanism": {"const": "SO_PEERCRED"},
+        "runtimeUid": {"type": "integer", "minimum": 0},
+        "runtimeGid": {"type": "integer", "minimum": 0},
+        "socketGroupGid": {"type": ["integer", "null"], "minimum": 0},
+        "allowedClientUid": {"type": ["integer", "null"], "minimum": 0},
+        "allowedClientGid": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxTimeoutSeconds", "maxRequestTimeoutSeconds", "maxDeploymentRequestTimeoutSeconds", "maxOutputBytes", "maxWorkloads"],
+      "properties": {
+        "maxTimeoutSeconds": {"type": "integer", "minimum": 1},
+        "maxRequestTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 600},
+        "maxDeploymentRequestTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 1200},
+        "maxOutputBytes": {"type": "integer", "minimum": 1},
+        "maxWorkloads": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

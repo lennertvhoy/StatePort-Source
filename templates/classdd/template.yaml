@@ -1,0 +1,54 @@
+apiVersion: statedd.stateport.io/v1alpha1
+kind: Template
+metadata:
+  id: classdd
+  name: ClassState for StatePort
+  version: 0.1.0
+  description: Template for trainers and education teams.
+spec:
+  domain: education
+  lifecycle:
+    - draft
+    - active
+    - archived
+  reviewCadence: weekly
+  allowedActions:
+    - name: read_state
+      level: L0
+      description: Read state files
+    - name: propose_action
+      level: L1
+      description: Propose a follow-up action
+    - name: write_state
+      level: L2
+      description: Update class state files
+    - name: send_summary
+      level: L3
+      description: Send summary message to trainer
+    - name: delete_instance
+      level: L4
+      description: Delete the class instance
+  schemas:
+    - state/class.yaml
+    - state/topics.yaml
+    - state/students.yaml
+  inbox:
+    format: markdown
+    allowedExtensions:
+      - .md
+      - .txt
+  quotas:
+    runsPerDay: 100
+    messagesPerDay: 200
+    monthlyEuroEstimate: 10
+  agentContract:
+    role: assistant
+    responsibilities:
+      - Maintain class state from lesson notes
+      - Identify weak topics and student follow-ups
+      - Prepare next-lesson notes
+      - Produce weekly reviews
+    forbiddenActions:
+      - Contact students directly without explicit approval
+      - Store data outside the instance
+      - Share lesson notes with unauthorized parties

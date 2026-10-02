@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/source-descriptor.v2.schema.json",
+  "title": "StatePort immutable source descriptor v2",
+  "type": "object",
+  "required": ["formatVersion", "kind", "sourceClass", "productionEligible", "repository", "requestedRef", "resolvedCommit", "resolvedTree", "checkoutLocation", "manifestDigest", "sourceDigest"],
+  "properties": {
+    "formatVersion": {"const": "statedd.source/v2"},
+    "kind": {"const": "git"},
+    "sourceClass": {"const": "canonical_source"},
+    "productionEligible": {"const": true},
+    "repository": {"type": "string", "minLength": 1},
+    "requestedRef": {"type": "string", "minLength": 1},
+    "resolvedCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "resolvedTree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "checkoutLocation": {"type": "string", "minLength": 1},
+    "manifestDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sourceDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

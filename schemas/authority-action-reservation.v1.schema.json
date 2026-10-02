@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/authority-action-reservation.v1.schema.json",
+  "title": "StatePort authority action reservation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "reservationId", "requestId", "decision", "reservedAt", "reservationDigest"],
+  "properties": {
+    "schema": {"const": "stateport.authority-action-reservation/v1"},
+    "reservationId": {"type": "string", "pattern": "^authority_reservation_[0-9a-f]{32}$"},
+    "requestId": {"type": "string", "pattern": "^authority_request_[0-9a-f]{32}$"},
+    "decision": {"type": "object"},
+    "reservedAt": {"type": "string", "format": "date-time"},
+    "reservationDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

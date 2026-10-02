@@ -1,0 +1,62 @@
+formatVersion: stateport.application-experience/v1
+applicationId: stateport.template.generic
+displayName: StatePort Template
+description: An isolated declarative template with trusted generic inspection.
+capabilities:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+  - file_viewer
+  - backup
+views:
+  - viewId: managed-template-home
+    label: Template
+    component: application_home
+    route: /application
+    capability: progress_dashboard
+  - viewId: managed-template-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+navigation:
+  - contributionId: managed-template-home-nav
+    label: Template
+    viewId: managed-template-home
+    placement: application
+    order: 10
+  - contributionId: managed-template-conversation-nav
+    label: Conversation
+    viewId: managed-template-conversation
+    placement: conversation
+    order: 20
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: Template conversation
+  emptyState: Work with this isolated template without exposing runtime controls.
+advancedControls:
+  - controlId: managed-template-state
+    label: Template state
+    component: state_summary
+    capability: progress_dashboard
+    order: 10
+  - controlId: managed-template-files
+    label: Files
+    component: file_viewer
+    capability: file_viewer
+    order: 20
+  - controlId: managed-template-runs
+    label: Runs
+    component: run_history
+    capability: goal_execution
+    order: 30
+  - controlId: managed-template-receipts
+    label: Receipts
+    component: receipt_list
+    capability: goal_execution
+    order: 40
+platformOperations: []
+legacyAliases: []

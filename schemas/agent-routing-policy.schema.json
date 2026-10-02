@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatePort agent routing policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "policyVersion", "limits", "roles", "selection", "escalation", "routingDeviation", "reviewTriggers", "automation"],
+  "properties": {
+    "formatVersion": {"const": "stateport.agent-routing-policy/v1"},
+    "policyVersion": {"const": 1},
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxThreads", "maxDepth"],
+      "properties": {
+        "maxThreads": {"const": 4},
+        "maxDepth": {"const": 1}
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scout", "mechanicalImplementer", "defaultImplementer", "complexImplementer", "architect", "reviewer", "exceptionalAdjudicator"],
+      "properties": {
+        "scout": {"$ref": "#/$defs/role"},
+        "mechanicalImplementer": {"$ref": "#/$defs/role"},
+        "defaultImplementer": {"$ref": "#/$defs/role"},
+        "complexImplementer": {"$ref": "#/$defs/role"},
+        "architect": {"$ref": "#/$defs/role"},
+        "reviewer": {"$ref": "#/$defs/role"},
+        "exceptionalAdjudicator": {"$ref": "#/$defs/role"}
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principle", "reasoningConcentration", "scoutMode", "independentReadOnlyRoles", "context"],
+      "properties": {
+        "principle": {"const": "cheapest-reliable-profile"},
+        "reasoningConcentration": {"const": "planning"},
+        "scoutMode": {"const": "read-only"},
+        "independentReadOnlyRoles": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"enum": ["architect", "reviewer"]}},
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy", "instructions", "irrelevantMcpServers"],
+          "properties": {
+            "policy": {"const": "narrow"},
+            "instructions": {"const": "local-nested"},
+            "irrelevantMcpServers": {"const": "disabled"}
+          }
+        }
+      }
+    },
+    "escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failedRepairLoops", "passingTestsUnclear", "solMax"],
+      "properties": {
+        "failedRepairLoops": {"type": "integer"},
+        "passingTestsUnclear": {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["ownership", "migration", "recovery", "compatibility"]}},
+        "solMax": {"const": "exceptional-only"}
+      }
+    },
+    "routingDeviation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invalidatesOutput", "requireLedgerEntry", "requireReview", "fullRerunAllowedOnlyFor"],
+      "properties": {
+        "invalidatesOutput": {"const": false},
+        "requireLedgerEntry": {"const": true},
+        "requireReview": {"const": true},
+        "fullRerunAllowedOnlyFor": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "controlled_benchmark",
+              "material_defect",
+              "unsafe_execution",
+              "irrecoverable_provenance",
+              "explicit_human_request"
+            ]
+          }
+        }
+      }
+    },
+    "reviewTriggers": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["model-change", "pricing-change", "codex-configuration-change"]}},
+    "automation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routing"],
+      "properties": {"routing": {"const": "disabled"}}
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preferredProfile", "access"],
+      "properties": {
+        "preferredProfile": {"enum": ["luna-medium", "luna-high", "terra-medium", "terra-high", "sol-xhigh", "sol-max"]},
+        "access": {"enum": ["read-only", "workspace-write"]}
+      }
+    }
+  }
+}

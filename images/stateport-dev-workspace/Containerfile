@@ -1,0 +1,247 @@
+FROM docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS workspace
+
+ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
+ARG STATEPORT_BUILD_SOURCE_TREE=unknown
+ARG STATEPORT_BUILD_SOURCE_REF=unknown
+ARG STATEPORT_BUILD_SOURCE_DIRTY=true
+ARG STATEPORT_BUILD_SOURCE_DATE_EPOCH=unknown
+ARG STATEPORT_BUILD_VERSION=0.0.0-unknown
+ARG STATEPORT_BUILD_CREATED=1970-01-01T00:00:00Z
+ARG STATEPORT_BUILD_ADAPTER=unknown
+LABEL org.opencontainers.image.title="StatePort Developer Workspace" \
+      org.opencontainers.image.source="https://github.com/lennertvhoy/StatePort" \
+      org.opencontainers.image.revision="${STATEPORT_BUILD_SOURCE_COMMIT}" \
+      org.opencontainers.image.version="${STATEPORT_BUILD_VERSION}" \
+      org.opencontainers.image.created="${STATEPORT_BUILD_CREATED}" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      io.stateport.source.tree="${STATEPORT_BUILD_SOURCE_TREE}" \
+      org.opencontainers.image.ref.name="${STATEPORT_BUILD_SOURCE_REF}" \
+      io.stateport.source.dirty="${STATEPORT_BUILD_SOURCE_DIRTY}" \
+      io.stateport.source-date-epoch="${STATEPORT_BUILD_SOURCE_DATE_EPOCH}" \
+      io.stateport.build.adapter="${STATEPORT_BUILD_ADAPTER}" \
+      io.stateport.image.role="developer-workspace" \
+      io.stateport.credentials="operator-volume-only"
+
+# Ubuntu's minimal base intentionally omits TLS roots. Bootstrap the exact
+# signed ca-certificates package from the base's signed archive, then replace
+# live sources with the fixed 2026-08-01 Canonical snapshot before installing
+# every other exact package.
+# Package-manager byproducts (apt/dpkg/alternatives logs and the ldconfig
+# aux-cache) embed wall-clock timestamps and would break OCI two-build digest
+# reproducibility, and they carry no runtime value in an image; remove them
+# at the end of every package step.
+RUN printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' \
+      'Acquire::https::Timeout "30";' 'APT::Update::Error-Mode "any";' \
+      > /etc/apt/apt.conf.d/80-stateport-build-transport \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates=20260601~24.04.1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /var/log/apt/history.log /var/log/apt/term.log /var/log/apt/eipp.log.xz \
+      /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache
+COPY images/stateport-dev-workspace/ubuntu-snapshot.sources /etc/apt/sources.list.d/ubuntu.sources
+# useradd stamps the current date into /etc/shadow's password-aging field,
+# which breaks double-build OCI reproducibility when the two builds cross
+# midnight UTC. Pin the field to the build's SOURCE_DATE_EPOCH day (0 when
+# unlabelled) so the layer is byte-identical across builds.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+      bash=5.2.21-2ubuntu4 \
+      bat=0.24.0-1build1 \
+      build-essential=12.10ubuntu1 \
+      curl=8.5.0-2ubuntu10.11 \
+      dnsutils=1:9.18.39-0ubuntu0.24.04.5 \
+      eza=0.18.2-1 \
+      fd-find=9.0.0-1 \
+      git=1:2.43.0-1ubuntu7.3 \
+      iproute2=6.1.0-1ubuntu6.4 \
+      iputils-ping=3:20240117-1ubuntu0.1 \
+      jq=1.7.1-3ubuntu0.24.04.2 \
+      less=590-2ubuntu2.1 \
+      locales=2.39-0ubuntu8.8 \
+      netcat-openbsd=1.226-1ubuntu2 \
+      openssh-client=1:9.6p1-3ubuntu13.18 \
+      procps=2:4.0.4-4ubuntu3.2 \
+      python3=3.12.3-0ubuntu2.1 \
+      python3-pip=24.0+dfsg-1ubuntu1.3 \
+      python3-venv=3.12.3-0ubuntu2.1 \
+      ripgrep=14.1.0-1 \
+      tmux=3.4-1ubuntu0.1 \
+      unzip=6.0-28ubuntu4.1 \
+      xz-utils=5.6.1+really5.4.5-1ubuntu0.3 \
+      yq=3.1.0-3 \
+      zip=3.0-13ubuntu0.2 \
+      zsh=5.9-6ubuntu2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /var/log/apt/history.log /var/log/apt/term.log /var/log/apt/eipp.log.xz \
+      /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+    && rm /etc/apt/apt.conf.d/80-stateport-build-transport \
+    && groupadd --gid 10001 stateport \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/stateport --shell /bin/bash stateport \
+    && shadow_epoch="${STATEPORT_BUILD_SOURCE_DATE_EPOCH:-0}"; case "$shadow_epoch" in ''|*[!0-9]*) shadow_epoch=0;; esac \
+    && sed -i "s/^stateport:\([^:]*\):[0-9]*:/\1:$((shadow_epoch / 86400)):/" /etc/shadow \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+    && ln -s /usr/bin/batcat /usr/local/bin/bat \
+    && mkdir -p /workspace \
+    && chown -R 10001:10001 /workspace /home/stateport
+
+# Build gh and fzf from exact release commits with pinned Go 1.27.1, preserving
+# upstream version metadata. Sources, toolchain, and Node assets are
+# digest-verified; build-only bytes and caches are removed in the same layer.
+# The optional github_token build secret only unlocks GitHub transport for the
+# pinned public clones; every fetched byte is still verified against the exact
+# pinned SHA-256 digest below, so no secret ever becomes release content.
+RUN --mount=type=secret,id=github_token \
+    if [ -r /run/secrets/github_token ]; then \
+      git config --global credential.https://github.com.helper '!f() { echo "username=x-access-token"; echo "password=$(cat /run/secrets/github_token)"; }; f'; \
+    fi \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/go1.27.1.linux-amd64.tar.gz \
+      https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz \
+    && echo "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445  /tmp/go1.27.1.linux-amd64.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/go1.27.1.linux-amd64.tar.gz -C /usr/local --no-same-owner \
+    && git clone --filter=blob:none --no-checkout --quiet https://github.com/cli/cli.git /tmp/cli-source \
+    && git -C /tmp/cli-source fetch --quiet --depth 1 origin 0cf1092493af067646fc5f3db9421c6a6ec9c938 \
+    && git -C /tmp/cli-source checkout -q --detach FETCH_HEAD \
+    && git -C /tmp/cli-source archive --format=tar --prefix=cli-0cf1092493af067646fc5f3db9421c6a6ec9c938/ HEAD > /tmp/gh-0cf10924.tar \
+    && echo "4632cfbb1c66183ef50aba9773f973dfb9e5a00e9446e629a864003d71339240  /tmp/gh-0cf10924.tar" | sha256sum -c - \
+    && git clone --filter=blob:none --no-checkout --quiet https://github.com/junegunn/fzf.git /tmp/fzf-source \
+    && git -C /tmp/fzf-source fetch --quiet --depth 1 origin 3337be9d450cd349e99273a2d3985ceaf5f3753f \
+    && git -C /tmp/fzf-source checkout -q --detach FETCH_HEAD \
+    && git -C /tmp/fzf-source archive --format=tar --prefix=fzf-3337be9d450cd349e99273a2d3985ceaf5f3753f/ HEAD > /tmp/fzf-3337be9d.tar \
+    && echo "8d8dd8e1ddb33aad685713be4cdae48030ce4ecd57f8558db242aafe4f81be8e  /tmp/fzf-3337be9d.tar" | sha256sum -c - \
+    && mkdir -p /tmp/go-tool-build \
+    && tar -xf /tmp/gh-0cf10924.tar -C /tmp/go-tool-build --no-same-owner \
+    && tar -xf /tmp/fzf-3337be9d.tar -C /tmp/go-tool-build --no-same-owner \
+    && cd /tmp/go-tool-build/cli-0cf1092493af067646fc5f3db9421c6a6ec9c938 \
+    && GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 /usr/local/go/bin/go build \
+      -mod=readonly -trimpath -buildvcs=false \
+      -ldflags "-s -w -X github.com/cli/cli/v2/internal/build.Version=2.101.0 -X github.com/cli/cli/v2/internal/build.Date=2026-09-15" \
+      -o /usr/local/bin/gh ./cmd/gh \
+    && cd /tmp/go-tool-build/fzf-3337be9d450cd349e99273a2d3985ceaf5f3753f \
+    && GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 /usr/local/go/bin/go build \
+      -a -mod=readonly -trimpath -buildvcs=false \
+      -ldflags "-s -w -X main.version=0.74.2 -X main.revision=3337be9d" \
+      -o /usr/local/bin/fzf . \
+    && /usr/local/go/bin/go version -m /usr/local/bin/gh | grep -F "go1.27.1" \
+    && /usr/local/go/bin/go version -m /usr/local/bin/fzf | grep -F "go1.27.1" \
+    && grep -aqF "golang.org/x/mod/sumdb/note" /usr/local/bin/gh \
+    && ! grep -aqE 'golang\.org/x/mod/(sumdb\.Client|sumdb/client|sumdb/tlog|tlog\.)' /usr/local/bin/gh \
+    && gh --version | grep -Fx "gh version 2.101.0 (2026-09-15)" \
+    && fzf --version | grep -Fx "0.74.2 (3337be9d)" \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/node-v22.23.2-linux-x64.tar.gz \
+      https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.gz \
+    && echo "b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a  /tmp/node-v22.23.2-linux-x64.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/node-v22.23.2-linux-x64.tar.gz -C /usr/local --no-same-owner \
+      --strip-components=1 \
+    && rm -rf /usr/local/go /tmp/go-tool-build /tmp/cli-source /tmp/fzf-source /root/go /root/.cache/go-build \
+      /root/.config/go /root/.local/state/gh /root/.gitconfig \
+    && rm -f /tmp/go1.27.1.linux-amd64.tar.gz /tmp/gh-0cf10924.tar \
+      /tmp/fzf-3337be9d.tar /tmp/node-v22.23.2-linux-x64.tar.gz
+
+# Node 22.23.2 bundles npm 11 whose own dependency tree carries known
+# vulnerable packages (tar 7.5.11, sigstore 3.1.0, picomatch 4.0.3,
+# brace-expansion 2.0.2). npm is a user-facing tool in this developer image,
+# so it is upgraded in place from the pinned upstream npm 12.0.2 bundle; that
+# bundle still carries brace-expansion 5.0.7, ip-address 10.2.0 and undici 6.27.0, so
+# all three are overlaid with their pinned fixed releases (2026-10-01 evidence:
+# GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7 fix brace-expansion at 5.0.10/5.0.11,
+# GHSA-rfgv-xxqx-mfg5 fixes undici at 6.28.1). Assets are fetched
+# over TLS and verified against exact pinned SHA-256 digests recorded in
+# config/container-build-inputs.yaml; any mismatch fails the build.
+RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/npm-12.0.2.tgz \
+      https://registry.npmjs.org/npm/-/npm-12.0.2.tgz \
+    && echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  /tmp/npm-12.0.2.tgz" | sha256sum -c - \
+    && rm -rf /usr/local/lib/node_modules/npm \
+    && mkdir -p /usr/local/lib/node_modules/npm \
+    && tar -xzf /tmp/npm-12.0.2.tgz -C /usr/local/lib/node_modules/npm --no-same-owner \
+      --strip-components=1 \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/brace-expansion-5.0.11.tgz \
+      https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.11.tgz \
+    && echo "67bb5a1b4d4a8ff497d845a0b891ffe6b7233aea2202641315cec88d0fff15eb  /tmp/brace-expansion-5.0.11.tgz" | sha256sum -c - \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
+    && mkdir -p /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
+    && tar -xzf /tmp/brace-expansion-5.0.11.tgz \
+      -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --no-same-owner \
+      --strip-components=1 \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/ip-address-10.3.1.tgz \
+      https://registry.npmjs.org/ip-address/-/ip-address-10.3.1.tgz \
+    && echo "ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5  /tmp/ip-address-10.3.1.tgz" | sha256sum -c - \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/ip-address \
+    && mkdir -p /usr/local/lib/node_modules/npm/node_modules/ip-address \
+    && tar -xzf /tmp/ip-address-10.3.1.tgz \
+      -C /usr/local/lib/node_modules/npm/node_modules/ip-address --no-same-owner \
+      --strip-components=1 \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/tar-7.5.21.tgz \
+      https://registry.npmjs.org/tar/-/tar-7.5.21.tgz \
+    && echo "bcedf25a21daecd1a18fb5e19ab855b7d79ec8ef1da175e8ba85cfc0ed0069d1  /tmp/tar-7.5.21.tgz" | sha256sum -c - \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/tar \
+    && mkdir -p /usr/local/lib/node_modules/npm/node_modules/tar \
+    && tar -xzf /tmp/tar-7.5.21.tgz \
+      -C /usr/local/lib/node_modules/npm/node_modules/tar --no-same-owner \
+      --strip-components=1 \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/undici-6.28.1.tgz \
+      https://registry.npmjs.org/undici/-/undici-6.28.1.tgz \
+    && echo "e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74  /tmp/undici-6.28.1.tgz" | sha256sum -c - \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/undici \
+    && mkdir -p /usr/local/lib/node_modules/npm/node_modules/undici \
+    && tar -xzf /tmp/undici-6.28.1.tgz \
+      -C /usr/local/lib/node_modules/npm/node_modules/undici --no-same-owner \
+      --strip-components=1 \
+    && export NODE_DISABLE_COMPILE_CACHE=1 \
+    && npm --version | grep -Fx "12.0.2" \
+    && rm -rf /tmp/node-compile-cache \
+    && rm -f /tmp/npm-12.0.2.tgz /tmp/brace-expansion-5.0.11.tgz /tmp/ip-address-10.3.1.tgz /tmp/tar-7.5.21.tgz /tmp/undici-6.28.1.tgz
+
+FROM workspace
+ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
+ARG STATEPORT_BUILD_SOURCE_TREE=unknown
+ARG STATEPORT_BUILD_SOURCE_REF=unknown
+ARG STATEPORT_BUILD_SOURCE_DIRTY=true
+ARG STATEPORT_BUILD_SOURCE_DATE_EPOCH=unknown
+ARG STATEPORT_BUILD_VERSION=0.0.0-unknown
+ARG STATEPORT_BUILD_CREATED=1970-01-01T00:00:00Z
+ARG STATEPORT_BUILD_ADAPTER=unknown
+ARG STATEPORT_OPENCODE_VERSION=1.18.31
+ARG STATEPORT_OPENCODE_LOCK_PACKAGE=opencode-linux-x64
+ARG STATEPORT_OPENCODE_TARBALL=https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.31.tgz
+ARG STATEPORT_OPENCODE_SRI=sha512-gTJ5nGNq+KJblwmeusEdz8YFwvkV7a3xTOV9EKKEmsv0Lkbajq/oQO9jEC0sMiS66mjHDOrhLgIUxSVqfLBM8g==
+ARG STATEPORT_OPENCODE_BINARY_MEMBER=package/bin/opencode
+ARG STATEPORT_OPENCODE_BINARY_SHA256=sha256:f9dab32248695e9ebd56b16a1921798fd85112cf5a69c7dfd0cabc1e17be4a11
+COPY config/opencode-runtime/package.json config/opencode-runtime/package-lock.json /opt/stateport-opencode/
+COPY images/bin/stateport-healthcheck /usr/local/bin/stateport-healthcheck
+COPY images/bin/stateport-agent-run /usr/local/bin/stateport-agent-run
+# Both entrypoints are shipped read-only-executable; the image contains no
+# bundled Codex runtime (OpenCode is the shipped agent).
+RUN chmod 0555 /usr/local/bin/stateport-healthcheck \
+    && chmod 0555 /usr/local/bin/stateport-agent-run
+
+# OpenCode is installed from the exact pinned glibc platform tarball and is
+# never built or patched here. The audited lock entry names the platform
+# package explicitly (no npm optional-dependency platform selection); its
+# resolved URL and sha512 SRI must match the pin, the extracted binary must
+# match the pinned sha256, and the build fails unless opencode reports exactly
+# the pinned version. A throwaway HOME keeps any runtime cache out of the
+# final layer.
+RUN export HOME=/tmp/stateport-build-home \
+    && mkdir -p "$HOME" /tmp/opencode-extract \
+    && node -e 'const crypto=require("crypto"),fs=require("fs");const [lockPath,platformPackage,tarUrl,sri,outPath]=process.argv.slice(1);const lock=JSON.parse(fs.readFileSync(lockPath,"utf8"));const entry=lock.packages["node_modules/"+platformPackage];if(!entry)throw new Error("lock has no "+platformPackage);if(entry.resolved!==tarUrl)throw new Error("lock platform tarball differs from the pin");if(entry.integrity!==sri)throw new Error("lock platform integrity differs from the pin");if(!/^sha512-[A-Za-z0-9+/]{86}==$/.test(sri))throw new Error("pinned platform integrity is not sha512 SRI");fetch(tarUrl).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.arrayBuffer()}).then(b=>{const d=Buffer.from(b);const a="sha512-"+crypto.createHash("sha512").update(d).digest("base64");if(a!==sri)throw new Error("tarball integrity differs from the pin");fs.writeFileSync(outPath,d);console.log("opencode platform tarball verified "+platformPackage+" bytes="+d.length)}).catch(e=>{console.error("opencode install refused: "+e.message);process.exit(1)});' \
+      /opt/stateport-opencode/package-lock.json "$STATEPORT_OPENCODE_LOCK_PACKAGE" "$STATEPORT_OPENCODE_TARBALL" "$STATEPORT_OPENCODE_SRI" /tmp/opencode.tgz \
+    && tar -xzf /tmp/opencode.tgz -C /tmp/opencode-extract --no-same-owner "$STATEPORT_OPENCODE_BINARY_MEMBER" \
+    && echo "${STATEPORT_OPENCODE_BINARY_SHA256#sha256:}  /tmp/opencode-extract/${STATEPORT_OPENCODE_BINARY_MEMBER}" | sha256sum -c - \
+    && cp /tmp/opencode-extract/"$STATEPORT_OPENCODE_BINARY_MEMBER" /usr/local/bin/opencode \
+    && chmod 0555 /usr/local/bin/opencode \
+    && test "$(opencode --version)" = "$STATEPORT_OPENCODE_VERSION" \
+    && rm -rf /tmp/opencode.tgz /tmp/opencode-extract /tmp/stateport-build-home
+
+ENV HOME=/home/stateport \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+WORKDIR /workspace
+USER 10001:10001
+CMD ["/bin/bash", "-l"]

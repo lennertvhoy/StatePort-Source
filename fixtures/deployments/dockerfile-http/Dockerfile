@@ -1,0 +1,7 @@
+FROM docker.io/library/python@sha256:afe189875f1d2f9b45e287834fb9f2c273a5d59d354ae4050ab9affbf0a6ba06
+WORKDIR /app
+COPY --chown=10001:10001 app.py /app/app.py
+USER 10001:10001
+EXPOSE 8080
+HEALTHCHECK --interval=2s --timeout=3s --start-period=5s CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+CMD ["python3", "app.py"]

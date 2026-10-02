@@ -1,0 +1,63 @@
+# Declarative guidance only. StatePort does not automatically route agent work.
+formatVersion: stateport.agent-routing-policy/v1
+policyVersion: 1
+limits:
+  maxThreads: 4
+  maxDepth: 1
+roles:
+  scout:
+    preferredProfile: luna-medium
+    access: read-only
+  mechanicalImplementer:
+    preferredProfile: luna-high
+    access: workspace-write
+  defaultImplementer:
+    preferredProfile: terra-medium
+    access: workspace-write
+  complexImplementer:
+    preferredProfile: terra-high
+    access: workspace-write
+  architect:
+    preferredProfile: sol-xhigh
+    access: read-only
+  reviewer:
+    preferredProfile: sol-xhigh
+    access: read-only
+  exceptionalAdjudicator:
+    preferredProfile: sol-max
+    access: read-only
+selection:
+  principle: cheapest-reliable-profile
+  reasoningConcentration: planning
+  scoutMode: read-only
+  independentReadOnlyRoles:
+    - architect
+    - reviewer
+  context:
+    policy: narrow
+    instructions: local-nested
+    irrelevantMcpServers: disabled
+escalation:
+  failedRepairLoops: 1
+  passingTestsUnclear:
+    - ownership
+    - migration
+    - recovery
+    - compatibility
+  solMax: exceptional-only
+routingDeviation:
+  invalidatesOutput: false
+  requireLedgerEntry: true
+  requireReview: true
+  fullRerunAllowedOnlyFor:
+    - controlled_benchmark
+    - material_defect
+    - unsafe_execution
+    - irrecoverable_provenance
+    - explicit_human_request
+reviewTriggers:
+  - model-change
+  - pricing-change
+  - codex-configuration-change
+automation:
+  routing: disabled

@@ -1,0 +1,12 @@
+{
+  "schema": "stateport.web-dependency-audit-policy/v1",
+  "browserData": {
+    "reviewedAt": "2026-08-01T00:00:00Z",
+    "reviewExpiresAt": "2026-11-01T00:00:00Z",
+    "minimumVersions": {
+      "baseline-browser-mapping": "2.11.9",
+      "caniuse-lite": "1.0.30001806"
+    }
+  },
+  "exceptions": []
+}

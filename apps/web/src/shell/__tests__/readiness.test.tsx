@@ -1,0 +1,83 @@
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { getClient, resetClientForTests, resetMockState } from '@/client'
+import { providerClient } from '@/client/providerClient'
+import { useSessionStore } from '@/state'
+import PlatformPage from '../PlatformPage'
+import { ReadinessSummary } from '../ReadinessSummary'
+
+beforeEach(() => {
+  resetClientForTests()
+  resetMockState()
+  vi.spyOn(providerClient, 'getStatus').mockResolvedValue({ configured: false, executableInstalled: true, connected: false, model: null, authenticationStatus: 'unverified', requestStatus: 'unverified', telemetryStatus: 'unavailable', detail: '' })
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: 'http://localhost' } })
+})
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); resetClientForTests() })
+
+it('does not infer execution or provider readiness from a connected service', async () => {
+  vi.spyOn(getClient().applications, 'list').mockResolvedValue([])
+  render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)
+  await waitFor(() => expect(screen.getByText('No applications installed')).toBeTruthy())
+  expect(screen.getAllByText('Not checked')).toHaveLength(2)
+  expect(screen.getByText(/Executable: installed; configuration: not configured; authentication: unverified; request: unverified/)).toBeTruthy()
+  expect(screen.getByRole('link', { name: 'Set up or verify provider' }).getAttribute('href')).toBe('/settings/provider')
+  expect(screen.getByRole('link', { name: 'Import a template' }).getAttribute('href')).toBe('/catalog')
+})
+
+it('separates runtime reachability from disabled worker execution', () => {
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', runtime: { status: 'available', workerExecutionEnabled: false } } })
+  render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)
+  expect(screen.getByText('Reachable')).toBeTruthy()
+  expect(screen.getByText('Disabled')).toBeTruthy()
+})
+
+it('explains worker and provider gaps as one guided next step, never a dead end', async () => {
+  vi.spyOn(getClient().applications, 'list').mockResolvedValue([])
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', runtime: { status: 'unavailable', workerExecutionEnabled: false } } })
+  render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)
+  await waitFor(() => expect(screen.getByText('Disabled')).toBeTruthy())
+  const worker = screen.getByText(/runs approved tasks in the background/i)
+  expect(worker.textContent).toContain('study sample works without it')
+  const provider = screen.getByText(/OpenCode sign-in/i)
+  expect(provider.textContent).toContain('the study sample does not')
+  expect(provider.textContent).toContain('save a model')
+  expect(provider.textContent).toContain('API key')
+  expect(screen.getByRole('link', { name: 'Review execution controls' }).getAttribute('href')).toBe('/execution-host')
+  expect(screen.getByRole('link', { name: 'Set up or verify provider' }).getAttribute('href')).toBe('/settings/provider')
+})
+
+it('does not present cached runtime or inventory as current when offline', async () => {
+  useSessionStore.setState({ serviceStatus: { state: 'offline', endpoint: '', runtime: { status: 'available', workerExecutionEnabled: true } } })
+  render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)
+  expect(screen.getByText('Offline')).toBeTruthy()
+  expect(screen.getByText('Inventory unavailable')).toBeTruthy()
+  expect(screen.queryByText('Reachable')).toBeNull()
+})
+
+it('re-reads provider status on the shell service-poll revision, not on its own interval', async () => {
+  vi.useFakeTimers()
+  const getStatus = vi.mocked(providerClient.getStatus)
+  render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(getStatus).toHaveBeenCalledTimes(1)
+
+  // A quiet 30 s adds no provider read: the summary owns no timer.
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  expect(getStatus).toHaveBeenCalledTimes(1)
+
+  // The shell service poll publishes a new revision; that drives the read.
+  act(() => {
+    useSessionStore.getState().setServiceStatus({ state: 'connected', endpoint: 'http://localhost' })
+  })
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(getStatus).toHaveBeenCalledTimes(2)
+})
+
+it('makes every existing platform surface discoverable without granting operations', () => {
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'local_user', actorId: 'user', platformOperationsAllowed: false, statebenchInspectionAllowed: false } } })
+  render(<MemoryRouter><PlatformPage /></MemoryRouter>)
+  expect(screen.getByRole('status').textContent).toContain('does not permit platform operations')
+  const controls = within(screen.getByRole('navigation', { name: 'Platform controls' }))
+  expect(controls.getAllByRole('link').map((link) => link.getAttribute('href'))).toEqual(['/settings/provider', '/execution-host', '/sources', '/deployments', '/authority', '/updater', '/preview-routes', '/statebench', '/settings/advanced'])
+})

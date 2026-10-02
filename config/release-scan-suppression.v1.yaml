@@ -1,0 +1,130 @@
+formatVersion: stateport.release-scan-suppression/v1
+resolvedOn: "2026-09-26"
+# Accepted vulnerability-SCAN SUPPRESSION policy.
+#
+# Grype applies ignore rules that never reach `matches`: every finding they
+# cover is moved into `ignoredMatches` and the scan reports "passed" for it.
+# The collector's per-advisory exception ledger
+# (config/release-scan-exceptions.v1.yaml, rule ids RX-*) can only explain
+# findings in `matches`, so before this contract existed an accepted
+# suppression was invisible to the release gate: no record, no justification,
+# no expiry, and no way for a reviewer to see the suppressed advisories at
+# all.  The rules below are the pinned grype executable's own compiled-in
+# defaults, declared here so that they are reviewable, expiring, and counted.
+#
+# This contract does NOT relax the gate for anything it does not name:
+#   * a suppressed finding at or above the effective threshold must be covered
+#     by a rule below whose justification is non-empty and whose expiry is in
+#     the future on the evaluation date, or the image is refused;
+#   * an effective ignore rule present in the scan but absent here (or differing
+#     in package name, package type, or match-type) refuses the image, so a
+#     scanner that grows a new default, or a local grype config that adds one,
+#     cannot suppress silently;
+#   * a rule here with an empty justification, or a rule whose declared grype
+#     version is not the version that produced the scan, refuses the image;
+#   * package name is matched as a FULL regular expression against the
+#     suppressed package name, which is stricter than grype's own unanchored
+#     match: a finding grype suppressed under a declared rule but which the
+#     declared expression does not cover end to end is refused, not excused.
+#
+# Provenance of the effective rules (measured 2026-09-26): grype is invoked as
+# `grype sbom:<syft.json> -o json` with no --config and no GRYPE_* environment
+# variable, `grype config` in a neutral working directory reports
+# `ignore: []`, and the literal strings below are compiled into the pinned
+# grype binary.  The four rules are therefore the pinned tool's own defaults,
+# reproducible from the grype version pinned in
+# config/release-tool-inputs.yaml, and they are byte-identical in every
+# scanned image, including stateport-dev-workspace.
+#
+# Residual, deliberately not accepted here: these rules suppress ALL advisories
+# for these packages, including the Linux-kernel advisories that grype
+# attributes to the `linux-libc-dev` deb inside stateport-dev-workspace.  On the
+# retained 2026-09-25 signed scan document that is 3508 suppressed findings, of
+# which 190 are at or above High (6 Critical, 184 High), all attributed to the
+# single package `deb linux-libc-dev 6.8.0-136.136` through RS-2026-003; on a
+# newer vulnerability database on 2026-09-26 the same suppression counted 189 at
+# or above High (183 High).  Those counts drift with the database, which is
+# exactly why this file declares a deadline and a per-rule identity instead of a
+# number.  A per-advisory ledger for those kernel advisories is a separate signed
+# round and is NOT provided by this contract: this file declares that the
+# suppression is accepted and bounded in time, it does not adjudicate any
+# individual advisory.
+#
+tool:
+  name: grype
+  version: "0.117.0"
+  provenance: >
+    Pinned grype executable and digest in config/release-tool-inputs.yaml
+    (homebrew-core bottle). This contract is valid only for scans produced by
+    that exact tool version; a scan descriptor reporting any other version
+    refuses the image.
+suppressionRule: >
+  default-deny; a suppressed finding is explained only by a rule below that
+  matches its package name, package type, and match-type, carries a non-empty
+  justification, and is unexpired on the evaluation date
+rules:
+  - id: RS-2026-001
+    package: kernel-headers
+    packageType: rpm
+    matchType: exact-indirect-match
+    justification: >
+      Grype's own compiled-in default. kernel-headers ships the Linux kernel
+      source headers used to build out-of-tree modules; it is a build-time
+      header package, contains no kernel image, no module, and no reachable
+      syscall surface. The advisories grype attributes to it describe the
+      running kernel, which this package does not contain and which the
+      container never loads (StatePort containers share the host kernel and
+      load no modules; the execution host runs rootless Podman, which
+      requires no kernel module for its user namespace). Not present in the
+      current Ubuntu/Alpine/Debian-based StatePort images; declared so that the
+      rule cannot become an undeclared effective rule if an RPM-based image
+      ever enters the release set.
+    expiresOn: "2026-12-31"
+  - id: RS-2026-002
+    package: "linux(-.*)?-headers-.*"
+    packageType: deb
+    matchType: exact-indirect-match
+    justification: >
+      Grype's own compiled-in default. Debian/Ubuntu kernel header packages
+      (linux-headers-*, linux-libc-dev's sibling linux-*-headers-*) carry
+      only the kernel UAPI headers and build scripts needed to compile
+      against the kernel. They install no kernel image, no module, and no
+      running code, so a vulnerability in the running kernel cannot be
+      exploited through them; the running kernel is the immutable host kernel
+      and is patched by the workstation/host owner, not by this image. These
+      packages are build-time dependencies of the image and are not on any
+      StatePort service surface.
+    expiresOn: "2026-12-31"
+  - id: RS-2026-003
+    package: linux-libc-dev
+    packageType: deb
+    matchType: exact-indirect-match
+    justification: >
+      Grype's own compiled-in default, and the only rule that currently
+      suppresses real findings: this single deb package is behind every
+      threshold-severity suppressed advisory in stateport-dev-workspace (the
+      counts are recorded, with their date, in the header above; they drift with
+      the grype database, so no count is pinned here).
+      linux-libc-dev is the glibc/kernel-UAPI development package: it ships
+      headers, static libraries, and makefiles used to compile native Node
+      modules (the worker and provider builds), and it contains no executable
+      image that runs. Every advisory it matches is a Linux KERNEL advisory
+      that requires the running kernel (module loading, syscall or namespace
+      behaviour); the kernel that runs the container is the host's immutable
+      kernel, shared with every other container and workload, and it is
+      upgraded by the owner outside the image. Scope of acceptance: the
+      package must be removed from the image where the build allows it, and
+      this rule expires so the residual is re-reviewed rather than inherited.
+    expiresOn: "2026-12-31"
+  - id: RS-2026-004
+    package: "linux-kbuild-.*"
+    packageType: deb
+    matchType: exact-indirect-match
+    justification: >
+      Grype's own compiled-in default. linux-kbuild-* ships the kernel build
+      makefiles and scripts (the /usr/src/linux-kbuild helpers) used to
+      compile out-of-tree modules. It contains no kernel code that executes
+      and no module that can be loaded; the module build is a developer-time
+      operation on the host, not a StatePort service surface. Declared so a
+      new default cannot appear undeclared.
+    expiresOn: "2026-12-31"

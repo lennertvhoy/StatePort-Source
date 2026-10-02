@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.dev/schemas/public-export-manifest.v1.schema.json",
+  "title": "StatePort public export manifest v1",
+  "description": "Public-safe metadata for payload files in a local candidate export. Source repository paths and Git object identities are intentionally absent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion",
+    "exportPolicy",
+    "status",
+    "normalization",
+    "blockingIssueCounts",
+    "files"
+  ],
+  "properties": {
+    "formatVersion": {"const": "stateport.public-export-manifest/v1"},
+    "exportPolicy": {"const": "stateport.public-export-allowlist/v1"},
+    "status": {"enum": ["blocked", "exported"]},
+    "normalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["directoryMode", "regularFileModes", "timestamp"],
+      "properties": {
+        "directoryMode": {"const": "0755"},
+        "regularFileModes": {
+          "const": ["0644", "0755"]
+        },
+        "timestamp": {"const": "1970-01-01T00:00:00Z"}
+      }
+    },
+    "blockingIssueCounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "count"],
+        "properties": {
+          "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "count": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/file"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "blocked"}}},
+      "then": {"properties": {"files": {"maxItems": 0}, "blockingIssueCounts": {"minItems": 1}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "exported"}}},
+      "then": {"properties": {"blockingIssueCounts": {"maxItems": 0}, "files": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "mode", "digest", "classification", "license", "provenanceRationale"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.git(?:/|$))(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000-\\u001f\\u007f\\\\:*?\"<>|]+$"
+        },
+        "mode": {"enum": ["0644", "0755"]},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "classification": {
+          "enum": ["public-source", "public-documentation", "public-generated", "third-party-reviewed"]
+        },
+        "license": {"type": "string", "minLength": 1, "maxLength": 128},
+        "provenanceRationale": {"type": "string", "minLength": 1, "maxLength": 500}
+      }
+    }
+  }
+}

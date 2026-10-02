@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools==80.10.2", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stateport-updater"
+version = "0.1.1"
+description = "StatePort exact-digest updater engine and loopback diagnostics service"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+authors = [{ name = "StatePort contributors" }]
+dependencies = []
+
+[project.scripts]
+stateport-updater = "stateport_updater.cli:main"
+
+[tool.setuptools]
+packages = ["stateport_updater", "stateport_release", "stateport_release.schemas", "execution_host"]
+
+[tool.setuptools.package-dir]
+stateport_updater = "src/stateport_updater"
+stateport_release = "../release-contracts/src/stateport_release"
+"stateport_release.schemas" = "../release-contracts/src/stateport_release/schemas"
+execution_host = "../execution-host/src/execution_host"
+
+[tool.setuptools.package-data]
+"stateport_release.schemas" = ["*.json"]
+execution_host = ["identity-contract.v1.json"]

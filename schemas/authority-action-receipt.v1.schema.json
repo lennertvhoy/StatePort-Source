@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/authority-action-receipt.v1.schema.json",
+  "title": "StatePort authority action receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "receiptId", "requestId", "action", "actorId", "authorizedBy",
+    "scope", "profile", "configuredPolicy", "policy", "decision", "result",
+    "startedAt", "completedAt", "estimatedCostUsd", "actualCostUsd",
+    "decisionDigest", "reservation", "claim", "receiptDigest"
+  ],
+  "properties": {
+    "schema": {"const": "stateport.authority-action-receipt/v1"},
+    "receiptId": {"type": "string", "pattern": "^authority_receipt_[0-9a-f]{32}$"},
+    "requestId": {"type": "string", "pattern": "^authority_request_[0-9a-f]{32}$"},
+    "action": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "actorId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "authorizedBy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id", "digest"],
+      "properties": {
+        "type": {"enum": ["grant", "policy_default", "owner_directive"]},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "scope": {"type": "object"},
+    "profile": {"enum": ["guarded", "balanced", "delegated", "custom"]},
+    "configuredPolicy": {"enum": ["deny", "ask_each_time", "approve_scope_once", "auto_and_notify", "auto_with_receipt"]},
+    "policy": {"enum": ["deny", "ask_each_time", "approve_scope_once", "auto_and_notify", "auto_with_receipt"]},
+    "decision": {"enum": ["authorized", "approval_required", "denied"]},
+    "result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "code", "summary", "resource"],
+      "properties": {
+        "status": {"enum": ["succeeded", "failed", "refused", "not_executed"]},
+        "code": {"type": ["string", "null"], "maxLength": 128},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "resource": {"type": "object"}
+      }
+    },
+    "startedAt": {"type": "string", "format": "date-time"},
+    "completedAt": {"type": "string", "format": "date-time"},
+    "estimatedCostUsd": {"type": "number", "minimum": 0},
+    "actualCostUsd": {"type": "number", "minimum": 0},
+    "decisionDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "reservation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["reservationId", "reservationDigest"],
+      "properties": {
+        "reservationId": {"type": "string", "pattern": "^authority_reservation_[0-9a-f]{32}$"},
+        "reservationDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "claim": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["claimId", "claimDigest"],
+      "properties": {
+        "claimId": {"type": "string", "pattern": "^authority_claim_[0-9a-f]{32}$"},
+        "claimDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "receiptDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {"const": "authorized"},
+          "authorizedBy": {
+            "properties": {"type": {"enum": ["grant", "policy_default"]}},
+            "required": ["type"]
+          },
+          "result": {
+            "properties": {"status": {"enum": ["succeeded", "failed"]}},
+            "required": ["status"]
+          }
+        },
+        "required": ["decision", "authorizedBy", "result"]
+      },
+      "then": {
+        "properties": {
+          "reservation": {"type": "object"},
+          "claim": {"type": "object"}
+        }
+      }
+    }
+  ]
+}

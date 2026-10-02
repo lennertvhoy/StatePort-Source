@@ -1,0 +1,54 @@
+formatVersion: stateport.release-tool-inputs/v1
+resolvedOn: "2026-08-23"
+platform: linux/amd64
+source: Homebrew Linux bottles already installed at /home/linuxbrew/.linuxbrew/bin
+
+tools:
+  syft:
+    version: 1.51.0
+    executablePath: /home/linuxbrew/.linuxbrew/bin/syft
+    resolvedExecutablePath: /home/linuxbrew/.linuxbrew/Cellar/syft/1.51.0/bin/syft
+    executableDigest: sha256:573d7116232d5609bbd76927ea258bf317cb5ab2c047fb652ee7c84ddd18d0b3
+    bottleDigest: sha256:4e0a5066e8ec542936f935771d8cd622dbbb68c413e4be2d0e7c82c8fe2fb319
+    bottleUri: https://ghcr.io/v2/homebrew/core/syft/blobs/sha256:4e0a5066e8ec542936f935771d8cd622dbbb68c413e4be2d0e7c82c8fe2fb319
+    provenance: homebrew-core-bottle
+  grype:
+    version: 0.117.0
+    executablePath: /home/linuxbrew/.linuxbrew/bin/grype
+    resolvedExecutablePath: /home/linuxbrew/.linuxbrew/Cellar/grype/0.117.0/bin/grype
+    executableDigest: sha256:c46dbdf945bf54055bf6df52e5b60f1cec498f957180b864b34030d6af391a30
+    bottleDigest: sha256:9a7d1515cd53a55dcc9fb9ea18ede93157892e4b7de2574cfe25215cf748f236
+    bottleUri: https://ghcr.io/v2/homebrew/core/grype/blobs/sha256:9a7d1515cd53a55dcc9fb9ea18ede93157892e4b7de2574cfe25215cf748f236
+    provenance: homebrew-core-bottle
+  cosign:
+    version: 3.1.3
+    executablePath: /home/linuxbrew/.linuxbrew/bin/cosign
+    resolvedExecutablePath: /home/linuxbrew/.linuxbrew/Cellar/cosign/3.1.3/bin/cosign
+    executableDigest: sha256:e31fb33fe302b1a7a190239e0f9e8ee896b427a1d92c352e883fd6c808a6d719
+    bottleDigest: sha256:ec952c936a5a3c70afabbc9cd9be14385bca6b57063c1e195a359ed95945757a
+    bottleUri: https://ghcr.io/v2/homebrew/core/cosign/blobs/sha256:ec952c936a5a3c70afabbc9cd9be14385bca6b57063c1e195a359ed95945757a
+    provenance: homebrew-core-bottle
+
+policy:
+  sbomFormats: [cyclonedx-json, spdx-json]
+  vulnerabilityFailureThreshold: high
+  allowUnfixed: false
+  exceptionsFile: config/release-scan-exceptions.v1.yaml
+  exceptionsRule: default-deny; only an exact, unexpired, image-scoped typed exception explains an unfixed finding
+  requireFreshDatabase: true
+  maxDatabaseAgeHours: 24
+  maxLatestAvailableDatabaseAgeHours: 48
+  latestDatabaseCheckMaxAgeMinutes: 15
+  minimumDatabaseFreshnessRemainingHours: 8
+  maxScanAgeHours: 24
+  signature:
+    status: configured_owner_trust_root
+    keyId: stateport-alpha-private-2026-08
+    publicKeyPath: config/trust/alpha-2026-08-cosign.pub
+    publicKeyFingerprint: sha256:df24c1ccdcf1ecf72da6d8d81ae8b0ffaca8d399826091b107cc4d6905915ea5
+    publicKeyFingerprintAlgorithm: sha256-canonical-der-spki
+    externalPrivateKeyReference: operator-managed-secret-store:stateport-alpha-private-2026-08-v6
+    privateCandidateModes: [pinned-public-key-fingerprint, pinned-key-id]
+    publicKeylessMode: [certificate-identity, oidc-issuer, transparency-log]
+    publicTransparencyLogUpload: false
+    testKeys: ephemeral_non_release_only

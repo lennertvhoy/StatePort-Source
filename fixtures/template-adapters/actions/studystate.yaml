@@ -1,0 +1,29 @@
+formatVersion: stateport.template.studystate.actions/v1
+application:
+  id: stateport.template.studystate
+  descriptorVersion: stateport.application/v1
+actions:
+  - formatVersion: stateport.template.studystate.action/v1
+    id: stateport.template.studystate.inspect/v1
+    displayName: Inspect study state
+    purpose: Validate and summarize the current StudyState learner and study workflow without mutating it.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, digest, summary]}
+    contextPolicy:
+      id: stateport.template.studystate.context/v1
+      categoryPaths:
+        study_mode: [state/STUDYDD_MODE.yaml]
+        study_state: [state/STUDY_STATE.yaml]
+        next_action: [NEXT_ACTIONS.md]
+      includeCategories: [study_mode, study_state, next_action]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: private
+      budgetTokens: 1600
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 10
+    budgetDefaults: {token: 1600, costMinor: 0, timeSeconds: 10, steps: 1}

@@ -1,0 +1,228 @@
+#cloud-config
+# StatePort alpha host bootstrap — Ubuntu 24.04 LTS, rootless Podman.
+#
+# Rendered by Terraform templatefile() in modules/host/main.tf.
+# Contains NO secrets. custom_data is visible to anyone with VM read access,
+# so never interpolate credentials here.
+#
+# Provision-time network access is limited to apt. The StatePort no-checkout
+# installer is staged afterwards by the operator into ${installer_staging};
+# cloud-init deliberately does not download it.
+
+hostname: ${name_prefix}-host
+preserve_hostname: false
+
+# Two unprivileged service identities, distinct from the operator login
+# account (created by the Azure VM resource) and from each other:
+#   ${control_user} — StatePort control services (API, adapters)
+#   ${exec_user}    — agent execution workloads (rootless Podman)
+# Neither can log in interactively; both have homes (needed by systemd
+# --user and rootless Podman) and passwords locked.
+users:
+  - name: ${control_user}
+    uid: 65531
+    primary_group: ${control_user}
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+  - name: ${exec_user}
+    uid: 65532
+    primary_group: ${exec_user}
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+groups:
+  - [${control_user}, 65531]
+  - [${exec_user}, 65532]
+  - [stateport-execution-control, 65530]
+
+package_update: true
+package_upgrade: false
+packages:
+  - podman          # container engine; runs rootless under ${exec_user}
+  - uidmap          # newuidmap/newgidmap for rootless user namespaces
+  - slirp4netns     # unprivileged network namespace plumbing
+  - fuse-overlayfs  # rootless storage driver (kernel overlayfs refuses some workloads)
+  - qemu-utils      # qemu-img, handy for inspecting disk images during alpha
+
+# Data disk: attached by Terraform at LUN 0. disk_setup creates a single GPT
+# partition; the filesystem and mount target that partition
+# (${data_disk_device}-part1), not the whole-disk device. Formatted once
+# (overwrite: false makes this idempotent across reboots/re-images of
+# cloud-init) and mounted at ${state_dir}, the durable StatePort state root.
+disk_setup:
+  ${data_disk_device}:
+    table_type: gpt
+    layout: true
+    overwrite: false
+fs_setup:
+  - label: stateport-data
+    device: ${data_disk_device}-part1
+    filesystem: ext4
+    overwrite: false
+mounts:
+  - ["${data_disk_device}-part1", "${state_dir}", "ext4", "defaults,nofail", "0", "2"]
+
+write_files:
+  # Readiness check the operator runs before installing StatePort.
+  # Verifies cgroup v2, lingering, rootless Podman, and the data disk mount.
+  - path: /usr/local/sbin/stateport-host-check
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # stateport-host-check — alpha host readiness probe. Read-only.
+      set -euo pipefail
+
+      fail=0
+
+      echo "== cgroup v2 =="
+      # Rootless Podman needs the unified (v2) cgroup hierarchy.
+      if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+        echo "OK: cgroup v2 unified hierarchy present"
+      else
+        echo "FAIL: cgroup v2 not detected"
+        fail=1
+      fi
+
+      echo "== lingering =="
+      # Lingering keeps systemd --user (and rootless Podman) alive without
+      # an interactive login session.
+      for u in ${control_user} ${exec_user}; do
+        linger=$(loginctl show-user "$u" --property=Linger --value 2>/dev/null || echo "no")
+        if [ "$linger" = "yes" ]; then
+          echo "OK: linger enabled for $u"
+        else
+          echo "FAIL: linger not enabled for $u"
+          fail=1
+        fi
+      done
+
+      echo "== rootless podman (${exec_user}) =="
+      exec_uid=$(id -u ${exec_user})
+       podman_rootless=$(runuser -u ${exec_user} -- env -i HOME="/var/lib/${exec_user}" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="/run/user/$exec_uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$exec_uid/bus" podman info --format 'rootless={{.Host.Security.Rootless}}' 2>/dev/null || true)
+       if [ "$podman_rootless" = "rootless=true" ]; then
+        echo "OK: podman responds for ${exec_user}"
+      else
+        echo "FAIL: rootless podman not usable for ${exec_user}"
+        fail=1
+      fi
+
+      echo "== data disk =="
+      if mountpoint -q ${state_dir}; then
+        echo "OK: ${state_dir} mounted"
+      else
+        echo "FAIL: ${state_dir} not mounted"
+        fail=1
+      fi
+
+      exit "$fail"
+
+  # Root-owned launch boundary. The signed release operator installs the
+  # manifest and module tree separately; this launcher never accepts an
+  # installer-owned Python path or ambient PYTHONPATH.
+  - path: /usr/local/libexec/stateport-execution-host-provision
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      PATH=/usr/sbin:/usr/bin:/sbin:/bin
+      export PATH
+       [ "$(id -u)" -eq 0 ] || exit 77
+       root=/usr/local/lib/stateport/provisioning
+       manifest=/etc/stateport/execution-host-provisioning.manifest
+       if [ "$${1-}" = "materialize" ]; then
+         shift
+         wheel=
+         wheel_digest=
+         while [ "$${#}" -gt 0 ]; do
+           case "$1" in
+             --updater-wheel) wheel=$2; shift 2 ;;
+             --updater-wheel-digest) wheel_digest=$2; shift 2 ;;
+             *) echo "unknown materialize argument: $1" >&2; exit 77 ;;
+           esac
+         done
+         [ -n "$wheel" ] && [ -n "$wheel_digest" ] || exit 77
+         [ -f "$wheel" ] && [ ! -L "$wheel" ] || exit 77
+         observed=$(sha256sum "$wheel" | cut -d ' ' -f 1)
+         [ "$observed" = "$${wheel_digest#sha256:}" ] || exit 77
+         exec /usr/bin/python3 - "$wheel" "$root" "$manifest" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+import zipfile
+
+wheel, module_root, manifest = map(Path, sys.argv[1:])
+if module_root.exists() or manifest.exists():
+    raise SystemExit("refusing to replace an existing provisioning module tree")
+staging = Path(tempfile.mkdtemp(prefix=".provisioning.", dir=module_root.parent))
+try:
+    entries = []
+    with zipfile.ZipFile(wheel) as archive:
+        for info in archive.infolist():
+            name = info.filename
+            if name.endswith("/") or name.endswith(".pyc"):
+                continue
+            if not (name.startswith("stateport_release/") or name.startswith("execution_host/")):
+                continue
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise SystemExit(f"unsafe wheel path: {name}")
+            entries.append((name, archive.read(info)))
+    if not entries:
+        raise SystemExit("signed updater wheel has no provisioning module tree")
+    manifest_lines = []
+    for name, content in sorted(entries):
+        destination = staging / name
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        os.chown(destination.parent, 0, 0)
+        os.chmod(destination.parent, 0o755)
+        destination.write_bytes(content)
+        os.chown(destination, 0, 0)
+        os.chmod(destination, 0o644)
+        manifest_lines.append(f"{hashlib.sha256(content).hexdigest()}  {name}")
+    os.chown(staging, 0, 0)
+    os.chmod(staging, 0o700)
+    os.replace(staging, module_root)
+    staging = None
+    manifest_temp = manifest.with_name(f".{manifest.name}.tmp")
+    manifest_temp.write_text("\n".join(manifest_lines) + "\n", encoding="ascii")
+    os.chown(manifest_temp, 0, 0)
+    os.chmod(manifest_temp, 0o600)
+    os.replace(manifest_temp, manifest)
+finally:
+    if staging is not None:
+        shutil.rmtree(staging, ignore_errors=True)
+PY
+         exit 0
+       fi
+       [ -f "$manifest" ] || exit 77
+      [ "$${PYTHONPATH-}" = "" ] && [ "$${PYTHONHOME-}" = "" ] || exit 77
+      while IFS='  ' read -r digest relative; do
+        [ -n "$${digest:-}" ] || continue
+        case "$relative" in *..*|/*) exit 77 ;; stateport_release/*|stateport_release/schemas/*|execution_host/*) ;; *) exit 77 ;; esac
+        file="$root/$relative"
+        [ -f "$file" ] && [ "$(stat -c '%u:%g' "$file")" = "0:0" ] || exit 77
+        [ "$(sha256sum "$file" | cut -d ' ' -f 1)" = "$digest" ] || exit 77
+      done < "$manifest"
+      unset PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP
+      export STATEPORT_ROOT_HELPER=1
+      exec /usr/bin/python3 -I -c 'import runpy,sys; sys.path.insert(0,"/usr/local/lib/stateport/provisioning"); runpy.run_module("stateport_release.execution_host_provisioning",run_name="__main__")' "$@"
+
+runcmd:
+  # Exact host identity contract consumed by the stable execution Quadlet.
+  - [sh, -c, "set -eu; test \"$(id -u ${control_user})\" = 65531; test \"$(id -g ${control_user})\" = 65531; test \"$(id -u ${exec_user})\" = 65532; test \"$(id -g ${exec_user})\" = 65532; test \"$(getent group stateport-execution-control | cut -d: -f3)\" = 65530"]
+  - [install, -d, -m, "0755", /etc/stateport, /usr/local/libexec, /usr/local/lib/stateport]
+  - [sh, -c, "set -eu; touch /etc/subuid /etc/subgid; chmod 0644 /etc/subuid /etc/subgid; for f in /etc/subuid /etc/subgid; do line=\"$(grep '^${exec_user}:' \"$f\" || true)\"; if [ -n \"$line\" ]; then test \"$line\" = '${exec_user}:100000:65536'; else printf '%s\\n' '${exec_user}:100000:65536' >> \"$f\"; fi; done"]
+  # Enable lingering for both service users (systemd --user without login).
+  - [loginctl, enable-linger, ${control_user}]
+  - [loginctl, enable-linger, ${exec_user}]
+  # Per-user state directories on the data disk (mounts run before runcmd).
+  - [install, -d, -m, "0750", -o, ${control_user}, -g, ${control_user}, "${state_dir}/control"]
+  - [install, -d, -m, "0750", -o, ${exec_user}, -g, ${exec_user}, "${state_dir}/exec"]
+  # Staging area for the StatePort no-checkout installer. Left empty here;
+  # the operator copies the installer in over SSH after provisioning.
+  - [install, -d, -m, "0755", "${installer_staging}"]
+  # Record bootstrap completion for the operator (no secrets, just facts).
+  - [sh, -c, "cloud-init status --long > /var/log/stateport-bootstrap.status"]

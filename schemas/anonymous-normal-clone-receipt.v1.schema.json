@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/anonymous-normal-clone-receipt.v1.schema.json",
+  "title": "StatePort anonymous normal-clone verification receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "url", "ref", "commit", "tree", "verification", "receiptId", "receiptSha256"],
+  "properties": {
+    "formatVersion": {"const": "stateport.anonymous-normal-clone-receipt/v1"},
+    "url": {"type": "string", "pattern": "^https://[^\\s?#]+$", "not": {"pattern": "^https://[^/]*@"}},
+    "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "verification": {"const": "credential-free-normal-clone-fetch-and-ls-remote"},
+    "receiptId": {"type": "string", "pattern": "^clone_receipt_[0-9a-f]{32}$"},
+    "receiptSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/workspace-budget.v1.schema.json",
+  "title": "StatePort workspace budget v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "maxRegisteredWorktrees",
+    "maxActiveWritableWorktrees",
+    "maxUnclassifiedWorktrees",
+    "maxUnreconciledBranches",
+    "maxExpiredLeases",
+    "blockNewWorkspaceWhenInventoryUnknown",
+    "blockNewWorkspaceWhenAnyPriorSliceCleanupIncomplete",
+    "workspaceRoot",
+    "lease"
+  ],
+  "properties": {
+    "schema": {"const": "stateport.workspace-budget/v1"},
+    "maxRegisteredWorktrees": {"type": "integer", "minimum": 1, "maximum": 64},
+    "maxActiveWritableWorktrees": {"type": "integer", "minimum": 1, "maximum": 16},
+    "maxUnclassifiedWorktrees": {"type": "integer", "minimum": 0, "maximum": 16},
+    "maxUnreconciledBranches": {"type": "integer", "minimum": 0, "maximum": 32},
+    "maxExpiredLeases": {"type": "integer", "minimum": 0, "maximum": 16},
+    "blockNewWorkspaceWhenInventoryUnknown": {"const": true},
+    "blockNewWorkspaceWhenAnyPriorSliceCleanupIncomplete": {"const": true},
+    "workspaceRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "directoryName"],
+      "properties": {
+        "mode": {"const": "sibling_directory"},
+        "directoryName": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$"}
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defaultDurationSeconds", "maxDurationSeconds"],
+      "properties": {
+        "defaultDurationSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+        "maxDurationSeconds": {"type": "integer", "minimum": 60, "maximum": 604800}
+      }
+    }
+  }
+}

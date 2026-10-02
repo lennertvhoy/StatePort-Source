@@ -1,0 +1,91 @@
+FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+
+ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown
+ARG STATEPORT_BUILD_SOURCE_TREE=unknown
+ARG STATEPORT_BUILD_SOURCE_REF=unknown
+ARG STATEPORT_BUILD_SOURCE_DIRTY=true
+ARG STATEPORT_BUILD_SOURCE_DATE_EPOCH=unknown
+ARG STATEPORT_BUILD_VERSION=0.0.0-unknown
+ARG STATEPORT_BUILD_CREATED=1970-01-01T00:00:00Z
+ARG STATEPORT_BUILD_ADAPTER=unknown
+LABEL org.opencontainers.image.title="StatePort Playwright Browser" \
+      org.opencontainers.image.source="https://github.com/lennertvhoy/StatePort" \
+      org.opencontainers.image.revision="${STATEPORT_BUILD_SOURCE_COMMIT}" \
+      org.opencontainers.image.version="${STATEPORT_BUILD_VERSION}" \
+      org.opencontainers.image.created="${STATEPORT_BUILD_CREATED}" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      io.stateport.source.tree="${STATEPORT_BUILD_SOURCE_TREE}" \
+      org.opencontainers.image.ref.name="${STATEPORT_BUILD_SOURCE_REF}" \
+      io.stateport.source.dirty="${STATEPORT_BUILD_SOURCE_DIRTY}" \
+      io.stateport.source-date-epoch="${STATEPORT_BUILD_SOURCE_DATE_EPOCH}" \
+      io.stateport.build.adapter="${STATEPORT_BUILD_ADAPTER}" \
+      io.stateport.image.role="browser-sidecar" \
+      io.stateport.playwright.version="1.62.1" \
+      io.stateport.browser.default="headless"
+
+# useradd stamps the current date into /etc/shadow's password-aging field,
+# which breaks double-build OCI reproducibility when the two builds cross
+# midnight UTC. Pin the field to the build's SOURCE_DATE_EPOCH day (0 when
+# unlabelled) so the layer is byte-identical across builds.
+RUN groupadd --gid 10001 stateport \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/stateport --shell /usr/sbin/nologin stateport \
+    && shadow_epoch="${STATEPORT_BUILD_SOURCE_DATE_EPOCH:-0}"; case "$shadow_epoch" in ''|*[!0-9]*) shadow_epoch=0;; esac \
+    && sed -i "s/^stateport:\([^:]*\):[0-9]*:/\1:$((shadow_epoch / 86400)):/" /etc/shadow \
+    && mkdir -p /workspace /artifacts \
+    && chown -R 10001:10001 /workspace /artifacts
+WORKDIR /opt/stateport-playwright
+COPY images/stateport-playwright/package.json images/stateport-playwright/package-lock.json ./
+COPY images/bin/stateport-healthcheck /usr/local/bin/stateport-healthcheck
+# npm writes wall-clock-named logs and cache index entries under $HOME (see
+# the stateport-dev-workspace Containerfile note); build with a throwaway
+# HOME/cache so the layer stays OCI-reproducible. npm itself is build-only:
+# the runtime CMD invokes the pinned @playwright/test CLI through node
+# directly, so npm's bundled dependency tree (tar, brace-expansion, undici)
+# is removed from the shipped image rather than carried as dead vulnerable
+# surface.
+RUN export HOME=/tmp/stateport-build-home \
+    && mkdir -p "$HOME" \
+    && npm ci --ignore-scripts --omit=dev --audit=false --fund=false \
+      --cache /tmp/stateport-npm-cache \
+    && chmod 0555 /usr/local/bin/stateport-healthcheck \
+    && npx playwright --version | grep -Fx "Version 1.62.1" \
+    && node -e 'for (const name of ["@playwright/test", "playwright", "playwright-core"]) { if (require(`${name}/package.json`).version !== "1.62.1") process.exit(1) }' \
+    && rm -rf /tmp/stateport-build-home /tmp/stateport-npm-cache /tmp/node-compile-cache \
+    && rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx
+
+# OpenSSL: the pinned Playwright base carries openssl/libssl3t64 3.0.13-0ubuntu3.12, which
+# CVE-2026-84782 (DTLS retransmission read past the message buffer, High) affects; Ubuntu
+# fixed it in 3.0.13-0ubuntu3.16 (advisory 2026-09-29). Both packages are installed at the
+# exact fixed version below (exact version or the build fails), remediated and not excepted.
+
+# The pinned Playwright base currently carries Chrome 151.0.7922.34. Replace
+# only that browser payload with digest-pinned Chrome for Testing153.0.8010.36.
+# The base's firefox/webkit payloads are never referenced by the product (the
+# journey drives the Chrome payload only) and are removed as dead vulnerable
+# surface rather than carried unpatched. Qualification must use this exact
+# payload with the pinned Playwright runtime.
+RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+       -o /tmp/chrome-linux64-153.0.8010.36.zip \
+       https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.36/linux64/chrome-linux64.zip \
+    && echo "167a098c4fdec156b58a9f678c90a84f9072d789f9c6e7b35496a6987b8b7ef8  /tmp/chrome-linux64-153.0.8010.36.zip" | sha256sum -c - \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y unzip=6.0-28ubuntu4.1 \
+      openssl=3.0.13-0ubuntu3.16 libssl3t64=3.0.13-0ubuntu3.16 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /var/log/apt/history.log /var/log/apt/term.log /var/log/apt/eipp.log.xz \
+      /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+    && rm -rf /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
+    && unzip -q /tmp/chrome-linux64-153.0.8010.36.zip -d /tmp \
+    && mv /tmp/chrome-linux64 /ms-playwright/chromium-1234/chrome-linux64 \
+    && rm -rf /ms-playwright/firefox-* /ms-playwright/webkit-* \
+    && test -z "$(ls -d /ms-playwright/firefox-* /ms-playwright/webkit-* 2>/dev/null)" \
+    && test -x /ms-playwright/chromium-1234/chrome-linux64/chrome \
+    && rm -f /tmp/chrome-linux64-153.0.8010.36.zip
+
+ENV HOME=/home/stateport \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    STATEPORT_BROWSER_MODE=headless \
+    STATEPORT_BROWSER_ARTIFACTS=/artifacts
+WORKDIR /workspace
+USER 10001:10001
+CMD ["node", "/opt/stateport-playwright/node_modules/@playwright/test/cli.js", "test"]

@@ -1,0 +1,23 @@
+formatVersion: stateport.application/v1
+applicationId: studydd
+displayName: StudyState
+description: A durable, user-owned study application.
+sourceProfile: builtin:studydd-local-alpha
+productionEligible: true
+privacyClassification: private_by_default
+actionsPath: contracts/studydd.actions.yaml
+executorCommand: scripts/portable_actions.py
+validationCommand: python3 scripts/check_studydd.py
+transactionEphemeralPaths:
+  - .studydd/transition.lock
+contextCategoryPaths:
+  instance_descriptor: [instance.yaml]
+  study_state: [state/STUDY_STATE.yaml]
+  skill_map: [state/SKILL_MAP.yaml]
+  activity_state: [state/ACTIVITY_STATE.yaml]
+  review_state: [reviews/REVIEW_STATE.yaml]
+  source_state: [sources/SOURCE_STATE.yaml]
+  active_target: [targets/TARGET.yaml]
+  activity_templates: [activities/ACTIVITY_TEMPLATES.yaml]
+  raw_sessions: [sessions/SESSION_LOG.md, sessions/SESSION_SUMMARIES.md]
+  generated_context: [state/CURRENT_CONTEXT.md, .studydd/context_pack.md]
