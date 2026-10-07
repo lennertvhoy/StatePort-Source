@@ -1,0 +1,80 @@
+formatVersion: stateport.application-experience/v1
+applicationId: stateport.template.projectstate
+displayName: ProjectState
+description: An isolated ProjectState workspace with trusted StatePort lifecycle actions.
+capabilities:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+  - file_viewer
+  - workbench
+  - terminal
+  - editor
+  - backup
+views:
+  - viewId: managed-project-home
+    label: Project
+    component: application_home
+    route: /application
+    capability: progress_dashboard
+  - viewId: managed-project-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+  - viewId: managed-project-workbench
+    label: Workbench
+    component: development_workbench
+    route: /workbench
+    capability: workbench
+navigation:
+  - contributionId: managed-project-home-nav
+    label: Project
+    viewId: managed-project-home
+    placement: application
+    order: 10
+  - contributionId: managed-project-conversation-nav
+    label: Conversation
+    viewId: managed-project-conversation
+    placement: conversation
+    order: 20
+  - contributionId: managed-project-workbench-nav
+    label: Workbench
+    viewId: managed-project-workbench
+    placement: advanced
+    order: 30
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: Project conversation
+  emptyState: Continue work in this isolated ProjectState workspace.
+advancedControls:
+  - controlId: managed-project-state
+    label: Project state
+    component: state_summary
+    capability: progress_dashboard
+    order: 10
+  - controlId: managed-project-files
+    label: Files
+    component: file_viewer
+    capability: file_viewer
+    order: 20
+  - controlId: managed-project-runs
+    label: Runs
+    component: run_history
+    capability: goal_execution
+    order: 30
+  - controlId: managed-project-context
+    label: Context
+    component: context_summary
+    capability: conversation
+    order: 40
+  - controlId: managed-project-receipts
+    label: Receipts
+    component: receipt_list
+    capability: goal_execution
+    order: 50
+platformOperations: []
+legacyAliases: []

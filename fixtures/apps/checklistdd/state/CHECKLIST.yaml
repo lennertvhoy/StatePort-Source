@@ -1,0 +1,5 @@
+formatVersion: checklistdd.state/v1
+items:
+  - id: first-item
+    label: Verify the portable execution boundary
+    completed: false

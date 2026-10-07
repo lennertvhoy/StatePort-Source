@@ -1,0 +1,35 @@
+formatVersion: stateport.design-source/v1
+source:
+  originalFilename: "StatePort — App-first Product UI _ UX.svg"
+  repositoryPath: docs/design/source/stateport-app-first-product-ui-ux.svg
+  sha256: 474f63d97559d2d4d845e22dfa30fdb8fb29c944624110a4b9b51f3f896f4dfc
+  byteSize: 5821651
+  mediaType: image/svg+xml
+  canvas: {width: 4576, height: 3176}
+  suppliedBy: product_owner
+  observedOn: "2026-07-16"
+classification:
+  role: design_provenance
+  productionFrontendAsset: false
+  servedToBrowser: false
+  executableContentObserved: false
+  externalReferencesObserved: false
+  textRepresentation: outlined_paths
+  accessibilitySemantics: absent
+frames:
+  - {id: visual-foundations, x: 28, y: 16, width: 1440, height: 960}
+  - {id: applications, x: 1568, y: 16, width: 1440, height: 960}
+  - {id: discover, x: 3108, y: 16, width: 1440, height: 960}
+  - {id: studystate-conversation, x: 28, y: 1096, width: 1440, height: 960}
+  - {id: projectstate-workbench, x: 1568, y: 1096, width: 1440, height: 960}
+  - {id: cto-orchestration, x: 3108, y: 1096, width: 1440, height: 960}
+  - {id: statebench, x: 28, y: 2176, width: 1440, height: 960}
+  - {id: projectstate-settings, x: 1568, y: 2176, width: 1440, height: 960}
+  - {id: studystate-mobile-conversation, x: 3108, y: 2176, width: 390, height: 844}
+usage:
+  rule: rebuild_as_semantic_responsive_StatePort_owned_components
+  forbidden:
+    - use_the_complete_sheet_as_an_interactive_frontend
+    - expose_outlined_text_as_application_copy
+    - infer_backend_capability_from_visual_presence
+    - treat_conceptual_values_as_runtime_evidence

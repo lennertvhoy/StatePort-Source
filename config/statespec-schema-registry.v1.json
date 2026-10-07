@@ -1,0 +1,17 @@
+{
+  "schema": "stateport.statespec-schema-registry/v1",
+  "entries": [
+    {
+      "id": "statedd.stateport.io/instance/v1alpha1",
+      "path": "schemas/instance.v1alpha1.schema.json",
+      "documentKind": "Instance",
+      "discriminator": {"field": "kind", "value": "Instance"}
+    },
+    {
+      "id": "statedd.stateport.io/lock/v1",
+      "path": "schemas/lock.v1.schema.json",
+      "documentKind": "LifecycleLock",
+      "discriminator": {"field": "formatVersion", "value": "statedd.lock/v1"}
+    }
+  ]
+}

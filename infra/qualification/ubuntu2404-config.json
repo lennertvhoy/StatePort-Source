@@ -1,0 +1,55 @@
+{
+  "schema": "stateport.qualification.ubuntu2404-config/v1",
+  "candidate": {
+    "releaseId": "stateport-alpha4-candidate",
+    "version": "0.1.0-alpha.4",
+    "targetId": "linux-amd64-rootless-podman-quadlet",
+    "releaseIndexDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "signedPayloadDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "sourceCommit": "2222222222222222222222222222222222222222",
+    "sourceTree": "3333333333333333333333333333333333333333",
+    "publicSource": {"authorityUrl": "https://github.com/lennertvhoy/StatePort-Alpha4-Source-final3.git", "ref": "refs/heads/main", "commit": "4444444444444444444444444444444444444444", "tree": "5555555555555555555555555555555555555555"},
+    "imageDigests": ["sha256:6666666666666666666666666666666666666666666666666666666666666666"],
+    "installerDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "artifacts": {
+    "releaseIndex": {"path": "/qualification-input/release-index.json", "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+    "signedPayload": {"path": "/qualification-input/release-index.signed-payload.json", "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+    "installer": {"path": "/qualification-input/install.sh", "sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777"},
+    "executionHostProvisioner": {"path": "/qualification-input/artifacts/executionHostProvisioner", "sha256": "sha256:abababababababababababababababababababababababababababababababab"},
+    "updater": {"path": "/qualification-input/artifacts/updater", "sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+    "images": {"stateport-alpha4": {"archivePath": "/qualification-input/stateport-alpha4.oci.tar", "archiveDigest": "sha256:8888888888888888888888888888888888888888888888888888888888888888", "manifestDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666", "signatureBundle": {"path": "/qualification-input/stateport-alpha4.sigstore.json", "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+  },
+  "verification": {
+    "publicKey": {"path": "/qualification-input/release.pub", "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "signatureBundle": {"path": "/qualification-input/release-index.sigstore.json", "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "predecessorSignatureBundle": {"path": "/qualification-input/predecessor-bundle/release-index.sigstore.json", "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+    "cosign": {"path": "/qualification-input/cosign", "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "keyId": "stateport-alpha4",
+    "publicKeyFingerprint": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "guest": {"guestId": "ubuntu-2404-alpha4", "distribution": "ubuntu", "version": "24.04", "isolationContract": "exactly-one-clean-ubuntu-24.04-guest-no-checkout-no-preexisting-stateport"},
+  "receipt": {"path": "/qualification-output/ubuntu2404-receipt.json", "sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999"},
+  "guestStage": {
+    "provisionerPath": "/usr/local/libexec/stateport-execution-host-provision",
+    "provisionerInstallArgv": ["sudo", "-n", "install", "-D", "-o", "root", "-g", "root", "-m", "0555", "{execution_host_provisioner}", "/usr/local/libexec/stateport-execution-host-provision"],
+    "rootPreflightArgv": ["sudo", "-n", "/usr/local/libexec/stateport-execution-host-provision", "qualification-preflight"],
+    "materializeArgv": ["sudo", "-n", "/usr/local/libexec/stateport-execution-host-provision", "materialize", "--execution-host-provisioner", "/usr/local/libexec/stateport-execution-host-provision", "--execution-host-provisioner-digest", "{execution_host_provisioner_digest}", "--execution-host-provisioner-bytes", "{execution_host_provisioner_bytes}", "--updater-wheel", "{updater_wheel}", "--updater-wheel-digest", "{updater_wheel_digest}", "--release-index", "{release_index}", "--bundle-root", "{bundle_root}", "--cosign", "{cosign}", "--cosign-digest", "{cosign_digest}", "--trust-public-key", "{public_key}", "--trust-public-key-digest", "{public_key_digest}", "--trust-key-id", "{key_id}", "--trust-key-fingerprint", "{public_key_fingerprint}"],
+    "provisionArgv": ["sudo", "-n", "/usr/local/libexec/stateport-execution-host-provision", "provision", "--release-index", "{release_index}", "--bundle-root", "{bundle_root}", "--cosign", "{cosign}", "--trust-public-key", "{public_key}", "--trust-key-id", "{key_id}", "--trust-key-fingerprint", "{public_key_fingerprint}", "--channel", "{channel}", "--receipt-out", "{provision_receipt}"],
+    "provisionReceiptPath": "/var/lib/stateport-provisioning/receipts/execution-host-provisioning-receipt.json",
+    "healthArgv": ["sudo", "-n", "/usr/local/libexec/stateport-execution-host-provision", "health-probe", "--socket", "{socket}"],
+    "installArgv": ["/qualification-input/install.sh", "--release-index", "{release_index}", "--bundle-root", "{bundle_root}", "--cosign", "{cosign}", "--trust-public-key", "{public_key}", "--trust-key-id", "{key_id}", "--trust-key-fingerprint", "{public_key_fingerprint}", "--channel", "{channel}", "--updater-wheel", "/qualification-input/artifacts/updater", "--execution-host-provisioner", "/qualification-input/artifacts/executionHostProvisioner", "--compose", "/qualification-input/compose.release.yaml", "--source-archive", "/qualification-input/artifacts/sourceArchive", "--release-notes", "/qualification-input/artifacts/releaseNotes", "--known-limitations", "/qualification-input/artifacts/knownLimitations", "--execution-host-receipt", "/var/lib/stateport-provisioning/receipts/execution-host-provisioning-receipt.json", "--yes"],
+    "uninstallArgv": ["/qualification-input/install.sh", "--uninstall"],
+    "purgeArgv": ["/qualification-input/install.sh", "--purge", "--confirm-purge", "{confirm_purge}"],
+    "rootCleanupArgv": ["sudo", "-n", "/usr/local/libexec/stateport-execution-host-provision", "qualification-cleanup", "--release-index", "{release_index}", "--bundle-root", "{bundle_root}", "--receipt", "{provision_receipt}"],
+    "restartArgv": ["systemctl", "--user", "restart", "stateport-accepted.target"],
+    "journeyArgv": ["/qualification-input/studystate-journey", "--application", "StudyState", "--phase", "{phase}"],
+    "stateRoot": "/home/stateport-qualification/.local/state/stateport",
+    "liveQuadletRoot": "/home/stateport-qualification/.config/containers/systemd",
+    "ownedPaths": ["/home/stateport-qualification/.config/systemd/user/stateport-accepted.target", "/usr/local/libexec/stateport-execution-host-provision"],
+    "preservedPaths": ["/home/stateport-qualification/.local/state/stateport"],
+    "ownedServices": ["stateport-accepted.target", "stateport-execution-host.service", "podman.socket"],
+    "ownedImages": ["stateport-web", "stateport-api", "stateport-worker", "stateport-runner", "stateport-preview", "stateport-execution-host", "stateport-maintenance"],
+    "checkoutPaths": ["/workspace", "/home/stateport-qualification/StatePort"]
+  }
+}

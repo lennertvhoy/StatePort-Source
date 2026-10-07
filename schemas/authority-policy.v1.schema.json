@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.local/schemas/authority-policy.v1.schema.json",
+  "title": "StatePort authority policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "defaultProfile",
+    "actionPolicies",
+    "profiles",
+    "hardDeny",
+    "mergeRequirements",
+    "subagentDefaultDeny",
+    "escalationConditions"
+  ],
+  "properties": {
+    "schema": {"const": "stateport.authority-policy/v1"},
+    "defaultProfile": {"enum": ["guarded", "balanced", "delegated", "custom"]},
+    "actionPolicies": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["risk", "reversible", "localMutation", "processLaunch", "remoteSideEffect"],
+        "properties": {
+          "risk": {"enum": ["low", "medium", "high", "critical"]},
+          "reversible": {"type": "boolean"},
+          "localMutation": {"type": "boolean"},
+          "processLaunch": {"type": "boolean"},
+          "remoteSideEffect": {"type": "boolean"}
+        }
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["guarded", "balanced", "delegated", "custom"],
+      "properties": {
+        "guarded": {"$ref": "#/$defs/profile"},
+        "balanced": {"$ref": "#/$defs/profile"},
+        "delegated": {"$ref": "#/$defs/profile"},
+        "custom": {"$ref": "#/$defs/profile"}
+      }
+    },
+    "hardDeny": {"$ref": "#/$defs/actionList"},
+    "mergeRequirements": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["exact_head_verified", "required_gates_passed"]}
+    },
+    "subagentDefaultDeny": {"$ref": "#/$defs/actionList"},
+    "escalationConditions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"}
+    }
+  },
+  "$defs": {
+    "actionList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"}
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default", "autoWithReceipt", "approveScopeOnce", "autoAndNotify", "deny"],
+      "properties": {
+        "default": {"enum": ["deny", "ask_each_time", "approve_scope_once", "auto_and_notify", "auto_with_receipt"]},
+        "autoWithReceipt": {"$ref": "#/$defs/actionList"},
+        "approveScopeOnce": {"$ref": "#/$defs/actionList"},
+        "autoAndNotify": {"$ref": "#/$defs/actionList"},
+        "deny": {"$ref": "#/$defs/actionList"}
+      }
+    }
+  }
+}

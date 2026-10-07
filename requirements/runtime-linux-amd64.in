@@ -1,0 +1,3 @@
+# StatePort control-plane runtime dependency roots for CPython 3.13 on
+# linux/amd64. Provider SDKs and developer/test tools are intentionally absent.
+PyYAML==6.0.3
