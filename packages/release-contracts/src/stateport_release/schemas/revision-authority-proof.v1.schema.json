@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-authority-proof.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "phase", "sourceSchema", "sourceDocumentDigest", "action", "operationPlanDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "actorId", "grantId", "requestId", "reservationId", "reservationDigest", "claimId", "claimDigest", "receiptId", "receiptDigest", "result", "proofDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-authority-proof/v1"},
+    "phase": {"enum": ["reservation", "claim", "finalize"]},
+    "sourceSchema": {"enum": ["stateport.authority-action-reservation/v1", "stateport.authority-action-claim/v1", "stateport.authority-action-receipt/v1"]},
+    "sourceDocumentDigest": {"$ref": "#/$defs/digest"},
+    "action": {"const": "apply_deployment"},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "actorId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"},
+    "grantId": {"type": "string", "pattern": "^grant_[A-Za-z0-9._:-]{3,127}$"},
+    "requestId": {"type": "string", "pattern": "^authority_request_[0-9a-f]{32}$"},
+    "reservationId": {"type": "string", "pattern": "^authority_reservation_[0-9a-f]{32}$"},
+    "reservationDigest": {"$ref": "#/$defs/digest"},
+    "claimId": {"oneOf": [{"type": "string", "pattern": "^authority_claim_[0-9a-f]{32}$"}, {"type": "null"}]},
+    "claimDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "receiptId": {"oneOf": [{"type": "string", "pattern": "^authority_receipt_[0-9a-f]{32}$"}, {"type": "null"}]},
+    "receiptDigest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+    "result": {"enum": ["reserved", "claimed", "finalized"]},
+    "proofDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

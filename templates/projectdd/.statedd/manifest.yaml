@@ -1,0 +1,79 @@
+formatVersion: statedd.template-manifest/v1
+templateId: projectdd
+templateVersion: 0.1.0
+files:
+  - path: .statedd/contract.md
+    source: .statedd/contract.md
+    owner: template
+    provision: copy
+    merge: replace
+    generation: none
+    required: true
+    schema: null
+    sensitivity: public
+  - path: .statedd/manifest.yaml
+    source: .statedd/manifest.yaml
+    owner: template
+    provision: copy
+    merge: replace
+    generation: none
+    required: true
+    schema: null
+    sensitivity: public
+  - path: README.md
+    source: README.md
+    owner: template
+    provision: copy
+    merge: replace
+    generation: none
+    required: true
+    schema: null
+    sensitivity: public
+  - path: instance.yaml
+    owner: instance
+    provision: create
+    merge: preserve
+    generation: none
+    required: true
+    schema: statedd.stateport.io/instance/v1alpha1
+    sensitivity: private
+  - path: state/decisions.yaml
+    owner: instance
+    provision: create
+    merge: preserve
+    generation: none
+    required: true
+    schema: null
+    sensitivity: private
+  - path: state/project.yaml
+    owner: instance
+    provision: create
+    merge: preserve
+    generation: none
+    required: true
+    schema: null
+    sensitivity: private
+  - path: state/risks.yaml
+    owner: instance
+    provision: create
+    merge: preserve
+    generation: none
+    required: true
+    schema: null
+    sensitivity: private
+  - path: state/tasks.yaml
+    owner: instance
+    provision: create
+    merge: preserve
+    generation: none
+    required: true
+    schema: null
+    sensitivity: private
+  - path: .statedd/lock.yaml
+    owner: generated
+    provision: generate
+    merge: replace
+    generation: materializer
+    required: true
+    schema: statedd.stateport.io/lock/v1
+    sensitivity: internal

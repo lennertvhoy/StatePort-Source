@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-activation-plan.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "planId", "operationPlanDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "expectedPointerGeneration", "newPointerGeneration", "expectedAcceptedDataGeneration", "promotionSpecDigest", "ownerMaterializationSpecDigest", "portAllocationProposalDigest", "signatureVerificationProofSetDigest", "steps", "planDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-activation-plan/v1"},
+    "planId": {"type": "string", "pattern": "^revision_activation_plan_[0-9a-f]{32}$"},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "expectedPointerGeneration": {"type": "integer", "minimum": 0},
+    "newPointerGeneration": {"type": "integer", "minimum": 1},
+    "expectedAcceptedDataGeneration": {"type": "string", "pattern": "^data_[0-9a-f]{32}$"},
+    "promotionSpecDigest": {"$ref": "#/$defs/digest"},
+    "ownerMaterializationSpecDigest": {"$ref": "#/$defs/digest"},
+    "portAllocationProposalDigest": {"$ref": "#/$defs/digest"},
+    "signatureVerificationProofSetDigest": {"$ref": "#/$defs/digest"},
+    "steps": {"type": "array", "minItems": 15, "maxItems": 15, "items": {"type": "string", "minLength": 1}},
+    "planDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

@@ -1,0 +1,5 @@
+# The repo root .gitignore excludes `.terraform.lock.hcl` globally. For this
+# alpha stack the provider set is pinned deliberately and the lockfile MUST
+# be committed, so re-include it here (negation is allowed because the
+# parent directory itself is not excluded).
+!.terraform.lock.hcl

@@ -1,0 +1,89 @@
+{
+  "schema": "stateport.qualification-config/v1",
+  "candidate": {
+    "releaseId": "stateport-alpha4-alpha4-candidate",
+    "version": "0.1.0-alpha.4",
+    "targetId": "linux-amd64-rootless-podman-quadlet",
+    "releaseIndexUri": "https://example.invalid/stateport/release-index.json",
+    "releaseIndexDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "signedPayloadDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "sourceCommit": "2222222222222222222222222222222222222222",
+    "sourceTree": "3333333333333333333333333333333333333333",
+    "imageDigests": ["sha256:4444444444444444444444444444444444444444444444444444444444444444"]
+  },
+  "acceptedReceiptDigests": [],
+  "guests": [
+    {
+      "guestId": "ubuntu-2404",
+      "distribution": "ubuntu",
+      "version": "24.04",
+      "transport": {"kind": "ssh", "host": "ubuntu-2404.example.invalid", "user": "operator", "port": 22, "knownHosts": "/absolute/path/to/known_hosts"},
+      "stageCommands": {
+        "release_verification": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "provisioning": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "install": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "protocol_health": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300},
+        "representative_app": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "backup_export": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "restart_reread": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "update_rollback": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "uninstall_purge": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "final_durable_state": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300}
+      }
+    },
+    {
+      "guestId": "debian-stable",
+      "distribution": "debian",
+      "version": "13",
+      "transport": {"kind": "ssh", "host": "debian.example.invalid", "user": "operator", "port": 22, "knownHosts": "/absolute/path/to/known_hosts"},
+      "stageCommands": {
+        "release_verification": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "provisioning": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "install": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "protocol_health": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300},
+        "representative_app": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "backup_export": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "restart_reread": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "update_rollback": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "uninstall_purge": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "final_durable_state": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300}
+      }
+    },
+    {
+      "guestId": "fedora-44",
+      "distribution": "fedora",
+      "version": "44",
+      "transport": {"kind": "ssh", "host": "fedora-44.example.invalid", "user": "operator", "port": 22, "knownHosts": "/absolute/path/to/known_hosts"},
+      "stageCommands": {
+        "release_verification": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "provisioning": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "install": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "protocol_health": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300},
+        "representative_app": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "backup_export": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "restart_reread": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "update_rollback": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "uninstall_purge": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "final_durable_state": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300}
+      }
+    },
+    {
+      "guestId": "rolling-linux",
+      "distribution": "rolling",
+      "version": "operator-declared",
+      "transport": {"kind": "ssh", "host": "rolling.example.invalid", "user": "operator", "port": 22, "knownHosts": "/absolute/path/to/known_hosts"},
+      "stageCommands": {
+        "release_verification": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "provisioning": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "install": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "protocol_health": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300},
+        "representative_app": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "backup_export": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "restart_reread": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "update_rollback": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 1800},
+        "uninstall_purge": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 900},
+        "final_durable_state": {"command": ["/opt/stateport/qualification-stage", "{stage_id}", "{candidate_digest}"], "timeoutSeconds": 300}
+      }
+    }
+  ]
+}

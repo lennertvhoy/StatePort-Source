@@ -1,0 +1,24 @@
+formatVersion: stateport.application-action/v1
+applicationId: stateport.development-reference
+actions:
+  - formatVersion: stateport.development.action/v1
+    actionId: stateport.development.inspect-project/v1
+    displayName: Inspect project state
+    purpose: Inspect the public-safe project fixture without mutating canonical state.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, digest]}
+    contextPolicy:
+      id: stateport.development.context/v1
+      categoryPaths: {project_state: [state/PROJECT.yaml]}
+      includeCategories: [instance_descriptor, project_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 240
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 240, costMinor: 0, timeSeconds: 5, steps: 1}

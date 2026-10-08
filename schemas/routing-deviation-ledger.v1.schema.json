@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/routing-deviation-ledger.v1.schema.json",
+  "title": "StatePort routing deviation ledger v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "ledgerVersion", "entries"],
+  "properties": {
+    "formatVersion": {"const": "stateport.routing-deviation-ledger/v1"},
+    "ledgerVersion": {"const": 1},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryId",
+        "assignment",
+        "intendedProfile",
+        "actualProfile",
+        "reason",
+        "incrementalCost",
+        "producedWork",
+        "testResult",
+        "rerun",
+        "review",
+        "retainedWork",
+        "discardedWork",
+        "correctiveConfigurationAction"
+      ],
+      "properties": {
+        "entryId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+        "assignment": {"type": "string", "minLength": 1, "maxLength": 256},
+        "intendedProfile": {
+          "enum": ["luna-medium", "luna-high", "terra-medium", "terra-high", "sol-xhigh", "sol-max"]
+        },
+        "actualProfile": {"type": "string", "minLength": 1, "maxLength": 128},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "incrementalCost": {"$ref": "#/$defs/incrementalCost"},
+        "producedWork": {"$ref": "#/$defs/producedWork"},
+        "testResult": {"$ref": "#/$defs/testResult"},
+        "rerun": {"$ref": "#/$defs/rerun"},
+        "review": {"$ref": "#/$defs/review"},
+        "retainedWork": {"$ref": "#/$defs/retainedWork"},
+        "discardedWork": {"$ref": "#/$defs/discardedWork"},
+        "correctiveConfigurationAction": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "incrementalCost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "amountMinor", "currency", "notes"],
+      "properties": {
+        "availability": {"enum": ["available", "unknown"]},
+        "amountMinor": {"type": ["integer", "null"], "minimum": 0},
+        "currency": {"type": ["string", "null"], "pattern": "^[A-Z]{3}$"},
+        "notes": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "producedWork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commits", "files"],
+      "properties": {
+        "commits": {"$ref": "#/$defs/workInventory"},
+        "files": {"$ref": "#/$defs/workInventory"}
+      }
+    },
+    "workInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "values"],
+      "properties": {
+        "status": {"enum": ["exact", "none", "unknown_exact"]},
+        "values": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+        }
+      }
+    },
+    "testResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "mixed", "unknown_exact"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    },
+    "rerun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["occurred", "profile", "trigger", "allowedReason", "worktreeIsolation", "compliance"],
+      "properties": {
+        "occurred": {"type": "boolean"},
+        "profile": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+        "trigger": {
+          "enum": [
+            "model_identity_only",
+            "controlled_benchmark",
+            "material_defect",
+            "unsafe_execution",
+            "irrecoverable_provenance",
+            "explicit_human_request",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "allowedReason": {
+          "type": ["string", "null"],
+          "enum": [
+            "controlled_benchmark",
+            "material_defect",
+            "unsafe_execution",
+            "irrecoverable_provenance",
+            "explicit_human_request",
+            null
+          ]
+        },
+        "worktreeIsolation": {
+          "enum": ["clean_repeated_experiment", "isolated_worktree", "same_modified_worktree", "unknown", "not_applicable"]
+        },
+        "compliance": {"enum": ["compliant", "historical_noncompliance", "not_applicable"]}
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "disposition",
+        "reviewerAssignment",
+        "access",
+        "originalImplementationOwner",
+        "worktreeIsolation",
+        "inspectedCommitOrDiff",
+        "freshFocusedTests",
+        "independent",
+        "notes"
+      ],
+      "properties": {
+        "disposition": {
+          "enum": [
+            "retained_pending_independent_acceptance",
+            "accepted",
+            "accepted_with_bounded_followups",
+            "rejected_with_reproduced_defects"
+          ]
+        },
+        "reviewerAssignment": {"type": "string", "minLength": 1, "maxLength": 256},
+        "access": {"enum": ["read-only", "workspace-write", "unknown"]},
+        "originalImplementationOwner": {"type": ["boolean", "null"]},
+        "worktreeIsolation": {
+          "enum": ["clean_detached_worktree", "isolated_read_only_worktree", "same_modified_worktree", "unknown"]
+        },
+        "inspectedCommitOrDiff": {"type": "boolean"},
+        "freshFocusedTests": {"enum": ["passed", "failed", "not_run", "unknown"]},
+        "independent": {"type": "boolean"},
+        "notes": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    },
+    "retainedWork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "description"],
+      "properties": {
+        "status": {"const": "retained"},
+        "description": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    },
+    "discardedWork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attribution", "description"],
+      "properties": {
+        "attribution": {"enum": ["exact", "none", "unknown_exact"]},
+        "description": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    }
+  }
+}

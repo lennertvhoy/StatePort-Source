@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/revision-terminal-acceptance-receipt.v1.schema.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "operationPlanDigest", "activationPlanDigest", "activationDecisionDigest", "releaseId", "signedPayloadDigest", "targetId", "topologyDigest", "pointerGeneration", "acceptedDataGeneration", "acceptedDataGenerationDigest", "ownerBundleDigests", "revisionUnitProjectionDigest", "routeProjectionDigest", "portActivationRecheckReceiptDigest", "healthEvidenceDigest", "explicitStartReceiptDigest", "explicitStopReceiptDigest", "authorityFinalizeProof", "acceptedAt", "result", "receiptDigest"],
+  "properties": {
+    "schema": {"const": "stateport.revision-terminal-acceptance-receipt/v1"},
+    "operationPlanDigest": {"$ref": "#/$defs/digest"},
+    "activationPlanDigest": {"$ref": "#/$defs/digest"},
+    "activationDecisionDigest": {"$ref": "#/$defs/digest"},
+    "releaseId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+    "targetId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "topologyDigest": {"$ref": "#/$defs/digest"},
+    "pointerGeneration": {"type": "integer", "minimum": 1},
+    "acceptedDataGeneration": {"type": "string", "pattern": "^data_[0-9a-f]{32}$"},
+    "acceptedDataGenerationDigest": {"$ref": "#/$defs/digest"},
+    "ownerBundleDigests": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["owner", "digest"], "properties": {"owner": {"const": "stateport-control"}, "digest": {"$ref": "#/$defs/digest"}}}},
+    "revisionUnitProjectionDigest": {"$ref": "#/$defs/digest"},
+    "routeProjectionDigest": {"$ref": "#/$defs/digest"},
+    "portActivationRecheckReceiptDigest": {"$ref": "#/$defs/digest"},
+    "healthEvidenceDigest": {"$ref": "#/$defs/digest"},
+    "explicitStartReceiptDigest": {"$ref": "#/$defs/digest"},
+    "explicitStopReceiptDigest": {"$ref": "#/$defs/digest"},
+    "authorityFinalizeProof": {"type": "object"},
+    "acceptedAt": {"$ref": "#/$defs/timestamp"},
+    "result": {"const": "accepted"},
+    "receiptDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "timestamp": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}}
+}

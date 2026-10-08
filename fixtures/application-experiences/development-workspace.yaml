@@ -1,0 +1,99 @@
+formatVersion: stateport.application-experience/v1
+applicationId: stateport.development-reference
+displayName: ProjectState
+description: A development application with an optional governed Workbench.
+capabilities:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+  - file_viewer
+  - workbench
+  - terminal
+  - editor
+  - cto_orchestration
+  - benchmark_evidence
+  - backup
+views:
+  - viewId: project-home
+    label: Project
+    component: application_home
+    route: /application
+    capability: progress_dashboard
+  - viewId: project-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+  - viewId: project-workbench
+    label: Workbench
+    component: development_workbench
+    route: /workbench
+    capability: workbench
+navigation:
+  - contributionId: project-home-nav
+    label: Project
+    viewId: project-home
+    placement: application
+    order: 10
+  - contributionId: project-conversation-nav
+    label: Conversation
+    viewId: project-conversation
+    placement: conversation
+    order: 20
+  - contributionId: project-workbench-nav
+    label: Workbench
+    viewId: project-workbench
+    placement: advanced
+    order: 30
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: Project conversation
+  emptyState: Continue the project conversation without exposing runtime machinery.
+advancedControls:
+  - controlId: project-state
+    label: Project state
+    component: state_summary
+    capability: progress_dashboard
+    order: 10
+  - controlId: project-files
+    label: Files
+    component: file_viewer
+    capability: file_viewer
+    order: 20
+  - controlId: project-runs
+    label: Runs
+    component: run_history
+    capability: goal_execution
+    order: 30
+  - controlId: project-context
+    label: Context
+    component: context_summary
+    capability: conversation
+    order: 40
+  - controlId: project-receipts
+    label: Receipts
+    component: receipt_list
+    capability: goal_execution
+    order: 50
+  - controlId: project-cto
+    label: CTO advisory
+    component: cto_orchestration
+    capability: cto_orchestration
+    order: 55
+  - controlId: project-benchmarks
+    label: Tested updates
+    component: benchmark_evidence
+    capability: benchmark_evidence
+    order: 60
+platformOperations:
+  - operationId: statebench-inspection
+    label: StateBench runs
+    component: benchmark_evidence
+    capability: benchmark_evidence
+    requiredActorPermissions:
+      - platform.statebench.read
+legacyAliases:
+  - ProjectDD
