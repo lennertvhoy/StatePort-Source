@@ -56,15 +56,16 @@ separate gates and are not established by those local results.
 
 ## Reporting and support limits
 
-There is no active public bug/support route and no active private
-vulnerability-reporting route. Public issue templates present in the source do
-not activate intake by themselves.
+Public issue intake and GitHub private vulnerability reporting are enabled on
+the public source repository (checked through GitHub on 2026-10-17). Neither
+carries a response-time commitment, and this single-user local alpha is not a
+supported product.
 
-- For an ordinary failure, use [troubleshooting](TROUBLESHOOTING.md) and keep a
-  minimal redacted reproduction for the future support route. Do not publish
-  private data.
-- For a suspected vulnerability, follow [the security policy](../SECURITY.md).
-  Do not disclose sensitive details publicly while no private route exists.
+- For an ordinary failure, use [troubleshooting](TROUBLESHOOTING.md) and, if it
+  persists, open a public issue with a minimal redacted reproduction. Do not
+  publish private data.
+- For a suspected vulnerability, follow [the security policy](../SECURITY.md)
+  and report it privately; do not disclose sensitive details publicly.
 - No supported-version matrix, SLA, paid support, or response-time commitment
   exists. See [SUPPORT.md](../SUPPORT.md).
 

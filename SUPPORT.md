@@ -9,14 +9,17 @@ support offering, and complete-product/native qualification remains open.
 
 Public, redacted product bugs can be reported in
 [StatePort Source issues](https://github.com/lennertvhoy/StatePort-Source/issues).
-The public repository and enabled issue intake were checked through GitHub on
-2026-09-05; no response-time commitment is implied. Include the version, target,
+GitHub reports issue intake as enabled on the public repository (checked on
+2026-10-17); no response-time commitment is implied. Include the version, target,
 a minimal synthetic reproduction, and relevant diagnostic codes. Consult the
-[troubleshooting guide](docs/TROUBLESHOOTING.md) first.
+[troubleshooting guide](docs/TROUBLESHOOTING.md) first. The current public alpha
+is Alpha.24; see the [release status](https://lennertvhoy.github.io/StatePort-Site/releases/)
+for what has and has not been measured.
 
 Do not include credentials, learner material, real instances or security exploit
-details in public issues. Private vulnerability reporting is still disabled;
-see [SECURITY.md](SECURITY.md) for this unresolved intake boundary.
+details in public issues. Report suspected vulnerabilities privately through
+[GitHub private vulnerability reporting](https://github.com/lennertvhoy/StatePort-Source/security/advisories/new)
+(enabled, checked on 2026-10-17); see [SECURITY.md](SECURITY.md).
 
 ## Boundaries
 
