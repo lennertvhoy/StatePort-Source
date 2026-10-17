@@ -479,6 +479,11 @@ export const MessageRow = memo(function MessageRow({
       {failedAssistant ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-2" role="alert">
           <span className="text-xs font-medium text-status-danger">Response interrupted</span>
+          {message.failureReason ? (
+            <span className="text-xs text-foreground-secondary" data-testid={`failure-reason-${message.id}`}>
+              {message.failureReason}
+            </span>
+          ) : null}
           <CardButton icon={RotateCcw} label="Retry response" onClick={onRetryResponse} testId={`retry-response-${message.id}`} />
         </div>
       ) : null}

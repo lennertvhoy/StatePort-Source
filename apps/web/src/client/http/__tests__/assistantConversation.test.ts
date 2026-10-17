@@ -284,4 +284,100 @@ describe('HttpAssistantConversationClient', () => {
     ])
     expect(transcriptReads).toBe(3)
   })
+
+  const QUOTA_SENTENCE =
+    "The provider's usage limit has been reached, so it refused the request. Wait for the limit to reset, or choose another model or plan in Coding provider settings, then retry."
+
+  function failedWork() {
+    const work = activeWork()
+    return {
+      ...work,
+      items: [
+        {
+          ...work.items[0],
+          state: 'failed' as const,
+          error: { code: 'provider_invocation_failed', message: QUOTA_SENTENCE },
+        },
+      ],
+    }
+  }
+
+  it('shows the durable failure cause on a reloaded failed response', async () => {
+    const fake = makeFakeFetch([
+      [
+        'GET',
+        `/v1/instances/${INSTANCE_ID}/conversation`,
+        jsonResponse({ ok: true, result: presentation([USER_MESSAGE]) }),
+      ],
+      [
+        'GET',
+        `/v1/instances/${INSTANCE_ID}/conversation/assistant-work`,
+        jsonResponse({ ok: true, result: failedWork() }),
+      ],
+    ])
+    const client = new HttpAssistantConversationClient(
+      new HttpTransport({ fetchFn: fake.fetchFn }),
+    )
+    const restored = await client.get(INSTANCE_ID)
+    const failed = restored.messages.find(
+      (message) => message.id === `assistant_pending:${USER_ID}`,
+    )
+    expect(failed).toMatchObject({
+      role: 'assistant',
+      state: 'failed',
+      content: '',
+      failureReason: QUOTA_SENTENCE,
+    })
+  })
+
+  it('hands the live assistant_error cause to the stream unchanged', async () => {
+    const failure = {
+      formatVersion: 'stateport.assistant-stream-event/v1',
+      workId: WORK_ID,
+      messageId: USER_ID,
+      attemptId: `attempt.${WORK_ID}.1`,
+      sequence: 4,
+      occurredAt: '2026-07-21T09:00:02.000Z',
+      status: 'failed',
+      error: { code: 'provider_invocation_failed', message: QUOTA_SENTENCE },
+    }
+    const body = [
+      `id: event.${WORK_ID}.4`,
+      'event: assistant_error',
+      `data: ${JSON.stringify(failure)}`,
+      '',
+      '',
+    ].join(String.fromCharCode(10))
+    const fake = makeFakeFetch([
+      [
+        'GET',
+        `/v1/instances/${INSTANCE_ID}/conversation`,
+        jsonResponse({ ok: true, result: presentation([USER_MESSAGE]) }),
+      ],
+      [
+        'GET',
+        `/v1/instances/${INSTANCE_ID}/conversation/assistant-work`,
+        jsonResponse({ ok: true, result: activeWork() }),
+      ],
+      [
+        'GET',
+        `/v1/instances/${INSTANCE_ID}/conversation/messages/${USER_ID}/events`,
+        new Response(body, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+        }),
+      ],
+    ])
+    const client = new HttpAssistantConversationClient(
+      new HttpTransport({ fetchFn: fake.fetchFn }),
+    )
+    const restored = await client.get(INSTANCE_ID)
+    const { stream } = await client.streamMessage(INSTANCE_ID, {
+      content: '',
+      resumeMessageId: restored.messages.find((m) => m.role === 'assistant')?.id,
+    })
+    const chunks = []
+    for await (const chunk of stream) chunks.push(chunk)
+    expect(chunks).toEqual([{ type: 'error', message: QUOTA_SENTENCE }])
+  })
 })

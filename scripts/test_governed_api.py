@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 for relative in (
@@ -58,6 +59,21 @@ def test_health_and_capabilities_are_explicitly_read_only() -> None:
         assert capabilities.status == 200
         assert capabilities.body["result"]["mutations"] == []
         assert "plan-upgrade" in capabilities.body["result"]["operations"]
+
+
+def test_operation_failure_has_safe_cause_and_sentence() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        api = GovernedAPI(tmpdir)
+        with patch.object(api, "_validate_template", side_effect=ValueError("/private/host/path")):
+            response = api.dispatch("POST", "/v1/validate/template", {"path": "template"})
+
+    assert response.status == 400
+    assert response.body["error"] == {
+        "code": "operation_failed",
+        "causeCode": "invalid_value",
+        "message": "A request value could not be used. Review the submitted values.",
+    }
+    assert "/private/host/path" not in response.json_bytes().decode()
 
 
 def test_validation_and_lifecycle_routes_return_structured_results() -> None:

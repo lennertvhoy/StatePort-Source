@@ -8,7 +8,7 @@ import {
   type OpenCodeCredentialProvider,
   type ProviderStatus,
 } from '@/client/providerClient'
-import { ConfirmDialog, CopyButton } from '@/components'
+import { ConfirmDialog, CopyButton, InlineNotice } from '@/components'
 import { Button } from '@/components/ui/button'
 import { useSessionStore } from '@/state'
 
@@ -17,6 +17,7 @@ import { useSessionStore } from '@/state'
 const LOGIN_POLL_MS = 3000
 const LOGIN_TERMINAL_PHASES: readonly LoginFlow['phase'][] = ['authenticated', 'failed', 'expired', 'cancelled']
 const isTerminalLoginPhase = (phase: LoginFlow['phase']) => LOGIN_TERMINAL_PHASES.includes(phase)
+const MODEL_IDENTIFIER = new RegExp('^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$')
 const LOGIN_PHASE_TEXT: Record<LoginFlow['phase'], string> = {
   pending: 'Waiting for Codex to confirm the device sign-in. This page keeps checking until it completes or expires.',
   code: 'Open the verification link in your browser and enter the one-time code shown below.',
@@ -65,10 +66,30 @@ const INSTALLED_CODEX_LOGIN = String.raw`stateport_codex() (
 )
 stateport_codex login`
 
+// Honest adoption states, derived from presence only: adopted (with when/where
+// it was copied from and the provider names), a source is available, or none.
+function adoptionSummary(status: ProviderStatus | null): string {
+  if (status?.adoptionStatus === 'adopted') {
+    const origin = [
+      status.adoptedAt ? `copied ${status.adoptedAt}` : null,
+      status.adoptedSource ? `from ${status.adoptedSource}` : null,
+    ].filter(Boolean).join(' ')
+    const providers = status.adoptedProviders && status.adoptedProviders.length > 0
+      ? `; providers: ${status.adoptedProviders.join(', ')}` : ''
+    return `Adopted: a copy of an existing OpenCode sign-in is present${origin ? ` (${origin})` : ''}${providers}. Presence only: StatePort does not check that it is still valid, and later changes to the original do not follow the copy.`
+  }
+  if (status?.adoptionSourceAvailable) {
+    const found = status.adoptionSourceProviders && status.adoptionSourceProviders.length > 0
+      ? ` Providers found: ${status.adoptionSourceProviders.join(', ')}; only the one matching your saved model (else opencode-go or opencode) is copied.` : ''
+    return `Not adopted. An existing OpenCode sign-in file was found in this runtime and can be adopted.${found}`
+  }
+  return 'Not adopted. No existing OpenCode sign-in file was found in this runtime. Sign in with OpenCode here first, or run the host-side adopt helper (scripts/adopt_opencode_signin.py).'
+}
+
 export function ProviderSettings() {
   const service = useSessionStore(state => state.serviceStatus)
   const operator = (service?.state === 'connected' || service?.state === 'degraded')
-    && service.actor?.role === 'platform_operator' && service.actor.platformOperationsAllowed === true
+    && (service.actor?.providerActionsAllowed ?? (service.actor?.role === 'platform_operator' && service.actor.platformOperationsAllowed === true)) === true
   const [status, setStatus] = useState<ProviderStatus | null>(null)
   const [model, setModel] = useState('')
   const [providerId, setProviderId] = useState<'codex' | 'opencode'>('opencode')
@@ -78,6 +99,7 @@ export function ProviderSettings() {
   const draftEdited = useRef(false)
   const requestVersion = useRef(0)
   const [error, setError] = useState<string | null>(null)
+  const [verificationResult, setVerificationResult] = useState<ProviderStatus | null>(null)
   const [loginFlow, setLoginFlow] = useState<LoginFlow | null>(null)
   const [signOutPrompted, setSignOutPrompted] = useState(false)
   const [credentialProvider, setCredentialProvider] = useState<OpenCodeCredentialProvider>('anthropic')
@@ -86,6 +108,15 @@ export function ProviderSettings() {
   const codexSelected = (status?.providerId ?? 'opencode') === 'codex'
   const opencodeSelected = (status?.providerId ?? 'opencode') === 'opencode'
   const credentialConfigured = status?.credentialStatus === 'configured'
+  const signInAdopted = status?.adoptionStatus === 'adopted'
+  const modelValid = MODEL_IDENTIFIER.test(model)
+  const modelInvalid = model.length > 0 && !modelValid
+  const verificationFailed = verificationResult?.requestStatus === 'failed' || verificationResult?.executableStatus === 'missing'
+  const verificationPassed = verificationResult !== null && !verificationFailed && (
+    (verificationResult.providerId ?? 'opencode') === 'opencode'
+      ? verificationResult.executableStatus === 'installed' && verificationResult.executableInstalled
+      : verificationResult.requestStatus === 'succeeded'
+  )
   const flowLive = loginFlow !== null && codexSelected && !isTerminalLoginPhase(loginFlow.phase)
   const applyCredentialProvider = (value: ProviderStatus) => {
     if (!credentialEdited.current) setCredentialProvider(value.credentialProvider ?? 'anthropic')
@@ -132,7 +163,7 @@ export function ProviderSettings() {
       return
     }
     const version = ++requestVersion.current
-    setBusy(true); setError(null)
+    setBusy(true); setError(null); setVerificationResult(null)
     try {
       setLoginFlow(await action())
     }
@@ -154,17 +185,18 @@ export function ProviderSettings() {
     }
     finally { if (requestVersion.current === version) setBusy(false) }
   }
-  async function perform(action: () => Promise<ProviderStatus>, mutation = true, saveDraft = false) {
+  async function perform(action: () => Promise<ProviderStatus>, mutation = true, saveDraft = false, verify = false) {
     if (mutation && !operator) {
       setError('Provider changes require an authorized platform operator session. Open StatePort through the operator session, then refresh the page.')
       return
     }
     const version = ++requestVersion.current
-    setBusy(true); setError(null)
+    setBusy(true); setError(null); setVerificationResult(null)
     try {
       const value = await action()
       if (requestVersion.current !== version) return
       setStatus(value)
+      if (verify) setVerificationResult(value)
       applyCredentialProvider(value)
       if (saveDraft || !draftEdited.current) {
         setProviderId(value.providerId ?? 'opencode'); setModel(value.model ?? '')
@@ -175,7 +207,9 @@ export function ProviderSettings() {
       if (requestVersion.current !== version) return
       setError(failure instanceof ClientError && (failure.status === 401 || failure.status === 403)
         ? 'The service did not authorize this request. Open StatePort through an authorized platform operator session, then refresh the page. No provider change was confirmed.'
-        : 'The provider operation could not be confirmed. Refresh status before retrying; if it remains unavailable, review the service connection in Platform diagnostics.')
+        : saveDraft && failure instanceof ClientError
+          ? `Model was not saved: ${failure.message}${failure.code ? ` (${failure.code})` : ''}`
+          : 'The provider operation could not be confirmed. Refresh status before retrying; if it remains unavailable, review the service connection in Platform diagnostics.')
     }
     finally { if (requestVersion.current === version) setBusy(false) }
   }
@@ -185,7 +219,7 @@ export function ProviderSettings() {
       return
     }
     const version = ++requestVersion.current
-    setBusy(true); setError(null)
+    setBusy(true); setError(null); setVerificationResult(null)
     try {
       const value = await action()
       if (requestVersion.current !== version) return
@@ -198,6 +232,30 @@ export function ProviderSettings() {
       setError(failure instanceof ClientError && (failure.status === 401 || failure.status === 403)
         ? 'The service did not authorize this request. Open StatePort through an authorized platform operator session, then refresh the page. No provider change was confirmed.'
         : 'The provider credential operation could not be confirmed. Refresh status before retrying; if it remains unavailable, review the service connection in Platform diagnostics.')
+    }
+    finally { if (requestVersion.current === version) setBusy(false) }
+  }
+  async function runAdoption(action: () => Promise<ProviderStatus>) {
+    if (!operator) {
+      setError('Provider changes require an authorized platform operator session. Open StatePort through the operator session, then refresh the page.')
+      return
+    }
+    const version = ++requestVersion.current
+    setBusy(true); setError(null); setVerificationResult(null)
+    try {
+      const value = await action()
+      if (requestVersion.current !== version) return
+      setStatus(value)
+    }
+    catch (failure) {
+      if (requestVersion.current !== version) return
+      // A refusal carries a fixed code and a detail that names paths only
+      // (never contents), so it is shown as returned.
+      setError(failure instanceof ClientError && (failure.status === 401 || failure.status === 403)
+        ? 'The service did not authorize this request. Open StatePort through an authorized platform operator session, then refresh the page. No provider change was confirmed.'
+        : failure instanceof ClientError && failure.status === 409
+          ? `OpenCode sign-in was not adopted: ${failure.message}${failure.code ? ` (${failure.code})` : ''}`
+          : 'The sign-in adoption could not be confirmed. Refresh status before retrying; if it remains unavailable, review the service connection in Platform diagnostics.')
     }
     finally { if (requestVersion.current === version) setBusy(false) }
   }
@@ -218,7 +276,7 @@ export function ProviderSettings() {
       </dl>
       <p role="status" className="text-sm">{status.detail}</p>
     </section> : <p role="status">{error ? 'Provider status is unavailable. Use Refresh status to retry.' : 'Loading provider status…'}</p>}
-    <form aria-label="Provider configuration" aria-describedby={!operator ? 'provider-permission-help' : undefined} className="min-w-0 space-y-3" onSubmit={event => { event.preventDefault(); void perform(() => providerClient.configure(model.trim(), providerId), true, true) }}>
+    <form aria-label="Provider configuration" aria-describedby={!operator ? 'provider-permission-help' : undefined} className="min-w-0 space-y-3" onSubmit={event => { event.preventDefault(); if (modelValid) void perform(() => providerClient.configure(model, providerId), true, true) }}>
       <label htmlFor="provider-choice" className="block text-sm font-medium">Coding provider</label>
       <select id="provider-choice" value={providerId} onChange={event => { draftEdited.current = true; setProviderId(event.target.value as 'codex' | 'opencode'); setShowLoginCommand(false) }} disabled={busy || !operator}
         className="w-full rounded-md border bg-background px-3 py-2 text-sm">
@@ -226,10 +284,11 @@ export function ProviderSettings() {
       </select>
       <label htmlFor="provider-model" className="block text-sm font-medium">{providerId === 'codex' ? 'Codex' : 'OpenCode'} model identifier</label>
       <input id="provider-model" value={model} onChange={event => { draftEdited.current = true; setModel(event.target.value) }} autoComplete="off"
-        required maxLength={256} pattern="[A-Za-z0-9][A-Za-z0-9._:/+\-]*" disabled={busy || !operator}
-        className="min-w-0 w-full rounded-md border bg-background px-3 py-2 text-sm" aria-describedby="provider-model-help" />
-      <p id="provider-model-help" className="text-sm text-muted-foreground">{providerId === 'codex' ? 'Use a model available to your Codex account. Saving enables new conversation work with this model; it does not authenticate the account.' : 'Use a model available to your OpenCode runtime. Saving enables new conversation work through the installed OpenCode executable. Connect a provider API key below or sign in with OpenCode itself; StatePort never reads OpenCode\'s own authentication.'}</p>
-      <Button className="h-auto min-h-10 whitespace-normal" type="submit" disabled={busy || !operator || !model.trim()}>Save model and enable</Button>
+        required maxLength={256} disabled={busy || !operator} aria-invalid={modelInvalid || undefined}
+        className="min-w-0 w-full rounded-md border bg-background px-3 py-2 text-sm" aria-describedby={modelInvalid ? 'provider-model-help provider-model-error' : 'provider-model-help'} />
+      <p id="provider-model-help" className="text-sm text-muted-foreground">{providerId === 'codex' ? 'Use a model available to your Codex account. Saving enables new conversation work with this model; it does not authenticate the account.' : 'Use a model available to your OpenCode runtime. Saving enables new conversation work through the installed OpenCode executable. Connect a provider API key below, or adopt an existing OpenCode sign-in; StatePort never displays or returns a credential.'}</p>
+      {modelInvalid && <p id="provider-model-error" role="alert" className="text-sm text-destructive">Model identifier must start with a letter or digit and contain only letters, digits, and . _ : / + - (up to 256 characters).</p>}
+      <Button className="h-auto min-h-10 whitespace-normal" type="submit" disabled={busy || !operator || !modelValid}>Save model and enable</Button>
     </form>
     {opencodeSelected && <section aria-label="OpenCode provider credential" className="space-y-3 rounded-lg border p-4">
       <h2 className="font-medium">OpenCode provider API key</h2>
@@ -265,6 +324,17 @@ export function ProviderSettings() {
             onClick={() => void runCredential(() => providerClient.removeCredential(credentialProvider))}>Remove credential</Button>
         </div>
       </form>
+    </section>}
+    {opencodeSelected && <section aria-label="Existing OpenCode sign-in" className="space-y-3 rounded-lg border p-4">
+      <h2 className="font-medium">Use an existing OpenCode sign-in</h2>
+      <p className="text-sm">If OpenCode (including OpenCode Go) is already signed in in this environment, StatePort can take over that sign-in by copying the record of the provider your saved model uses (otherwise opencode-go or opencode) into the private provider home with owner-only permissions. Other providers in the file are never copied. The original is not changed, and the copy is never shown or returned. Caution: an OAuth sign-in rotates its refresh token when it refreshes, so a copied OAuth record can sign the original OpenCode out; prefer an API-key provider such as OpenCode Go.</p>
+      <p role="status" aria-label="Adopted sign-in state" className="text-sm">{adoptionSummary(status)}</p>
+      <div className="flex flex-wrap gap-3">
+        <Button className="h-auto min-h-10 whitespace-normal" type="button" disabled={busy || !operator}
+          onClick={() => void runAdoption(providerClient.adoptSignIn)}>Adopt existing OpenCode sign-in</Button>
+        <Button className="h-auto min-h-10 whitespace-normal" type="button" variant="outline" disabled={busy || !operator || !signInAdopted}
+          onClick={() => void runAdoption(providerClient.removeAdoptedSignIn)}>Remove adopted sign-in</Button>
+      </div>
     </section>}
     <section className="space-y-3" aria-label="Authentication and verification">
       {codexSelected ? <section aria-label="Account sign-in (device login)" className="space-y-3 rounded-lg border p-4">
@@ -314,10 +384,24 @@ export function ProviderSettings() {
       <p className="text-sm text-muted-foreground">Verify sends one short request with no application conversation or files. It may consume account usage. A successful check describes this runtime and moment; it does not establish production qualification.</p>
       </div>}
       <div className="flex flex-wrap gap-3">
-        <Button className="h-auto min-h-10 whitespace-normal" disabled={busy || !operator || !status?.configured || ((status.providerId ?? 'opencode') === 'codex' && (!status.connected || (status.executableStatus !== 'unverified' && !status.executableInstalled)))} onClick={() => void perform(providerClient.verify)}>{busy ? 'Working…' : status?.providerId === 'opencode' ? 'Check selected adapter' : 'Verify bounded request'}</Button>
+        <Button className="h-auto min-h-10 whitespace-normal" disabled={busy || !operator || !status?.configured || ((status.providerId ?? 'opencode') === 'codex' && (!status.connected || (status.executableStatus !== 'unverified' && !status.executableInstalled)))} onClick={() => void perform(providerClient.verify, true, false, true)}>{busy ? 'Working…' : status?.providerId === 'opencode' ? 'Check selected adapter' : 'Verify bounded request'}</Button>
         <Button className="h-auto min-h-10 whitespace-normal" variant="outline" disabled={busy || !operator || !status?.connected} onClick={() => void perform(providerClient.disconnect)}>Disconnect StatePort</Button>
         <Button className="h-auto min-h-10 whitespace-normal" variant="outline" disabled={busy} onClick={() => void perform(providerClient.getStatus, false)}>Refresh status</Button>
       </div>
+      {verificationResult && <section aria-label="Provider check result">
+        <InlineNotice
+          tone={verificationFailed ? 'danger' : verificationPassed ? 'informational' : 'attention'}
+          title={(verificationResult.providerId ?? 'opencode') === 'opencode'
+            ? verificationFailed ? 'Adapter check failed' : verificationPassed ? 'Adapter check passed' : 'Adapter check inconclusive'
+            : verificationResult.requestStatus === 'succeeded' ? 'Bounded request succeeded' : verificationResult.requestStatus === 'failed' ? 'Bounded request failed' : 'Bounded request not verified'}
+        >
+          <p>Executable: {verificationResult.executableStatus === 'unverified' ? 'Not checked' : verificationResult.executableInstalled ? 'Installed' : 'Missing'}</p>
+          <p>Bounded request: {verificationResult.requestStatus}</p>
+          <p>Login presence: {verificationResult.authenticationStatus}</p>
+          <p>{verificationResult.detail}</p>
+          {verificationResult.executionRefusal && <p>{verificationResult.executionRefusal}</p>}
+        </InlineNotice>
+      </section>}
       {(status?.providerId ?? 'opencode') === 'codex' && <p className="text-sm text-muted-foreground">Disconnect stops the active assistant processor and cancels queued requests. Reconnecting accepts future messages; your earlier transcript stays intact. To sign out of Codex itself, use Sign out of Codex above; the terminal helper (<code>stateport_codex logout</code> after defining it above) remains as a fallback. <code>stateport_codex version</code> checks its installed executable without logging in.</p>}
     </section>
     <ConfirmDialog open={signOutPrompted} onOpenChange={setSignOutPrompted} title="Sign out of Codex?" description="This removes the provider-owned Codex login from this runtime. It is separate from Disconnect StatePort, which stops this app's assistant connection but leaves the Codex login in place." effect="The Codex login is removed from this runtime. New provider work fails authentication until you sign in again. Conversation history and StatePort settings are unaffected." reversibility="Sign in again with Start device sign-in to restore access." confirmLabel="Confirm sign-out" onConfirm={() => { void perform(providerClient.logout).then(() => setLoginFlow(null)) }} />

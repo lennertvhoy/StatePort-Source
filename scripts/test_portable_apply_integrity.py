@@ -197,7 +197,7 @@ def test_apply_requires_the_instance_writer_lease(
     service, app, instance_root, run_id = _approved_proposal(tmp_path, monkeypatch, "lease")
     before = snapshot_files(instance_root)
     with InstanceLease(app.layout.operations_root / "leases", instance_root, owner="competing-writer"):
-        with pytest.raises(PortableExecutionError, match="active writer lease"):
+        with pytest.raises(PortableExecutionError, match="Another change is being applied"):
             service.apply_proposal(run_id)
     assert snapshot_files(instance_root) == before
     assert service.inspect(run_id)["run"]["status"] == "state_change_approved"

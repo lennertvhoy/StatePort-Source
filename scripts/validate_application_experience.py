@@ -1146,35 +1146,103 @@ def _keyword_only(node: ast.FunctionDef) -> list[str]:
 # body from a supplied one when it decides a conditional verb.
 _NULL = "\x01null\x01"
 
+# CALL-SITE SUPPLIEDNESS MARKERS.
+#
+# The defect these exist to fix: `def request(path, *, body=None)` whose sink
+# reads `method="POST" if body is not None else "GET"`. A call site that passes
+# `body={"expectedVersion": 3}` supplied an argument the old binder could not
+# reduce to a string, so it bound NOTHING, so the "unsupplied parameters take
+# their declared default" loop then bound `body` to _NULL, and the conditional
+# decided GET. That is a confident WRONG answer about a request the test makes
+# with a body, and it is worse than an unknown because it manufactures a
+# contradiction a reader may "fix" by editing the manifest.
+#
+# So a SUPPLIED argument now always binds, to one of three facts:
+#   _NOT_NULL   the value is provably not None -> `x is not None` is True
+#   _UNDECIDED  the value was supplied but its None-ness is unprovable -> UNKNOWN
+#   _NULL       the value is the None literal, or the parameter was omitted and
+#               its declared default is None -> `x is not None` is False
+# _UNDECIDED is NOT a third answer to the conditional: `_single` turns it into
+# the unbound sentinel, so the conditional yields no decision and the row lands
+# `unresolved`. It exists to stop _NULL from being reached for a supplied value.
+_NOT_NULL = "\x01notnull\x01"
+_UNDECIDED = "\x01undecided\x01"
+
+# A suppliedness marker is a fact about a value, never a value. It therefore may
+# not be substituted into a composed path, and the refusal is here rather than
+# in `_is_hole` on purpose: `_single` asks `_contains_hole` about the SAME
+# env entries when it decides a conditional, and if these markers counted as
+# holes `_single` would answer _UNBOUND for the not-null case too and the whole
+# suppliedness distinction would collapse back into "unknown". Substituting a
+# marker into a path is worse than useless -- it manufactures a route string
+# like "/v1/instances/x/activity/\x01undecided\x01" that matches nothing and
+# turns an honest unresolved row into a false `unsupported`. That regression was
+# measured before this filter existed: 7 rows left `supported` and 17 entered
+# `unsupported` from marker leakage alone.
+#
+# _NULL belongs in this set for the same reason and was ALWAYS at risk: it means
+# "this parameter was supplied no value", which is not a path either. Before
+# this filter a hole over a _NULL-bound name was filled with "\x01null\x01",
+# producing a route that matches nothing. Keyword-only defaults kept that rare;
+# honouring a POSITIONAL None default made it common, and 30 rows moved on it.
+_VALUE_MARKERS = frozenset({_NULL, _NOT_NULL, _UNDECIDED})
+
+
+def _is_suppliedness_marker(value: str) -> bool:
+    return value in _VALUE_MARKERS
+
 
 def _is_null_literal(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
 
 def _call_arguments(
-    site: ast.Call, function: ast.FunctionDef, literals: dict[str, Any] | None = None
-) -> dict[str, set[str]] | None:
+    site: ast.Call,
+    function: ast.FunctionDef,
+    literals: dict[str, Any] | None = None,
+    assignments: dict[str, ast.AST] | None = None,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]] | None:
     """Bind a function's parameters from one call site's arguments.
 
-    Returns None only when the binding itself is untrustworthy: more arguments
-    than parameters (`*args`), or a `**kwargs` spread whose positions cannot be
-    known. A single NON-LITERAL argument does not abort the binding -- that was
-    a real bug: `request(connection, headers, "credential", body)` passes two
-    non-literals before the literal that carries the path, and rejecting the
-    whole call lost the evidence and reported a correct live test as
-    unsupported. A parameter whose argument is not a literal is simply left
-    unbound, and an unbound name becomes a hole, which the matcher refuses.
+    Returns `(bound, supplied)`, or None only when the binding itself is
+    untrustworthy: more arguments than parameters (`*args`), or a `**kwargs`
+    spread whose positions cannot be known. A single NON-LITERAL argument does
+    not abort the binding -- that was a real bug: `request(connection, headers,
+    "credential", body)` passes two non-literals before the literal that carries
+    the path, and rejecting the whole call lost the evidence and reported a
+    correct live test as unsupported. A parameter whose argument is not a
+    literal is left out of `bound`, and an unbound name becomes a hole, which
+    the matcher refuses.
+
+    `supplied` is a SEPARATE, LOWER-PRIORITY map. It carries the one fact about
+    a supplied argument that no string value can carry -- whether it is None --
+    and it is applied only where `bound` and the file's own assignments have
+    said nothing. That separation is load-bearing rather than tidy: these two
+    maps are merged in that order, so a suppliedness fact written into `bound`
+    would OVERWRITE a perfectly good module-level string binding. Measured: with
+    suppliedness in `bound`, scripts/test_post_mutation_security_matrix.py
+    resolved 10 paths instead of 89 and three `supported` rows became
+    `unsupported`, because `request(ACTION)` lost the value `_resolved_
+    assignments` had already proved for `ACTION`. Suppliedness is the weakest
+    thing this resolver knows about a name, so it goes in last.
 
     An unsupplied parameter takes its declared default, so
     `def request(path, *, body=None)` called without `body` binds body to a
     null marker and a `method="POST" if body is not None else "GET"` sink
     resolves to GET. That default binding is the whole reason
     get-instance-activity resolves at all.
+
+    A SUPPLIED parameter that reduces to no string records its SUPPLIEDNESS in
+    the lower-priority map rather than nothing. Recording nothing let the
+    default loop relabel a call site's real body as an absent one and decide
+    GET for a request that carries a body; see the CALL-SITE SUPPLIEDNESS
+    MARKERS block.
     """
     parameters = _parameters(function)
     if len(site.args) > len(parameters):
         return None
     bound: dict[str, set[str]] = {}
+    supplied: dict[str, set[str]] = {}
     for index, argument in enumerate(site.args):
         values = _string_values(argument)
         if values is not None:
@@ -1189,6 +1257,10 @@ def _call_arguments(
             proven = _subscript_string(argument, literals) if literals else None
             if proven is not None:
                 bound[parameters[index]] = {proven}
+            else:
+                supplied[parameters[index]] = _suppliedness(
+                    argument, assignments or {}, frozenset()
+                )
     for keyword in site.keywords:
         if keyword.arg is None:
             return None
@@ -1201,18 +1273,97 @@ def _call_arguments(
             proven = _subscript_string(keyword.value, literals) if literals else None
             if proven is not None:
                 bound[keyword.arg] = {proven}
-    for parameter in _keyword_only(function):
-        if parameter in bound:
+            else:
+                supplied[keyword.arg] = _suppliedness(
+                    keyword.value, assignments or {}, frozenset()
+                )
+    for parameter in _all_parameters(function):
+        if parameter in bound or parameter in supplied:
             continue
         default = _default_of(function, parameter)
         if default is None:
             continue
         values = _string_values(default)
         if values is not None:
+            # A string default is only honoured for a keyword-only parameter.
+            # Binding `method="GET"` from a POSITIONAL default would credit a
+            # verb the call site may never issue, which is the same fabrication
+            # as reading a verb off a method name, so it is not done. A None
+            # default is a different fact: it is the absence of a body, and
+            # that is what the conditional actually tests.
+            if parameter not in _keyword_only(function):
+                continue
             bound[parameter] = values
         elif _is_null_literal(default):
             bound[parameter] = {_NULL}
-    return bound
+    return bound, supplied
+
+
+def _all_parameters(node: ast.FunctionDef) -> list[str]:
+    """Every parameter name, positional then keyword-only, in one list.
+
+    The omitted-argument default binding needs both, because a helper may
+    declare `def request(path, body=None)` positionally and
+    `def request(path, *, body=None)` as keyword-only, and a call site that
+    omits `body` in either shape has supplied no body.
+    """
+    return _parameters(node) + _keyword_only(node)
+
+
+def _suppliedness(
+    node: ast.AST, assignments: dict[str, ast.AST] | None, seen: frozenset[str]
+) -> set[str]:
+    """The single fact a SUPPLIED argument carries about being None.
+
+    Returns {_NOT_NULL} when the expression cannot be None, and {_UNDECIDED}
+    otherwise. There is deliberately no third "assume not None" branch: an
+    argument whose type this resolver cannot see stays unknown, because a
+    confident verb here is exactly the defect class this function exists to
+    remove.
+    """
+    if _provably_not_none(node, assignments or {}, seen):
+        return {_NOT_NULL}
+    return {_UNDECIDED}
+
+
+def _provably_not_none(
+    node: ast.AST, assignments: dict[str, ast.AST], seen: frozenset[str]
+) -> bool:
+    """Whether an expression provably evaluates to something that is not None.
+
+    This is a TYPE question, answered only from syntax this resolver can read:
+
+      * a non-None constant is not None; the None constant is;
+      * a dict, list, set or tuple literal is a container and never None, even
+        when empty -- `body={}` really does select the POST branch at a call site
+        that passes `body={}`;
+      * a joined string (f-string) is a str and never None;
+      * a name is resolved through its last local assignment and the question
+        is asked of that value, with `seen` breaking a self-referential chain.
+
+    Everything else -- a call, a subscript of a live response, an attribute, a
+    binary op -- is NOT provably not-None and must not be. A call in particular
+    can return None (`dict.get`, `next`), so treating every call as a body would
+    manufacture POST verdicts. A subscript is refused for the same reason
+    defect class two refused it as a VALUE: `prepared["body"]` may be None.
+
+    Note this never looks at a name's spelling, a path segment, a comment or a
+    method name. `body` is not evidence of a body, and neither is `get_thing`.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value is not None
+    if isinstance(node, (ast.Dict, ast.List, ast.Set, ast.Tuple)):
+        return True
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.Name):
+        if node.id in seen:
+            return False
+        bound = assignments.get(node.id)
+        if bound is None:
+            return False
+        return _provably_not_none(bound, assignments, seen | {node.id})
+    return False
 
 
 def _default_of(function: ast.FunctionDef, parameter: str) -> ast.AST | None:
@@ -1229,10 +1380,541 @@ def _default_of(function: ast.FunctionDef, parameter: str) -> ast.AST | None:
     return None
 
 
+# ── REACHABILITY: A SINK IS PROVEN BY A TERMINAL OPERATION, NOT BY ITS NAME ──
+#
+# The defect this block exists to close. `_is_request_sink` decided that a call
+# was a transport because its CALLEE NAME was in `_TRANSPORT_NAMES`. That is a
+# naming convention, not a property of the code, so a test that issues a genuine
+# request through a differently-named transport was invisible, and its row was
+# reported `unsupported` -- a confident false accusation against a correct test.
+#
+# The rule implemented here is REACHABILITY: a call is a transport if the thing
+# it calls actually performs I/O. A `_Terminal` is the name of the exact
+# terminal operation that makes it one, and only these count:
+#
+#   * `urlopen` / `urlretrieve`            -- a network primitive from urllib
+#   * `socket.create_connection`           -- a TCP connect
+#   * `socket.socket`                      -- a socket object, then `.connect`
+#   * `<obj>.connect` / `.sendall` / `.send`-- a connected-socket write
+#   * the service's own route dispatch     -- a `{"/route": handler}` table that
+#                                             is looked up by the request path
+#                                             and the looked-up value CALLED,
+#                                             which is what `do_POST` and
+#                                             `GovernedAPI.dispatch` both are
+#
+# A resolvable sink may NEVER fabricate a path: path and verb still come from
+# `_paths_at`/`_sink_verb` unchanged, so a hole stays a hole and an undecidable
+# verb stays undecidable. This block only decides WHETHER a call is a transport.
+#
+# THE WIDENING IS THE RISK, and this resolver has already shipped three
+# fabrication classes (filling anonymous holes from an unrelated module table;
+# treating an unprovable subscript as a value; deciding a conditional verb). So:
+#   * "looks like a request" is never a reason. Only a proven terminal is.
+#   * a terminal must be REACHED through the call graph, not merely present in
+#     the same file, or in the same class, or under any name.
+#   * if no terminal operation can be named, the call is not a sink.
+_CLASS_INDEX: dict[str, list[tuple[Path, ast.ClassDef]]] | None = None
+
+# Call identity -> proven route dispatch. Populated per file by
+# _record_dispatch_calls, read by _is_dispatch_call. See that function for why
+# the proof is recorded once instead of re-derived where it cannot be seen.
+_DISPATCH_CALLS: dict[int, bool] = {}
+
+# Call identity -> the class method proven to open a socket. The definition is
+# carried with the call because that is where the handshake's request line -- and
+# therefore its verb -- is written. See _record_dispatch_calls.
+_HANDSHAKE_CALLS: dict[int, ast.AST] = {}
+
+
+def _class_index() -> dict[str, list[tuple[Path, ast.ClassDef]]]:
+    """Every class in the workspace, by name, with the file it came from.
+
+    Cross-module reachability needs this: a cited test calls
+    `api.dispatch(...)`, but `dispatch` is defined in
+    packages/governed-api/src/governed_api/application.py, not in the test. The
+    index is built once and cached; it is only consulted for an attribute call
+    whose receiver cannot be resolved inside the cited file.
+    """
+    global _CLASS_INDEX
+    if _CLASS_INDEX is None:
+        index: dict[str, list[tuple[Path, ast.ClassDef]]] = {}
+        roots = [ROOT / "packages", ROOT / "apps", ROOT / "scripts"]
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*.py")):
+                try:
+                    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
+                    continue
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        index.setdefault(node.name, []).append((path, node))
+        _CLASS_INDEX = index
+    return _CLASS_INDEX
+
+
+def _method_of(class_node: ast.ClassDef, name: str) -> ast.FunctionDef | None:
+    """A method defined directly on this class, including decorated ones."""
+    for item in class_node.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name:
+            return item
+    return None
+
+
+def _transport_bindings(tree: ast.Module) -> dict[str, ast.Call]:
+    """Module- and class-level `name = <call>` bindings in one file.
+
+    Needed because some transports are bound OUTSIDE any function:
+    scripts/test_preview_gateway.py:180 has a module-level
+    `_NO_REDIRECT_OPENER = build_opener(_NoRedirect)`, and the `.open(...)` that
+    is the actual transport lives inside a function. A walk of function bodies
+    alone cannot see the binding that makes that `.open` a network call.
+
+    Cached per file: this is consulted for every sink in the file, and the walk
+    it replaces was the second-largest cost in the measurement.
+    """
+    cached = _TRANSPORT_BINDINGS.get(id(tree))
+    if cached is not None:
+        return cached
+    bindings: dict[str, ast.Call] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bindings.setdefault(target.id, node.value)
+    _TRANSPORT_BINDINGS[id(tree)] = bindings
+    return bindings
+
+
+def _is_dispatch_call(call: ast.Call) -> bool:
+    """Whether this call is a service route dispatch, by REACHABILITY.
+
+    The predicate is the terminal operation itself, not the spelling
+    `dispatch`: it is exactly what `_reaches_transport` returns for a route
+    dispatch. So a method merely NAMED `dispatch` -- or `request`, or anything
+    else -- is not a dispatch unless the body it reaches actually builds a
+    path-keyed route table and calls the looked-up handler.
+
+    This is what makes the path and verb offsets safe to apply: they are
+    justified by the same proof that made the call a sink, so a resolvable sink
+    still cannot fabricate a path. A dispatch call whose path is computed keeps
+    its hole, and one whose verb is not a literal HTTP verb stays undecided.
+    """
+    return _DISPATCH_CALLS.get(id(call), False)
+
+
+def _terminal_in(body: ast.AST, functions: dict[str, list[ast.FunctionDef]],
+                 bindings: dict[str, ast.Call] | None = None,
+                 seen: frozenset[str] = frozenset()) -> str | None:
+    """The terminal operation this function body reaches, or None.
+
+    Walks the body for a network primitive, a socket operation, or a service
+    route dispatch, and recurses through calls to functions defined in the same
+    file. `seen` bounds the walk, for the same reason `_is_request_sink` has one.
+    """
+    for node in ast.walk(body):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _callee_name(node)
+        if isinstance(node.func, ast.Name) and name in {"urlopen", "urlretrieve"}:
+            return f"{name}()"
+        if isinstance(node.func, ast.Attribute):
+            if name == "create_connection" and _is_socket_receiver(node.func.value):
+                return "socket.create_connection(...)"
+            if name == "socket" and _is_socket_receiver(node.func.value):
+                return "socket.socket(...)"
+            if name in {"connect", "sendall", "send"}:
+                return f".{name}(...) on a socket"
+    dispatch = _route_dispatch_in(body)
+    if dispatch is not None:
+        return dispatch
+    for node in ast.walk(body):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _callee_name(node)
+        # An `Opener.open(request, timeout=...)` is urllib's transport. It is
+        # reached by a chain: `build_opener(...)` at module level in
+        # scripts/test_preview_gateway.py:180, then `.open(...)` at :189.
+        if isinstance(node.func, ast.Attribute) and name == "open":
+            found = _opener_chain(node, bindings)
+            if found is not None:
+                return found
+        if isinstance(node.func, ast.Attribute) and name == "request":
+            found = _connection_request(node, body, bindings)
+            if found is not None:
+                return found
+        if isinstance(node.func, ast.Name) and name in functions and name not in seen:
+            nested = seen | {name}
+            for definition in functions[name]:
+                found = _terminal_in(definition, functions, bindings, nested)
+                if found is not None:
+                    return found
+    return None
+
+
+def _connection_request(call: ast.Call, body: ast.AST,
+                        bindings: dict[str, ast.Call] | None) -> str | None:
+    """`connection.request(...)` where the connection is an HTTPConnection.
+
+    `X.request(...)` is refused on its name alone -- `registry.request` and a
+    hundred other things have that method. It counts only when X is bound to an
+    `HTTPConnection`/`HTTPSConnection` constructor, which is the object whose
+    `.request` writes a request line onto the socket. In
+    scripts/test_provider_setup.py:177-179 that is the entire transport.
+    """
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    if not isinstance(receiver, ast.Name):
+        return None
+    candidates: list[ast.Call] = []
+    for node in ast.walk(body):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == receiver.id:
+                    candidates.append(node.value)
+    if bindings is not None and receiver.id in bindings:
+        candidates.append(bindings[receiver.id])
+    for candidate in candidates:
+        if _callee_name(candidate) in {"HTTPConnection", "HTTPSConnection"}:
+            return "http.client HTTPConnection.request(method, path, ...) onto a connection"
+    return None
+
+
+def _opener_chain(call: ast.Call, bindings: dict[str, ast.Call] | None) -> str | None:
+    """`<opener>.open(request, ...)` where the opener came from `build_opener`.
+
+    `X.open(...)` alone is refused. It is only a transport when X is bound, in
+    this file, to a `build_opener(...)` result -- an `OpenerDirector`, whose
+    `open` performs the HTTP transaction. Requiring the constructor is what keeps
+    this from crediting any object with an `open` method, which `open(path)` on
+    a file object trivially has.
+    """
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    if not isinstance(receiver, ast.Name) or not bindings:
+        return None
+    bound = bindings.get(receiver.id)
+    if bound is not None and _callee_name(bound) == "build_opener":
+        return "urllib OpenerDirector.open(request) after build_opener(...)"
+    return None
+
+
+def _is_socket_receiver(node: ast.AST) -> bool:
+    """Whether this expression is the `socket` module itself."""
+    return isinstance(node, ast.Name) and node.id == "socket"
+
+
+def _route_dispatch_in(body: ast.AST) -> str | None:
+    """The service route dispatch this body performs, or None.
+
+    The shape is the one `GovernedAPI.dispatch` and `do_POST` share, and it has
+    THREE parts, all required:
+
+      1. a `{"/literal/route": handler}` table bound to a local name;
+      2. `chosen = table.get(<expr>)` -- the lookup is BY THE REQUEST PATH, so
+         the argument is a parameter or derived value, never a route literal;
+      3. `chosen(...)` -- the looked-up value is CALLED with a payload.
+
+    Part 3 is what makes this a dispatch rather than a lookup. Part 2's argument
+    being a non-literal is what makes it path-keyed rather than a constant
+    table. A function that merely takes a `path` argument and returns a dict
+    satisfies none of the three, and no spelling can fake them: they are
+    statements, not names.
+    """
+    tables: set[str] = set()
+    chosen: set[str] = set()
+    for node in ast.walk(body):
+        if isinstance(node, ast.Assign):
+            # (1) the route table
+            if isinstance(node.value, ast.Dict) and node.value.keys and all(
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and key.value.startswith("/")
+                for key in node.value.keys
+            ):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        tables.add(target.id)
+            # (2) the path-keyed lookup
+            if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute):
+                call = node.value
+                if (
+                    call.func.attr == "get"
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id in tables
+                    and call.args
+                    and not isinstance(call.args[0], ast.Constant)
+                ):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            chosen.add(target.id)
+    if not chosen:
+        return None
+    # (3) the looked-up handler is CALLED
+    for node in ast.walk(body):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in chosen:
+                return "service route dispatch: routes.get(path) then handler(payload)"
+    return None
+
+
+def _reaches_transport(call: ast.Call, tree: ast.Module,
+                       functions: dict[str, list[ast.FunctionDef]],
+                       bindings: dict[str, ast.Call] | None = None) -> str | None:
+    """The terminal operation this call reaches, or None if it reaches none.
+
+    This is the reachability rule. It replaces the callee-name test for
+    attribute calls, and it is deliberately UNSATISFIABLE by a suggestive name:
+    a call qualifies only when a terminal operation -- named here as a string --
+    is provably reached from its body.
+    """
+    name = _callee_name(call)
+    if isinstance(call.func, ast.Attribute):
+        return _attribute_terminal(call, name, tree, functions, bindings)
+    if name in functions:
+        for definition in functions[name]:
+            found = _terminal_in(definition, functions, bindings)
+            if found is not None:
+                return found
+        return None
+    if isinstance(call.func, ast.Name) and name in {"urlopen", "urlretrieve"}:
+        return f"{name}()"
+    return None
+
+
+def _attribute_terminal(call: ast.Call, name: str, tree: ast.Module,
+                        functions: dict[str, list[ast.FunctionDef]],
+                        bindings: dict[str, ast.Call] | None = None) -> str | None:
+    """Reachability for `receiver.name(...)`, including cross-module methods.
+
+    Two proven cases, in order:
+      1. the receiver is bound in THIS file to a construction of a class whose
+         `name` method is defined in this file -- `RawWebSocket.open(service)`;
+      2. the method is defined on a class in the workspace index and reaches a
+         terminal -- `api.dispatch(...)` -> `GovernedAPI.dispatch`.
+
+    A receiver that is neither is NOT a sink, whatever the method is called.
+    """
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    if receiver is None:
+        return None
+
+    # (0) The receiver is bound to a TRANSPORT CONSTRUCTOR anywhere in this file:
+    # `connection = http.client.HTTPConnection(...)` followed by
+    # `connection.request(...)` in a NESTED helper. In
+    # scripts/test_provider_setup.py:177-179 the binding and the call are in
+    # different function bodies (the binding in the test, the call inside
+    # `def request(...)`), so a body-local walk cannot pair them. Requiring the
+    # constructor is what keeps this from crediting any `X.request(...)`.
+    for candidate in _receiver_constructions(tree, receiver):
+        if _callee_name(candidate) in {"HTTPConnection", "HTTPSConnection"}:
+            return "http.client HTTPConnection.request(...) onto a bound connection"
+        if _callee_name(candidate) == "create_connection":
+            return "socket.create_connection(...) bound receiver"
+        if _callee_name(candidate) == "build_opener":
+            return f"urllib OpenerDirector.{name}(request) after build_opener(...)"
+
+    # (1) A class defined in this same file, constructed in this same file.
+    local_classes = _local_class_index(tree)
+    if isinstance(receiver, ast.Name) and receiver.id in local_classes:
+        method = _method_of(local_classes[receiver.id], name)
+        if method is not None:
+            return _terminal_in(method, functions, bindings)
+        return None
+
+    # (2) The receiver is a name CONSTRUCTED from an imported class, or TYPED as
+    # one. Both are computed ONCE per cited file, not once per call: doing either
+    # walk inline cost 385 of the 492 seconds this measurement took, because
+    # every attribute call in every cited test repeated two full AST walks.
+    candidates = _receiver_classes(tree, receiver)
+    for class_name in sorted(candidates):
+        key = (class_name, name)
+        if key in _METHOD_TERMINALS:
+            cached = _METHOD_TERMINALS[key]
+            if cached is not None:
+                return cached
+            continue
+        for path, class_node in _class_index().get(class_name, []):
+            method = _method_of(class_node, name)
+            if method is None:
+                continue
+            try:
+                source = _parsed_module(path)
+            except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
+                continue
+            found = _terminal_in(method, _functions(source), _transport_bindings(source))
+            if found is not None:
+                # A (class, method) pair has ONE terminal operation, so the first
+                # proof of it is the whole answer. Caching matters: a class index
+                # holds every definition of a class, and the same method is
+                # otherwise re-proved for every attribute call in every cited test.
+                _METHOD_TERMINALS[key] = found
+                return found
+        _METHOD_TERMINALS[key] = None
+    return None
+
+
+_MODULE_TREES: dict[Path, ast.Module] = {}
+
+# (class name, method name) -> the terminal operation that method reaches, or
+# None when it reaches none. Both outcomes are cached, because "reaches none" is
+# the expensive case: it is the one that has to be re-proved to be believed.
+_METHOD_TERMINALS: dict[tuple[str, str], str | None] = {}
+
+# Per-cited-file maps, keyed by the tree's identity. Both were previously
+# recomputed for every attribute call, which cost 385 of the 492 seconds the
+# measurement took; hoisting them is what makes reachability affordable.
+_LOCAL_CLASSES: dict[int, dict[str, ast.ClassDef]] = {}
+_RECEIVER_CLASSES: dict[int, tuple[ast.Module, tuple[dict[str, set[str]], dict[str, set[str]]]]] = {}
+_RECEIVER_CONSTRUCTIONS: dict[int, dict[str, list[ast.Call]]] = {}
+_TRANSPORT_BINDINGS: dict[int, dict[str, ast.Call]] = {}
+
+
+def _parsed_module(path: Path) -> ast.Module:
+    """A parsed module, cached by path.
+
+    The reachability walk re-enters this for the same handful of files on every
+    attribute call in every cited test, and re-parsing them dominated the
+    measurement's runtime. Caching is safe because the validator only reads.
+    """
+    tree = _MODULE_TREES.get(path)
+    if tree is None:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        _MODULE_TREES[path] = tree
+    return tree
+
+
+def _receiver_constructions(tree: ast.Module, receiver: ast.AST) -> list[ast.Call]:
+    """Every constructor call in this file bound to the receiver's NAME.
+
+    Deliberately name-keyed and file-local: it returns the calls assigned to
+    `connection` or `work_store` anywhere in the file, and the caller then asks
+    whether any of them is a TRANSPORT constructor. A name shared with an
+    unrelated object elsewhere in the file is a known over-approximation of the
+    same kind `_functions` already documents, and it is safe in the direction
+    that matters -- it can only ADD a sink, and the added sink still has to
+    carry a real path and verb to move a row at all.
+    """
+    if not isinstance(receiver, ast.Name):
+        return []
+    cached = _RECEIVER_CONSTRUCTIONS.get(id(tree))
+    if cached is None:
+        cached = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        cached.setdefault(target.id, []).append(node.value)
+        _RECEIVER_CONSTRUCTIONS[id(tree)] = cached
+    return cached.get(receiver.id, [])
+
+
+def _local_class_index(tree: ast.Module) -> dict[str, ast.ClassDef]:
+    """Classes defined in this file, by name. Cached per file."""
+    cached = _LOCAL_CLASSES.get(id(tree))
+    if cached is None:
+        cached = {
+            node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+        }
+        _LOCAL_CLASSES[id(tree)] = cached
+    return cached
+
+
+def _receiver_classes(tree: ast.Module, receiver: ast.AST) -> set[str]:
+    """Class names the receiver could be: constructed from one, or typed as one.
+
+    Both maps are computed once per file and cached, because this is consulted for
+    every attribute call and an inline walk dominated the measurement's runtime.
+    """
+    if not isinstance(receiver, ast.Name):
+        return set()
+    built, typed = _receiver_class_map(tree)
+    return built.get(receiver.id, set()) | typed.get(receiver.id, set())
+
+
+def _receiver_class_map(tree: ast.Module) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """(constructed, typed) receiver-name -> class names, computed once per file."""
+    key = id(tree)
+    entry = _RECEIVER_CLASSES.get(key)
+    # The entry keeps a strong reference to its tree. Keying on id() alone let a
+    # garbage-collected tree's id be reused by a later tree, which then read the
+    # earlier tree's class map (a flaky fabricated receiver class).
+    cached = entry[1] if entry is not None and entry[0] is tree else None
+    if cached is None:
+        built: dict[str, set[str]] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+                continue
+            callee = node.value.func
+            if not isinstance(callee, ast.Name) or not callee.id[:1].isupper():
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    built.setdefault(target.id, set()).add(callee.id)
+        typed: dict[str, set[str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.arg) and node.annotation is not None:
+                name = _single_class_name(node.annotation)
+                if name is not None:
+                    typed.setdefault(node.arg, set()).add(name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
+                name = _single_class_name(node.returns)
+                if name is not None:
+                    typed.setdefault(node.name, set()).add(name)
+        cached = (built, typed)
+        _RECEIVER_CLASSES[key] = (tree, cached)
+    return cached
+
+
+def _annotated_class_names(tree: ast.Module, receiver: ast.AST) -> set[str]:
+    """Class names a receiver is TYPED as, by parameter or return annotation.
+
+    A test helper receives its transport rather than building it:
+    `def _register(harness: WebHarness, port: int, ...)` at
+    scripts/test_preview_gateway.py:85 then calls `harness.post(...)`, and
+    `WebHarness.post` is the real urllib transport in
+    scripts/test_platform_services_api.py:157. Construction cannot see that; the
+    annotation can, and an annotation is a statement about the object rather
+    than a guess at its name.
+
+    Only a BARE, resolvable class name is accepted. `Optional[WebHarness]`,
+    `Union[...]`, a subscript it cannot read, and a string annotation are all
+    refused rather than guessed, so this cannot fabricate a class the code does
+    not name.
+    """
+    if not isinstance(receiver, ast.Name):
+        return set()
+    # Delegates to the same cached map _attribute_terminal reads, so this is the
+    # production predicate and not a parallel copy of it.
+    _built, typed = _receiver_class_map(tree)
+    return typed.get(receiver.id, set())
+
+
+def _single_class_name(annotation: ast.AST) -> str | None:
+    """The class name of a BARE annotation, or None if it is anything else.
+
+    `WebHarness` -> "WebHarness". `list[WebHarness]`, `WebHarness | None`,
+    `"WebHarness"` and `Any` all return None, because choosing a name out of a
+    compound annotation would be exactly the fabrication this resolver has
+    already shipped once.
+    """
+    if isinstance(annotation, ast.Name):
+        # `Any` is Capitalised and is not a class, so capitalisation alone is not
+        # enough: a `typing` pseudo-type must not be resolved as a receiver
+        # class, or a `harness: Any` parameter would resolve to a `class Any`
+        # that does not exist.
+        if annotation.id in {"Any", "Union", "Optional", "Callable", "Iterable", "Mapping"}:
+            return None
+        return annotation.id if annotation.id[:1].isupper() else None
+    if isinstance(annotation, ast.Attribute):
+        return None
+    return None
+
+
 def _is_request_sink(
     call: ast.Call,
     functions: dict[str, list[ast.FunctionDef]],
     seen: frozenset[str] = frozenset(),
+    tree: ast.Module | None = None,
 ) -> bool:
     """Whether a call reaches the network.
 
@@ -1247,16 +1929,18 @@ def _is_request_sink(
     caller's broad `except` then converted into "unanalysable", silently
     emptying the measurement for that file. A bounded walk that cannot
     loop is required, not defensive.
+
+    THE ATTRIBUTE BRANCH IS NOW REACHABILITY, not spelling. It used to answer
+    `name in _TRANSPORT_NAMES`, which credited `registry.get()` -- a dict
+    lookup -- and missed `api.dispatch(...)`, which performs the service's own
+    request dispatch. When a `tree` is supplied the callee must REACH a terminal
+    operation; when it is not (the older call sites) the historical name test is
+    kept, so no existing caller changes behaviour.
     """
     name = _callee_name(call)
-    # An ATTRIBUTE call named `request`/`get`/`post` is the http.client or
-    # requests style, not a call of a local helper that happens to share the
-    # name. Treating it as a local function was a real bug: in
-    # scripts/test_provider_setup.py the helper is `def request(...)` and the
-    # transport is `connection.request(...)`, so the sink was matched against
-    # the helper's own definition, found no transport inside it, and the row was
-    # then reported unsupported -- a false accusation against a correct test.
     if isinstance(call.func, ast.Attribute):
+        if tree is not None:
+            return _reaches_transport(call, tree, functions, _transport_bindings(tree)) is not None
         return name in _TRANSPORT_NAMES
     if name in _TRANSPORT_NAMES and name not in functions:
         return True
@@ -1289,6 +1973,32 @@ def _sink_verb(call: ast.Call, env: dict[str, set[str]], assignments: dict[str, 
         if keyword.arg == "method":
             return _verb_of(keyword.value, env, assignments)
     name = _callee_name(call)
+    if _HANDSHAKE_CALLS.get(id(call)):
+        # A raw handshake writes the verb into its own request line:
+        # `f"GET {path} HTTP/1.1"` at scripts/test_terminal_service.py:387. The
+        # verb is read from that literal inside the body that was PROVEN to open
+        # a socket, so it is an observed fact about the bytes sent and not an
+        # assumption that a handshake means GET.
+        # The request line is an f-string, so the verb is its FIRST literal
+        # piece -- `f"GET {path} HTTP/1.1"` is a JoinedStr whose leading value is
+        # Constant("GET "). Reading only whole-string constants would miss every
+        # real handshake, because a path-bearing request line is never a plain
+        # literal.
+        for inner in ast.walk(_HANDSHAKE_CALLS[id(call)]):
+            if not isinstance(inner, ast.JoinedStr) or not inner.values:
+                continue
+            head = inner.values[0]
+            if not isinstance(head, ast.Constant) or not isinstance(head.value, str):
+                continue
+            token = head.value.split(" ", 1)[0]
+            if token in _HTTP_VERBS and head.value.endswith(" "):
+                return {token}
+    if _is_dispatch_call(call) and call.args:
+        # `dispatch("POST", "/v1/mutations/request", {...})`: the verb is the
+        # first positional argument. It is read from the CALL SITE and only when
+        # it is a literal HTTP verb, so a conditional or computed verb leaves the
+        # row `unresolved` rather than guessing it.
+        return _verb_of(call.args[0], env, assignments)
     if name == "request" and call.args:
         return _verb_of(call.args[0], env, assignments)
     if name in {"get", "head", "delete", "options"}:
@@ -1396,7 +2106,18 @@ def _single(node: ast.AST, env: dict[str, set[str]]) -> object:
     """One known value for a node, or _UNBOUND.
 
     The null marker becomes Python's None here so that `body is not None`
-    evaluates the way it reads. Every other bound value is a string.
+    evaluates the way it reads. Every other bound value is a string, except the
+    not-null marker -- which is a non-None value by construction, so
+    `body is not None` is True for it and the conditional takes the POST branch,
+    which is the decision the call site earned by supplying a body.
+
+    The undecided marker returns _UNBOUND, not a value. That is the whole
+    safety property of the suppliedness rule: a call site supplied an argument
+    whose None-ness could not be proven, so `x is not None` is undecidable, so
+    the verb is undecidable, so the row is `unresolved`. If _UNDECIDED were
+    allowed through as an ordinary string the comparison would be False and the
+    resolver would answer GET -- the very wrong confident answer this change
+    exists to remove, reached from the opposite direction.
     """
     if isinstance(node, ast.Constant):
         return node.value
@@ -1404,6 +2125,8 @@ def _single(node: ast.AST, env: dict[str, set[str]]) -> object:
         values = env.get(node.id)
         if values and len(values) == 1:
             only = next(iter(values))
+            if only == _UNDECIDED:
+                return _UNBOUND
             if not _contains_hole(only):
                 return None if only == _NULL else only
     return _UNBOUND
@@ -1439,6 +2162,7 @@ def _resolve_test_citations(path: Path) -> tuple[set[tuple[str, frozenset[str]]]
     # Every call in the file, with the environment its enclosing function
     # supplies. A helper's parameters are bound from ITS call sites, which is
     # the step that makes `post_lifecycle(..., "export", ...)` resolve.
+    _record_dispatch_calls(tree, functions)
     for enclosing, node in _sinks_in(tree, functions):
         name = _callee_name(node)
         for env in _environments_for(
@@ -1465,9 +2189,53 @@ def _sinks_in(
     """
     found: list[tuple[ast.FunctionDef | None, ast.Call]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _is_request_sink(node, functions):
+        if isinstance(node, ast.Call) and _is_request_sink(node, functions, tree=tree):
             found.append((_enclosing_function(tree, node), node))
     return found
+
+
+def _record_dispatch_calls(tree: ast.Module,
+                           functions: dict[str, list[ast.FunctionDef]]) -> None:
+    """Record, by call identity, which sinks are proven route dispatches.
+
+    `_paths_at` and `_sink_verb` need to know the `(method, path, body)` shape
+    of a dispatch, and they only receive the call. The proof is computed once
+    here, where the tree and the reachability rule are both in hand, and recorded
+    so the path/verb readers can ask a question they can answer from a fact
+    rather than re-deriving one they cannot see.
+
+    Identity-keyed, not name-keyed: `id(call)` is stable for the lifetime of the
+    tree, and it means the two readers can only ever agree with the reachability
+    rule, because they are reading its own result.
+    """
+    _DISPATCH_CALLS.clear()
+    _HANDSHAKE_CALLS.clear()
+    _METHOD_TERMINALS.clear()
+    _LOCAL_CLASSES.clear()
+    _RECEIVER_CLASSES.clear()
+    _RECEIVER_CONSTRUCTIONS.clear()
+    _TRANSPORT_BINDINGS.clear()
+    bindings = _transport_bindings(tree)
+    local_classes = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        terminal = _reaches_transport(node, tree, functions, bindings)
+        if terminal is None:
+            continue
+        if terminal.startswith("service route dispatch"):
+            _DISPATCH_CALLS[id(node)] = True
+        elif terminal.startswith("socket."):
+            # The verb is read from the handshake's own request line, so the
+            # DEFINITION that was proven to open the socket is recorded with the
+            # call: the reader of the verb cannot re-derive it from the call.
+            receiver = node.func.value
+            if isinstance(receiver, ast.Name) and receiver.id in local_classes:
+                method = _method_of(local_classes[receiver.id], node.func.attr)
+                if method is not None:
+                    _HANDSHAKE_CALLS[id(node)] = method
 
 
 def _binding_scopes(
@@ -1570,12 +2338,19 @@ def _environments_for(
             for site in _call_sites(scope, enclosing.name, enclosing):
                 if id(site) in inside or id(site) not in scope_ids:
                     continue
-                bound = _call_arguments(site, enclosing, literals)
-                if bound is None:
+                call_binding = _call_arguments(site, enclosing, literals, assignments)
+                if call_binding is None:
                     continue
+                bound, supplied = call_binding
                 merged = dict(module_env)
                 merged.update(_resolved_assignments(assignments, module_env, literals))
                 merged.update(bound)
+                # Suppliedness last: it is the weakest fact about a name, and a
+                # name the file already proved must keep that proof. See the
+                # `(bound, supplied)` docstring for the measurement that forced
+                # this ordering.
+                for parameter, fact in supplied.items():
+                    merged.setdefault(parameter, fact)
                 environments.append(merged)
     if not environments:
         merged = dict(module_env)
@@ -1692,7 +2467,34 @@ def _paths_at(
     """
     name = _callee_name(call)
     candidates: list[ast.AST] = []
-    if name == "request" and len(call.args) >= 2:
+    if _HANDSHAKE_CALLS.get(id(call)):
+        # A raw WebSocket handshake: the route is the `path=` KEYWORD, not the
+        # first positional argument. In scripts/test_terminal_service.py:362
+        # `RawWebSocket.open(service, path=f"{SOCKET_PATH}?token={secret}")` the
+        # first positional argument is the service DICT, so reading args[0] as
+        # the path resolved the route to a hole and reported terminal-socket
+        # unsupported while a real handshake stood right there.
+        supplied = False
+        for keyword in call.keywords:
+            if keyword.arg == "path":
+                candidates.append(keyword.value)
+                supplied = True
+        if not supplied:
+            # No `path=` at the call site, so the route is the callee's own
+            # declared default -- `path: str = SOCKET_PATH` at :365. The
+            # signature is the definition that was proven to open the socket, so
+            # this reads a default rather than inventing a route.
+            default = _default_of(_HANDSHAKE_CALLS[id(call)], "path")
+            if default is not None:
+                candidates.append(default)
+    if not candidates and _is_dispatch_call(call) and len(call.args) >= 2:
+        # A service dispatch is `dispatch(method, path, body)`: the VERB is the
+        # first argument and the PATH the second. Reading args[0] as the path
+        # would resolve the route to the literal "POST", which matches nothing --
+        # and that is how three correct rows stayed unsupported while the call
+        # beside them was a real request the whole time.
+        candidates.append(call.args[1])
+    elif name == "request" and len(call.args) >= 2:
         candidates.append(call.args[1])
     elif name == "Request" and call.args:
         candidates.append(call.args[0])
@@ -1740,7 +2542,11 @@ def _expand(composed: str, env: dict[str, set[str]]) -> set[str]:
     if end == -1:
         return {composed.replace(_HOLE_CHAR, _HOLE_KEEP)}
     name = composed[start + 1 : end]
-    usable = {value for value in env.get(name, set()) if value and not _is_hole(value)}
+    usable = {
+        value
+        for value in env.get(name, set())
+        if value and not _is_hole(value) and not _is_suppliedness_marker(value)
+    }
     if not usable:
         # Leave this piece unresolved but keep the surrounding text intact, so
         # the OTHER holes in the same path can still be filled. Replacing the

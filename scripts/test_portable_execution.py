@@ -66,6 +66,29 @@ def test_typed_action_is_engine_bound_and_transactionally_applied(tmp_path: Path
     assert (app.layout.instances_root / "moved-study" / "instance.yaml").is_file()
 
 
+def test_repeat_portable_export_gets_a_new_archive_and_never_overwrites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "repeat-export")
+    first = execution.export_instance("repeat-export")
+    first_bytes = Path(first["archive"]).read_bytes()
+    second = execution.export_instance("repeat-export")
+    third = execution.export_instance("repeat-export")
+    names = [Path(item["archive"]).name for item in (first, second, third)]
+    assert names == ["repeat-export.zip", "repeat-export~2.zip", "repeat-export~3.zip"]
+    assert Path(first["archive"]).read_bytes() == first_bytes
+    imported = execution.import_instance_archive(
+        second["archive"], app.layout.instances_root / "from-second", new_instance_id="from-second"
+    )
+    assert imported["instanceId"] == "from-second"
+
+
 def test_development_candidate_receipt_is_rechecked_before_execute_and_apply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -569,3 +592,48 @@ def test_codex_worker_termination_diagnostics_are_safe_and_distinguishable(
         path.read_text(encoding="utf-8")
         for path in Path(completed["runBundle"]["path"]).rglob("*") if path.is_file()
     )
+
+
+def test_repeat_export_name_can_never_collide_with_another_instance_named_like_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L4: an instance literally called `<id>-2` must not fight `<id>`'s second export for one file."""
+    import re
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "twin")
+    execution.install_fixture_instance("studystate.sample", "twin-2")
+    first_twin = execution.export_instance("twin")
+    other = execution.export_instance("twin-2")  # takes the plain `twin-2.zip`
+    again = execution.export_instance("twin")  # the repeat export of `twin`
+    names = [Path(item["archive"]).name for item in (first_twin, other, again)]
+    assert names == ["twin.zip", "twin-2.zip", "twin~2.zip"]
+    assert len(set(names)) == 3
+    other_bytes = Path(other["archive"]).read_bytes()
+    assert Path(again["archive"]).read_bytes() != other_bytes  # a different instance's archive, not overwritten
+    # The repeat-export shape is outside the instance-id grammar, so it can never be another instance's `<id>.zip`.
+    assert re.fullmatch(r"[a-z][a-z0-9._-]{1,127}", "twin~2") is None
+
+
+def test_repeat_export_never_overwrites_an_existing_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    execution = PortableExecutionService(app, ROOT)
+    execution.install_fixture_instance("studystate.sample", "keeper")
+    first = execution.export_instance("keeper")
+    portable = Path(first["archive"]).parent
+    (portable / "keeper~2.zip").write_bytes(b"precious")
+    (portable / "keeper~3.zip").symlink_to(portable / "keeper~2.zip")
+    again = execution.export_instance("keeper")
+    assert Path(again["archive"]).name == "keeper~4.zip"
+    assert (portable / "keeper~2.zip").read_bytes() == b"precious"

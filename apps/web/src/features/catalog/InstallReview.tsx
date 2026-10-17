@@ -26,6 +26,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { applicationDestinationAvailable } from '@/features/application-experience/registry'
+import { notifyApplicationsChanged } from '@/shell/data'
 
 import { hasElevatedScope, networkPolicyLabel, releaseStatusLabel, reviewClassificationPresentation } from './catalogModel'
 
@@ -101,6 +102,7 @@ export function InstallReview({ entry, open, onOpenChange, onInstalled }: Instal
       ) {
         throw new Error('The durable installation receipt did not match the created application or digest.')
       }
+      notifyApplicationsChanged()
       setResult({ instance, receipt: { id: receipt.id, digest: durableDigest } })
       setPhase('success')
       onInstalled(instance)

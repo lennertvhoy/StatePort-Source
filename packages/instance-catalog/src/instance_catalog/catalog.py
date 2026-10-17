@@ -240,7 +240,7 @@ class InstanceCatalog:
             changed, record = self._revalidate(record)
             if changed:
                 document["entries"][index] = record.to_dict()
-                self._write(document)
+                self._persist_refresh(document)
             return record
 
     def list(self, *, include_archived: bool = True, refresh: bool = True) -> tuple[InstanceRecord, ...]:
@@ -253,11 +253,23 @@ class InstanceCatalog:
                 refreshed = [self._revalidate(record)[1] for record in records]
                 if refreshed != records:
                     document["entries"] = [record.to_dict() for record in refreshed]
-                    self._write(document)
+                    self._persist_refresh(document)
                 records = refreshed
             if not include_archived:
                 records = [record for record in records if record.status == "active"]
             return tuple(records)
+
+    def _persist_refresh(self, document: Mapping[str, Any]) -> None:
+        """Save revalidated timestamps on a read, but never fail the read because they could not be saved.
+
+        Every read revalidates and stamps lastValidatedAt. On a full or read-only disk the write raises
+        OSError; the freshly validated records are still correct, so the read returns them (found by the
+        disk-full e2e row: the whole UI went "Service offline" because even listing instances failed).
+        """
+        try:
+            self._write(document)
+        except OSError:
+            pass
 
     def refresh(self, instance_id: str | None = None) -> tuple[InstanceRecord, ...]:
         """Revalidate one or all paths, finding moved directories by identity."""

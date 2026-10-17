@@ -649,7 +649,12 @@ const BACKEND_UNAVAILABLE_COPY =
 
 function prepareErrorCopy(err: unknown): string {
   if (err instanceof ClientError && err.code === 'goal_backend_unavailable') {
-    return BACKEND_UNAVAILABLE_COPY
+    // The service's own refusal reason (for example a missing sandbox runtime) is
+    // more accurate than the generic copy, so show it when one was sent.
+    const reason = typeof err.detail === 'string' ? err.detail.trim().replace(/\.$/, '') : ''
+    return reason
+      ? `Governed execution is unavailable: ${reason}. Nothing was prepared or run.`
+      : BACKEND_UNAVAILABLE_COPY
   }
   return err instanceof Error ? err.message : String(err)
 }
@@ -743,6 +748,14 @@ function ObjectiveForm({
           <div data-testid="orchestration-degraded">
             <InlineNotice tone="attention" title="Assisted mode only">
               {degradedReason ?? 'Orchestration is limited to Assisted mode for this application.'}
+            </InlineNotice>
+          </div>
+        ) : null}
+
+        {orch.backend?.status === 'available' && orch.backend.testOnly !== true && orch.backend.message ? (
+          <div data-testid="orchestration-backend-scope">
+            <InlineNotice tone="informational" title="What a governed run does here">
+              {orch.backend.message}
             </InlineNotice>
           </div>
         ) : null}

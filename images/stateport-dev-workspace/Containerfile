@@ -143,8 +143,10 @@ RUN --mount=type=secret,id=github_token \
 # vulnerable packages (tar 7.5.11, sigstore 3.1.0, picomatch 4.0.3,
 # brace-expansion 2.0.2). npm is a user-facing tool in this developer image,
 # so it is upgraded in place from the pinned upstream npm 12.0.2 bundle; that
-# bundle still carries brace-expansion 5.0.7 and ip-address 10.2.0, so both
-# packages are overlaid with their pinned fixed releases. Assets are fetched
+# bundle still carries brace-expansion 5.0.7, ip-address 10.2.0 and undici 6.27.0, so
+# all three are overlaid with their pinned fixed releases (2026-10-01 evidence:
+# GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7 fix brace-expansion at 5.0.10/5.0.11,
+# GHSA-rfgv-xxqx-mfg5 fixes undici at 6.28.1). Assets are fetched
 # over TLS and verified against exact pinned SHA-256 digests recorded in
 # config/container-build-inputs.yaml; any mismatch fails the build.
 RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
@@ -156,12 +158,12 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
     && tar -xzf /tmp/npm-12.0.2.tgz -C /usr/local/lib/node_modules/npm --no-same-owner \
       --strip-components=1 \
     && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
-      -o /tmp/brace-expansion-5.0.9.tgz \
-      https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz \
-    && echo "5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf  /tmp/brace-expansion-5.0.9.tgz" | sha256sum -c - \
+      -o /tmp/brace-expansion-5.0.11.tgz \
+      https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.11.tgz \
+    && echo "67bb5a1b4d4a8ff497d845a0b891ffe6b7233aea2202641315cec88d0fff15eb  /tmp/brace-expansion-5.0.11.tgz" | sha256sum -c - \
     && rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
     && mkdir -p /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
-    && tar -xzf /tmp/brace-expansion-5.0.9.tgz \
+    && tar -xzf /tmp/brace-expansion-5.0.11.tgz \
       -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --no-same-owner \
       --strip-components=1 \
     && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
@@ -182,10 +184,19 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
     && tar -xzf /tmp/tar-7.5.21.tgz \
       -C /usr/local/lib/node_modules/npm/node_modules/tar --no-same-owner \
       --strip-components=1 \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      -o /tmp/undici-6.28.1.tgz \
+      https://registry.npmjs.org/undici/-/undici-6.28.1.tgz \
+    && echo "e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74  /tmp/undici-6.28.1.tgz" | sha256sum -c - \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/undici \
+    && mkdir -p /usr/local/lib/node_modules/npm/node_modules/undici \
+    && tar -xzf /tmp/undici-6.28.1.tgz \
+      -C /usr/local/lib/node_modules/npm/node_modules/undici --no-same-owner \
+      --strip-components=1 \
     && export NODE_DISABLE_COMPILE_CACHE=1 \
     && npm --version | grep -Fx "12.0.2" \
     && rm -rf /tmp/node-compile-cache \
-    && rm -f /tmp/npm-12.0.2.tgz /tmp/brace-expansion-5.0.9.tgz /tmp/ip-address-10.3.1.tgz /tmp/tar-7.5.21.tgz
+    && rm -f /tmp/npm-12.0.2.tgz /tmp/brace-expansion-5.0.11.tgz /tmp/ip-address-10.3.1.tgz /tmp/tar-7.5.21.tgz /tmp/undici-6.28.1.tgz
 
 FROM workspace
 ARG STATEPORT_BUILD_SOURCE_COMMIT=unknown

@@ -2906,6 +2906,10 @@ class ExecutionHostDaemon:
             finished_at = self._config.clock()
             entry = self._ledger_required().capture_source_command_output(entry, self._engine, at=finished_at, termination_reason="exited")
             state = "stopped" if entry["spec"].get("kind") == "workspace" else "exited"
+            # The container stopped without the daemon's cooperation, so no
+            # supervision or explicit-stop receipt will ever be written for
+            # this transition.  Record why the observed terminal state exists,
+            # or a `stopped`/`exited` row can exist with no evidence at all.
             self._transition_snapshot(
                 self._ledger_required(),
                 entry,
@@ -2913,6 +2917,16 @@ class ExecutionHostDaemon:
                 at=finished_at,
                 exit_status=info.get("exitStatus"),
                 finished_at=finished_at,
+                receipt={
+                    "kind": "external-stop",
+                    "detail": (
+                        "the container was no longer running while the ledger still "
+                        "recorded running; the stop happened outside the daemon, which "
+                        "issued no stop for this workload"
+                    ),
+                    "cleanup": "not-required",
+                    "residual": self._residual_evidence(entry["workloadId"]),
+                },
             )
             entry = self._entry_required(payload["workloadId"])
         return (

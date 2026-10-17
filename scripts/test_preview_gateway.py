@@ -315,7 +315,7 @@ def test_preview_route_management_requires_session_and_guard(
         harness.port, "/v1/preview-routes", method="POST", cookie=harness.cookie, body=body
     )
     assert status == 403
-    assert payload["error"]["code"] == "preview_route_access_denied"
+    assert payload["error"]["code"] == "csrf_token_invalid"
 
     status, payload = _request(
         harness.port,

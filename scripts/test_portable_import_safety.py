@@ -111,7 +111,7 @@ def test_portable_import_is_preview_bound_authenticated_and_replay_safe(tmp_path
             session = json.loads(response.read())["result"]
             cookie = response.headers["Set-Cookie"].split(";", 1)[0]
         status, denied = _post(origin, "/v1/portable-import/preview", preview_body, cookie=cookie)
-        assert status == 403 and denied["error"]["code"] == "portable_import_denied"
+        assert status == 403 and denied["error"]["code"] == "csrf_token_invalid"
         status, malformed = _post(origin, "/v1/portable-import/preview", {**preview_body, "dryRun": True}, cookie=cookie, csrf=session["csrfToken"])
         assert status == 409 and malformed["error"]["code"] == "portable_import_request_invalid"
         stale_archive = {**archive, "archiveFileDigest": "sha256:" + "0" * 64}

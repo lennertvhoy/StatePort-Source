@@ -692,7 +692,12 @@ def _start_app_server(layout_root: Path) -> tuple[object, threading.Thread, str,
         layout_root / "state",
     )
     layout.initialize()
-    server = AppServer(("127.0.0.1", 0), layout, ROOT / "apps" / "web")
+    from service_test_product import service_product_fixture  # noqa: PLC0415
+
+    # Backend-only: the real apps/web needs a validated production build.
+    server = AppServer(
+        ("127.0.0.1", 0), layout, service_product_fixture(layout_root, ROOT) / "apps" / "web"
+    )
     thread = threading.Thread(
         target=server.serve_forever,
         kwargs={"poll_interval": 0.02},
@@ -1337,6 +1342,11 @@ def test_workspace_idle_timeout_stops_container_and_preserves_volume(tmp_path: P
         entry = json.loads(
             (handle.state_dir / "workloads" / f"{workspace_id}.json").read_text(encoding="utf-8")
         )
+        # A stopped workspace always explains itself durably. Asserted before
+        # the cause: a container killed from outside the daemon yields an
+        # `external-stop` receipt here, which is contamination to report, not a
+        # reason to accept an unexplained `stopped`.
+        assert entry["receipts"], f"stopped workspace has no receipts: {entry['receipts']}"
         assert entry["receipts"][-1]["kind"] == "idle-timeout"
         assert "volume preserved" in entry["receipts"][-1]["detail"]
         assert _podman("volume", "exists", f"stateport-workspace-{workspace_id}").returncode == 0

@@ -1040,7 +1040,9 @@ def test_closure_guard_rechecks_identity_and_refuses_concurrent_dirty_write(
     assert stopped["stop"]["stateBeforeStop"] == "independently_reviewed"
 
 
-def test_coordinator_fails_closed_without_test_backend_injection(tmp_path: Path) -> None:
+def test_coordinator_fails_closed_without_test_backend_injection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """No production default to the synthetic backend — typed unavailable.
 
     A coordinator built the way production builds it (no
@@ -1050,6 +1052,11 @@ def test_coordinator_fails_closed_without_test_backend_injection(tmp_path: Path)
     Mode ``off`` stays available: it is a stop operation, not an execution.
     """
 
+    import stateport_goal_execution.coordinator as coordinator_module
+
+    monkeypatch.setattr(
+        coordinator_module, "sandbox_readiness", lambda: (False, "bubblewrap_missing")
+    )
     project = _repository(tmp_path / "project")
     coordinator = GoalExecutionCoordinator(record_root=tmp_path / "records")
     identity = coordinator.current_identity(project)
@@ -1094,6 +1101,12 @@ def test_production_service_refuses_goal_prepare_without_a_configured_backend(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    import stateport_goal_execution.coordinator as coordinator_module
+
+    # A host without a usable bubblewrap sandbox: the production wiring must say so.
+    monkeypatch.setattr(
+        coordinator_module, "sandbox_readiness", lambda: (False, "bubblewrap_missing")
+    )
     app = PersistentApp(LocalLayout.from_environment())
     app.setup_init()
     project = _repository(app.layout.instances_root / "development-one")
@@ -1140,7 +1153,9 @@ def test_production_service_refuses_goal_prepare_without_a_configured_backend(
         availability = view["backendAvailability"]
         assert availability["status"] == "unavailable"
         assert availability["code"] == "goal_backend_unavailable"
-        assert "no execution backend is configured" in availability["message"]
+        assert "sandbox runtime" in availability["message"]
+        assert "bubblewrap" in availability["message"]
+        assert "sandboxed_validation_not_implemented" not in json.dumps(view)
         assert availability["nextAction"]
         prepare_body = {
             "expectedInstanceId": "development-one",

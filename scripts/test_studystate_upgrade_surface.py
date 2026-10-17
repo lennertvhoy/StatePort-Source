@@ -1955,7 +1955,7 @@ def test_portable_export_refuses_an_active_instance_writer(
         instance,
         owner="test-active-writer",
     ):
-        with pytest.raises(PortableExecutionError, match="active writer lease"):
+        with pytest.raises(PortableExecutionError, match="Another operation is using this instance"):
             service.export_instance("export-lease")
 
 

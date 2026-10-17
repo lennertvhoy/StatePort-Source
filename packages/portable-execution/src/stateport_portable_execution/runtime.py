@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import hashlib
 import math
@@ -83,6 +84,120 @@ class PortableExecutionError(ValueError):
     pass
 
 
+class InstanceLeaseRefusedError(PortableExecutionError):
+    """The instance writer lease could not be taken, with the real reason.
+
+    Raised before anything is changed. The HTTP boundary keeps a 409 and
+    exposes ``code`` as the envelope code and ``cause_code`` as ``causeCode``,
+    so a busy lease (another operation holds it), a full disk and an unwritable
+    lease directory are three different answers instead of one.
+    """
+
+    http_status = 409
+
+    def __init__(self, message: str, code: str):
+        self.code = code
+        self.cause_code = code
+        super().__init__(message)
+
+
+def _lease_refusal(exc: BaseException, *, apply: bool) -> InstanceLeaseRefusedError:
+    """Translate a lease failure into a truthful refusal; lease semantics stay as they are."""
+
+    done = "this change was not applied" if apply else "the instance was not exported"
+    if isinstance(exc, InstanceLeaseBusy):
+        if apply:
+            return InstanceLeaseRefusedError(
+                "Another change is being applied to this instance right now, so this one was not "
+                "applied. Wait for it to finish, then try again.",
+                "instance_busy",
+            )
+        return InstanceLeaseRefusedError(
+            "Another operation is using this instance right now, so it cannot be exported yet. "
+            "Wait for it to finish, then try again.",
+            "instance_busy",
+        )
+    cause = exc.__cause__
+    if isinstance(cause, OSError):
+        if cause.errno in (errno.ENOSPC, errno.EDQUOT):
+            return InstanceLeaseRefusedError(
+                f"The disk holding StatePort data is full, so {done}. Free some space and try again.",
+                "disk_full",
+            )
+        if cause.errno in (errno.EROFS, errno.EACCES, errno.EPERM):
+            return InstanceLeaseRefusedError(
+                f"StatePort cannot write to its data folder, so {done}. Check the folder's "
+                "permissions and that its disk is not read-only, then try again.",
+                "data_not_writable",
+            )
+    return InstanceLeaseRefusedError(
+        f"StatePort could not lock this instance, so {done}. Check service health and try again.",
+        "instance_lease_unavailable",
+    )
+
+
+class WorkerRefusedError(PortableExecutionError):
+    """The application's own worker refused the request before changing anything.
+
+    The message is built from a vetted allowlist/format (never raw worker output),
+    names what is out of date and says what to do. The HTTP boundary keeps the
+    409 ``execution_refused`` envelope and adds ``cause_code`` as ``causeCode``.
+    """
+
+    http_status = 409
+
+    def __init__(self, message: str, cause_code: str):
+        self.cause_code = cause_code
+        super().__init__(message)
+
+
+# Workers signal a refusal by raising ValueError (an uncaught ValueError prints
+# `ValueError: <message>` as the last stderr line). ONLY the known refusals below
+# get their precise sentence and cause code; any other worker text (which a
+# third-party template controls, and which may carry instance data) is never
+# echoed to the browser: it gets one fixed sentence.
+_WORKER_REFUSAL_LINE = re.compile(r"^ValueError: (?P<message>[A-Za-z0-9][A-Za-z0-9 ,.;:'()_-]{2,239})$")
+_KNOWN_WORKER_REFUSALS: dict[str, tuple[str, str]] = {
+    "expectedPlanDigest must match the current durable plan": (
+        "plan_stale",
+        "The learning plan changed after this change was prepared: it was prepared against a "
+        "plan version that is no longer current, so it was refused and nothing was changed. "
+        "Reload the application to see the current plan, then prepare the change again.",
+    ),
+    "the last durable transition is not undoable": (
+        "nothing_to_undo",
+        "There is no recent change that can be undone: the last change is not an undoable "
+        "evidence entry, so nothing was changed. Reload the application to see its current state.",
+    ),
+}
+
+
+def worker_refusal_from_stderr(stderr: object) -> tuple[str, str] | None:
+    """Return (causeCode, readable message) when the worker refused with a ValueError.
+
+    ``stderr`` is transient worker output: it is never stored or returned, only the
+    vetted refusal text derived from its final line.
+    """
+
+    if not isinstance(stderr, str):
+        return None
+    lines = [line.strip() for line in stderr.strip().splitlines() if line.strip()]
+    if not lines:
+        return None
+    match = _WORKER_REFUSAL_LINE.fullmatch(lines[-1])
+    if match is None:
+        return None
+    message = match.group("message")
+    known = _KNOWN_WORKER_REFUSALS.get(message)
+    if known is not None:
+        return known
+    return (
+        "worker_refused_request",
+        "The application refused this request. Nothing was changed; review the request and prepare it "
+        "again, or open the application to see its current state.",
+    )
+
+
 class PortableImportError(PortableExecutionError):
     """A portable-import refusal with a stable, public classification code."""
 
@@ -102,11 +217,15 @@ class EnvironmentGatedExecution(PortableExecutionError):
 class WorkerExecutionError(PortableExecutionError):
     """A worker termination with only the safe, durable observation attached."""
 
-    def __init__(self, classification: str, process: dict[str, Any], message: str):
+    def __init__(
+        self, classification: str, process: dict[str, Any], message: str,
+        *, refusal: tuple[str, str] | None = None,
+    ):
         if classification not in TERMINATION_CLASSIFICATIONS - {"success"}:
             raise ValueError("worker termination classification is invalid")
         self.classification = classification
         self.process = process
+        self.refusal = refusal
         super().__init__(message)
 
 
@@ -602,6 +721,44 @@ class PortableExecutionService:
                 time.sleep(0.01)
         raise PortableExecutionError("recorded apply process generation could not be terminated")
 
+    def _retire_unbacked_applied_bundles(self, run_id: str | None = None) -> list[str]:
+        """Keep the sealed `-applied` bundle in step with the run record.
+
+        Invariant: a `<run>-applied` bundle exists only for a run recorded `applied`. The bundle is
+        sealed before the run closes, so a crash (or a post-seal failure) followed by rollback leaves
+        a sealed bundle that claims an apply the run no longer has.  Evidence is never deleted: the
+        bundle is renamed to `<run>-applied.rolled-back` (an unsealed `.tmp` becomes
+        `<run>-applied.incomplete`).  Renames are idempotent and a crash between two of them is
+        completed by the next startup.
+        """
+
+        retired: list[str] = []
+        root = self.bundle_root
+        if not root.is_dir():
+            return retired
+        candidates = sorted(root.glob("*-applied")) + sorted(root.glob("*-applied.tmp"))
+        if not candidates:
+            return retired
+        statuses = {record.get("runId"): record.get("status") for record in self.store.all()}
+        for path in candidates:
+            name = path.name
+            owner = name.removesuffix(".tmp").removesuffix("-applied")
+            if run_id is not None and owner != run_id:
+                continue
+            if owner not in statuses or statuses[owner] == "applied":
+                continue
+            target_name = owner + ("-applied.incomplete" if name.endswith(".tmp") else "-applied.rolled-back")
+            target = root / target_name
+            suffix = 0
+            while target.exists():
+                suffix += 1
+                target = root / f"{target_name}.{suffix}"
+            os.replace(path, target)
+            retired.append(target.name)
+        if retired:
+            self._fsync_directory(root)
+        return retired
+
     def _recover_interrupted_applies(self) -> None:
         """Restore crash-interrupted canonical applies before accepting new work."""
 
@@ -817,6 +974,7 @@ class PortableExecutionService:
                         "interrupted apply could not be reconciled safely"
                     ) from exc
         self.store.recover_orphans(active_run_ids=still_owned)
+        self._retire_unbacked_applied_bundles()
 
     def _instance_requires_operator_recovery(self, instance_id: str) -> bool:
         return any(
@@ -2768,7 +2926,13 @@ class PortableExecutionService:
                 classification = self._classify_worker_termination(process)
                 if classification != "result_artifact_missing":
                     if classification != "success":
-                        raise WorkerExecutionError(classification, process, "worker terminated before producing a result")
+                        raise WorkerExecutionError(
+                            classification, process, "worker terminated before producing a result",
+                            refusal=(
+                                worker_refusal_from_stderr(process_result.stderr)
+                                if classification == "worker_nonzero_exit" else None
+                            ),
+                        )
                 try:
                     value = json.loads(process_result.stdout)
                 except json.JSONDecodeError as exc:
@@ -2892,6 +3056,8 @@ class PortableExecutionService:
                 self.store.update(run_id, runBundle=self._write_run_bundle(failed))
             except Exception:  # noqa: BLE001 - preserve the primary termination result
                 pass
+            if exc.refusal is not None:
+                raise WorkerRefusedError(exc.refusal[1], exc.refusal[0]) from exc
             raise PortableExecutionError("worker execution terminated") from exc
         except (OSError, ProcessRuntimeError, subprocess.SubprocessError, json.JSONDecodeError, PortableExecutionError) as exc:
             process = process or self._worker_process_observation(launch_status="not_started")
@@ -3211,10 +3377,14 @@ class PortableExecutionService:
             current = self.store.get(run_id) or {}
             transaction = dict(current.get("applyTransaction") or {})
             transaction["rollbackStatus"] = "completed"
+            clear_applied: dict[str, Any] = {}
+            if current.get("appliedRunBundle") is not None or current.get("closureReceipt") is not None:
+                clear_applied = {"receipt": None, "appliedRunBundle": None, "closureReceipt": None, "receiptId": None}
             failed = self.store.transition(
                 run_id, "apply_failed", diagnostic=diagnostic, rollback=rollback,
-                canonicalStateAfter=restored, applyTransaction=transaction,
+                canonicalStateAfter=restored, applyTransaction=transaction, **clear_applied,
             )
+            self._retire_unbacked_applied_bundles(run_id)
         except Exception as rollback_error:  # noqa: BLE001 - retain explicit unknown state
             rollback = {
                 "status": "failed", "byteIdentical": False,
@@ -3269,7 +3439,7 @@ class PortableExecutionService:
                 owner=f"portable-apply:{run_id}",
             )
         except InstanceLeaseError as exc:
-            raise PortableExecutionError("instance writer lease is unavailable") from exc
+            raise _lease_refusal(exc, apply=True) from exc
         try:
             with lease:
                 record = self.store.get(run_id) or {}
@@ -3535,7 +3705,7 @@ class PortableExecutionService:
                         raise
                     raise PortableExecutionError("filesystem transaction failed") from exc
         except InstanceLeaseError as exc:
-            raise PortableExecutionError("instance already has an active writer lease") from exc
+            raise _lease_refusal(exc, apply=True) from exc
         return self.inspect(run_id)
 
     def _write_run_bundle(self, record: dict[str, Any], *, suffix: str = "", state_after: str | None = None) -> dict[str, Any]:
@@ -3825,14 +3995,28 @@ class PortableExecutionService:
                 owner=f"portable-export:{instance_id}",
             ):
                 self.app.locked_source(instance_id)
-                destination = self.app.layout.operations_root / "portable" / f"{instance_id}.zip"
+                portable_root = self.app.layout.operations_root / "portable"
+                # The first export keeps the stable `<id>.zip` name. Later exports
+                # of the same instance get `<id>~2.zip`, `<id>~3.zip`, ... so an
+                # earlier archive is never overwritten and a repeat export works.
+                # "~" is outside the instance-id grammar, so a repeat-export name
+                # can never equal another instance's `<id>.zip` (an instance
+                # literally named `<id>-2` has its own lease and would otherwise
+                # race this one for the same file). Publication itself is a
+                # hard link, which fails atomically if the name already exists.
+                destination = portable_root / f"{instance_id}.zip"
+                counter = 1
+                while destination.exists() or destination.is_symlink():
+                    counter += 1
+                    if counter > 999:
+                        raise PortableExecutionError(
+                            "This instance already has 999 portable exports. Delete or move old "
+                            "archives from the portable export folder, then export again."
+                        )
+                    destination = portable_root / f"{instance_id}~{counter}.zip"
                 return export_portable(root, destination)
-        except InstanceLeaseBusy as exc:
-            raise PortableExecutionError(
-                "instance already has an active writer lease"
-            ) from exc
         except InstanceLeaseError as exc:
-            raise PortableExecutionError("instance writer lease is unavailable") from exc
+            raise _lease_refusal(exc, apply=False) from exc
 
     def inspect_instance_archive(self, archive_path: str | os.PathLike[str]) -> dict[str, Any]:
         return inspect_portable(archive_path)

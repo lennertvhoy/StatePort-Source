@@ -362,11 +362,13 @@ export class HttpAssistantConversationClient extends HttpConversationClient {
             ? 'stopped'
             : 'streaming'
       const content =
+        item.state === 'cancelled'
+          ? 'The assistant attempt was cancelled.'
+          : ''
+      const failureReason =
         item.state === 'failed'
           ? item.error?.message ?? 'The assistant attempt failed.'
-          : item.state === 'cancelled'
-            ? 'The assistant attempt was cancelled.'
-            : ''
+          : undefined
       placeholders.push({
         id: `${PENDING_PREFIX}${item.messageId}`,
         conversationId: conversation.id,
@@ -374,6 +376,7 @@ export class HttpAssistantConversationClient extends HttpConversationClient {
         content,
         createdAt: item.updatedAt,
         state,
+        ...(failureReason === undefined ? {} : { failureReason }),
         attachments: [],
         contextChips: [],
         toolEvents: [],

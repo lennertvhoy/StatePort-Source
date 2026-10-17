@@ -135,7 +135,9 @@ def test_client_rst_does_not_trigger_second_error_response(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     app = PersistentApp(LocalLayout.from_environment())
     app.setup_init()
-    server = AppServer(("127.0.0.1", 0), app.layout, ROOT / "apps" / "web")
+    server = AppServer(
+        ("127.0.0.1", 0), app.layout, service_product_fixture(tmp_path, ROOT) / "apps" / "web"
+    )
     log_path = Path(server.log.name)
     response_started = threading.Event()
     response_release = threading.Event()

@@ -30,8 +30,8 @@ COPY images/bin/stateport-healthcheck /usr/local/bin/stateport-healthcheck
 # bytes. `apk add` writes a wall-clock line to /var/log/apk.log; deleting it
 # keeps the two-build OCI digest proof reproducible.
 RUN apk add --no-cache \
-      libcrypto3=3.5.8-r0 \
-      libssl3=3.5.8-r0 \
+      libcrypto3=3.5.9-r0 \
+      libssl3=3.5.9-r0 \
       libuuid=2.41.6-r1 \
       sqlite-libs=3.53.4-r0 \
     && rm -f /var/log/apk.log

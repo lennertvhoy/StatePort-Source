@@ -207,7 +207,7 @@ def _run_git(root: Path, args: list[str], *, timeout: float) -> str:
     }
     try:
         result = subprocess.run(
-            ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", *args],
+            ["git", "-c", f"safe.directory={root}", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", *args],
             cwd=root,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -397,18 +397,31 @@ def _public_target(value: object) -> tuple[str, str]:
     url = validate_public_https_url(value, resolve=False)
     host = urlsplit(url).hostname
     # Resolve in a disposable process so an unavailable resolver cannot occupy
-    # a service request indefinitely. Revalidate every returned address.
-    try:
-        result = subprocess.run(
-            [sys.executable, "-I", "-c", "import json,socket,sys; print(json.dumps(sorted({x[4][0] for x in socket.getaddrinfo(sys.argv[1],443,type=socket.SOCK_STREAM)})))", str(host)],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=8, check=True,
-        )
-        addresses = json.loads(result.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        raise RepositoryImportError("repository_url_unresolved", "repository host could not be resolved within the limit") from exc
-    if not addresses or any(not isinstance(item, str) or _is_denied_ip(item) for item in addresses):
-        raise RepositoryImportError("repository_url_private_target", "repository URL resolves to a private or reserved network")
-    return url, sorted(addresses, key=lambda item: (":" in item, item))[0]
+    # a service request indefinitely. Families are resolved one at a time and
+    # the first usable answer wins: one flat getaddrinfo waits for both the A
+    # and the AAAA answer, and a stalled AAAA (typical first-query behaviour on
+    # NAT'd WSL DNS) consumed the whole 8s budget and refused every template
+    # import on the Win11+WSL2 guest (2026-10-06) although the A record had
+    # answered immediately. The pinned fetch contacts exactly one address, so
+    # one working family is sufficient. Every returned address is revalidated.
+    last_error: Exception | None = None
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", "import json,socket,sys; print(json.dumps(sorted({x[4][0] for x in socket.getaddrinfo(sys.argv[1],443,int(sys.argv[2]),socket.SOCK_STREAM)})))", str(host), str(int(family))],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=8, check=True,
+            )
+            addresses = json.loads(result.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            last_error = exc
+            continue
+        if not isinstance(addresses, list) or not addresses:
+            last_error = ValueError(f"no addresses returned for family {int(family)}")
+            continue
+        if any(not isinstance(item, str) or _is_denied_ip(item) for item in addresses):
+            raise RepositoryImportError("repository_url_private_target", "repository URL resolves to a private or reserved network")
+        return url, sorted(addresses, key=lambda item: (":" in item, item))[0]
+    raise RepositoryImportError("repository_url_unresolved", "repository host could not be resolved within the limit") from last_error
 
 
 def _private_repository_cache(policy: RepositorySourcePolicy) -> Path:

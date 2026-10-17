@@ -14,6 +14,9 @@ from urllib.request import Request, urlopen
 import pytest
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from service_test_product import service_product_fixture  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 for relative in (
@@ -94,7 +97,9 @@ def _service(
     server = AppServer(
         ("127.0.0.1", 0),
         layout,
-        ROOT / "apps" / "web",
+        # Backend-only: the real apps/web needs a validated production build,
+        # which a fresh checkout does not have (see service_test_product).
+        service_product_fixture(layout.config_root.parent, ROOT) / "apps" / "web",
         actor_role=actor_role,
         canonical_source_catalog=canonical_source_catalog,
     )
@@ -307,7 +312,7 @@ def test_development_verification_requires_csrf_operator_and_exact_identity(
         payload = _candidate_payload(detail["result"])
 
         denied_status, denied = _request(port, action_path, cookie=cookie, body=payload)
-        assert denied_status == 403 and denied["error"]["code"] == "source_verification_denied"
+        assert denied_status == 403 and denied["error"]["code"] == "csrf_token_invalid"
 
         stale = dict(payload)
         stale["expectedCommit"] = "f" * 40

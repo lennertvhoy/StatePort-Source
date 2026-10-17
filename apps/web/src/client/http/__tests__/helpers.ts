@@ -83,7 +83,7 @@ export function makeFakeFetch(
   }
 }
 
-function withCsrf(res: Response, token: string): Response {
+export function withCsrf(res: Response, token: string): Response {
   const headers = new Headers(res.headers)
   headers.set('X-StatePort-CSRF', token)
   return new Response(res.body, { status: res.status, headers })

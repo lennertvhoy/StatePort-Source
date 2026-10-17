@@ -87,7 +87,11 @@ import { HttpTransport, voidSchema } from './transport'
 
 const unknownPayload = z.unknown()
 const restoreDigest = z.string().regex(/^sha256:[0-9a-f]{64}$/)
-const restoreId = z.string().regex(/^[a-z][a-z0-9-]{1,63}$/)
+// Instance identity grammar: lowercase start, then lowercase letters/digits/
+// hyphens/underscores. `ins_` + 16 hex is the id shape the UI and API
+// themselves install with (HttpCatalogClient.createInstance), so the wire
+// schemas for recovery/restore payloads must accept it.
+const restoreId = z.string().regex(/^[a-z][a-z0-9_-]{1,63}$/)
 const restorePlannedSourceAccess = z.union([
   z.object({ disposition: z.literal('not_propagated') }).strict(),
   z

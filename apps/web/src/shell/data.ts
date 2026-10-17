@@ -183,6 +183,33 @@ export async function reconnectService(): Promise<void> {
 
 // ── Applications list (sidebar, switcher, palette) ───────────────────────────
 
+// One shared revision for "the set of applications (or one of their listed
+// fields) changed". Every list consumer (sidebar, switcher, palette, dashboard)
+// subscribes, so an install/rename/pin made anywhere refreshes all of them
+// without a page reload.
+let applicationsRevision = 0
+const applicationsListeners = new Set<() => void>()
+
+export function notifyApplicationsChanged(): void {
+  applicationsRevision += 1
+  for (const listener of [...applicationsListeners]) listener()
+}
+
+export function subscribeApplicationsChanged(listener: () => void): () => void {
+  applicationsListeners.add(listener)
+  return () => {
+    applicationsListeners.delete(listener)
+  }
+}
+
+export function getApplicationsRevision(): number {
+  return applicationsRevision
+}
+
+export function useApplicationsRevision(): number {
+  return useSyncExternalStore(subscribeApplicationsChanged, getApplicationsRevision, getApplicationsRevision)
+}
+
 interface ApplicationsResult {
   instances: ApplicationInstance[]
   loading: boolean
@@ -198,9 +225,9 @@ export function useApplications(): ApplicationsResult {
     instances: ApplicationInstance[]
     error: unknown
   } | null>(null)
-  const [nonce, setNonce] = useState(0)
+  const revision = useApplicationsRevision()
   const activeScenario = useSessionStore((s) => s.activeScenario)
-  const requestKey = `${nonce}#${activeScenario ?? ''}`
+  const requestKey = `${revision}#${activeScenario ?? ''}`
 
   useEffect(() => {
     let cancelled = false
@@ -217,9 +244,9 @@ export function useApplications(): ApplicationsResult {
     return () => {
       cancelled = true
     }
-  }, [nonce, activeScenario, requestKey])
+  }, [activeScenario, requestKey])
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), [])
+  const refresh = notifyApplicationsChanged
   const landed = result && result.key === requestKey ? result : null
   return {
     instances: result?.instances ?? [],
@@ -242,26 +269,43 @@ export function sidebarInstances(instances: ApplicationInstance[], maxRecents = 
 // ── Instance cache (breadcrumb, titles, app shell) ───────────────────────────
 
 const instanceCache = new Map<string, ApplicationInstance>()
+const instanceCachedAt = new Map<string, number>()
 const instanceInflight = new Map<string, Promise<ApplicationInstance>>()
 
-export function primeInstanceCache(instance: ApplicationInstance): void {
+/**
+ * A cached projection is only trusted for this long. Our own changes invalidate the entry
+ * explicitly (see invalidateInstanceCache callers), but a change made by ANOTHER tab, browser
+ * or client never reaches this page, so without an age limit the page keeps showing the old
+ * state until a hard reload. Entering the application again after this age re-reads the service.
+ */
+export const INSTANCE_CACHE_MAX_AGE_MS = 5_000
+
+function storeInstance(instance: ApplicationInstance): void {
   instanceCache.set(instance.id, instance)
+  instanceCachedAt.set(instance.id, Date.now())
+}
+
+export function primeInstanceCache(instance: ApplicationInstance): void {
+  storeInstance(instance)
 }
 
 export function fetchInstanceCached(instanceId: string): Promise<ApplicationInstance> {
   const cached = instanceCache.get(instanceId)
-  if (cached) return Promise.resolve(cached)
+  const fresh = cached !== undefined && Date.now() - (instanceCachedAt.get(instanceId) ?? 0) <= INSTANCE_CACHE_MAX_AGE_MS
+  if (cached && fresh) return Promise.resolve(cached)
   const inflight = instanceInflight.get(instanceId)
   if (inflight) return inflight
   const promise = getClient()
     .applications.get(instanceId)
     .then((instance) => {
-      instanceCache.set(instanceId, instance)
+      storeInstance(instance)
       instanceInflight.delete(instanceId)
       return instance
     })
     .catch((err) => {
       instanceInflight.delete(instanceId)
+      // An aged copy is still better than an error page when the service is briefly unreachable.
+      if (cached) return cached
       throw err
     })
   instanceInflight.set(instanceId, promise)
@@ -269,8 +313,13 @@ export function fetchInstanceCached(instanceId: string): Promise<ApplicationInst
 }
 
 export function invalidateInstanceCache(instanceId?: string): void {
-  if (instanceId) instanceCache.delete(instanceId)
-  else instanceCache.clear()
+  if (instanceId) {
+    instanceCache.delete(instanceId)
+    instanceCachedAt.delete(instanceId)
+  } else {
+    instanceCache.clear()
+    instanceCachedAt.clear()
+  }
 }
 
 /** Instance name for chrome (breadcrumb/title). Returns undefined while loading/missing. */

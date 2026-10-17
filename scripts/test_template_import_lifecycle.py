@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -220,6 +221,72 @@ def test_template_import_copies_only_the_committed_tree_and_runs_trusted_action(
         adapter_id="statespec-template",
         application_id="stateport.template.generic",
     )[1]["declaredTemplateId"] == "checklist-course"
+
+
+def test_wrong_template_import_approval_is_a_distinct_readable_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    source = _statespec_repository(sources / "native")
+    monkeypatch.setenv("STATEPORT_REPOSITORY_ROOTS", str(sources))
+    layout = LocalLayout(tmp_path / "config", tmp_path / "data", tmp_path / "state")
+    layout.initialize()
+    app = PersistentApp(layout)
+    inspector = RepositoryInspector(RepositorySourcePolicy(layout))
+    inspected = _inspection(inspector, source, sources)
+    plan = app.plan_template_import(
+        inspected, candidate_id=str(inspected["candidateId"]),
+        instance_id="approval-probe", name="Approval probe",
+    )
+    wrong = {"decision": "approve", "actorId": "local-user", "planDigest": "sha256:" + "1" * 64}
+    with pytest.raises(AppError, match="approval does not match this plan") as refused:
+        app.install_template(
+            plan, wrong, source_root=source, current_inspection=inspected, actor_id="local-user",
+        )
+    assert refused.value.cause_code == "template_import_approval_mismatch"
+    tampered = {**plan, "name": "Changed after planning"}
+    with pytest.raises(AppError, match="plan is not valid or was modified") as modified:
+        app.install_template(
+            tampered, {**wrong, "planDigest": plan["planDigest"]}, source_root=source,
+            current_inspection=inspected, actor_id="local-user",
+        )
+    assert modified.value.cause_code == "template_import_plan_invalid"
+    assert not (layout.instances_root / "approval-probe").exists()
+
+
+def test_allowlisted_template_import_survives_git_ownership_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    source = _statespec_repository(sources / "native")
+    monkeypatch.setenv("STATEPORT_REPOSITORY_ROOTS", str(sources))
+    layout = LocalLayout(tmp_path / "config", tmp_path / "data", tmp_path / "state")
+    layout.initialize()
+    app = PersistentApp(layout)
+    inspector = RepositoryInspector(RepositorySourcePolicy(layout))
+    git_calls: list[list[str]] = []
+    original_run = subprocess.run
+
+    def foreign_owner_git(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[0] == "git" and kwargs.get("cwd") == source:
+            git_calls.append(argv)
+            kwargs["env"] = {
+                **dict(kwargs.get("env") or os.environ),
+                "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+            }
+        return original_run(argv, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(subprocess, "run", foreign_owner_git)
+        inspected = _inspection(inspector, source, sources)
+        installed = _install(app, inspected, source, "foreign-owner-template")
+
+    assert installed["instanceId"] == "foreign-owner-template"
+    assert git_calls
+    assert all(f"safe.directory={source}" in argv for argv in git_calls)
+    assert all("safe.directory=*" not in argv for argv in git_calls)
 
 
 def test_managed_incarnation_refuses_a_recreated_marker(

@@ -754,6 +754,12 @@ export interface ConversationMessage {
   content: string
   createdAt: string
   state: MessageState
+  /**
+   * Why an assistant response failed, as the service's fixed public-safe
+   * sentence (quota, sign-in, model, upstream, timeout). Only set on failed
+   * assistant messages.
+   */
+  failureReason?: string
   attachments: Attachment[]
   contextChips: ContextChip[]
   toolEvents: ToolEvent[]
@@ -1986,6 +1992,8 @@ export interface LocalServiceStatus {
     actorId: string
     platformOperationsAllowed: boolean
     statebenchInspectionAllowed: boolean
+    /** Backend-derived: the role holds application.provider.manage. Absent on older services. */
+    providerActionsAllowed?: boolean
   }
 }
 

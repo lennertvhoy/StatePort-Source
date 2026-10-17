@@ -83,7 +83,7 @@ def test_checklistdd_fixture_is_installable_through_real_service(tmp_path, monke
             urlopen(unsafe_request)
         except HTTPError as error:
             assert error.code == 403
-            assert json.loads(error.read())["error"]["code"] == "application_install_denied"
+            assert json.loads(error.read())["error"]["code"] == "csrf_token_invalid"
         else:
             raise AssertionError("legacy install without origin, CSRF, or exact package identity succeeded")
 
@@ -133,11 +133,17 @@ def test_checklistdd_fixture_is_installable_through_real_service(tmp_path, monke
             {"expectedInstanceId": "service-checklist", "expectedRevision": revision},
         )
         assert stale_status == 400 and stale["error"]["code"] == "operation_failed"
+        # Distinct, readable cause instead of the generic "A request value could not be used".
+        assert stale["error"]["causeCode"] == "run_revision_stale"
+        assert "changed since the request was prepared" in stale["error"]["message"]
+        assert "Reload the run" in stale["error"]["message"]
         wrong_status, wrong = rejected_post(
             f"/v1/runs/{run_id}/execute",
             {"expectedInstanceId": "different-instance", "expectedRevision": approved_revision},
         )
         assert wrong_status == 400 and wrong["error"]["code"] == "operation_failed"
+        assert wrong["error"]["causeCode"] == "run_instance_mismatch"
+        assert "different application" in wrong["error"]["message"]
         observed = get(f"/v1/runs/{run_id}")["result"]["run"]
         assert observed["status"] == "approved"
         assert observed["revision"] == approved_revision

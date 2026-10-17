@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .sandbox import SANDBOX_BACKEND_ID
+
 
 _BACKEND_REGISTRY: dict[str, Any] = {}
 
@@ -17,7 +19,20 @@ def _init_backends() -> None:
         "ready": False,
         "readiness": None,
         "capabilities": None,
-        "error": "sandboxed_validation_not_implemented",
+        # Honest reason: the rootless-container OpenCode agent backend exists in
+        # execution-host but is self-declared not production eligible and has no
+        # separate confined validator integrated, so it is never offered.
+        "error": "container_agent_backend_not_production_eligible",
+    }
+    # The bubblewrap-sandboxed backend is the only offered governed backend. Its
+    # readiness is a real smoke run (sandbox.probe), made on demand and cached,
+    # never at registry initialisation or when merely listing.
+    _BACKEND_REGISTRY[SANDBOX_BACKEND_ID] = {
+        "backend": None,
+        "ready": False,
+        "readiness": "probed_on_demand",
+        "capabilities": None,
+        "error": "readiness_not_probed",
     }
 
 
@@ -56,9 +71,19 @@ def list_backends() -> dict[str, Any]:
     }
 
 
+def sandbox_readiness() -> tuple[bool, str]:
+    """Probe (cached) whether the bubblewrap sandbox is usable on this host."""
+
+    from .sandbox import probe
+
+    return probe()
+
+
 def backend_effective_profile(backend_id: str) -> str:
     if backend_id == "fake":
         return "provider-free-inspection"
+    if backend_id == SANDBOX_BACKEND_ID:
+        return "sandboxed-validation"
     return "opencode-container-execution"
 
 

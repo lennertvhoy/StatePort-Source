@@ -5,9 +5,12 @@ OpenCode reads provider credentials from its own data directory
 environment variable. This module implements the second route only: the
 operator supplies one API key for one documented provider, StatePort stores it
 in a private file with owner-only permissions and injects it into the managed
-OpenCode subprocess environment. StatePort never reads, copies or reports
+OpenCode subprocess environment. StatePort never reports
 OpenCode's own authentication storage, and the stored value is never returned
-by a status projection, log line or HTTP response.
+by a status projection, log line or HTTP response. Adopting an existing OpenCode
+sign-in is a separate, explicit operator action (``provider_adoption``) that
+copies OpenCode's own auth file into this provider home without ever reading
+its values back.
 
 The provider-to-environment-variable map below is the documented environment
 contract used by the pinned OpenCode runtime. It was checked against the

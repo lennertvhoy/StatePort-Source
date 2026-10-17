@@ -65,6 +65,12 @@ except ModuleNotFoundError as exc:  # Keep the read-only API importable as a sta
 
 API_VERSION = "stateport.api/v1"
 _JSON_HEADERS = {"content-type": "application/json; charset=utf-8"}
+OPERATION_FAILURE_SENTENCES = {
+    "lifecycle_error": "The template lifecycle could not complete. Check its state and try again.",
+    "local_io_error": "A local resource could not be accessed. Check service setup and try again.",
+    "invalid_value": "A request value could not be used. Review the submitted values.",
+    "unclassified_error": "The operation could not be completed. Check service health and try again.",
+}
 
 
 @dataclass(frozen=True)
@@ -301,7 +307,15 @@ class GovernedAPI:
         except APIError as exc:
             return self._error(exc.status, exc.code, str(exc))
         except (LifecycleError, OSError, TypeError, ValueError) as exc:
-            return self._error(400, "operation_failed", str(exc))
+            cause_code = (
+                "lifecycle_error" if isinstance(exc, LifecycleError) else
+                "local_io_error" if isinstance(exc, OSError) else
+                "invalid_value"
+            )
+            return self._error(
+                400, "operation_failed", OPERATION_FAILURE_SENTENCES[cause_code],
+                cause_code=cause_code,
+            )
         except Exception:
             return self._error(500, "internal_error", "the operation failed")
 
@@ -1558,10 +1572,13 @@ class GovernedAPI:
         return Response(200, {"ok": True, "result": body}, dict(_JSON_HEADERS))
 
     @staticmethod
-    def _error(status: int, code: str, message: str) -> Response:
+    def _error(status: int, code: str, message: str, *, cause_code: str | None = None) -> Response:
+        error = {"code": code, "message": message}
+        if cause_code is not None:
+            error["causeCode"] = cause_code
         return Response(
             status,
-            {"ok": False, "error": {"code": code, "message": message}},
+            {"ok": False, "error": error},
             dict(_JSON_HEADERS),
         )
 

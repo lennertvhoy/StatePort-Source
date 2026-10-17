@@ -17,6 +17,9 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
+import tempfile
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "public_export_unclassified_paths.py"
@@ -229,3 +232,132 @@ class ReporterIsNotAGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DependencyDefectReportTests(unittest.TestCase):
+    """The --deps reporter must be able to FAIL, or it is decoration.
+
+    This exists because the campaign it lives in shipped a residue guard built on a
+    pattern that could never match anything, reported its unconditional zero as a
+    verified property, and only an independent pass caught it. A reporter with no
+    negative control is exactly that shape waiting to happen, so every case here has a
+    matching case that must NOT be reported.
+    """
+
+    def _policy(self, rules):
+        return SimpleNamespace(rules=[SimpleNamespace(**r) for r in rules])
+
+    def _rule(self, rid, classification, paths):
+        return {"identifier": rid, "classification": classification, "paths": list(paths)}
+
+    def _scan(self, tmp: Path, body: str, name: str = "pub_mod.py"):
+        """Write the fixture and return its path AS THE REPORTER RESOLVES IT.
+
+        report_dependency_defects() reads Path(src) relative to the process CWD, not to
+        reporter.ROOT, and silently skips an unreadable file. An earlier version of this
+        test patched ROOT and left the CWD alone, so the fixture was never read and the
+        positive cases failed with an empty result - which is a reminder that a
+        silent-skip path can look exactly like a clean report.
+        """
+        (tmp / name).write_text(body, encoding="utf-8")
+        return str(tmp / name)
+
+    def test_reports_a_published_file_that_reads_a_private_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = self._scan(tmp, 'X = open("secrets/config.yaml").read()\n')
+            pol = self._policy([
+                self._rule("pub", "public-source", [src]),
+                self._rule("priv", "private-internal", ["secrets/config.yaml"]),
+            ])
+            with mock.patch.object(reporter, "_load_policy", return_value=pol), \
+                 mock.patch.object(reporter, "ROOT", tmp):
+                found, _unreadable = reporter.report_dependency_defects()
+        self.assertTrue(found, "a published file reading a private path must be reported")
+        self.assertEqual(found[0][0], src)
+        self.assertEqual(found[0][1], "secrets/config.yaml")
+
+    def test_reports_a_module_style_import_of_a_private_file(self):
+        # "from privmod import x" carries no path prefix; this is the case path-only
+        # matching missed, and it is the regression this test exists to hold shut.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = self._scan(tmp, "from privmod import thing\n")
+            pol = self._policy([
+                self._rule("pub", "public-source", [src]),
+                self._rule("priv", "private-internal", ["scripts/privmod.py"]),
+            ])
+            with mock.patch.object(reporter, "_load_policy", return_value=pol), \
+                 mock.patch.object(reporter, "ROOT", tmp):
+                found, _unreadable = reporter.report_dependency_defects()
+        self.assertTrue(found, "a module-style import of a private file must be reported")
+        self.assertEqual(found[0][1], "scripts/privmod.py")
+
+    def test_does_not_report_a_clean_published_file(self):
+        """NEGATIVE CONTROL: a file with no private dependency must produce nothing.
+
+        Without this, a reporter that always returned every published file would pass
+        every other test in this class.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = self._scan(tmp, "import json\nX = json.dumps({})\n")
+            pol = self._policy([
+                self._rule("pub", "public-source", [src]),
+                self._rule("priv", "private-internal", ["secrets/config.yaml"]),
+            ])
+            with mock.patch.object(reporter, "_load_policy", return_value=pol), \
+                 mock.patch.object(reporter, "ROOT", tmp):
+                found, _unreadable = reporter.report_dependency_defects()
+        self.assertEqual(found, [], "a clean published file must not be reported")
+
+    def test_does_not_report_a_mention_in_a_comment(self):
+        """NEGATIVE CONTROL: a name in a comment is not a dependency.
+
+        This is the distinction the 51-finding crude scan lost, so it is pinned here.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = self._scan(tmp, '# see secrets/config.yaml for the layout\nimport json\n')
+            pol = self._policy([
+                self._rule("pub", "public-source", [src]),
+                self._rule("priv", "private-internal", ["secrets/config.yaml"]),
+            ])
+            with mock.patch.object(reporter, "_load_policy", return_value=pol), \
+                 mock.patch.object(reporter, "ROOT", tmp):
+                found, _unreadable = reporter.report_dependency_defects()
+        self.assertEqual(found, [], "a comment mentioning a private path is not a dependency")
+
+    def test_reports_an_unreadable_published_file_instead_of_skipping_it(self):
+        """An unreadable file must be visible, not silently dropped.
+
+        Skipping it made the finding count smaller for no visible reason, so a broken
+        tree and a clean one produced the same output. That is the no-op-instrument shape
+        one level in, and this is the test that keeps it fixed.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            absent = tmp / "absent_module.py"
+            good = tmp / "pub_mod.py"
+            good.write_text('open("secrets/config.yaml")\n', encoding="utf-8")
+            pol = self._policy([
+                self._rule("pub", "public-source", [str(absent), str(good)]),
+                self._rule("priv", "private-internal", ["secrets/config.yaml"]),
+            ])
+            with mock.patch.object(reporter, "_load_policy", return_value=pol), \
+                 mock.patch.object(reporter, "ROOT", tmp):
+                defects, unreadable = reporter.report_dependency_defects()
+        self.assertEqual(
+            [p for p, _ in unreadable], [str(absent)],
+            "the unreadable file must be reported, not silently skipped",
+        )
+        self.assertTrue(defects, "the readable file's finding must still be reported")
+
+    def test_deps_mode_is_report_only_and_exits_zero(self):
+        """It must not become a gate by accident: no findings must still exit 0."""
+        proc = subprocess.run(
+            [sys.executable, "scripts/public_export_unclassified_paths.py", "--deps"],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("published->private", proc.stdout)

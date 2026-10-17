@@ -2002,6 +2002,61 @@ def test_idle_stop_receipt_is_atomic_against_polling(
         daemon.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("kind", "workload_id", "expected_state"),
+    [("workspace", "ws-external", "stopped"), ("terminal", "wl-external", "exited")],
+)
+def test_status_receipts_a_container_stopped_outside_the_daemon(
+    tmp_path: Path, kind: str, workload_id: str, expected_state: str
+) -> None:
+    """A running workload whose container died elsewhere is still receipted.
+
+    The status path is the only observer of an externally killed container:
+    the daemon never issued the stop, so no supervision or explicit-stop
+    receipt will ever be written.  A terminal state must never exist without
+    durable evidence of what caused it.
+    """
+    engine = WorkspaceFakeEngine()
+    daemon = _boot(tmp_path, engine, interval=0.05)
+    try:
+        bounded = wspec(workload_id, timeoutSeconds=600) if kind == "workspace" else spec(
+            workload_id, kind=kind, timeoutSeconds=600
+        )
+        doc = grant_document([bounded])
+        provision_grants(tmp_path, doc)
+        client = _client(tmp_path, doc)
+        client.create_workspace(bounded) if kind == "workspace" else client.create_workload(bounded)
+        client.start(workload_id)
+        assert client.status(workload_id)["result"]["state"] == "running"
+
+        # The container dies from outside the daemon: a foreign podman kill or
+        # a store-level event, never an engine.stop() this daemon issued.
+        engine.containers[workload_id]["running"] = False
+        engine.containers[workload_id]["exitStatus"] = 137
+        assert engine.stopped == []
+
+        assert client.status(workload_id)["result"]["state"] == expected_state
+
+        entry = OperationLedger(tmp_path / "state").get(workload_id)
+        assert entry["state"] == expected_state
+        assert entry["receipts"], (
+            "a terminal state reached by observation must carry durable evidence"
+        )
+        receipt = entry["receipts"][-1]
+        assert receipt["kind"] == "external-stop"
+        assert "outside the daemon" in receipt["detail"]
+        assert receipt["cleanup"] == "not-required"
+        assert receipt["residual"]["engineStatus"] == "exited"
+        assert receipt["residual"]["exitStatus"] == 137
+        assert receipt["residual"]["containerRunning"] is False
+        # The observed stop is terminal bookkeeping, not a lost workload: the
+        # preserved workspace is still startable against its volume.
+        if kind == "workspace":
+            assert client.start(workload_id)["result"]["state"] == "running"
+    finally:
+        daemon.shutdown()
+
+
 def test_workspace_without_stop_after_idle_is_not_idle_stopped(tmp_path: Path) -> None:
     engine = WorkspaceFakeEngine()
     daemon = _boot(tmp_path, engine, interval=0.05)

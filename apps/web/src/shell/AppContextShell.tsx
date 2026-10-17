@@ -21,7 +21,7 @@ import { cn } from '@/lib/utils'
 
 import type { CurrentInstanceContext } from './currentInstance'
 import { InstanceContext } from './currentInstance'
-import { fetchInstanceCached, primeInstanceCache, useMarkLastOpened } from './data'
+import { fetchInstanceCached, invalidateInstanceCache, notifyApplicationsChanged, primeInstanceCache, useMarkLastOpened } from './data'
 
 const NAV_ICONS: Record<ApplicationNavIcon, typeof LayoutDashboard> = {
   overview: LayoutDashboard,
@@ -45,7 +45,15 @@ export function AppContextShell({ children }: { children?: ReactNode }) {
   } | null>(null)
   const [nonce, setNonce] = useState(0)
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), [])
+  // A refresh must re-read the service: drop the shared instance cache first
+  // (otherwise fetchInstanceCached would hand back the stale copy, e.g. the
+  // "Backup due / Never" state right after a verified backup), then tell every
+  // list consumer (sidebar, dashboard) that listed fields may have changed.
+  const refresh = useCallback(() => {
+    if (instanceId) invalidateInstanceCache(instanceId)
+    setNonce((n) => n + 1)
+    notifyApplicationsChanged()
+  }, [instanceId])
   const requestKey = `${instanceId ?? ''}#${nonce}`
 
   useEffect(() => {

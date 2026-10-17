@@ -8,7 +8,10 @@ import { useSessionStore } from '@/state'
 
 import { ReadOnlyValue, SettingRow, SettingSubsection } from './controls'
 
-const INSTANCE_ID = /^[a-z][a-z0-9-]{1,63}$/
+// Same instance identity grammar as the recovery wire schemas in
+// domainsCore.ts: `ins_` + 16 hex (the id shape the UI/API install with)
+// must pass here too.
+const INSTANCE_ID = /^[a-z][a-z0-9_-]{1,63}$/
 const RESTORE_STATUS_LABEL: Record<RecoveryStatus['restore']['status'], string> = {
   not_planned: 'Not planned',
   planned: 'Planned',
@@ -93,11 +96,13 @@ function InstanceRecoveryRestorePanel({ instanceId, onRestored }: RecoveryRestor
       if (!mounted.current) return
       onRestored()
       pushToast({ kind: 'success', title: 'Backup completed', body: `Validated receipt ${result.receipt.id} was recorded.` })
-    } catch {
+    } catch (err) {
       if (!mounted.current) return
       await reload(false)
       if (!mounted.current) return
-      setError('No validated backup receipt was received. Refresh recovery status before retrying; the operation may have completed.')
+      // Say why when the service told us (for example a full disk); a lost connection has no reason to give.
+      const reason = err instanceof Error && err.message.trim() ? `${err.message.trim()} ` : ''
+      setError(`${reason}No validated backup receipt was received. Refresh recovery status before retrying; the operation may have completed.`)
     } finally {
       if (mounted.current) { setBusy(false); setBackupBusy(false) }
     }
@@ -111,7 +116,7 @@ function InstanceRecoveryRestorePanel({ instanceId, onRestored }: RecoveryRestor
       return
     }
     if (!INSTANCE_ID.test(trimmedId) || trimmedId === instanceId) {
-      setError('Use a different lowercase instance ID containing letters, numbers, and hyphens.')
+      setError('Use a different lowercase instance ID containing letters, numbers, hyphens, and underscores.')
       return
     }
     setBusy(true)

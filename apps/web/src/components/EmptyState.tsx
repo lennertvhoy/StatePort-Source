@@ -13,6 +13,8 @@ export interface EmptyStateAction {
   label: string
   onClick: () => void
   icon?: LucideIcon
+  /** Disabled while the action's work is in flight (prevents double submission). */
+  disabled?: boolean
 }
 
 export interface EmptyStateProps {
@@ -37,13 +39,13 @@ export function EmptyState({ icon: Icon, title, description, action, secondaryAc
       {action || secondaryAction ? (
         <div className="mt-2 flex items-center gap-2">
           {action ? (
-            <Button size="sm" onClick={action.onClick}>
+            <Button size="sm" onClick={action.onClick} disabled={action.disabled}>
               {action.icon ? <action.icon aria-hidden="true" /> : null}
               {action.label}
             </Button>
           ) : null}
           {secondaryAction ? (
-            <Button size="sm" variant="ghost" onClick={secondaryAction.onClick}>
+            <Button size="sm" variant="ghost" onClick={secondaryAction.onClick} disabled={secondaryAction.disabled}>
               {secondaryAction.icon ? <secondaryAction.icon aria-hidden="true" /> : null}
               {secondaryAction.label}
             </Button>

@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import type { NotificationItem } from '@/client'
-import { getClient } from '@/client'
+import { ClientError, getClient } from '@/client'
 import { EmptyState, TimeAgo } from '@/components'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -29,7 +29,10 @@ export function NotificationsPopover({ children }: { children: ReactNode }) {
     getClient()
       .activity.listNotifications()
       .then((list) => {
-        if (!cancelled) setItems(list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)))
+        if (!cancelled) {
+          setItems([...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt)))
+          setError(null)
+        }
       })
       .catch((err) => {
         if (!cancelled) {
@@ -60,8 +63,10 @@ export function NotificationsPopover({ children }: { children: ReactNode }) {
           {error ? (
             <div className="flex flex-col items-start gap-2 px-3 py-4" data-testid="notifications-unavailable">
               <p className="text-sm font-medium text-foreground">Notifications unavailable</p>
-              <p className="text-sm text-foreground-secondary">The notification source could not be read. No empty state is being inferred.</p>
-              <Button
+              <p className="text-sm text-foreground-secondary">{error instanceof ClientError
+                ? error.kind === 'not_implemented' ? 'No notification source is available in this build.' : error.message
+                : 'The notification source could not be read. No empty state is being inferred.'}</p>
+              {!(error instanceof ClientError && error.kind === 'not_implemented') && <Button
                 size="sm"
                 variant="outline"
                 onClick={() => {
@@ -71,7 +76,7 @@ export function NotificationsPopover({ children }: { children: ReactNode }) {
                 }}
               >
                 Retry
-              </Button>
+              </Button>}
             </div>
           ) : items === null ? (
             <p className="px-3 py-4 text-sm text-foreground-secondary">Loading…</p>

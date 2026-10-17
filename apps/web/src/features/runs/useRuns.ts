@@ -15,6 +15,8 @@ import type {
   RunRecord,
 } from '@/client'
 import { getClient } from '@/client'
+import { useCurrentInstance } from '@/shell/currentInstance'
+import { invalidateInstanceCache } from '@/shell/data'
 import { useSessionStore } from '@/state'
 
 interface RunsSnapshot {
@@ -55,6 +57,10 @@ export function useRuns(instanceId: string): RunsState & RunsActions {
   const [activeRun, setActiveRun] = useState<RunRecord | null>(null)
   const [transitionError, setTransitionError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  // Governed transitions can change the instance projection server-side
+  // (Learning progress, activity, approvals). Default context is a no-op when
+  // rendered outside the app shell (tests).
+  const { refresh: refreshInstanceContext } = useCurrentInstance()
   const requestKey = `${instanceId}#${nonce}`
   const currentRequestKey = useRef(requestKey)
   currentRequestKey.current = requestKey
@@ -143,6 +149,12 @@ export function useRuns(instanceId: string): RunsState & RunsActions {
           expectedRevision: run.revision,
         })
         updateRun(next)
+        // Every transition here is a governed mutation of the run. Drop the
+        // shell's cached projection of the affected instance so surfaces like
+        // the Learning overview re-read truth (no polling); re-read the live
+        // app context when the transition belongs to this shell's instance.
+        invalidateInstanceCache(next.instanceId)
+        if (next.instanceId === instanceId) refreshInstanceContext()
         return next
       } catch (error: unknown) {
         setTransitionError(error)
@@ -152,7 +164,7 @@ export function useRuns(instanceId: string): RunsState & RunsActions {
         setBusy(false)
       }
     },
-    [updateRun],
+    [instanceId, refreshInstanceContext, updateRun],
   )
 
   const selectRun = useCallback((run: RunRecord | null) => {

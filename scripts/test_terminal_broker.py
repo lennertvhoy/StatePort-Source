@@ -412,6 +412,51 @@ def test_project_sandbox_retains_the_dedicated_pty_for_job_control(tmp_path):
     assert command[-3:] == ("/bin/bash", "--noprofile", "--norc")
 
 
+def test_project_sandbox_never_sets_a_hostname(tmp_path):
+    """Nested rootless podman denies the UTS capability, so `--hostname` kills the shell.
+
+    The owner saw `bwrap: Can't set hostname to stateport-workspace: Operation
+    not permitted`.  `--unshare-all` already gives the sandbox a private UTS
+    namespace; the sandbox must keep that and its capability drop, and must not
+    ask for a hostname.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    command = broker_module._project_sandbox_command(
+        Path("/usr/bin/bwrap"),
+        project.resolve(),
+        ("/bin/bash", "--noprofile", "--norc"),
+    )
+    assert "--hostname" not in command
+    assert "stateport-workspace" not in command
+    assert "--unshare-all" in command
+    drop = command.index("--cap-drop")
+    assert command[drop + 1] == "ALL"
+
+
+@pytest.mark.skipif(
+    __import__("shutil").which("bwrap") is None,
+    reason="bubblewrap is not installed on this host",
+)
+def test_project_sandbox_built_command_line_runs_under_real_bubblewrap(tmp_path):
+    bwrap = Path(__import__("shutil").which("bwrap"))
+    probe = subprocess.run(
+        [bwrap.as_posix(), "--unshare-all", "--ro-bind", "/", "/", "--", "/bin/true"],
+        capture_output=True, timeout=20, check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip("bubblewrap cannot create namespaces on this host: " + probe.stderr.decode(errors="replace")[:200])
+    project = tmp_path / "project"
+    project.mkdir()
+    command = broker_module._project_sandbox_command(
+        bwrap, project.resolve(), ("/bin/sh", "-c", "pwd; echo STATEPORT_SANDBOX_OK"),
+    )
+    result = subprocess.run(command, capture_output=True, timeout=20, check=False)
+    assert b"Can't set hostname" not in result.stderr
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert result.stdout.decode().splitlines() == [project.resolve().as_posix(), "STATEPORT_SANDBOX_OK"]
+
+
 def test_project_sandbox_interactive_shell_has_controlling_terminal_and_job_control(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

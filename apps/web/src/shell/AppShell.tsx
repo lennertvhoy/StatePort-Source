@@ -211,6 +211,30 @@ function BuiltInCommands() {
   )
 }
 
+/**
+ * Bypass block (WCAG 2.4.1): the first Tab stop on every route. It is visually
+ * hidden until focused and moves focus into <main>, so a keyboard user reaches
+ * the page's primary action after Tab, Enter, Tab instead of tabbing through
+ * the whole sidebar and topbar first. It is not a hash link on purpose: the app
+ * uses hash routing, and `#main-content` would navigate away.
+ */
+function SkipToContent() {
+  return (
+    <a
+      href="#main-content"
+      data-testid="skip-to-content"
+      onClick={(event) => {
+        event.preventDefault()
+        const main = document.getElementById('main-content')
+        if (main instanceof HTMLElement) main.focus()
+      }}
+      className="sr-only rounded-sm bg-surface px-3 py-2 text-sm font-medium text-foreground shadow-2 ring-2 ring-accent focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-toast"
+    >
+      Skip to main content
+    </a>
+  )
+}
+
 export function AppShell() {
   useServiceStatusPolling()
   useOperationsPolling()
@@ -222,6 +246,7 @@ export function AppShell() {
 
   return (
     <StartupFocusContext.Provider value={startupFocus}><div className="flex h-dvh overflow-hidden bg-app text-foreground" data-testid="app-shell">
+      <SkipToContent />
       <ThemeEngine />
       <TitleManager />
       <KeyboardShortcuts />

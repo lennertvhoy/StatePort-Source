@@ -300,7 +300,10 @@ def test_every_post_route_requires_the_authenticated_mutation_boundary(
                 origin=origin,
             )
             assert status == 403, path
-            assert payload["error"]["code"] == denial_code, path
+            # A failed CSRF/origin check has ONE stable code on every route: the web client retries only on
+            # it, so a route-specific denial label must never hide it (and vice versa).
+            assert payload["error"]["code"] == "csrf_token_invalid", path
+            assert payload["error"]["code"] != denial_code, path
     finally:
         server.shutdown()
         thread.join(timeout=2)
@@ -433,7 +436,7 @@ def test_post_boundary_is_fail_closed_for_future_routes_and_session_is_the_only_
             origin=origin,
         )
         assert status == 403
-        assert denied["error"]["code"] == "file_workspace_access_denied"
+        assert denied["error"]["code"] == "csrf_token_invalid"
 
         status, denied = _post(
             port,
@@ -443,7 +446,7 @@ def test_post_boundary_is_fail_closed_for_future_routes_and_session_is_the_only_
             origin="https://attacker.invalid",
         )
         assert status == 403
-        assert denied["error"]["code"] == "file_workspace_access_denied"
+        assert denied["error"]["code"] == "csrf_token_invalid"
 
         status, missing = _post(
             port,
@@ -494,7 +497,7 @@ def test_every_post_route_rejects_duplicate_origin_and_csrf_headers(
             for headers in duplicate_authorization_headers:
                 status, payload = _raw_post(port, headers, path=path)
                 assert status == 403, path
-                assert payload["error"]["code"] == denial_code, path
+                assert payload["error"]["code"] == "csrf_token_invalid", path
     finally:
         server.shutdown()
         thread.join(timeout=2)
@@ -648,7 +651,7 @@ def test_container_host_mapping_uses_one_explicit_loopback_authority(
             host=external_host,
         )
         assert status == 403
-        assert payload["error"]["code"] == "file_workspace_access_denied"
+        assert payload["error"]["code"] == "csrf_token_invalid"
 
         status, payload, set_cookie = _raw_request_with_host(
             bound_port,

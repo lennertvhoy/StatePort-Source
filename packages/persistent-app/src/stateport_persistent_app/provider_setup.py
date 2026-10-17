@@ -25,6 +25,7 @@ from uuid import uuid4
 
 from codex_adapter import CodexAdapter
 from external_engine_runtime import ProcessSpec, TemporaryWorkspace, filtered_environment, run_process
+from .provider_adoption import OAUTH_ROTATION_CAVEAT, OpenCodeAdoption
 from .provider_credentials import ProviderCredentialStore, resolve_provider_home
 from .provider_router import ProviderRouter, ProviderRouterError, PROVIDERS
 
@@ -93,6 +94,9 @@ class ProviderSetup:
         self.staging_root = state_root / 'provider-verification'
         self.adapter_factory = adapter_factory
         self.credential_store = credential_store or ProviderCredentialStore(resolve_provider_home())
+        # Adoption shares the credential store's provider home: the adopted
+        # copy lands exactly where the managed OpenCode subprocess reads it.
+        self.adoption = OpenCodeAdoption(self.credential_store.home, selected_provider=self._selected_auth_provider)
         self.login_code_wait_seconds = float(login_code_wait_seconds)
         self.login_flow_timeout_seconds = float(login_flow_timeout_seconds)
         if self.login_code_wait_seconds <= 0 or self.login_flow_timeout_seconds <= 0:
@@ -111,6 +115,16 @@ class ProviderSetup:
         self.authentication = 'unverified'
         self.request = 'unverified'
         self.detail = 'Select a provider and model, then verify in this runtime.'
+
+    def _selected_auth_provider(self):
+        """The auth.json provider id of the saved model (``<provider>/<model>``), if OpenCode is selected."""
+        if not os.path.lexists(self.profile_path):
+            return None
+        profile = ProviderRouter.read_profile(self.profile_path)
+        if profile['provider']['backendId'] != 'opencode':
+            return None
+        identifier = profile['model']['id']
+        return identifier.split('/', 1)[0] if '/' in identifier else None
 
     def selected_provider(self):
         if not os.path.lexists(self.profile_path):
@@ -203,6 +217,8 @@ class ProviderSetup:
                 # Configure/Verify probed it in this service session.
                 if not observed:
                     detail = 'OpenCode is the saved provider. Its executable and authentication are checked only when you configure or verify in this service session.'
+                    if self.adoption.status()['adoptionStatus'] == 'adopted':
+                        detail += ' An adopted OpenCode sign-in copy is present (presence only; it is not checked). ' + OAUTH_ROTATION_CAVEAT
                 elif not installed:
                     detail = 'OpenCode executable is not installed in this runtime. Install the pinned OpenCode runtime, then verify again.'
             return dict(configured=configured, executableInstalled=installed,
@@ -212,7 +228,7 @@ class ProviderSetup:
                         connected=configured and not disabled, model=model,
                         authenticationStatus='unavailable' if (observed and not installed) else self.authentication,
                         requestStatus=self.request, telemetryStatus='unavailable', detail=detail,
-                        **self.credential_store.status())
+                        **self.credential_store.status(), **self.adoption.status())
 
     def configure(self, model, provider_id=None):
         with self.lock:
@@ -226,7 +242,7 @@ class ProviderSetup:
             self.detail = (
                 'OpenCode model saved. StatePort runs the pinned OpenCode executable and reports it. '
                 'An operator-provided provider API key can be stored here and is injected only into '
-                'OpenCode invocations; StatePort never reads OpenCode\'s own authentication.'
+                'OpenCode invocations. An existing OpenCode sign-in can also be adopted; StatePort never displays or returns a credential.'
                 if provider_id == 'opencode'
                 else 'Model saved. Authenticate using Codex in this runtime, then verify. StatePort never reads or copies credentials.'
             )
@@ -241,6 +257,32 @@ class ProviderSetup:
                     'Credential stored in the private provider home. It is injected only into managed '
                     'OpenCode invocations and is never returned by this service.'
                 )
+            return self.status()
+
+    def adopt_signin(self, providers=None):
+        """Copy the selected provider record(s) of an existing OpenCode sign-in (presence-only status)."""
+        with self.lock:
+            status = self.adoption.adopt(providers=providers)
+            if self.selected_provider() == 'opencode':
+                self.detail = (
+                    'The selected provider record(s) of an existing OpenCode sign-in were copied into the private '
+                    'provider home; other providers were not copied. '
+                    'It is a copy: it is injected only into managed OpenCode invocations, is never returned '
+                    'by this service, and does not follow later changes to the original. '
+                    + OAUTH_ROTATION_CAVEAT + ' Verify to confirm it works.'
+                )
+            self.authentication = self.request = 'unverified'
+            return self.status()
+
+    def remove_adopted_signin(self):
+        """Delete only StatePort's copy of the adopted sign-in."""
+        with self.lock:
+            self.adoption.forget()
+            if self.selected_provider() == 'opencode':
+                self.detail = (
+                    'The adopted OpenCode sign-in copy was removed. The original OpenCode sign-in is untouched.'
+                )
+            self.authentication = self.request = 'unverified'
             return self.status()
 
     def remove_credential(self, provider_id):
@@ -331,8 +373,12 @@ class ProviderSetup:
             return self.status()
         self.authentication = 'unverified'
         self.request = 'unverified'
+        if self.adoption.status()['adoptionStatus'] == 'adopted':
+            self.detail = ('OpenCode executable verified in this runtime. An adopted OpenCode sign-in copy is present '
+                           '(presence only; this control does not check that it is still valid). Send conversation work to use it.')
+            return self.status()
         self.detail = ('OpenCode executable verified in this runtime. Authentication is not verified by this control; '
-                       'sign in with OpenCode itself, then send conversation work.')
+                       'sign in with OpenCode itself, or adopt an existing OpenCode sign-in, then send conversation work.')
         return self.status()
 
     def login_status(self):

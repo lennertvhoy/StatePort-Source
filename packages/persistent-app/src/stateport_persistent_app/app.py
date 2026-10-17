@@ -63,6 +63,8 @@ APPROVAL_FORMAT = "stateport.exact-approval/v1"
 RESTORE_PLAN_FORMAT = "stateport.restore-plan/v1"
 RESTORE_APPROVAL_FORMAT = "stateport.restore-approval/v1"
 RESTORE_RECEIPT_FORMAT = "stateport.restore-receipt/v1"
+RESTORE_INTENT_FORMAT = "stateport.restore-intent/v1"
+RESTORE_FAILURE_FORMAT = "stateport.restore-failure/v1"
 RECOVERY_STATUS_FORMAT = "stateport.recovery-status/v1"
 SOURCE_ACCESS_FORMAT = "stateport.source-access/v1"
 TEMPLATE_IMPORT_PLAN_FORMAT = "stateport.template-import-plan/v1"
@@ -73,6 +75,14 @@ _RESTORE_STATUS_ARTIFACT_LIMIT = 4096
 _RESTORE_ARTIFACT_BYTES_LIMIT = 256 * 1024
 _RESTORE_INVENTORY_BYTES_LIMIT = 16 * 1024 * 1024
 _ID = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+# Identity grammar of instances the product itself installs: the browser
+# generates `ins_<16 hex>` (HttpCatalogClient.createInstance), and the
+# portable-execution fixture install accepts `_` and `.` in instance ids.
+# Restore source/destination ids therefore accept the underscore on top of the
+# hyphen-only `_ID` used for bootstrap/template identities. Safe as a path
+# segment: it starts with a lowercase letter and has no `.`, `/`, `\\` or
+# other separator, so `instances_root / id` can never leave `instances_root`.
+_INSTANCE_ID = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _GIT_OID = re.compile(r"^[0-9a-f]{40}$")
 _SOURCE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -105,7 +115,18 @@ _GENERATED_IMPORT_PREFIXES = (
 
 
 class AppError(ValueError):
-    """A safe, user-facing local application error."""
+    """A safe, user-facing local application error.
+
+    ``cause_code`` (optional) is a stable, machine-readable reason. When it is
+    set, the HTTP boundary reports this exception's own message and cause code
+    (``operation_failed`` / ``<cause_code>``) instead of the generic redacted
+    sentence, so every raiser that sets it must keep the message free of paths
+    and secrets and say what the person can do next.
+    """
+
+    def __init__(self, message: str = "", *, cause_code: str | None = None):
+        super().__init__(message)
+        self.cause_code = cause_code
 
 
 class ApplicationRenameError(AppError):
@@ -964,6 +985,37 @@ class PersistentCatalog:
                        for entry in self._external_load())
         return entries
 
+    def quarantine_unregistered_instance_directories(self) -> list[str]:
+        """Startup only: move directories under instances/ that the catalog does not list into quarantine.
+
+        An install, import or restore that was killed between creating its directory and registering it in
+        the catalog leaves a directory nobody can see, open or retry over (the destination "already exists").
+        Nothing is deleted: the directory is renamed under <data>/quarantine/unregistered-instances/ with a
+        timestamp. Runs before any request is served, so it cannot race an install in flight, and does
+        nothing unless the catalog file exists and parses (never guess from an unreadable catalog).
+        """
+        root = self.layout.instances_root
+        if not root.is_dir() or not self.layout.catalog_file.is_file():
+            return []
+        try:
+            registered = {record.path for record in self._canonical().list(refresh=False)}
+        except Exception:  # noqa: BLE001 - an unreadable catalog means: touch nothing
+            return []
+        moved: list[str] = []
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        for child in sorted(root.iterdir()):
+            if child.name in registered or child.is_symlink() or not child.is_dir():
+                continue
+            target_dir = self.layout.data_root / "quarantine" / "unregistered-instances"
+            target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target = target_dir / f"{child.name}-{stamp}"
+            try:
+                os.rename(child, target)
+            except OSError:
+                continue
+            moved.append(child.name)
+        return moved
+
     def list(self) -> list[dict[str, Any]]:
         try:
             return [self._entry(record) for record in self._canonical().list()] + [self._external_entry(item) for item in self._external_load()]
@@ -1150,6 +1202,52 @@ def _validate_id(value: str, label: str) -> str:
     if not isinstance(value, str) or not _ID.fullmatch(value):
         raise AppError(f"{label} must match {_ID.pattern}")
     return value
+
+
+def _validate_instance_id(value: str, label: str) -> str:
+    """Validate an existing or restored instance identity (allows `ins_<hex>`)."""
+
+    if not isinstance(value, str) or not _INSTANCE_ID.fullmatch(value):
+        raise AppError(
+            f"{label} must match {_INSTANCE_ID.pattern}: start with a lowercase letter, "
+            "then use only lowercase letters, digits, hyphens or underscores (2 to 64 "
+            "characters in total)",
+            cause_code="instance_identity_invalid",
+        )
+    return value
+
+
+_RESTORE_ARTIFACT_NOUN = {
+    "plans": "plan",
+    "approvals": "approval",
+    "receipts": "receipt",
+    "failures": "failure record",
+}
+_RESTORE_NEXT_STEP = {
+    "plans": "Create a new restore plan and use the plan digest it returns.",
+    "approvals": "Approve the current restore plan and apply it with the approval digest "
+    "that the approval step returned.",
+    "receipts": "Open the recovery status for this application to see the restore result.",
+    "failures": "Open the recovery status for this application to see the restore result.",
+}
+
+
+def _restore_refusal(kind: str, reason: str) -> "ApprovalError":
+    """A readable, distinct refusal for one restore plan/approval/receipt artifact.
+
+    ``reason`` is ``not_found`` (the digest names nothing stored), ``invalid``
+    (the stored or submitted artifact is malformed, unsafe or its digest does not
+    verify). Messages carry no paths, digests or host details.
+    """
+
+    noun = _RESTORE_ARTIFACT_NOUN.get(kind, "artifact")
+    step = _RESTORE_NEXT_STEP.get(kind, "")
+    singular = kind[:-1] if kind.endswith("s") else kind
+    if reason == "not_found":
+        text = f"The restore {noun} was not found. It may be mistyped, expired or from a different application. {step}"
+    else:
+        text = f"The restore {noun} is not valid: the digest does not match a verified, unmodified {noun}. {step}"
+    return ApprovalError(text.strip(), cause_code=f"restore_{singular}_{reason}")
 
 
 def _render_node(node: Any, values: Mapping[str, Any]) -> Any:
@@ -1944,7 +2042,8 @@ class SourceCache:
         )
         try:
             return subprocess.run(
-                ["git", "-c", "credential.helper=", *arguments],
+                ["git", *(["-c", f"safe.directory={cwd}"] if cwd is not None else []),
+                 "-c", "credential.helper=", *arguments],
                 cwd=cwd,
                 capture_output=True,
                 text=text,
@@ -2562,10 +2661,17 @@ class PersistentApp:
             template_source_descriptor_override=selected_descriptor,
         )
 
-    def locked_source(self, instance_id: str) -> dict[str, Any]:
-        """Return a path-free, exact source projection from the installed lock."""
+    def locked_source(self, instance_id: str, *, prefetched: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Return a path-free, exact source projection from the installed lock.
 
-        entry, root = self._entry(instance_id)
+        ``prefetched`` is the catalog entry the caller just listed; passing it avoids re-reading (and
+        re-validating and rewriting) the whole catalog once per instance, which made listing O(n^2).
+        """
+
+        if prefetched is None:
+            entry, root = self._entry(instance_id)
+        else:
+            entry, root = self._entry_root(dict(prefetched))
         template_id, projected = self._locked_source_at(root)
         return {
             "applicationId": str(entry.get("applicationId") or template_id),
@@ -2722,7 +2828,12 @@ class PersistentApp:
             or approval.get("actorId") != expected_actor_id
             or approval.get("planDigest") != plan.get("planDigest")
         ):
-            raise ApprovalError("exact template import approval is required")
+            raise ApprovalError(
+                "The template import approval does not match this plan. Approve the "
+                "current import plan as the signed-in operator (decision, actorId and "
+                "planDigest must all match) and try the install again.",
+                cause_code="template_import_approval_mismatch",
+            )
 
     @staticmethod
     def _make_managed_incarnation(stage: Path, instance_id: str) -> dict[str, Any]:
@@ -2778,7 +2889,10 @@ class PersistentApp:
             or plan.get("planDigest")
             != _digest({key: value for key, value in plan.items() if key != "planDigest"})
         ):
-            raise ApprovalError("template import plan digest is invalid")
+            raise ApprovalError(
+                "The template import plan is not valid or was modified. Plan the import again.",
+                cause_code="template_import_plan_invalid",
+            )
         self._validate_template_import_approval(
             plan,
             approval,
@@ -3035,21 +3149,30 @@ class PersistentApp:
         unsigned = dict(plan)
         unsigned.pop("planDigest", None)
         if expected != _digest(unsigned):
-            raise ApprovalError("plan digest is not self-consistent")
+            raise ApprovalError(
+                "The plan was modified after it was created, so it cannot be approved. Plan the install again.",
+                cause_code="plan_digest_inconsistent",
+            )
         approval = {"formatVersion": APPROVAL_FORMAT, "operation": plan.get("operation"), "planDigest": expected, "operatorId": operator_id, "approvedAt": _now(), "expiresAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")}
         approval["approvalDigest"] = _digest(approval)
         return approval
 
     def create(self, plan: Mapping[str, Any], approval: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if plan.get("planDigest") != _digest({key: value for key, value in plan.items() if key != "planDigest"}):
-            raise ApprovalError("plan digest does not match exact plan")
+            raise ApprovalError(
+                "The plan was modified after it was created, so it cannot be applied. Plan the install again.",
+                cause_code="plan_digest_inconsistent",
+            )
         if (
             approval is None
             or approval.get("planDigest") != plan.get("planDigest")
             or approval.get("approvalDigest")
             != _digest({key: value for key, value in approval.items() if key != "approvalDigest"})
         ):
-            raise ApprovalError("exact plan approval is required")
+            raise ApprovalError(
+                "The approval does not match this plan. Approve the current plan and apply it with that approval.",
+                cause_code="plan_approval_mismatch",
+            )
         destination = _safe_instance_root(Path(str(plan["destination"])))
         if plan.get("conflict") == "outside_catalog_root":
             raise AppError("destination must be inside the canonical StatePort instance root")
@@ -3411,7 +3534,7 @@ class PersistentApp:
                 or plan.get("operation") != "restore_new_instance"
                 or plan.get("destinationInstanceId") != expected_instance_id
                 or not isinstance(source_instance_id, str)
-                or not _ID.fullmatch(source_instance_id)
+                or not _INSTANCE_ID.fullmatch(source_instance_id)
                 or plan.get("sourceInstanceId") != source_instance_id
                 or approval.get("sourceInstanceId") != source_instance_id
                 or approval.get("destinationInstanceId") != expected_instance_id
@@ -3593,7 +3716,7 @@ class PersistentApp:
             for field in ("sourceAccessClass", "productionInstallAllowed"):
                 observed_source.pop(field, None)
             try:
-                locked = self.locked_source(str(entry["instanceId"]))["source"]
+                locked = self.locked_source(str(entry["instanceId"]), prefetched=entry)["source"]
                 source_access = self._effective_source_access(
                     str(entry["instanceId"]), entry, locked,
                 )
@@ -3841,7 +3964,14 @@ class PersistentApp:
         *,
         allow_stale_replacement: bool = False,
     ) -> tuple[dict[str, Any], Path]:
-        entry = self.catalog.get(instance_id)
+        return self._entry_root(self.catalog.get(instance_id), allow_stale_replacement=allow_stale_replacement)
+
+    def _entry_root(
+        self,
+        entry: dict[str, Any],
+        *,
+        allow_stale_replacement: bool = False,
+    ) -> tuple[dict[str, Any], Path]:
         if entry.get("pathState") != "present":
             if (
                 allow_stale_replacement
@@ -4126,15 +4256,17 @@ class PersistentApp:
         return self.layout.operations_root / "restores"
 
     @staticmethod
-    def _restore_digest(value: str, label: str) -> str:
+    def _restore_digest(value: str, label: str, *, kind: str | None = None) -> str:
         if not isinstance(value, str) or not _SOURCE_DIGEST.fullmatch(value):
+            if kind is not None:
+                raise _restore_refusal(kind, "invalid")
             raise ApprovalError(f"{label} is invalid")
         return value
 
     def _restore_artifact_path(self, kind: str, digest: str) -> Path:
-        if kind not in {"plans", "approvals", "receipts", "failures"}:
+        if kind not in {"plans", "approvals", "receipts", "failures", "intents"}:
             raise AppError("restore artifact class is invalid")
-        safe_digest = self._restore_digest(digest, f"restore {kind} digest")[7:]
+        safe_digest = self._restore_digest(digest, f"restore {kind} digest", kind=kind)[7:]
         return self._restore_operations_root / kind / f"{safe_digest}.json"
 
     def _load_restore_artifact(
@@ -4147,11 +4279,11 @@ class PersistentApp:
     ) -> dict[str, Any]:
         value = self._read_restore_artifact(kind, digest)
         if not isinstance(value, Mapping) or value.get("formatVersion") != format_version:
-            raise ApprovalError(f"restore {kind[:-1]} is invalid")
+            raise _restore_refusal(kind, "invalid")
         result = dict(value)
         embedded = result.pop(digest_field, None)
         if embedded != digest or not secrets.compare_digest(_digest(result), digest):
-            raise ApprovalError(f"restore {kind[:-1]} digest is invalid")
+            raise _restore_refusal(kind, "invalid")
         result[digest_field] = digest
         return result
 
@@ -4176,7 +4308,7 @@ class PersistentApp:
     def _open_restore_artifact_directory(
         self, kind: str, *, create: bool = False
     ) -> int | None:
-        if kind not in {"plans", "approvals", "receipts", "failures", "locks"}:
+        if kind not in {"plans", "approvals", "receipts", "failures", "intents", "locks"}:
             raise AppError("restore artifact inventory class is invalid")
         flags = (
             os.O_RDONLY
@@ -4255,7 +4387,7 @@ class PersistentApp:
         *,
         mode: int = 0o600,
     ) -> None:
-        safe_digest = self._restore_digest(digest, f"restore {kind} digest")
+        safe_digest = self._restore_digest(digest, f"restore {kind} digest", kind=kind)
         payload = _canonical(value)
         if len(payload) > _RESTORE_ARTIFACT_BYTES_LIMIT:
             raise AppError(f"restore {kind[:-1]} artifact is oversized")
@@ -4298,7 +4430,10 @@ class PersistentApp:
                 raise AppError(f"restore {kind[:-1]} artifact ownership changed")
             os.fsync(directory)
         except FileExistsError as exc:
-            raise AppError("immutable restore operation artifact already exists") from exc
+            raise AppError(
+                "immutable restore operation artifact already exists",
+                cause_code="restore_artifact_exists",
+            ) from exc
         except Exception:
             if created and created_identity is not None:
                 try:
@@ -4315,11 +4450,45 @@ class PersistentApp:
                 os.close(artifact_descriptor)
             os.close(directory)
 
+    def _publish_restore_artifact(
+        self,
+        kind: str,
+        digest: str,
+        value: dict[str, Any],
+        *,
+        format_version: str,
+        digest_field: str,
+    ) -> dict[str, Any]:
+        """Publish a content-addressed artifact; an identical one already there is success.
+
+        Artifact names are digests of their content and timestamps have one-second
+        resolution, so repeating the same step within a second (an approval after a
+        crash and restart, a retried plan) produces the exact same artifact. That is
+        an idempotent repeat, not a conflict; only different content under the same
+        digest is refused, with a specific code.
+        """
+
+        try:
+            self._write_restore_artifact_new(kind, digest, value)
+        except AppError as exc:
+            if getattr(exc, "cause_code", None) != "restore_artifact_exists":
+                raise
+            existing = self._load_restore_artifact(
+                kind, digest, format_version=format_version, digest_field=digest_field,
+            )
+            if existing != value:
+                raise AppError(
+                    "A different restore record already exists under this identity. "
+                    "Create a new restore plan.",
+                    cause_code="restore_artifact_conflict",
+                ) from exc
+        return value
+
     def _read_restore_artifact(self, kind: str, digest: str) -> Any:
-        safe_digest = self._restore_digest(digest, f"restore {kind} digest")
+        safe_digest = self._restore_digest(digest, f"restore {kind} digest", kind=kind)
         descriptor = self._open_restore_artifact_directory(kind)
         if descriptor is None:
-            raise ApprovalError(f"restore {kind[:-1]} was not found")
+            raise _restore_refusal(kind, "not_found")
         artifact_descriptor = -1
         try:
             artifact_descriptor = os.open(
@@ -4344,9 +4513,9 @@ class PersistentApp:
                 raise ApprovalError(f"restore {kind[:-1]} artifact is oversized")
             return json.loads(payload.decode("utf-8"))
         except FileNotFoundError as exc:
-            raise ApprovalError(f"restore {kind[:-1]} was not found") from exc
+            raise _restore_refusal(kind, "not_found") from exc
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ApprovalError(f"restore {kind[:-1]} artifact is invalid") from exc
+            raise _restore_refusal(kind, "invalid") from exc
         finally:
             if artifact_descriptor >= 0:
                 os.close(artifact_descriptor)
@@ -4358,8 +4527,8 @@ class PersistentApp:
         destination_instance_id: str,
         operation: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
-        _validate_id(source_instance_id, "source_instance_id")
-        _validate_id(destination_instance_id, "destination_instance_id")
+        _validate_instance_id(source_instance_id, "source_instance_id")
+        _validate_instance_id(destination_instance_id, "destination_instance_id")
         lock_key = hashlib.sha256(
             f"{source_instance_id}\0{destination_instance_id}".encode("utf-8")
         ).hexdigest()
@@ -4413,7 +4582,7 @@ class PersistentApp:
     ) -> tuple[dict[str, Any], Path, dict[str, Any], dict[str, Any]]:
         """Resolve one indexed backup and prove its exact bytes and identity."""
 
-        _validate_id(source_instance_id, "source_instance_id")
+        _validate_instance_id(source_instance_id, "source_instance_id")
         index_path = self.layout.backups_root / "index.json"
         if index_path.is_symlink() or (index_path.exists() and not index_path.is_file()):
             raise AppError("backup index is unsafe")
@@ -4437,7 +4606,11 @@ class PersistentApp:
             if backup_receipt_id is None or receipt_id == backup_receipt_id:
                 matches.append(dict(item))
         if not matches:
-            raise AppError("the selected verified backup was not found")
+            raise AppError(
+                "The selected verified backup was not found for this application. "
+                "Create a backup first or pick one from the recovery list.",
+                cause_code="restore_backup_not_found",
+            )
         record = matches[-1]
         receipt = record.get("backupReceipt")
         if (
@@ -4554,17 +4727,25 @@ class PersistentApp:
         )
 
     def _assert_restore_destination_available(self, destination_instance_id: str) -> Path:
-        _validate_id(destination_instance_id, "destination_instance_id")
+        _validate_instance_id(destination_instance_id, "destination_instance_id")
         if any(
             item.get("instanceId") == destination_instance_id
             for item in self.catalog.list()
         ):
-            raise AppError("restore destination identity is already cataloged")
+            raise AppError(
+                "A restored copy with this name already exists in the catalog. "
+                "Choose a different destination identity for the restored copy.",
+                cause_code="restore_destination_exists",
+            )
         target = _safe_instance_root(
             self.layout.instances_root / destination_instance_id
         )
         if target.exists() or target.is_symlink():
-            raise AppError("restore destination already exists")
+            raise AppError(
+                "A restored copy with this name already exists on disk. "
+                "Choose a different destination identity for the restored copy.",
+                cause_code="restore_destination_exists",
+            )
         if target.parent.is_symlink():
             raise AppError("restore destination parent is unsafe")
         return target
@@ -4579,14 +4760,22 @@ class PersistentApp:
     ) -> dict[str, Any]:
         """Persist a path-free exact plan for a new-identity restore."""
 
-        _validate_id(source_instance_id, "source_instance_id")
-        _validate_id(destination_instance_id, "destination_instance_id")
+        _validate_instance_id(source_instance_id, "source_instance_id")
+        _validate_instance_id(destination_instance_id, "destination_instance_id")
         if source_instance_id == destination_instance_id:
-            raise AppError("restore must create a different instance identity")
+            raise AppError(
+                "Restore must create a different instance identity than the source. "
+                "Change the destination identity.",
+                cause_code="restore_destination_same_as_source",
+            )
         if not isinstance(backup_receipt_id, str) or not re.fullmatch(
             r"backup-[0-9a-f]{24}", backup_receipt_id
         ):
-            raise AppError("backup receipt identity is invalid")
+            raise AppError(
+                "The backup receipt identity is not valid. Pick a backup from the "
+                "recovery list and try again.",
+                cause_code="restore_backup_receipt_invalid",
+            )
         source_entry, _source_root = self._entry(source_instance_id)
         _public_record, archive, manifest, backup_binding = self._verified_backup_record(
             source_instance_id, backup_receipt_id
@@ -4644,19 +4833,10 @@ class PersistentApp:
             ),
         }
         plan["planDigest"] = _digest(plan)
-        try:
-            self._write_restore_artifact_new(
-                "plans", plan["planDigest"], plan
-            )
-        except AppError:
-            existing = self._load_restore_artifact(
-                "plans",
-                plan["planDigest"],
-                format_version=RESTORE_PLAN_FORMAT,
-                digest_field="planDigest",
-            )
-            if existing != plan:
-                raise
+        self._publish_restore_artifact(
+            "plans", plan["planDigest"], plan,
+            format_version=RESTORE_PLAN_FORMAT, digest_field="planDigest",
+        )
         return plan
 
     def approve_restore(
@@ -4676,16 +4856,27 @@ class PersistentApp:
             digest_field="planDigest",
         )
         if plan.get("sourceInstanceId") != source_instance_id:
-            raise ApprovalError("restore plan source identity does not match")
+            raise ApprovalError(
+                "This restore plan was made for a different source application. "
+                "Create a restore plan from the application you are restoring.",
+                cause_code="restore_plan_source_mismatch",
+            )
         if not isinstance(actor_id, str) or not re.fullmatch(
             r"[A-Za-z0-9._:-]{1,128}", actor_id
         ):
             raise ApprovalError("restore approver identity is invalid")
         if actor_role not in {"platform_operator", "local_operator"}:
-            raise ApprovalError("restore approval requires an operator role")
+            raise ApprovalError(
+                "Restore approval requires an operator role. Sign in as an operator to approve a restore.",
+                cause_code="restore_approval_requires_operator",
+            )
         now = datetime.now(timezone.utc).replace(microsecond=0)
         if _parse_utc(plan.get("expiresAt"), "restore plan expiry") <= now:
-            raise ApprovalError("restore plan has expired")
+            raise ApprovalError(
+                "The restore plan has expired (plans are valid for 15 minutes). "
+                "Create a new restore plan.",
+                cause_code="restore_plan_expired",
+            )
         approval = {
             "formatVersion": RESTORE_APPROVAL_FORMAT,
             "operation": "restore_new_instance",
@@ -4701,8 +4892,9 @@ class PersistentApp:
             ).isoformat().replace("+00:00", "Z"),
         }
         approval["approvalDigest"] = _digest(approval)
-        self._write_restore_artifact_new(
-            "approvals", approval["approvalDigest"], approval
+        self._publish_restore_artifact(
+            "approvals", approval["approvalDigest"], approval,
+            format_version=RESTORE_APPROVAL_FORMAT, digest_field="approvalDigest",
         )
         return approval
 
@@ -4727,9 +4919,10 @@ class PersistentApp:
         destination_present: bool,
         catalog_registered: bool,
         staging_retained: bool,
+        intent_digest: str | None = None,
     ) -> None:
         failure = {
-            "formatVersion": "stateport.restore-failure/v1",
+            "formatVersion": RESTORE_FAILURE_FORMAT,
             "operation": "restore_new_instance",
             "sourceInstanceId": plan.get("sourceInstanceId"),
             "destinationInstanceId": plan.get("destinationInstanceId"),
@@ -4744,10 +4937,14 @@ class PersistentApp:
             "externalEffectsRestored": False,
             "recordedAt": _now(),
         }
+        if intent_digest is not None:
+            # Resolves the intent journal entry of the attempt that failed.
+            failure["intentDigest"] = intent_digest
         failure["failureDigest"] = _digest(failure)
         try:
-            self._write_restore_artifact_new(
-                "failures", failure["failureDigest"], failure
+            self._publish_restore_artifact(
+                "failures", failure["failureDigest"], failure,
+                format_version=RESTORE_FAILURE_FORMAT, digest_field="failureDigest",
             )
         except AppError as exc:
             raise AppError("restore failure receipt could not be published") from exc
@@ -4781,12 +4978,25 @@ class PersistentApp:
             or approval.get("planDigest") != plan_digest
             or approval.get("decision") != "approved"
         ):
-            raise ApprovalError("restore approval does not bind the exact plan")
+            raise ApprovalError(
+                "The restore approval does not match this plan: it was issued for a "
+                "different plan, application or decision. Approve this plan again and "
+                "apply it with the new approval digest.",
+                cause_code="restore_approval_mismatch",
+            )
         now = datetime.now(timezone.utc).replace(microsecond=0)
         if _parse_utc(plan.get("expiresAt"), "restore plan expiry") <= now:
-            raise ApprovalError("restore plan has expired")
+            raise ApprovalError(
+                "The restore plan has expired (plans are valid for 15 minutes). "
+                "Create a new restore plan.",
+                cause_code="restore_plan_expired",
+            )
         if _parse_utc(approval.get("expiresAt"), "restore approval expiry") <= now:
-            raise ApprovalError("restore approval has expired")
+            raise ApprovalError(
+                "The restore approval has expired (approvals are valid for 10 minutes). "
+                "Approve the plan again.",
+                cause_code="restore_approval_expired",
+            )
         destination_instance_id = str(plan["destinationInstanceId"])
 
         def transaction() -> dict[str, Any]:
@@ -4841,6 +5051,21 @@ class PersistentApp:
             catalog_entry: dict[str, Any] | None = None
             source_access_recorded = False
             destination_source_access: dict[str, Any] | None = None
+            # Intent journal (append-only): written and fsynced before the first effect on the
+            # destination, so a crash after this point is recognisable on the next start and
+            # reconcile_interrupted_restores() can prove the leftovers belong to this attempt.
+            intent = {
+                "formatVersion": RESTORE_INTENT_FORMAT,
+                "operation": "restore_new_instance",
+                "sourceInstanceId": source_instance_id,
+                "destinationInstanceId": destination_instance_id,
+                "planDigest": plan_digest,
+                "approvalDigest": approval_digest,
+                "attemptId": secrets.token_hex(8),
+                "startedAt": _now(),
+            }
+            intent["intentDigest"] = _digest(intent)
+            self._write_restore_artifact_new("intents", intent["intentDigest"], intent)
             try:
                 require_source_access_unchanged()
                 restored = restore_backup(
@@ -4968,6 +5193,7 @@ class PersistentApp:
                     destination_present=target.exists() or target.is_symlink(),
                     catalog_registered=catalog_entry is not None and not catalog_rolled_back,
                     staging_retained=restore_staging_retained(target),
+                    intent_digest=intent["intentDigest"],
                 )
                 if isinstance(exc, AppError):
                     raise
@@ -4978,6 +5204,102 @@ class PersistentApp:
         return self._with_restore_lock(
             source_instance_id, destination_instance_id, transaction
         )
+
+    def reconcile_interrupted_restores(self) -> list[str]:
+        """Startup only: finish the rollback of a restore whose process was killed mid-apply.
+
+        apply_restore journals an intent before its first effect and publishes the receipt last.
+        An intent with neither a receipt nor a resolving failure record belongs to an attempt that
+        died in between. Such an attempt can have left a staging directory, a published but
+        unregistered destination, a catalog entry, and a destination source-access receipt. All of
+        it is undone here: the exact catalog entry created at or after the intent is forgotten (never
+        one that predates it), its source-access receipt is discarded, and unregistered directories
+        are moved to quarantine (renamed, never deleted). The outcome is then recorded as a
+        ``restore_interrupted`` failure that names the intent, so the next start finds nothing left to
+        do and the source, the approved plan and a re-plan all work again. Must run before requests
+        are served; it cannot race an apply in flight. Returns the resolved destination identities.
+        """
+
+        try:
+            intents = self._restore_artifact_digests("intents")
+            if not intents:
+                return []
+            receipts = set(self._restore_artifact_digests("receipts"))
+            resolved = {
+                value.get("intentDigest")
+                for value in (
+                    self._load_restore_artifact(
+                        "failures", digest,
+                        format_version=RESTORE_FAILURE_FORMAT, digest_field="failureDigest",
+                    )
+                    for digest in self._restore_artifact_digests("failures")
+                )
+            }
+        except (AppError, OSError):
+            return []  # an unreadable journal means: touch nothing
+        handled: list[str] = []
+        for digest in intents:
+            if digest in resolved:
+                continue
+            try:
+                intent = self._load_restore_artifact(
+                    "intents", digest,
+                    format_version=RESTORE_INTENT_FORMAT, digest_field="intentDigest",
+                )
+                if intent.get("planDigest") in receipts:
+                    continue
+                destination_id = str(intent["destinationInstanceId"])
+                handled_one = self._with_restore_lock(
+                    str(intent["sourceInstanceId"]),
+                    destination_id,
+                    lambda intent=intent: {"done": self._roll_back_interrupted_restore(intent)},
+                )
+            except (AppError, OSError, KeyError):
+                continue
+            if handled_one.get("done"):
+                handled.append(destination_id)
+        return handled
+
+    def _roll_back_interrupted_restore(self, intent: Mapping[str, Any]) -> bool:
+        plan_digest = str(intent["planDigest"])
+        if plan_digest in self._restore_artifact_digests("receipts"):
+            return False  # completed after all: nothing to undo
+        destination_id = str(intent["destinationInstanceId"])
+        target = _safe_instance_root(self.layout.instances_root / destination_id)
+        owned = False
+        entry: dict[str, Any] | None = None
+        try:
+            entry = self.catalog.get(destination_id)
+        except AppError:
+            entry = None
+        catalog_registered = False
+        if entry is not None:
+            try:
+                # the catalog stamps microseconds, the intent whole seconds: compare instants, not text
+                owned = _parse_utc(entry.get("createdAt"), "catalog creation time") >= _parse_utc(
+                    intent["startedAt"], "restore intent start"
+                )
+            except (AppError, ValueError, TypeError):
+                owned = False
+            if owned:
+                self._discard_source_access_receipt(destination_id)
+                owned = self.catalog.forget_if_matches(entry)
+            catalog_registered = not owned
+        if not catalog_registered:
+            self.catalog.quarantine_unregistered_instance_directories()
+        self._record_restore_failure(
+            {
+                "sourceInstanceId": intent.get("sourceInstanceId"),
+                "destinationInstanceId": destination_id,
+                "planDigest": plan_digest,
+            },
+            reason_code="restore_interrupted",
+            destination_present=target.exists() or target.is_symlink(),
+            catalog_registered=catalog_registered,
+            staging_retained=restore_staging_retained(target),
+            intent_digest=str(intent["intentDigest"]),
+        )
+        return True
 
     def recovery_status(self, instance_id: str) -> dict[str, Any]:
         """Return path-free backup and restore truth for one source instance."""
@@ -5020,7 +5342,7 @@ class PersistentApp:
             value = self._load_restore_artifact(
                 "failures",
                 digest,
-                format_version="stateport.restore-failure/v1",
+                format_version=RESTORE_FAILURE_FORMAT,
                 digest_field="failureDigest",
             )
             if value.get("sourceInstanceId") == instance_id:
@@ -5126,7 +5448,11 @@ class PersistentApp:
 
     def import_state(self, plan: Mapping[str, Any], source: str, approval: Mapping[str, Any]) -> dict[str, Any]:
         if approval.get("planDigest") != plan.get("planDigest"):
-            raise ApprovalError("state import approval does not match exact plan")
+            raise ApprovalError(
+                "The state import approval does not match this plan. Approve the current import plan "
+                "and apply it with that approval.",
+                cause_code="state_import_approval_mismatch",
+            )
         if plan.get("unknown", {}).get("status") == "blocking":
             raise AppError("state import plan contains unknown state; review and resolve it before applying")
         source_root = _safe_instance_root(Path(source), must_exist=True)

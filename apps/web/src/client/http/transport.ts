@@ -83,6 +83,18 @@ export function unwrapEnvelope(body: unknown): { ok: true; payload: unknown } | 
   return { ok: true, payload: body }
 }
 
+/** The stable error code the service gives a failed CSRF/origin check (HTTP 403). */
+export const CSRF_ERROR_CODE = 'csrf_token_invalid'
+
+async function isCsrfRefusal(res: Response): Promise<boolean> {
+  try {
+    const body: unknown = await res.clone().json()
+    return isRecord(body) && isRecord(body.error) && body.error.code === CSRF_ERROR_CODE
+  } catch {
+    return false
+  }
+}
+
 export class HttpTransport {
   private baseUrl: string
   private fetchFn: typeof fetch
@@ -226,6 +238,21 @@ export class HttpTransport {
     }
 
     if (res.status === 401 && !options._retried) {
+      this.csrfToken = null
+      await this.ensureSession()
+      return this.request(path, { ...options, _retried: true })
+    }
+
+    // A 403 on a mutation is retried ONLY when the service says the CSRF check
+    // failed (`csrf_token_invalid`): the browser cookie jar is shared by every
+    // transport in the page, but each transport caches its own token.  After
+    // the service restarts, another transport re-primes the cookie on its 401,
+    // and this one keeps sending the old token with a valid session, which the
+    // service answers with 403 (never 401).  The service refuses such a request
+    // in `_mutation_security` before running anything, so one retry with a fresh
+    // token is safe.  Every other 403 (route-specific permission refusals, some
+    // of which can follow partial work) is reported as is and never replayed.
+    if (res.status === 403 && mutation && !options._retried && (await isCsrfRefusal(res))) {
       this.csrfToken = null
       await this.ensureSession()
       return this.request(path, { ...options, _retried: true })

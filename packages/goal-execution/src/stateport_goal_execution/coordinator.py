@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 from typing import Any, Callable
 
 from .backend import (
@@ -24,7 +26,9 @@ from .backend import (
     backend_effective_read_scope,
     backend_effective_write_scope,
     get_backend,
+    sandbox_readiness,
 )
+from . import sandbox
 from .bootstrap import BootstrapProposal, prepare_project_bootstrap, prepare_recommended_slice
 from .contracts import (
     CtoModePolicy,
@@ -51,6 +55,15 @@ VIEW_FORMAT = "stateport.goal-execution-view/v1"
 RECORD_FORMAT = "stateport.goal-execution-operational-record/v1"
 _WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
 _MAX_REVIEW_ENTRIES = 4096
+SANDBOX_BACKEND_ID = sandbox.SANDBOX_BACKEND_ID
+_FROM_ENVIRONMENT = object()
+_SANDBOX_REASONS = {
+    "bubblewrap_missing": "bubblewrap (bwrap) is not installed on this host",
+    "sandbox_python_missing": "the sandbox system Python (/usr/bin/python3) is missing",
+    "sandbox_yaml_missing": "PyYAML is not available in the sandbox system Python",
+    "user_namespaces_unavailable": "bubblewrap could not create its sandbox (user namespaces are blocked here)",
+    "sandbox_launch_failed": "the sandbox could not be launched",
+}
 
 
 def _now() -> str:
@@ -180,9 +193,19 @@ class GoalExecutionCoordinator:
     results without executing anything — stays unreachable outside tests.
     """
 
-    def __init__(self, *, record_root: Path, allow_synthetic_backend: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        record_root: Path,
+        allow_synthetic_backend: bool = False,
+        agent_command: Any = _FROM_ENVIRONMENT,
+    ) -> None:
         self._root = _private_directory(record_root)
         self._allow_synthetic_backend = allow_synthetic_backend
+        # Test/dev-only operator configuration; never taken from a request. A real
+        # model agent cannot run in the network-less, credential-less sandbox.
+        self._agent_override = agent_command
+        sandbox.sweep_orphans(self._root / "sandbox-staging")
         self._mutex = threading.RLock()
         self._sessions: dict[str, GoalExecutionSession] = {}
         self._projections: dict[str, dict[str, Any]] = {}
@@ -215,6 +238,16 @@ class GoalExecutionCoordinator:
         self._projections[instance_id] = value
         return value
 
+    @staticmethod
+    def _agent_view(backend_id: str | None, argv: tuple[str, ...] | None) -> dict[str, Any] | None:
+        if backend_id != SANDBOX_BACKEND_ID:
+            return None
+        return {
+            "configured": argv is not None,
+            "commandDigest": ("sha256:" + sandbox.agent_command_digest(argv)) if argv else None,
+            "testOnlyConfiguration": True,
+        }
+
     def _projection(self, session: GoalExecutionSession) -> dict[str, Any]:
         manifest = session.bootstrap.manifest
         selected = next(item for item in manifest.goal_items if item.item_id == session.plan.item_id)
@@ -226,8 +259,10 @@ class GoalExecutionCoordinator:
             "instanceId": session.plan.instance_id,
             "mode": session.profile.mode.value,
             "state": session.state.value,
-            "providerExecution": bool(backend_id) and backend_id != "fake",
+            "providerExecution": bool(backend_id) and backend_id not in ("fake", SANDBOX_BACKEND_ID),
             "backendId": backend_id,
+            "agent": saved.get("agent"),
+            "sandboxRun": saved.get("sandboxRun"),
             "backgroundLoop": False,
             "nextItemAutoStart": False,
             "proposal": {
@@ -419,6 +454,19 @@ class GoalExecutionCoordinator:
             raise
         raise AssertionError("terminal stop must raise")
 
+    def _current_agent(self) -> tuple[str, ...] | None:
+        if self._agent_override is not _FROM_ENVIRONMENT:
+            return tuple(self._agent_override) if self._agent_override else None
+        try:
+            return sandbox.parse_agent_command(os.environ.get(sandbox.AGENT_COMMAND_ENV))
+        except sandbox.SandboxError as exc:
+            raise GovernanceRefusal(exc.code, str(exc)) from exc
+
+    @staticmethod
+    def _agent_marker(argv: tuple[str, ...] | None) -> str:
+        digest = sandbox.agent_command_digest(argv)
+        return f"-agent-{digest[:16]}" if digest else ""
+
     def _resolve_backend(self, backend_id: str | None) -> str:
         """Bind the execution backend, failing closed when none is available.
 
@@ -429,8 +477,8 @@ class GoalExecutionCoordinator:
         """
 
         if backend_id is None:
-            backend_id = "fake" if self._allow_synthetic_backend else "opencode_container"
-        if backend_id not in ("fake", "opencode_container"):
+            backend_id = "fake" if self._allow_synthetic_backend else SANDBOX_BACKEND_ID
+        if backend_id not in ("fake", "opencode_container", SANDBOX_BACKEND_ID):
             raise GovernanceRefusal("backend_unsupported", f"backend {backend_id} is not supported")
         if backend_id == "fake":
             if not self._allow_synthetic_backend:
@@ -439,6 +487,16 @@ class GoalExecutionCoordinator:
                     "the synthetic goal-execution backend is test-only and is not enabled "
                     "on this service; no production backend is configured, so governed "
                     "execution is unavailable rather than fabricated",
+                )
+            return backend_id
+        if backend_id == SANDBOX_BACKEND_ID:
+            ready, reason = sandbox_readiness()
+            if not ready:
+                raise GovernanceRefusal(
+                    "goal_backend_unavailable",
+                    "the sandboxed execution backend is unavailable: "
+                    f"{_SANDBOX_REASONS.get(reason, reason)}; nothing was prepared or run "
+                    "and no result is fabricated",
                 )
             return backend_id
         entry = get_backend("opencode_container")
@@ -467,20 +525,48 @@ class GoalExecutionCoordinator:
         entry = get_backend("opencode_container")
         if entry is not None and entry.get("ready"):
             return {"status": "available", "backendId": "opencode_container", "testOnly": False}
-        readiness_detail = str((entry or {}).get("error") or "unknown")
+        ready, reason = sandbox_readiness()
+        if ready:
+            try:
+                agent = self._current_agent()
+            except GovernanceRefusal as exc:
+                return {
+                    "status": "unavailable",
+                    "code": exc.code,
+                    "message": f"Governed execution is unavailable: {exc}.",
+                    "nextAction": "Correct the operator agent configuration or remove it.",
+                }
+            return {
+                "status": "available",
+                "backendId": SANDBOX_BACKEND_ID,
+                "testOnly": False,
+                "agent": "configured_test_only" if agent else "not_configured",
+                "message": (
+                    "Sandboxed execution only. Each run exports the exact committed project into a "
+                    "network-less bubblewrap sandbox and runs the approved StatePort validator there. "
+                    + (
+                        "An operator-configured test agent command also runs in the sandbox; its changes are "
+                        "kept as an unreviewed patch and are never applied to your project. "
+                        if agent
+                        else "No coding agent is configured, so a run checks the project and changes nothing; "
+                        "the objective you write is recorded with the slice but does not steer the run. "
+                    )
+                    + "Real model coding-agent runs are not supported here."
+                ),
+            }
+        readiness_detail = _SANDBOX_REASONS.get(reason, reason)
         return {
             "status": "unavailable",
             "code": "goal_backend_unavailable",
             "message": (
-                "Governed execution is unavailable: no execution backend is "
-                f"configured on this host ({readiness_detail}). Nothing can be "
+                "Governed execution is unavailable: the sandbox runtime this host needs "
+                f"is not usable ({readiness_detail}). Nothing can be "
                 "prepared, executed, reviewed, or closed, and no result is "
                 "fabricated."
             ),
             "nextAction": (
-                "No operator action enables execution here. Wait for a "
-                "StatePort release that configures a governed execution "
-                "backend; turning orchestration off stays available."
+                "Make bubblewrap usable on this host (install it and allow user namespaces), "
+                "then reload. Turning orchestration off stays available."
             ),
         }
 
@@ -578,6 +664,11 @@ class GoalExecutionCoordinator:
             bootstrap = BootstrapProposal(manifest=manifest, proposal=proposal)
             plan, acceptance = prepare_recommended_slice(bootstrap, proposed_by=profile.orchestrator_actor)
             assert selected_backend is not None  # non-off modes resolve a backend first
+            agent_argv = self._current_agent() if selected_backend == SANDBOX_BACKEND_ID else None
+            if agent_argv:
+                # The operator agent command is bound into the plan id, so the plan digest the
+                # approver confirms covers it; execute recomputes and refuses on drift.
+                plan = replace(plan, plan_id=plan.plan_id + self._agent_marker(agent_argv))
             effective_profile = backend_effective_profile(selected_backend)
             delegation = DelegationPlan(
                 plan_id=f"delegation-{selected_backend}-v1",
@@ -606,9 +697,11 @@ class GoalExecutionCoordinator:
                 effective_capabilities=frozenset({"goal_execution", "cto_orchestration", f"backend_{selected_backend}"}),
                 approval_leases=self._leases,
             )
-            self._projections.setdefault(instance_id, {}).update({
+            self._projections.setdefault(instance_id, {}).pop("sandboxRun", None)
+            self._projections[instance_id].update({
                 "backendId": selected_backend,
-                "providerExecution": selected_backend != "fake",
+                "providerExecution": selected_backend not in ("fake", SANDBOX_BACKEND_ID),
+                "agent": self._agent_view(selected_backend, agent_argv),
             })
             self._sessions[instance_id] = session
             return self._persist(instance_id, self._projection(session))
@@ -651,7 +744,7 @@ class GoalExecutionCoordinator:
                     "the prepared slice names the test-only synthetic backend, which is "
                     "not enabled on this service; execution is refused rather than fabricated",
                 )
-            if backend_id not in ("fake", "opencode_container"):
+            if backend_id not in ("fake", "opencode_container", SANDBOX_BACKEND_ID):
                 raise GovernanceRefusal(
                     "goal_backend_unavailable",
                     "the prepared slice does not bind a configured execution backend; "
@@ -674,7 +767,9 @@ class GoalExecutionCoordinator:
                 ),
             )
             try:
-                if backend_id == "opencode_container":
+                if backend_id == SANDBOX_BACKEND_ID:
+                    result = self._execute_sandbox(instance_id, instance_root, session, commit, tree)
+                elif backend_id == "opencode_container":
                     result = self._execute_opencode(instance_id, instance_root, session, commit, tree)
                 else:
                     result = self._execute_fake(instance_id, instance_root, session, commit, tree)
@@ -759,6 +854,165 @@ class GoalExecutionCoordinator:
             tests_passed=verification.manifest.repository_digest == session.bootstrap.manifest.repository_digest,
             repository_clean=True,
         )
+
+    def _execute_sandbox(
+        self, instance_id: str, instance_root: Path, session: GoalExecutionSession, commit: str, tree: str,
+    ) -> ExecutionResult:
+        """Run the approved slice in a bubblewrap jail; the host project is only read."""
+
+        started = time.monotonic()
+        budget = session.approval.approved_budget.time_seconds if session.approval else session.plan.maximum_budget.time_seconds
+        agent_argv = self._current_agent()
+        if session.plan.plan_id != session.plan.plan_id.split("-agent-")[0] + self._agent_marker(agent_argv):
+            raise GovernanceRefusal(
+                "agent_command_drift",
+                "the operator agent configuration changed after the plan was approved; execution is refused",
+            )
+        commands = tuple(session.plan.validation_commands)
+        if commands != tuple(session.acceptance.validation_commands):
+            raise GovernanceRefusal("validation_commands_unbound", "validation commands are not bound to the plan")
+        ready, reason = sandbox_readiness()
+        if not ready:
+            raise GovernanceRefusal(
+                "goal_backend_unavailable",
+                f"the sandbox became unavailable: {_SANDBOX_REASONS.get(reason, reason)}",
+            )
+        run_record: dict[str, Any] = {
+            "formatVersion": "stateport.goal-sandbox-run/v1",
+            "backendId": SANDBOX_BACKEND_ID,
+            "isolation": {
+                "sandbox": "bubblewrap",
+                "network": "none",
+                "environment": "cleared",
+                "stagingSource": "git objects at the approved commit, no .git",
+                "hostProjectWrites": "none",
+            },
+            "agent": {"state": "not_configured", "testOnlyConfiguration": True, "run": None},
+            "validation": [],
+            "changes": None,
+            "patch": None,
+            "patchApplied": False,
+            "patchReviewed": False,
+            "modelCalls": False,
+        }
+        saved = self._projections.setdefault(instance_id, {})
+        run_dir = sandbox.staging_root(self._root / "sandbox-staging")
+        steps = 0
+        try:
+            staging, scratch = run_dir / "workspace", run_dir / "scratch"
+            scratch.mkdir(mode=0o700)
+            try:
+                sandbox.export_commit(instance_root, commit, staging)
+                before = sandbox.manifest(staging)
+                before_root: Path | None = None
+                remaining = lambda: max(1.0, budget - (time.monotonic() - started))  # noqa: E731
+                if agent_argv:
+                    before_root = run_dir / "baseline"
+                    sandbox.snapshot_tree(staging, before_root)
+                    steps += 1
+                    outcome = sandbox.run_confined(
+                        agent_argv, staging, writable=True, timeout=remaining(), scratch=scratch,
+                    )
+                    run_record["agent"] = {
+                        "state": "completed" if outcome.passed() else "failed",
+                        "testOnlyConfiguration": True,
+                        "commandDigest": "sha256:" + str(sandbox.agent_command_digest(agent_argv)),
+                        "run": outcome.to_public("agent"),
+                    }
+                after = sandbox.manifest(staging)
+                changes = sandbox.diff_manifests(before, after, staging)
+                run_record["changes"] = changes
+                if changes["changed"]:
+                    patch, truncated = sandbox.build_patch(before_root, staging, changes, before)
+                    patch_digest = "sha256:" + hashlib.sha256(patch.encode("utf-8")).hexdigest()
+                    artifact = self._write_patch_artifact(instance_id, patch_digest, patch)
+                    run_record["patch"] = {
+                        "digest": patch_digest, "bytes": len(patch.encode("utf-8")),
+                        "truncated": truncated, "artifact": artifact,
+                    }
+                if agent_argv and run_record["agent"]["state"] != "completed":
+                    saved["sandboxRun"] = run_record
+                    raise GovernanceRefusal(
+                        "agent_step_failed",
+                        "the sandboxed agent command did not complete successfully; see the recorded run",
+                    )
+                results = []
+                for command in commands:
+                    argv, mounts = sandbox.validator_mount(command, scratch)
+                    steps += 1
+                    outcome = sandbox.run_confined(
+                        argv, staging, writable=False, timeout=remaining(), scratch=scratch, extra_ro=mounts,
+                    )
+                    results.append(outcome)
+                    run_record["validation"].append({"command": command, **outcome.to_public("validator")})
+                if sandbox.manifest_digest(sandbox.manifest(staging)) != changes["afterDigest"]:
+                    raise sandbox.SandboxError("staging_mutated_during_validation", "staging changed while it was being validated")
+            except sandbox.SandboxError as exc:
+                run_record["failure"] = {"code": exc.code, "message": str(exc)}
+                saved["sandboxRun"] = run_record
+                raise GovernanceRefusal(exc.code, str(exc)) from exc
+        finally:
+            sandbox.release_staging(run_dir)
+        passed = bool(results) and all(item.passed() for item in results)
+        run_record["passed"] = passed
+        saved["sandboxRun"] = run_record
+        verified = self._bound_identity(instance_id, session, instance_root)
+        if verified != (commit, tree):
+            self._stop_and_persist(
+                instance_id, session, code="base_drift", message="repository identity changed during sandboxed execution",
+            )
+        # What the validators actually ran against. The patch is never applied,
+        # so when the agent changed files the pass is about the agent-modified
+        # tree, NOT the approved base commit this result names; the subject is
+        # recorded, bound into the digest and into the result identity so a
+        # later "apply" cannot reuse it as an attestation of the base commit.
+        changed = bool(changes["changed"])
+        validated_subject = {
+            "kind": "agent_modified_tree" if changed else "base_commit",
+            "baseCommit": commit, "baseTree": tree,
+            "afterDigest": changes["afterDigest"],
+            "attestsBaseCommit": not changed,
+        }
+        run_record["validatedSubject"] = validated_subject
+        test_digest = canonical_digest({
+            "kind": "sandboxed-contract-validation",
+            "validatedSubject": validated_subject,
+            "baseCommit": commit, "baseTree": tree,
+            "validation": [
+                {"command": v["command"], "exitCode": v["exitCode"], "outputDigest": v["outputDigest"]}
+                for v in run_record["validation"]
+            ],
+            "agent": run_record["agent"].get("commandDigest"),
+            "changesDigest": changes["afterDigest"],
+            "patchDigest": (run_record["patch"] or {}).get("digest"),
+            "passed": passed,
+        })
+        run_record["testResultDigest"] = test_digest
+        saved["sandboxRun"] = run_record
+        return ExecutionResult(
+            result_id=f"result-sandbox-{commit[:16]}"
+            + (f"-modified-{changes['afterDigest'].split(':', 1)[1][:16]}" if changed else ""),
+            item_id=session.plan.item_id,
+            plan_digest=session.plan.digest,
+            implementer_actor=session.delegation.implementer_actor,
+            functional_commit=commit,
+            functional_tree=tree,
+            test_result_digest=test_digest,
+            contract_versions=session.plan.contract_versions,
+            actual_permissions=session.plan.required_permissions,
+            side_effect_class=session.plan.side_effect_class,
+            used_budget=GoalBudget(token=0, cost_minor=0, time_seconds=int(time.monotonic() - started) + 1, steps=steps),
+            tests_passed=passed,
+            repository_clean=True,
+        )
+
+    def _write_patch_artifact(self, instance_id: str, digest: str, patch: str) -> str:
+        directory = _private_directory(self._record_path(instance_id).parent / "artifacts")
+        name = "patch-" + digest.split(":", 1)[1][:16] + ".diff"
+        descriptor = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(patch)
+        return name
 
     def _execute_opencode(
         self, instance_id: str, instance_root: Path, session: GoalExecutionSession, commit: str, tree: str,
@@ -878,7 +1132,7 @@ class GoalExecutionCoordinator:
         plan_commands = tuple(session.plan.validation_commands)
         return False, canonical_digest({
             "validation": "not_run",
-            "reason": "sandboxed_validation_not_implemented",
+            "reason": "container_agent_backend_not_production_eligible",
             "commandsBoundToPlan": commands == plan_commands,
             "validationCommands": list(commands),
             "passed": False,

@@ -99,7 +99,25 @@ def test_doctor_rejects_non_fixture_adapter(tmp_path: Path) -> None:
     assert diagnostic.severity is Severity.ERROR
 
 
-_REPO_COPY_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".tmp")
+# The tighter list is the convention already used elsewhere in this repository — see
+# `_REPO_COPY_IGNORE` in `test_statedd_validate_schema.py` — and the measured difference
+# is large: a copy went from 36,512 files in 3.5s to 3,856 files in 0.4s, with Doctor
+# emitting the *same* five diagnostics across the same five distinct codes (CI, ENV, HOST,
+# INSTANCE, SOURCE). So the fixture is smaller, faster, and unchanged in what it exercises.
+#
+# `.opencode` is the one that matters most for correctness: it holds live `.opencode/goals`
+# JSON that is rewritten continuously while this suite runs, and ROOT is demonstrably
+# mutated between two copies taken seconds apart. Copying live Goal state into a fixture
+# makes it non-hermetic for no benefit, since Doctor never reads it.
+#
+# NOT a fix for the intermittent `before == after` failure in
+# `test_doctor_does_not_write_during_run`. That failure is unreproduced, and a torn copy
+# still has a stable before/after pair because both walks see the same directory. This
+# change is justified on hermeticity and cost alone.
+_REPO_COPY_IGNORE = shutil.ignore_patterns(
+    ".git", "__pycache__", ".tmp",
+    ".venv", "node_modules", ".terraform", ".opencode", ".cache",
+)
 
 
 def _copy_repo(destination: Path, *, source: Path = ROOT) -> None:

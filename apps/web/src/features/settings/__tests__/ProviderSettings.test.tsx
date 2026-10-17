@@ -10,7 +10,7 @@ import { ClientError } from '@/client/types'
 vi.mock('@/client/providerClient', () => ({
   OPENCODE_CREDENTIAL_PROVIDERS: ['anthropic', 'openai', 'openrouter', 'google', 'groq', 'xai'],
   OPENCODE_CREDENTIAL_PROVIDER_LABELS: { anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter', google: 'Google (Gemini)', groq: 'Groq', xai: 'xAI' },
-  providerClient: { getStatus: vi.fn(), configure: vi.fn(), verify: vi.fn(), disconnect: vi.fn(), login: vi.fn(), getLogin: vi.fn(), cancelLogin: vi.fn(), logout: vi.fn(), setCredential: vi.fn(), removeCredential: vi.fn() },
+  providerClient: { getStatus: vi.fn(), configure: vi.fn(), verify: vi.fn(), disconnect: vi.fn(), login: vi.fn(), getLogin: vi.fn(), cancelLogin: vi.fn(), logout: vi.fn(), setCredential: vi.fn(), removeCredential: vi.fn(), adoptSignIn: vi.fn(), removeAdoptedSignIn: vi.fn() },
 }))
 const status: ProviderStatus = { configured: false, executableInstalled: false, connected: false, model: null, providerId: 'codex', authenticationStatus: 'unavailable', requestStatus: 'unverified', telemetryStatus: 'unavailable', detail: 'Codex is missing in this runtime.' }
 afterEach(() => { cleanup(); Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 }) })
@@ -50,6 +50,53 @@ describe('Provider settings', () => {
     expect(await screen.findByText('Present (expiry not guaranteed)')).not.toBeNull()
     await user.click(screen.getByRole('button', { name: 'Disconnect StatePort' }))
     await waitFor(() => expect((screen.getByRole('button', { name: 'Verify bounded request' }) as HTMLButtonElement).disabled).toBe(true))
+  })
+
+  it.each([
+    { executableInstalled: true, executableStatus: 'installed' as const, requestStatus: 'unverified' as const, title: 'Adapter check passed', detail: 'OpenCode executable verified in this runtime.' },
+    { executableInstalled: false, executableStatus: 'missing' as const, requestStatus: 'failed' as const, title: 'Adapter check failed', detail: 'OpenCode executable is missing in this runtime.' },
+    { executableInstalled: true, executableStatus: 'installed' as const, requestStatus: 'failed' as const, title: 'Adapter check failed', detail: 'OpenCode did not answer the version probe.' },
+  ])('shows the returned adapter outcome and reason after verification: $title', async ({ executableInstalled, executableStatus, requestStatus, title, detail }) => {
+    const selected: ProviderStatus = { ...status, providerId: 'opencode', configured: true, connected: true, model: 'openai/test', detail: 'Saved OpenCode selection.' }
+    vi.mocked(providerClient.getStatus).mockResolvedValue(selected)
+    vi.mocked(providerClient.verify).mockResolvedValue({ ...selected, executableInstalled, executableStatus, requestStatus, detail, executionRefusal: executableInstalled ? null : 'The pinned runtime is absent.' })
+    render(<ProviderSettings />)
+    await screen.findByText('Saved OpenCode selection.')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Check selected adapter' }))
+
+    const outcome = await screen.findByLabelText('Provider check result')
+    expect(outcome.textContent).toContain(title)
+    expect(outcome.textContent).toContain(detail)
+    expect(outcome.textContent).toContain(executableInstalled ? 'Installed' : 'Missing')
+    if (!executableInstalled) expect(outcome.textContent).toContain('The pinned runtime is absent.')
+    expect(outcome.textContent).toContain('Bounded request: ' + requestStatus)
+  })
+
+  it('rejects an invalid model identifier inline before a save request', async () => {
+    render(<ProviderSettings />)
+    await screen.findByText('Codex is missing in this runtime.')
+    await userEvent.type(screen.getByRole('textbox', { name: 'Codex model identifier' }), 'bad model!')
+
+    expect(screen.getByText(/letters, digits, and \. _ : \/ \+ -/)).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: 'Codex model identifier' }).getAttribute('aria-invalid')).toBe('true')
+    fireEvent.submit(screen.getByRole('form', { name: 'Provider configuration' }))
+    expect(providerClient.configure).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { message: 'the local operation failed', code: 'operation_failed' },
+    { message: 'model is unavailable for this runtime', code: 'provider_model_unavailable' },
+  ])('shows the service refusal when a valid model save is rejected: $code', async ({ message, code }) => {
+    vi.mocked(providerClient.configure).mockRejectedValue(new ClientError('http', message, { status: 400, code }))
+    render(<ProviderSettings />)
+    await screen.findByText('Codex is missing in this runtime.')
+    await userEvent.type(screen.getByRole('textbox', { name: 'Codex model identifier' }), 'valid/model-1')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save model and enable' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain(message)
+    expect(screen.getByRole('alert').textContent).toContain(code)
   })
 
   afterEach(() => { vi.useRealTimers() })
@@ -440,4 +487,106 @@ it('refuses OpenCode credential controls without an operator session', async () 
   expect(providerClient.setCredential).not.toHaveBeenCalled()
   expect(providerClient.removeCredential).not.toHaveBeenCalled()
   view.unmount()
+})
+
+it('enables provider changes for a local user whose backend grants the provider permission', async () => {
+  vi.resetAllMocks()
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'local_user', actorId: 'local-user', platformOperationsAllowed: false, statebenchInspectionAllowed: false, providerActionsAllowed: true } } })
+  vi.mocked(providerClient.getStatus).mockResolvedValue({ ...status, configured: true, executableInstalled: true, connected: true, model: 'existing-model' })
+  const view = render(<ProviderSettings />)
+  await screen.findByDisplayValue('existing-model')
+  expect(screen.queryByText(/opening this page does not grant permission/)).toBeNull()
+  expect((screen.getByRole('button', { name: 'Disconnect StatePort' }) as HTMLButtonElement).disabled).toBe(false)
+  view.unmount()
+})
+
+it('keeps provider changes refused when the backend withholds the provider permission', async () => {
+  vi.resetAllMocks()
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', actor: { role: 'platform_operator', actorId: 'operator', platformOperationsAllowed: true, statebenchInspectionAllowed: false, providerActionsAllowed: false } } })
+  vi.mocked(providerClient.getStatus).mockResolvedValue({ ...status, configured: true, executableInstalled: true, connected: true, model: 'existing-model' })
+  const view = render(<ProviderSettings />)
+  await screen.findByDisplayValue('existing-model')
+  expect((screen.getByRole('button', { name: 'Disconnect StatePort' }) as HTMLButtonElement).disabled).toBe(true)
+  view.unmount()
+})
+
+describe('Existing OpenCode sign-in adoption', () => {
+  const operatorSession = { state: 'connected' as const, endpoint: '', actor: { role: 'platform_operator' as const, actorId: 'operator', platformOperationsAllowed: true, statebenchInspectionAllowed: false } }
+  const base: ProviderStatus = {
+    ...status, providerId: 'opencode', configured: true, connected: true, model: 'opencode-go/glm-5',
+    executableInstalled: true, executableStatus: 'installed', authenticationStatus: 'unverified',
+    credentialStatus: 'unconfigured', credentialProvider: null, credentialEnvVar: null,
+    adoptionStatus: 'not_adopted', adoptionSourceAvailable: true, adoptedAt: null, adoptedSource: null, adoptedProviders: [],
+  }
+  const adopted: ProviderStatus = {
+    ...base, adoptionStatus: 'adopted', adoptionSourceAvailable: false,
+    adoptedAt: '2026-10-01T12:00:00Z', adoptedSource: '/home/operator/.local/share/opencode/auth.json', adoptedProviders: ['opencode-go'],
+  }
+  beforeEach(() => { vi.resetAllMocks(); useSessionStore.setState({ serviceStatus: operatorSession }) })
+
+  it('says which providers will be copied and warns about OAuth refresh-token rotation', async () => {
+    vi.mocked(providerClient.getStatus).mockResolvedValue({ ...base, adoptionSourceProviders: ['openai', 'opencode-go'] })
+    render(<ProviderSettings />)
+    const state = await screen.findByRole('status', { name: 'Adopted sign-in state' })
+    expect(state.textContent).toContain('Providers found: openai, opencode-go')
+    expect(state.textContent).toMatch(/only the one matching your saved model/)
+    const section = screen.getByRole('region', { name: 'Existing OpenCode sign-in' })
+    expect(section.textContent).toMatch(/Other providers in the file are never copied/)
+    expect(section.textContent).toMatch(/OAuth sign-in rotates its refresh token.*sign the original OpenCode out/)
+  })
+
+  it('walks not adopted, adopted and removed with honest presence-only text', async () => {
+    vi.mocked(providerClient.getStatus).mockResolvedValue(base)
+    vi.mocked(providerClient.adoptSignIn).mockResolvedValue(adopted)
+    vi.mocked(providerClient.removeAdoptedSignIn).mockResolvedValue({ ...base, adoptionSourceAvailable: true })
+    const user = userEvent.setup()
+    const view = render(<ProviderSettings />)
+    const state = await screen.findByRole('status', { name: 'Adopted sign-in state' })
+    expect(state.textContent).toMatch(/Not adopted\. An existing OpenCode sign-in file was found/)
+    expect((screen.getByRole('button', { name: 'Remove adopted sign-in' }) as HTMLButtonElement).disabled).toBe(true)
+    await user.click(screen.getByRole('button', { name: 'Adopt existing OpenCode sign-in' }))
+    expect(providerClient.adoptSignIn).toHaveBeenCalledOnce()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Adopted sign-in state' }).textContent).toMatch(/Adopted: a copy of an existing OpenCode sign-in is present/))
+    const text = screen.getByRole('status', { name: 'Adopted sign-in state' }).textContent ?? ''
+    expect(text).toContain('/home/operator/.local/share/opencode/auth.json')
+    expect(text).toContain('providers: opencode-go')
+    expect(text).toMatch(/Presence only: StatePort does not check that it is still valid/)
+    await user.click(screen.getByRole('button', { name: 'Remove adopted sign-in' }))
+    expect(providerClient.removeAdoptedSignIn).toHaveBeenCalledOnce()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Adopted sign-in state' }).textContent).toMatch(/^Not adopted/))
+    view.unmount()
+  })
+
+  it('tells the truth when no existing sign-in is available and shows the refusal paths', async () => {
+    vi.mocked(providerClient.getStatus).mockResolvedValue({ ...base, adoptionSourceAvailable: false })
+    vi.mocked(providerClient.adoptSignIn).mockRejectedValue(new ClientError('http', 'No existing OpenCode sign-in was found. Looked for: /home/operator/.local/share/opencode/auth.json.', { status: 409, code: 'adoption_source_missing' }))
+    const user = userEvent.setup()
+    const view = render(<ProviderSettings />)
+    const state = await screen.findByRole('status', { name: 'Adopted sign-in state' })
+    expect(state.textContent).toMatch(/No existing OpenCode sign-in file was found in this runtime/)
+    expect(state.textContent).toContain('scripts/adopt_opencode_signin.py')
+    await user.click(screen.getByRole('button', { name: 'Adopt existing OpenCode sign-in' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('OpenCode sign-in was not adopted')
+    expect(alert.textContent).toContain('/home/operator/.local/share/opencode/auth.json')
+    expect(alert.textContent).toContain('adoption_source_missing')
+    expect(screen.getByRole('status', { name: 'Adopted sign-in state' }).textContent).toMatch(/^Not adopted/)
+    view.unmount()
+  })
+
+  it('does not render the adopt controls for Codex and refuses them without provider permission', async () => {
+    vi.mocked(providerClient.getStatus).mockResolvedValue({ ...base, providerId: 'codex' })
+    const codex = render(<ProviderSettings />)
+    await screen.findByText('Selected provider')
+    expect(screen.queryByRole('button', { name: 'Adopt existing OpenCode sign-in' })).toBeNull()
+    codex.unmount()
+
+    useSessionStore.setState({ serviceStatus: { ...operatorSession, actor: { ...operatorSession.actor, providerActionsAllowed: false } } })
+    vi.mocked(providerClient.getStatus).mockResolvedValue(base)
+    const denied = render(<ProviderSettings />)
+    const button = await screen.findByRole('button', { name: 'Adopt existing OpenCode sign-in' }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(providerClient.adoptSignIn).not.toHaveBeenCalled()
+    denied.unmount()
+  })
 })

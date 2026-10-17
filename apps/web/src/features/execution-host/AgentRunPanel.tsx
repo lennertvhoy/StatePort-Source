@@ -211,7 +211,8 @@ export default function AgentRunPanel() {
           <p>
             Provider directory: {status.providerDirectory.configured ? 'configured' : 'not configured'} ·{' '}
             {status.providerDirectory.present ? 'present' : 'missing'} · files: provider env{' '}
-            {directoryFile(status.providerDirectory.files.providerEnv)}, opencode.json{' '}
+            {directoryFile(status.providerDirectory.files.providerEnv)}, adopted sign-in (auth.json){' '}
+            {directoryFile(status.providerDirectory.files.authJson === true)}, opencode.json{' '}
             {directoryFile(status.providerDirectory.files.opencodeJson)}, model{' '}
             {directoryFile(status.providerDirectory.files.model)}
           </p>

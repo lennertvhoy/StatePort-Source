@@ -69,6 +69,13 @@ this time window does not relax product acceptance or authorize unqualified rele
   Alpha.16 successor for the local public rehearsal, preserving Alpha.15 and
   Alpha.16 bytes and all native complete-product acceptance boundaries.
 
+## Follow-on direction (post-release, owner 2026-09-29)
+
+After the current slice closes, StatePort grows toward letting users work with AI the way the owner does:
+a mechanical autonomous-run supervisor, quota-aware provider routing, an optional external-companion contract,
+a built-in resource governor and multi-session supervision, all as optional capability-gated adapters. Queue and
+order: `BACKLOG.md` (BL-POST-01..06). This adds no scope or acceptance to the current slice.
+
 ## Non-goals
 
 - Calling a frontend build, unit-test count, synthetic fixture, staged installer,

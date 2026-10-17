@@ -73,7 +73,10 @@ writes it to ``execution-host-provisioning-plan.json`` in the state root —
    re-renders and cross-checks the plan, revalidates immediately before the
    first privileged write, and writes a create-only root-owned receipt below
     ``/var/lib/stateport-provisioning/receipts``.  This rootless installer never
-    escalates; it refuses to claim install success until that exact receipt —
+    runs that transaction; its only escalated calls are fixed-shape ``sudo -n``
+    operations inside the ``stateport-control`` account's own session (its podman
+    volumes at install; its units, containers, volumes and quadlet files at
+    uninstall/purge), and it refuses to claim install success until that exact receipt —
     carrying the privileged transaction's digest-bound protocol-health proof,
     recorded after probing the confined socket as the allowed client — is
     present and matches this exact release and plan.
@@ -83,7 +86,14 @@ Uninstall and purge (recorded authority only, converge on partial state):
 plus the staged materialization manifest) and reverses exactly what install
 did — it stops and disables the recorded systemd user units, removes the
 recorded containers by exact name, deletes the exact live Quadlet files the
-installer materialized, and reloads the user manager.  All genesis data
+installer materialized, and reloads the user manager.  The control plane runs
+as the ``stateport-control`` account, so its part (units, containers, network,
+volumes, Quadlet files, activation target) is reached with
+``sudo -n runuser -u stateport-control -- env -i ... <absolute program>`` (no
+``sudo`` when already root), refused up front with ``administrator_rights_required``
+when ``sudo`` would prompt.  Data volumes are looked up in the store that owns them
+(the control account's); a purge also removes same-named leftovers that earlier
+installers created in the installing user's own store.  All genesis data
 volumes, snapshot volumes, the state root with every durable record, and the
 updater venv are preserved, and a durable
 ``stateport.internal-install-uninstall-receipt/v1`` records every removed and
@@ -115,10 +125,11 @@ from __future__ import annotations
 import argparse
 import base64
 import http.cookiejar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib
+import importlib.util
 from io import BytesIO
 import json
 import os
@@ -216,12 +227,30 @@ UNINSTALL_RECEIPT_SCHEMA = "stateport.internal-install-uninstall-receipt/v1"
 # The WSL2 target's per-user Windows logon keep-alive task.  WSL does not keep
 # a distro alive for its systemd services and does not start one at Windows
 # logon, so without this task the installed product stops being reachable with
-# the last WSL session and does not return at the next logon.  It is registered
-# through WSL interop as ONE per-user ONLOGON task: no /RU, no /IT, no
-# /RL, and no other Windows-side state is ever touched.
+# the last WSL session and does not return after a Windows restart.  It is
+# registered through WSL interop (PowerShell ScheduledTasks, because
+# schtasks.exe cannot set battery/time-limit/restart settings) as ONE per-user
+# task for the invoking user: no password is stored, no elevation is asked, and
+# no other Windows-side state is ever touched.
 WINDOWS_KEEPAIVE_RECORD_SCHEMA = "stateport.windows-keepalive/v1"
 _WINDOWS_KEEPAIVE_TASK_NAME = "StatePortKeepAlive"
 _WINDOWS_KEEPAIVE_RECORD_FILE = "windows-keepalive.json"
+# Definition generation of the task.  "v1" (Alpha.21) was a bare ONLOGON
+# schtasks task that never ran in a headless guest, was refused on battery and
+# was killed after Windows' 72 h default.  "v2" is registered through
+# PowerShell's ScheduledTasks module because schtasks.exe cannot express the
+# settings that matter.  A recorded v1 task is re-registered on the next run.
+_WINDOWS_KEEPAIVE_DEFINITION = "v2"
+_WINDOWS_KEEPAIVE_LEGACY_DEFINITION = "v1"
+_WINDOWS_KEEPAIVE_REPEAT_MINUTES = 10
+# The registration script prints exactly one of these on success.  Windows
+# decides which are allowed for this user, so the script tries them in order.
+_WINDOWS_KEEPAIVE_MODES = (
+    "boot-and-logon",
+    "background-and-logon",
+    "logon-only",
+)
+_WINDOWS_KEEPAIVE_MODE_PREFIX = "stateport-keepalive-mode="
 # The distro name is interpolated verbatim into the task's command line, so it
 # is only accepted when it is an ordinary WSL distribution name.
 _WINDOWS_KEEPAIVE_DISTRO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -707,6 +736,12 @@ class InstallConfig:
     prepare_execution_host: bool = False
     health_timeout_seconds: float = 600.0
     health_poll_seconds: float = 2.0
+    # An existing installation of this same release is reinstalled over,
+    # keeping its data, instead of being kept as it is.
+    reinstall: bool = False
+    # Show the exact plan JSON and technical notices; off by default so the
+    # terminal carries plain phase lines and one closing summary.
+    verbose: bool = False
 
 
 @dataclass(frozen=True)
@@ -732,6 +767,10 @@ class InstallOutcome:
     receipt_path: Path | None = None
     converged: bool = False
     execution_host: Mapping[str, Any] | None = None
+    keepalive_status: str | None = None
+    target_id: str | None = None
+    # Plain-language lines the report shows under the headline (never values).
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -841,10 +880,9 @@ def _apply_published_ports(
                 drift.append(f"{key}: manifest={reconciled[key]} unit={published[unit_key]}")
                 reconciled[key] = published[unit_key]
     if drift:
-        print(
-            f"notice: port allocation drifted between ceremonies; using {source} ports ("
-            + "; ".join(sorted(drift)[:8]) + ")",
-            flush=True,
+        _notice(
+            f"port allocation drifted between ceremonies; using {source} ports ("
+            + "; ".join(sorted(drift)[:8]) + ")"
         )
     return reconciled, drift
 
@@ -924,10 +962,9 @@ def _reconcile_ports_with_live_units(
                         # carries the staged render; without evidence of a
                         # diverging re-render it is the best available truth.
                         text = convergence_copy.read_text(encoding="utf-8")
-                        print(
-                            f"notice: control unit {unit_path.name} unreadable; "
-                            "using the staged convergence copy",
-                            flush=True,
+                        _notice(
+                            f"control unit {unit_path.name} unreadable; "
+                            "using the staged convergence copy"
                         )
                     else:
                         raise InstallerRefusal(
@@ -999,6 +1036,173 @@ def _own_live_unit_ports(live_root: Path, signed_payload_digest: str) -> set[int
     return ports
 
 
+_CONTROL_LIVE_QUADLET_ROOT = Path("/var/lib/stateport-control/.config/containers/systemd")
+
+
+_CONTROL_UNIT_NAME = re.compile(r"[a-z0-9][a-z0-9_.@-]{0,127}\.container")
+
+
+def _retained_control_unit_names(state_root: Path, signed_hex: str) -> list[str]:
+    """Accepted control-plane container unit names this release already recorded.
+
+    Two retained records name them, and BOTH are needed:
+
+    * the staged materialization manifest, written by the install transaction
+      (a rerun after a failure past staging); and
+    * the execution-host provisioning plan, written before the root helper runs
+      (the single-line installer is two invocations: the first emits that plan
+      and runs the root provisioning transaction, which installs and STARTS the
+      control-plane units; the second derives its collision inventory BEFORE it
+      stages anything, so on a clean first install the staged manifest does not
+      exist yet and the plan is the only record of which units are ours).
+
+    Names only; every caller still verifies the live unit bytes carry this
+    release's signed-payload label before trusting a port.
+    """
+
+    names: list[str] = []
+
+    def add(relative: Any) -> None:
+        if not isinstance(relative, str) or not relative:
+            return
+        name = PurePosixPath(relative).name
+        if (
+            _CONTROL_UNIT_NAME.fullmatch(name) is not None
+            and "/" not in name
+            and name not in names
+        ):
+            names.append(name)
+
+    manifest_path = state_root / "releases" / "staged" / signed_hex / "materialization.json"
+    try:
+        if manifest_path.is_file() and not manifest_path.is_symlink():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifacts = manifest.get("artifacts") if isinstance(manifest, Mapping) else None
+            for artifact in artifacts if isinstance(artifacts, list) else ():
+                if (
+                    isinstance(artifact, Mapping)
+                    and artifact.get("owner") == CONTROL_IDENTITY
+                    and artifact.get("profile") == "accepted"
+                    and artifact.get("kind") == "container"
+                ):
+                    add(artifact.get("liveRelativePath"))
+    except (OSError, ValueError):
+        pass
+
+    plan_path = state_root / "execution-host-provisioning-plan.json"
+    try:
+        if plan_path.is_file() and not plan_path.is_symlink():
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            materialization = (
+                plan.get("controlPlaneMaterialization") if isinstance(plan, Mapping) else None
+            )
+            for relative in materialization if isinstance(materialization, Mapping) else ():
+                # accepted/<signed_hex>/stateport-control/<unit file name>
+                parts = PurePosixPath(str(relative)).parts
+                if (
+                    len(parts) == 4
+                    and parts[0] == "accepted"
+                    and parts[1] == signed_hex
+                    and parts[2] == CONTROL_IDENTITY
+                ):
+                    add(parts[3])
+    except (OSError, ValueError):
+        pass
+    return names
+
+
+def _own_control_unit_ports(
+    state_root: Path,
+    signed_payload_digest: str,
+    runner: Runner | None,
+    *,
+    control_root: Path = _CONTROL_LIVE_QUADLET_ROOT,
+) -> set[int]:
+    """Host ports published by THIS release's own retained control-plane units.
+
+    The accepted control-plane units are installed into the ``stateport-control``
+    account's live Quadlet root by the root provisioning transaction, and that
+    tree is root-owned and mode 0700: the invoking user can neither list nor
+    read it.  The exact unit names therefore come from the staged
+    materialization manifest THIS release already wrote, and the bytes are read
+    with the same fixed-shape ``sudo -n cat`` the live-unit reconciliation
+    already uses -- no new privileged capability.
+
+    On a rerun after a failure past service start those units are already bound
+    by this release's own containers.  Counting their ports as observed-host
+    collisions shifts the deterministic derivation one probe step per service,
+    so the staged manifest names a port no unit publishes: the user is given one
+    address and the durable record keeps another.  Excluding them lets the
+    derivation reproduce the retained allocation exactly, which is the same rule
+    ``_own_live_unit_ports`` already applies to the invoking user's live root.
+
+    Only units carrying this release's own signed-payload label are excluded, so
+    a foreign unit's ports stay in the collision inventory.  Every failure mode
+    -- no runner, no retained record, an unreadable or absent unit, a refused
+    ``sudo -n`` -- yields no exclusion and leaves the inventory exactly as it was;
+    unreadable is never treated as free.
+    """
+
+    ports: set[int] = set()
+    if runner is None:
+        return ports
+    signed_hex = signed_payload_digest.removeprefix("sha256:")
+    marker = f"{_OWN_RELEASE_LABEL}{signed_payload_digest}"
+    for name in _retained_control_unit_names(state_root, signed_hex):
+        unit_path = control_root / name
+        text: str | None = None
+        try:
+            # The control root is root-owned 0700: stat() on a unit inside it
+            # raises PermissionError (pathlib.Path.is_file re-raises EACCES on
+            # Python 3.12), so a refused direct read must fall through to the
+            # fixed-shape sudo read instead of silently yielding no exclusion.
+            try:
+                direct = unit_path.is_file() and not unit_path.is_symlink()
+            except OSError:
+                direct = False
+            if direct:
+                text = unit_path.read_text(encoding="utf-8")
+            else:
+                read = runner.run(["sudo", "-n", "cat", str(unit_path)], timeout=60)
+                if read.returncode == 0:
+                    text = read.stdout
+        except (OSError, subprocess.SubprocessError):
+            text = None
+        if text is None or marker not in text:
+            continue
+        ports.update(int(match) for match in _PUBLISH_PORT.findall(text))
+    return ports
+
+
+def _observed_host_inventory(
+    release: Any,
+    probe: HostProbe,
+    *,
+    live_quadlet_root: Path,
+    state_root: Path,
+    signed_payload_digest: str,
+    runner: Runner | None,
+    control_root: Path = _CONTROL_LIVE_QUADLET_ROOT,
+) -> list[dict[str, Any]]:
+    """Observed-host collision inventory, minus this release's own listeners."""
+
+    own_ports = _own_live_unit_ports(live_quadlet_root, signed_payload_digest)
+    own_ports |= _own_control_unit_ports(
+        state_root, signed_payload_digest, runner, control_root=control_root
+    )
+    return [
+        {
+            "class": "observed-host",
+            "port": port,
+            "identityDigest": release.canonical_digest(
+                {"class": "observed-host", "port": port, "source": "proc-net-tcp-listen"}
+            ),
+        }
+        for port in probe.occupied_ports()
+        if port not in own_ports
+    ]
+
+
 def _readable_probe(path: Path) -> bool:
     """Existence check that survives a stat-refused parent directory.
 
@@ -1016,8 +1220,31 @@ def _readable_probe(path: Path) -> bool:
         return False
 
 
+def _control_probe(runner: Runner | None, path: Path) -> bool:
+    """Whether a path inside the control account's private tree exists.
+
+    That tree is mode 0700 for the control account, so this user can only ask "is it there" through the
+    account's own session.  Without a usable session (no runner, ``sudo`` would prompt, an unexpected
+    answer) the old rule applies: a refused probe means present-but-unverifiable, which callers treat as
+    present, the safe side for detecting an existing installation.
+    """
+
+    if runner is not None:
+        try:
+            control = _control_access(runner)
+            if control is None:
+                return False  # no such account: nothing of the control plane can exist
+            return _control_file_kind(control, str(path), code="installation_record_incomplete") is not None
+        except InstallerRefusal:
+            pass
+    return _readable_probe(path)
+
+
 def _live_runtime_present(
-    config: InstallConfig, state_root: Path, signed_payload_digest: str
+    config: InstallConfig,
+    state_root: Path,
+    signed_payload_digest: str,
+    runner: Runner | None = None,
 ) -> bool:
     """Whether the accepted runtime this release installed still exists live.
 
@@ -1050,7 +1277,7 @@ def _live_runtime_present(
     control_present = any(
         artifact.get("owner") == "stateport-control" for artifact in accepted
     ) and all(
-        _readable_probe(control_root / a["liveRelativePath"])
+        _control_probe(runner, control_root / a["liveRelativePath"])
         for a in accepted
         if a.get("owner") == "stateport-control"
     )
@@ -1064,7 +1291,11 @@ def _live_runtime_present(
             unit_path = control_root / live_relative
         else:
             unit_path = config.live_quadlet_root / live_relative
-        if not _readable_probe(unit_path):
+        if not (
+            _control_probe(runner, unit_path)
+            if artifact.get("owner") == "stateport-control" and control_present
+            else _readable_probe(unit_path)
+        ):
             return False
     if control_present:
         target_path = (
@@ -1072,7 +1303,221 @@ def _live_runtime_present(
         )
     else:
         target_path = _systemd_user_root(config) / ACCEPTED_ACTIVATION_TARGET
-    return _readable_probe(target_path)
+    return _control_probe(runner, target_path) if control_present else _readable_probe(target_path)
+
+
+@dataclass(frozen=True)
+class ExistingInstall:
+    """A live StatePort installation found in the state root before any change."""
+
+    state_root: Path
+    release_id: str
+    version: str
+    signed_payload_digest: str
+    local_url: str | None
+    receipt_path: Path
+
+    def is_release(self, release_id: str, signed_payload_digest: str) -> bool:
+        return (
+            self.release_id == release_id
+            and self.signed_payload_digest == signed_payload_digest
+        )
+
+
+# What the person chose about an existing installation.
+EXISTING_KEEP = "keep"
+EXISTING_REINSTALL = "reinstall"
+EXISTING_CANCEL = "cancel"
+
+
+def _uninstalled_since(receipts_dir: Path, install_receipt: Path) -> bool:
+    """Whether a succeeded uninstall/purge was written after this install receipt (by file time).
+
+    That ends the installation.  The root provisioning step of a following install re-creates the control
+    plane's units before the installer's own pass looks for an existing installation, so "the runtime is
+    there" alone would call a fresh install an existing one and change nothing.
+    """
+
+    try:
+        installed_ns = install_receipt.stat().st_mtime_ns
+    except OSError:
+        return False
+    for gone_path in sorted(receipts_dir.glob("uninstall_receipt_*.json")):
+        try:
+            if gone_path.stat().st_mtime_ns <= installed_ns:
+                continue
+            gone = _load_json(gone_path, "uninstall receipt")
+        except (OSError, InstallerRefusal):
+            continue
+        if gone.get("action") in {"uninstall", "purge"} and gone.get("result") == "succeeded":
+            return True
+    return False
+
+
+def _detect_existing_install(
+    config: InstallConfig, state_root: Path, runner: Runner | None = None
+) -> ExistingInstall | None:
+    """Find a live installation from its own durable records, read-only.
+
+    Present means: a succeeded install receipt AND the live runtime that
+    receipt describes still exists.  After a non-purge uninstall the receipt is
+    history while the runtime is gone, which is not an existing install.  After
+    an accepted update the updater status names the release that is current, so
+    that (not the genesis receipt) is the version reported and compared.
+    """
+
+    receipts_dir = state_root / "receipts"
+    if receipts_dir.is_symlink() or not receipts_dir.is_dir():
+        return None
+    latest: tuple[str, Path, dict[str, Any]] | None = None
+    for receipt_path in sorted(receipts_dir.glob("install_receipt_*.json")):
+        try:
+            receipt = _load_json(receipt_path, "install receipt")
+        except InstallerRefusal:
+            continue
+        if receipt.get("result") != "succeeded" or receipt.get("operation") != "install":
+            continue
+        finished = str(receipt.get("finishedAt", ""))
+        if latest is None or finished >= latest[0]:
+            latest = (finished, receipt_path, receipt)
+    if latest is None:
+        return None
+    _finished, receipt_path, receipt = latest
+    if _uninstalled_since(receipts_dir, receipt_path):
+        return None
+    release_record = receipt.get("release")
+    if not isinstance(release_record, dict):
+        return None
+    release_id = str(release_record.get("releaseId", ""))
+    version = str(release_record.get("version", ""))
+    signed_digest = str(release_record.get("signedPayloadDigest", ""))
+    if not release_id or _DIGEST.fullmatch(signed_digest) is None:
+        return None
+    if not _live_runtime_present(config, state_root, signed_digest, runner):
+        return None
+    status_path = state_root / "updater" / "status.json"
+    if status_path.is_file() and not status_path.is_symlink():
+        try:
+            current = _load_json(status_path, "update status").get("current")
+        except InstallerRefusal:
+            current = None
+        if (
+            isinstance(current, dict)
+            and isinstance(current.get("releaseId"), str)
+            and isinstance(current.get("signedPayloadDigest"), str)
+        ):
+            release_id = str(current["releaseId"])
+            signed_digest = str(current["signedPayloadDigest"])
+            version = str(current.get("version") or version)
+    runtime = receipt.get("runtime")
+    url = runtime.get("localUrl") if isinstance(runtime, dict) else None
+    return ExistingInstall(
+        state_root=state_root,
+        release_id=release_id,
+        version=version or release_id,
+        signed_payload_digest=signed_digest,
+        local_url=str(url) if url else None,
+        receipt_path=receipt_path,
+    )
+
+
+def _describe_existing_install(existing: ExistingInstall) -> list[str]:
+    lines = [f"StatePort {existing.version} is already installed on this machine."]
+    lines.append(f"  Location: {existing.state_root}")
+    if existing.local_url:
+        lines.append(f"  Address:  {existing.local_url}")
+    return lines
+
+
+def _installed_identity_id(state_root: Path) -> str | None:
+    path = state_root / "updater" / "trust" / "install-trust.json"
+    try:
+        value = _load_json(path, "install trust record").get("installedIdentityId")
+    except InstallerRefusal:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _other_release_refusal(
+    existing: ExistingInstall, new_version: str
+) -> InstallerRefusal:
+    wrapper = existing.state_root / "bin" / "stateport-update"
+    identity = _installed_identity_id(existing.state_root) or "<identity id from updater/trust/install-trust.json>"
+    return InstallerRefusal(
+        "existing_install_other_release",
+        f"StatePort {existing.version} is already installed (state: {existing.state_root}) "
+        f"and this installer carries StatePort {new_version}. The installer cannot swap "
+        "releases in place: the installed data volumes belong to the release that created "
+        f"them. To move to {new_version} and keep your data, use the installed updater "
+        f"({wrapper}). To start over on {new_version}, remove the old installation first "
+        f"with --purge --confirm-purge {identity} (this DELETES your StatePort data), "
+        "then run the installer again.",
+    )
+
+
+def _interactive_existing_decider(existing: ExistingInstall) -> str:
+    """Ask update/reinstall/cancel on a real terminal only."""
+
+    for line in _describe_existing_install(existing):
+        _say(line)
+    _say()
+    _say("  [k] Keep it as it is (nothing is changed)  [default]")
+    _say("  [r] Reinstall this release over it (your data is kept)")
+    _say("  [c] Cancel")
+    try:
+        answer = input("Choose k, r or c: ").strip().lower()
+    except EOFError:
+        return EXISTING_CANCEL
+    if answer in {"", "k", "keep"}:
+        return EXISTING_KEEP
+    if answer in {"r", "reinstall"}:
+        return EXISTING_REINSTALL
+    return EXISTING_CANCEL
+
+
+def _resolve_existing_install(
+    config: InstallConfig,
+    existing: ExistingInstall,
+    *,
+    release_id: str,
+    version: str,
+    signed_payload_digest: str,
+    decider: Callable[[ExistingInstall], str] | None,
+) -> str:
+    """Decide what to do about a live installation, or refuse in plain words."""
+
+    if not existing.is_release(release_id, signed_payload_digest):
+        raise _other_release_refusal(existing, version)
+    if config.reinstall:
+        for line in _describe_existing_install(existing):
+            _say(line)
+        _say("Reinstalling this release over it as requested; your data is kept.")
+        return EXISTING_REINSTALL
+    if config.prepare_execution_host:
+        # Preparation changes no runtime; the decision belongs to the install
+        # pass that follows, so never block or refuse here.
+        for line in _describe_existing_install(existing):
+            _say(line)
+        return EXISTING_KEEP
+    if config.assume_yes:
+        for line in _describe_existing_install(existing):
+            _say(line)
+        _say("This is the release being installed, so it is kept as it is. "
+             "Pass --yes --reinstall to reinstall it.")
+        return EXISTING_KEEP
+    if decider is not None:
+        choice = decider(existing)
+        if choice == EXISTING_CANCEL:
+            raise InstallerRefusal(
+                "install_cancelled", "cancelled; nothing was changed"
+            )
+        return choice
+    raise InstallerRefusal(
+        "existing_install_needs_choice",
+        f"StatePort {existing.version} is already installed (state: {existing.state_root}). "
+        "Nothing was changed. Run the installer again with --yes to keep it as it is, or "
+        "with --yes --reinstall to reinstall this release over it (your data is kept).",
+    )
 
 
 def _sha256_digest(content: bytes) -> str:    return "sha256:" + hashlib.sha256(content).hexdigest()
@@ -1148,12 +1593,21 @@ def _retain_local_image_archives(source_root: Path, destination_root: Path) -> N
             continue
         target = destination / archive.name
         if target.exists() or target.is_symlink():
-            if not target.is_file() or target.read_bytes() != archive.read_bytes():
+            if target.is_symlink() or not target.is_file():
                 raise InstallerRefusal(
-                    "image_archive_conflict", f"retained image archive differs: {archive.name}"
+                    "image_archive_conflict", f"retained image archive is not a regular file: {archive.name}"
                 )
-            continue
-        shutil.copyfile(archive, target)
+            if target.read_bytes() == archive.read_bytes():
+                continue
+            # A different retained archive is left by an earlier release or an interrupted
+            # copy. The incoming archive is candidate-bound and digest-verified by the caller,
+            # so set the old one aside (never deleted) and retain the new one, instead of
+            # refusing every retry after an earlier attempt.
+            aside = destination / f"{archive.name}.superseded-{int(time.time())}"
+            os.replace(target, aside)
+        partial = destination / f".{archive.name}.partial"
+        shutil.copyfile(archive, partial)
+        os.replace(partial, target)
 
 
 def _read_bounded(path: Path, *, description: str, maximum: int) -> bytes:
@@ -1777,6 +2231,149 @@ def verify_podman_package_bundle(
         raise
 
 
+def _say(message: str = "", *, stream: Any = None) -> None:
+    """One plain, flushed line for the person running the installer."""
+
+    print(message, file=stream if stream is not None else sys.stdout, flush=True)
+
+
+_INSTALL_PHASES = 7
+# Technical notices (port-allocation drift, fallback copies, tier details) are
+# for diagnosis; they are shown only with --verbose and are otherwise silent.
+_VERBOSE = False
+
+
+def _phase(number: int, title: str) -> None:
+    _say(f"[{number}/{_INSTALL_PHASES}] {title}")
+
+
+def _notice(message: str) -> None:
+    if _VERBOSE:
+        _say(f"  note: {message}")
+
+
+# A fresh Ubuntu runs unattended-upgrades right after first boot and holds the
+# dpkg/apt locks (and leaves ``dpkg --audit`` non-empty mid-transaction) for
+# minutes.  The audit gate waits for that to finish before it judges the
+# package database; it refuses only when the audit stays dirty with no package
+# manager running, or when the wait budget runs out.
+_DPKG_AUDIT_WAIT_SECONDS = 600.0
+_DPKG_AUDIT_IDLE_RECHECKS = 3
+_DPKG_AUDIT_IDLE_RECHECK_SECONDS = 3.0
+_DPKG_AUDIT_BACKOFF_SECONDS = (2.0, 5.0, 10.0, 15.0, 30.0)
+_DPKG_LOCK_FILES = ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock")
+_PACKAGE_MANAGER_COMMS = frozenset(
+    {"dpkg", "apt", "apt-get", "aptitude", "unattended-upgr", "apt.systemd.dai"}
+)
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _package_manager_activity() -> str | None:
+    """Name what currently holds the package database, or None when idle.
+
+    Read-only: a shared non-blocking advisory lock probe on the dpkg lock files
+    (the exclusive lock dpkg itself takes) plus a /proc scan for the package
+    manager processes, so it needs no extra tools and no privilege.
+    """
+
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        fcntl = None  # type: ignore[assignment]
+    if fcntl is not None:
+        for lock_file in _DPKG_LOCK_FILES:
+            try:
+                fd = os.open(lock_file, os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                try:
+                    fcntl.lockf(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except OSError:
+                    return "another package installation"
+                fcntl.lockf(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            comm = Path("/proc", entry, "comm").read_text(encoding="utf-8").strip()
+            if comm in _PACKAGE_MANAGER_COMMS:
+                return "unattended-upgrades" if comm.startswith("unattended") else comm
+            if comm.startswith("python"):
+                cmdline = Path("/proc", entry, "cmdline").read_bytes().split(b"\0")
+                if len(cmdline) > 1 and Path(cmdline[1].decode("utf-8", "replace")).name.startswith(
+                    "unattended-upgrade"
+                ):
+                    return "unattended-upgrades"
+        except OSError:
+            continue
+    return None
+
+
+def _require_clean_dpkg_audit(
+    runner: Runner,
+    *,
+    activity: Callable[[], str | None] | None = None,
+) -> None:
+    """Refuse only on an audit that is genuinely broken and stays that way."""
+
+    probe = activity or _package_manager_activity
+    deadline = _monotonic() + _DPKG_AUDIT_WAIT_SECONDS
+    started = _monotonic()
+    announced_at: float | None = None
+    idle_rechecks = 0
+    backoff = 0
+    while True:
+        audit = runner.run(["dpkg", "--audit"], timeout=60)
+        if audit.returncode == 0 and not audit.stdout.strip() and not audit.stderr.strip():
+            if announced_at is not None:
+                _say("  The package manager is idle again; continuing.")
+            return
+        detail = " ".join((audit.stdout + " " + audit.stderr).split())[:300]
+        busy = probe()
+        if busy is None:
+            idle_rechecks += 1
+            if idle_rechecks > _DPKG_AUDIT_IDLE_RECHECKS:
+                raise InstallerRefusal(
+                    "package_installation_invalid",
+                    "dpkg reports an incomplete package transaction and no package manager is "
+                    "running: " + (detail or f"dpkg --audit exited {audit.returncode}")
+                    + ". Run 'sudo dpkg --configure -a' and then run the installer again.",
+                )
+            _sleep(_DPKG_AUDIT_IDLE_RECHECK_SECONDS)
+            continue
+        idle_rechecks = 0
+        now = _monotonic()
+        if now >= deadline:
+            raise InstallerRefusal(
+                "package_manager_busy",
+                f"{busy} was still using the package database after "
+                f"{int(_DPKG_AUDIT_WAIT_SECONDS // 60)} minutes. Wait for it to finish "
+                "(Ubuntu runs it automatically after first boot), then run the installer again.",
+            )
+        if announced_at is None or now - announced_at >= 30.0:
+            _say(
+                f"  Waiting for {busy} to finish with the system package manager "
+                f"({int(now - started)}s of up to {int(_DPKG_AUDIT_WAIT_SECONDS)}s)..."
+            )
+            announced_at = now
+        _sleep(_DPKG_AUDIT_BACKOFF_SECONDS[min(backoff, len(_DPKG_AUDIT_BACKOFF_SECONDS) - 1)])
+        backoff += 1
+
+
 def verify_installed_podman_packages(
     preflight: Mapping[str, Any],
     *,
@@ -1988,11 +2585,7 @@ def verify_installed_podman_packages(
             "package_runtime_mismatch",
             "the installed supplementary-group runtime differs from pinned crun 1.28",
         )
-    audit = runner.run(["dpkg", "--audit"], timeout=60)
-    if audit.returncode != 0 or audit.stdout.strip() or audit.stderr.strip():
-        raise InstallerRefusal(
-            "package_installation_invalid", "dpkg reports an incomplete package transaction"
-        )
+    _require_clean_dpkg_audit(runner)
 
     installed_state = {
         name: {
@@ -2429,15 +3022,150 @@ def _volume_names(signed_hex: str, volume_key: str) -> tuple[str, str]:
     )
 
 
-def _ensure_volume(runner: Runner, name: str) -> None:
+_CONTROL_HOME = "/var/lib/stateport-control"
+_CONTROL_QUADLET_ROOT = f"{_CONTROL_HOME}/.config/containers/systemd"
+_CONTROL_SYSTEMD_USER_ROOT = f"{_CONTROL_HOME}/.config/systemd/user"
+# The only programs the installer ever runs inside the control account's own session, by absolute
+# path (the same set and the same sanitized environment the root helper uses for that account).
+_CONTROL_PROGRAMS = {
+    "cat": "/usr/bin/cat",
+    "podman": "/usr/bin/podman",
+    "rm": "/usr/bin/rm",
+    "stat": "/usr/bin/stat",
+    "systemctl": "/usr/bin/systemctl",
+}
+
+
+def _euid() -> int:
+    return os.geteuid()
+
+
+@dataclass(frozen=True)
+class _ControlAccount:
+    uid: int
+    gid: int
+    home: str
+
+
+class _ControlRunner:
+    """Runner seam that acts INSIDE the ``stateport-control`` account's own session.
+
+    Everything the product runs as the control plane (its containers, its named
+    volumes, its systemd user manager, its quadlet files) belongs to that
+    account, not to the user who started the installer.  Reaching it is one
+    fixed shape: ``sudo -n runuser -u stateport-control -- env -i <sanitized
+    environment> <absolute program> ...`` (without ``sudo`` when already root),
+    exactly what the root helper does for the same account.  Only the programs in
+    ``_CONTROL_PROGRAMS`` can be named, so this seam never becomes a general
+    privileged command runner.
+    """
+
+    def __init__(self, runner: Runner, account: _ControlAccount, *, euid: int) -> None:
+        self._runner = runner
+        self._account = account
+        self._euid = euid
+
+    def wrap(self, argv: Sequence[str]) -> list[str]:
+        program = _CONTROL_PROGRAMS.get(str(argv[0]))
+        if program is None:
+            raise InstallerRefusal(
+                "control_command_refused",
+                f"{argv[0]} is not a program the installer runs as the control account",
+            )
+        home, runtime = self._account.home, f"/run/user/{self._account.uid}"
+        environment = {
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
+            "HOME": home,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "LOGNAME": CONTROL_IDENTITY,
+            "PATH": "/usr/bin:/bin",
+            "SHELL": "/usr/sbin/nologin",
+            "USER": CONTROL_IDENTITY,
+            "XDG_CACHE_HOME": f"{home}/.cache",
+            "XDG_CONFIG_HOME": f"{home}/.config",
+            "XDG_DATA_HOME": f"{home}/.local/share",
+            "XDG_RUNTIME_DIR": runtime,
+            "XDG_STATE_HOME": f"{home}/.local/state",
+        }
+        wrapped = [
+            "/usr/sbin/runuser",
+            "-u",
+            CONTROL_IDENTITY,
+            "--",
+            "/usr/bin/env",
+            "-i",
+            *(f"{key}={value}" for key, value in sorted(environment.items())),
+            program,
+            *[str(item) for item in argv[1:]],
+        ]
+        return wrapped if self._euid == 0 else ["sudo", "-n", *wrapped]
+
+    def run(self, argv: Sequence[str], *, timeout: int) -> Completed:
+        return self._runner.run(self.wrap(argv), timeout=timeout)
+
+
+def _control_access(runner: Runner) -> _ControlRunner | None:
+    """A runner inside the control account, or None when that account does not exist.
+
+    ``getent`` answers "no such account" (exit 2) definitively; any other failure
+    is not absence.  Before anything is changed, a caller that is not root must be
+    able to use ``sudo`` without a prompt: the refusal says so and names the fix.
+    """
+
+    found = _run_effect(
+        runner, ["getent", "passwd", CONTROL_IDENTITY], timeout=30, code="control_account_unobservable"
+    )
+    if found.returncode == 2:
+        return None
+    fields = found.stdout.strip().split(":")
+    if found.returncode != 0 or len(fields) < 7 or fields[0] != CONTROL_IDENTITY:
+        raise InstallerRefusal(
+            "control_account_unobservable",
+            f"cannot establish whether the {CONTROL_IDENTITY} account exists; "
+            "a failed lookup is not absence",
+        )
+    try:
+        account = _ControlAccount(uid=int(fields[2]), gid=int(fields[3]), home=fields[5])
+    except ValueError as exc:
+        raise InstallerRefusal(
+            "control_account_unobservable", f"the {CONTROL_IDENTITY} account record is malformed"
+        ) from exc
+    if account.home != _CONTROL_HOME or account.uid <= 0:
+        raise InstallerRefusal(
+            "control_account_unexpected",
+            f"the {CONTROL_IDENTITY} account is not the provisioned one (home {account.home})",
+        )
+    euid = _euid()
+    if euid != 0:
+        sudo = _run_effect(runner, ["sudo", "-n", "true"], timeout=30, code="administrator_rights_required")
+        if sudo.returncode != 0:
+            raise InstallerRefusal(
+                "administrator_rights_required",
+                f"StatePort's control plane runs under the {CONTROL_IDENTITY} account, and reaching it needs "
+                "administrator rights (sudo) without a password prompt. Run 'sudo -v' in this terminal and "
+                "run the installer again. Nothing was changed.",
+            )
+    return _ControlRunner(runner, account, euid=euid)
+
+
+def _ensure_volume(runner: Runner, name: str) -> bool:
+    """Make the volume exist; True when it already did (its data is kept), False when just created.
+
+    ``runner`` decides WHOSE podman store holds it: the services' own account (a ``_ControlRunner``
+    for the control plane) or the invoking user.  A volume must live in the store of the account that
+    mounts it, or the installer would record, inspect and later delete a decoy of the real data.
+    """
+
     exists = runner.run(["podman", "volume", "exists", name], timeout=60)
     if exists.returncode == 0:
-        return
+        return True
     created = runner.run(["podman", "volume", "create", name], timeout=120)
     if created.returncode != 0:
         raise InstallerRefusal(
             "volume_create_failed", f"podman volume create {name}: {created.stderr.strip()[:200]}"
         )
+    return False
 
 
 def _create_venv(venv_dir: Path) -> None:
@@ -2703,25 +3431,105 @@ def _wait_for_health(
     return evidence
 
 
+def _powershell_literal(value: str) -> str:
+    """A PowerShell single-quoted string literal (only ``'`` needs doubling)."""
+
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _windows_keepalive_script(task_name: str, command: str) -> str:
+    """The exact, deterministic PowerShell that registers the keep-alive task.
+
+    What Windows allows without a stored password or elevation, and what this
+    asks for, in order of preference:
+
+    1. ``boot-and-logon``: principal = the invoking user with logon type S4U
+       ("run whether the user is logged on or not", no password stored), and
+       triggers at Windows startup, at the user's logon and every few minutes.
+       Windows may refuse a startup trigger to a non-elevated registrant.
+    2. ``background-and-logon``: the same S4U principal without the startup
+       trigger.  The repeating trigger plus "start when available" starts the
+       distribution shortly after boot even when nobody ever signs in.
+    3. ``logon-only``: the interactive principal (needs a signed-in session).
+       Used only when Windows refuses S4U for this user.
+
+    A task that must start before any logon *as this user* with no stored
+    password does not exist: Windows' only password-free boot principals are
+    SYSTEM and friends, and a SYSTEM-run wsl.exe cannot see this user's
+    distributions.  Settings in every mode: allowed and kept running on
+    battery, no execution time limit (Windows' default is 72 h), start when
+    available after a missed start, restart on failure, and one instance at a
+    time.
+    """
+
+    executable, _, arguments = command.partition(" ")
+    name = _powershell_literal(task_name)
+    interval = _WINDOWS_KEEPAIVE_REPEAT_MINUTES
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        f"$name = {name}",
+        "$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
+        f"$action = New-ScheduledTaskAction -Execute {_powershell_literal(executable)} "
+        f"-Argument {_powershell_literal(arguments)}",
+        "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
+        "-DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew "
+        "-RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) "
+        "-ExecutionTimeLimit (New-TimeSpan -Seconds 0)",
+        "$logon = New-ScheduledTaskTrigger -AtLogOn -User $user",
+        "$startup = New-ScheduledTaskTrigger -AtStartup",
+        "$repeat = New-ScheduledTaskTrigger -Once -At '2020-01-01 00:00:00' "
+        f"-RepetitionInterval (New-TimeSpan -Minutes {interval})",
+        "$background = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Limited",
+        "$interactive = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive "
+        "-RunLevel Limited",
+        "function Register([object[]]$triggers, $principal, [string]$mode) {",
+        "  Register-ScheduledTask -TaskName $name -Action $action -Trigger $triggers "
+        "-Settings $settings -Principal $principal -Force "
+        "-Description 'Keeps the StatePort WSL distribution running (installed by StatePort).' "
+        "| Out-Null",
+        f"  Write-Output ('{_WINDOWS_KEEPAIVE_MODE_PREFIX}' + $mode)",
+        "}",
+        "try { Register @($startup, $logon, $repeat) $background "
+        f"'{_WINDOWS_KEEPAIVE_MODES[0]}' }}",
+        "catch {",
+        "  try { Register @($logon, $repeat) $background "
+        f"'{_WINDOWS_KEEPAIVE_MODES[1]}' }}",
+        "  catch {",
+        "    try { Register @($logon, $repeat) $interactive "
+        f"'{_WINDOWS_KEEPAIVE_MODES[2]}' }}",
+        "    catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+        "  }",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 @dataclass(frozen=True)
 class _WindowsKeepAlive:
-    """The exact Windows logon task this installation owns, and nothing else."""
+    """The exact Windows task this installation owns, and nothing else."""
 
     task_name: str
     command: str
+    definition: str = _WINDOWS_KEEPAIVE_DEFINITION
+    # What Windows actually allowed at registration; observed, never planned,
+    # so it must not take part in plan equality.
+    registered_mode: str | None = field(default=None, compare=False)
+
+    @property
+    def script(self) -> str:
+        return _windows_keepalive_script(self.task_name, self.command)
 
     @property
     def create_argv(self) -> tuple[str, ...]:
+        encoded = base64.b64encode(self.script.encode("utf-16-le")).decode("ascii")
         return (
-            "schtasks.exe",
-            "/Create",
-            "/TN",
-            self.task_name,
-            "/TR",
-            self.command,
-            "/SC",
-            "ONLOGON",
-            "/F",
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
         )
 
     @property
@@ -2734,18 +3542,29 @@ class _WindowsKeepAlive:
         return {
             "taskName": self.task_name,
             "command": self.command,
-            "trigger": "logon",
+            "definition": self.definition,
+            "triggers": ["startup", "logon", f"every-{_WINDOWS_KEEPAIVE_REPEAT_MINUTES}-minutes"],
+            "settings": [
+                "allow-on-battery",
+                "no-execution-time-limit",
+                "start-when-available",
+                "restart-on-failure",
+            ],
             "scope": "invoking-user",
         }
 
     def as_record(self) -> dict[str, Any]:
-        return {
+        record: dict[str, Any] = {
             "schema": WINDOWS_KEEPAIVE_RECORD_SCHEMA,
             "taskName": self.task_name,
             "command": self.command,
+            "definition": self.definition,
             "createArgv": list(self.create_argv),
             "deleteArgv": list(self.delete_argv),
         }
+        if self.registered_mode is not None:
+            record["registeredMode"] = self.registered_mode
+        return record
 
 
 def _windows_keepalive_for(
@@ -2789,26 +3608,69 @@ def _windows_keepalive_for(
 
 def _register_windows_keepalive(
     runner: Runner, keepalive: _WindowsKeepAlive, state_root: Path
-) -> None:
-    """Register the per-user logon task and durably record it first.
+) -> tuple[_WindowsKeepAlive, bool]:
+    """Register the per-user task and durably record it first.
 
     The record is written before the effect so a task that exists can never be
-    invisible to uninstall, even if this process dies between the two.
+    invisible to uninstall, even if this process dies between the two.  After a
+    successful registration the record is rewritten once with the mode Windows
+    actually allowed.
+
+    The task is a convenience: it keeps the distro running after the last WSL
+    window closes.  A slow first ``powershell.exe`` call on the user's machine
+    must not crash an install whose services are already healthy, so a timed-out
+    registration is retried once with a longer timeout; if that times out too,
+    a plain notice is printed and the installer continues with the task not
+    registered.  The durable record then keeps no ``registeredMode``, which is
+    exactly what ``repair`` state needs to offer a later retry.  A registration
+    Windows actually refused (nonzero exit) still refuses the install closed.
     """
 
     _write_json(state_root / _WINDOWS_KEEPAIVE_RECORD_FILE, keepalive.as_record())
-    completed = _run_effect(
-        runner,
-        keepalive.create_argv,
-        timeout=120,
-        code="windows_keepalive_registration_failed",
-    )
+    try:
+        completed = _run_effect(
+            runner,
+            keepalive.create_argv,
+            timeout=120,
+            code="windows_keepalive_registration_failed",
+        )
+    except subprocess.TimeoutExpired:
+        _say(
+            "  note: the Windows keep-alive registration is slow to answer; "
+            "retrying once with a longer timeout"
+        )
+        try:
+            completed = _run_effect(
+                runner,
+                keepalive.create_argv,
+                timeout=300,
+                code="windows_keepalive_registration_failed",
+            )
+        except subprocess.TimeoutExpired:
+            _say(
+                "  notice: the optional Windows keep-alive task "
+                f"({keepalive.task_name}) could not be registered; StatePort is "
+                "installed and healthy, but it may stop after the last WSL window "
+                "closes. Run the installer again to register the task."
+            )
+            return keepalive, False
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()[:200]
         raise InstallerRefusal(
             "windows_keepalive_registration_failed",
-            f"could not register the Windows logon task {keepalive.task_name}: {detail}",
+            f"could not register the Windows task {keepalive.task_name}: {detail}",
         )
+    mode = None
+    for line in completed.stdout.splitlines():
+        text = line.strip()
+        if text.startswith(_WINDOWS_KEEPAIVE_MODE_PREFIX):
+            candidate = text[len(_WINDOWS_KEEPAIVE_MODE_PREFIX):]
+            if candidate in _WINDOWS_KEEPAIVE_MODES:
+                mode = candidate
+    registered = replace(keepalive, registered_mode=mode)
+    if mode is not None:
+        _write_json(state_root / _WINDOWS_KEEPAIVE_RECORD_FILE, registered.as_record())
+    return registered, True
 
 
 def _load_windows_keepalive(state_root: Path) -> _WindowsKeepAlive | None:
@@ -2837,7 +3699,19 @@ def _load_windows_keepalive(state_root: Path) -> _WindowsKeepAlive | None:
             "installation_record_invalid",
             f"the keep-alive record at {path} lacks the exact task command",
         )
-    return _WindowsKeepAlive(task_name=task_name, command=command)
+    definition = record.get("definition", _WINDOWS_KEEPAIVE_LEGACY_DEFINITION)
+    if not isinstance(definition, str):
+        raise InstallerRefusal(
+            "installation_record_invalid",
+            f"the keep-alive record at {path} has an invalid task definition",
+        )
+    mode = record.get("registeredMode")
+    return _WindowsKeepAlive(
+        task_name=task_name,
+        command=command,
+        definition=definition,
+        registered_mode=mode if isinstance(mode, str) else None,
+    )
 
 
 def _windows_task_absent(completed: Completed) -> bool:
@@ -2875,6 +3749,41 @@ def _windows_task_present(runner: Runner, task_name: str) -> bool:
     )
 
 
+def _windows_keepalive_state(
+    runner: Runner, state_root: Path, planned: _WindowsKeepAlive
+) -> str:
+    """Whether the recorded keep-alive task is current: ``ok`` or ``repair``.
+
+    ``repair`` means the task must be (re)registered by name: no record yet and
+    no task on the host, a record from the Alpha.21 definition, or a recorded
+    task that Windows no longer has.  A foreign task of the same name, or a
+    record naming another command, is a refusal and never guessed at.
+    """
+
+    recorded = _load_windows_keepalive(state_root)
+    if recorded is None:
+        if _windows_task_present(runner, planned.task_name):
+            raise InstallerRefusal(
+                "windows_keepalive_task_conflict",
+                "StatePortKeepAlive exists without this installation's task record; "
+                "run the installer again with --reinstall to replace that task",
+            )
+        return "repair"
+    if recorded.command != planned.command:
+        raise InstallerRefusal(
+            "windows_keepalive_record_mismatch",
+            "StatePortKeepAlive record does not match the planned Windows task command",
+        )
+    if recorded.definition != planned.definition:
+        # Alpha.21 registered a bare ONLOGON task that never ran in a headless
+        # guest; re-register it by name with the current definition
+        # (idempotent, the record names exactly this task).
+        return "repair"
+    if not _windows_task_present(runner, recorded.task_name):
+        return "repair"
+    return "ok"
+
+
 def _remove_windows_tasks(runner: Runner, tasks: Sequence[str]) -> list[str]:
     """Delete exactly the recorded tasks; an already-absent task is convergence."""
 
@@ -2899,6 +3808,94 @@ def _remove_windows_tasks(runner: Runner, tasks: Sequence[str]) -> list[str]:
     return removed
 
 
+def _keep_existing_install(
+    config: InstallConfig,
+    existing: ExistingInstall,
+    *,
+    runner: Runner,
+    state_root: Path,
+    plan_digest: str,
+    index_digest: str,
+    windows_keepalive: _WindowsKeepAlive | None,
+    execution_host_info: Mapping[str, Any] | None,
+) -> InstallOutcome:
+    """Honour "keep": change nothing about the runtime and succeed plainly.
+
+    The one permitted action is repairing a missing/outdated Windows keep-alive
+    task by name, because without it the kept installation stays down after the
+    next Windows restart; it is reported, and nothing else is touched.  When
+    the plan derived from this run's options differs from the installed plan
+    (other ports, state flags, host ports that moved), the installation is
+    still kept and the person is told how to apply the new options.
+    """
+
+    receipt = _load_json(existing.receipt_path, "install receipt")
+    plan_matches = (
+        receipt.get("installPlanDigest") == plan_digest
+        and receipt.get("releaseIndexDigest") == index_digest
+    )
+    notes: list[str] = []
+    repaired = False
+    keepalive_ok: bool | None = None
+    if windows_keepalive is not None:
+        if _windows_keepalive_state(runner, state_root, windows_keepalive) == "repair":
+            _registered, keepalive_ok = _register_windows_keepalive(
+                runner, windows_keepalive, state_root
+            )
+            repaired = keepalive_ok
+            if keepalive_ok:
+                notes.append(
+                    "The Windows keep-alive task (StatePortKeepAlive) was missing or outdated and was "
+                    "registered again; nothing else was changed."
+                )
+            else:
+                notes.append(
+                    "The Windows keep-alive task (StatePortKeepAlive) could not be registered; "
+                    "StatePort itself was not changed. Run the installer again to register the task."
+                )
+        else:
+            keepalive_ok = True
+    if plan_matches:
+        # Identical content is a no-op, foreign content refuses closed.
+        _install_update_wrapper(config, state_root)
+    else:
+        notes.append(
+            "The options given now differ from the installed ones (or ports on this machine "
+            "moved), so nothing was applied. Run the installer again with --reinstall to "
+            "apply them; your data is kept."
+        )
+    return InstallOutcome(
+        status="succeeded",
+        code="keepalive_repaired" if repaired else "already_installed",
+        message=(
+            "the installed release was kept as it is"
+            + ("; the plan derived from these options differs from the installed plan" if not plan_matches else "")
+            + "; "
+            + (
+                "StatePortKeepAlive registered for Windows logon"
+                if windows_keepalive is not None and keepalive_ok
+                else (
+                    "the optional Windows keep-alive task could not be registered; "
+                    "run the installer again to register it"
+                    if windows_keepalive is not None
+                    else "Windows keep-alive not required on portable Linux"
+                )
+            )
+        ),
+        local_url=existing.local_url,
+        receipt_path=existing.receipt_path,
+        converged=not repaired,
+        execution_host=execution_host_info,
+        keepalive_status=(
+            "registered"
+            if windows_keepalive is not None and keepalive_ok
+            else "not_registered" if windows_keepalive is not None else "not_required"
+        ),
+        target_id=config.expected_target,
+        notes=tuple(notes),
+    )
+
+
 def install(
     config: InstallConfig,
     *,
@@ -2910,9 +3907,12 @@ def install(
     clock: Callable[[], datetime],
     confirmer: Callable[[Mapping[str, Any]], bool],
     venv_creator: Callable[[Path], None] = _create_venv,
+    existing_decider: Callable[["ExistingInstall"], str] | None = None,
 ) -> InstallOutcome:
     """Run the fail-closed install flow; every refusal is typed and durable."""
 
+    global _VERBOSE
+    _VERBOSE = bool(config.verbose)
     try:
         substrate = probe.substrate()
     except InstallerRefusal as refusal:
@@ -2955,6 +3955,7 @@ def install(
             clock=clock,
             confirmer=confirmer,
             venv_creator=venv_creator,
+            existing_decider=existing_decider,
             substrate=substrate,
             started=clock(),
         )
@@ -2981,6 +3982,7 @@ def _install_inner(
     venv_creator: Callable[[Path], None],
     substrate: HostSubstrateFacts,
     started: datetime,
+    existing_decider: Callable[["ExistingInstall"], str] | None = None,
 ) -> InstallOutcome:
     if config.channel not in _CHANNELS:
         raise InstallerRefusal("channel_invalid", f"unknown channel: {config.channel}")
@@ -3013,6 +4015,7 @@ def _install_inner(
     venv_dir = state_root / "updater-venv"
 
     # Inputs (local paths, or bounded HTTPS downloads with digest binding).
+    _phase(1, "Checking the signed release...")
     index_path = _acquire_input(
         config.release_index,
         description="release index",
@@ -3037,6 +4040,25 @@ def _install_inner(
 
     # Trust step 3: the authenticated index pins every artifact digest.
     signed = bootstrap.signed
+    # An existing live installation is looked for now, from the authenticated
+    # release identity and before anything of it can be touched (the updater
+    # venv, plan files, units).  The person gets a plain statement and a
+    # choice, or a plain refusal that says what to pass instead.
+    existing_action: str | None = None
+    existing_found: ExistingInstall | None = None
+    signed_release = signed.get("release")
+    if isinstance(signed_release, dict):
+        found = _detect_existing_install(config, state_root, runner)
+        if found is not None:
+            existing_found = found
+            existing_action = _resolve_existing_install(
+                config,
+                found,
+                release_id=str(signed_release.get("releaseId", "")),
+                version=str(signed_release.get("version", "")),
+                signed_payload_digest=bootstrap.signed_digest,
+                decider=existing_decider,
+            )
     artifacts = signed.get("artifacts")
     if not isinstance(artifacts, dict):
         raise InstallerRefusal("index_malformed", "signed payload has no artifact inventory")
@@ -3234,6 +4256,8 @@ def _install_inner(
     images = index.document["signed"]["images"]
 
     # Host verification: capability-based, distribution identity is observation.
+    _say(f"  StatePort {verified.index.version}: signatures and release contents verified.")
+    _phase(2, "Checking this machine...")
     facts = probe.gather()
     decision = _verify_host(
         release, facts, substrate, expected_target=config.expected_target
@@ -3241,11 +4265,10 @@ def _install_inner(
     support_tier = decision.support_tier
     if support_tier == "compatible_unvalidated":
         for warning in decision.warnings:
-            print(f"notice: {warning}", file=sys.stderr)
-        print(
-            f"notice: this host installs as {support_tier} — it matches the capability "
-            "contract but has no clean-install acceptance receipt",
-            file=sys.stderr,
+            _notice(str(warning))
+        _say(
+            "  Note: this machine is not one of the tested setups; it has every capability "
+            "StatePort needs, so the install continues."
         )
     host_identity = {
         "formatVersion": "stateport.install-host-identity/v1",
@@ -3266,20 +4289,20 @@ def _install_inner(
     # them lets the deterministic derivation reproduce the original allocation
     # exactly; counting them as observed-host shifts every port, overwrites the
     # live units, and traps every later rerun in a dead-port health loop.
-    own_ports = _own_live_unit_ports(config.live_quadlet_root, index.signed_digest)
-    occupied: list[dict[str, Any]] = []
-    for port in probe.occupied_ports():
-        if port in own_ports:
-            continue
-        occupied.append(
-            {
-                "class": "observed-host",
-                "port": port,
-                "identityDigest": release.canonical_digest(
-                    {"class": "observed-host", "port": port, "source": "proc-net-tcp-listen"}
-                ),
-            }
-        )
+    # The control-plane units of THIS release are bound by its own containers
+    # on a rerun AND on a clean first install (the root provisioning invocation
+    # started them before this one began) and live in an unreadable root-owned
+    # tree; reading them back is the same exclusion, so this invocation
+    # reproduces the allocation the provisioned units already publish instead
+    # of stepping the derivation one probe step per service.
+    occupied = _observed_host_inventory(
+        release,
+        probe,
+        live_quadlet_root=config.live_quadlet_root,
+        state_root=state_root,
+        signed_payload_digest=index.signed_digest,
+        runner=runner,
+    )
     empty_inventory = release.canonical_digest([])
     collision_digests = {
         "current": empty_inventory,
@@ -3345,6 +4368,7 @@ def _install_inner(
     signer_entries.sort(key=lambda item: (item["subjectKind"], item["subjectId"]))
 
     # Exact install plan.
+    _phase(3, "Preparing the install plan...")
     plan: dict[str, Any] = {
         "schema": "stateport.install-plan/v1",
         "installerVersion": INSTALLER_VERSION,
@@ -3391,7 +4415,15 @@ def _install_inner(
         {key: value for key, value in plan.items() if key != "createdAt"}
     )
     plan["planDigest"] = plan_digest
-    _write_json(state_root / "install-plan.json", plan)
+    # Keeping a live installation changes nothing, so the installed plan record
+    # is not overwritten by a plan that is never going to be installed.
+    keeping_existing = (
+        existing_action == EXISTING_KEEP
+        and existing_found is not None
+        and not config.prepare_execution_host
+    )
+    if not keeping_existing:
+        _write_json(state_root / "install-plan.json", plan)
 
     # Execution-host provisioning: compute the control-plane materialization
     # (deterministic for the verified release + host state) and emit the plan.
@@ -3453,7 +4485,24 @@ def _install_inner(
     # non-purge uninstall the receipt is historic while the units, containers,
     # and activation target are gone; the rerun must fall through and
     # reinstall, converging the durable records that were preserved.
+    if keeping_existing and existing_found is not None:
+        # "Keep it as it is" (and --yes) is a decision, not a hint: the install
+        # transaction never runs over a live installation of this release.
+        # Whether the plan derived now equals the installed one only decides
+        # what the person is told, never whether their installation is replaced.
+        return _keep_existing_install(
+            config,
+            existing_found,
+            runner=runner,
+            state_root=state_root,
+            plan_digest=plan_digest,
+            index_digest=index.index_digest,
+            windows_keepalive=windows_keepalive,
+            execution_host_info=execution_host_info,
+        )
     for receipt_path in sorted(receipts_dir.glob("install_receipt_*.json")):
+        if existing_action == EXISTING_REINSTALL:
+            break
         try:
             existing = _load_json(receipt_path, "install receipt")
         except InstallerRefusal:
@@ -3464,16 +4513,19 @@ def _install_inner(
             and existing.get("installPlanDigest") == plan_digest
             and existing.get("releaseIndexDigest") == index.index_digest
         ):
-            if not _live_runtime_present(config, state_root, index.signed_digest):
+            if _uninstalled_since(receipts_dir, receipt_path):
+                continue
+            if not _live_runtime_present(config, state_root, index.signed_digest, runner):
                 break
-            # The per-user logon keep-alive task is part of the live runtime
-            # this installation created, so it belongs to the same convergence
-            # rule: when the host no longer has it, a converged rerun must fall
-            # through and re-register rather than report success with a dead
-            # keep-alive.  Re-registration is idempotent (``/F`` by name).
-            recorded_keepalive = _load_windows_keepalive(state_root)
-            if recorded_keepalive is not None and not _windows_task_present(
-                runner, recorded_keepalive.task_name
+            # The per-user keep-alive task is part of the live runtime this
+            # installation created, so it belongs to the same convergence rule:
+            # when the host no longer has it (or has the Alpha.21 definition),
+            # a converged rerun must fall through and re-register rather than
+            # report success with a dead keep-alive.  Re-registration is
+            # idempotent (by name).
+            if (
+                windows_keepalive is not None
+                and _windows_keepalive_state(runner, state_root, windows_keepalive) == "repair"
             ):
                 break
             # A converged rerun still enforces the create-only entry point:
@@ -3483,11 +4535,20 @@ def _install_inner(
             return InstallOutcome(
                 status="succeeded",
                 code="already_installed",
-                message="an exact succeeded receipt already binds this install plan",
+                message=(
+                    "an exact succeeded receipt already binds this install plan; "
+                    + (
+                        "StatePortKeepAlive registered for Windows logon"
+                        if windows_keepalive is not None
+                        else "Windows keep-alive not required on portable Linux"
+                    )
+                ),
                 local_url=url or None,
                 receipt_path=receipt_path,
                 converged=True,
                 execution_host=execution_host_info,
+                keepalive_status="registered" if windows_keepalive is not None else "not_required",
+                target_id=config.expected_target,
             )
 
     intent = {
@@ -4664,7 +5725,9 @@ def _execute_install(
 
     # Pull the exact digest-pinned images; verify observed digests.
     image_entries: list[dict[str, Any]] = []
-    for image in sorted(images, key=lambda item: item["imageId"]):
+    _phase(4, f"Downloading and verifying the container images ({len(images)})...")
+    for image_number, image in enumerate(sorted(images, key=lambda item: item["imageId"]), 1):
+        _say(f"  image {image_number}/{len(images)}: {image['imageId']}")
         reference = str(image["reference"])
         if "@sha256:" not in reference:
             raise InstallerRefusal(
@@ -4707,26 +5770,52 @@ def _execute_install(
     _write_json(intent_path, intent)
 
     # Genesis data volumes and the honest empty genesis validation backup.
+    _phase(5, "Creating data volumes and service files...")
     signed_hex = index.signed_digest.removeprefix("sha256:")
     installation_volumes: dict[str, str] = {}
     snapshot_bindings: list[dict[str, Any]] = []
     requires_snapshot = False
     volumes_by_key: dict[str, Mapping[str, Any]] = {}
+    volume_owner: dict[str, str] = {}
     for service in target["services"]:
         for volume in service["writableVolumes"]:
             volume_key = release.revision_volume_key(
                 target, str(service["serviceId"]), str(volume["name"])
             )
             volumes_by_key[volume_key] = volume
+            volume_owner[volume_key] = str(service.get("quadletOwner", ""))
+    # A volume lives in the podman store of the account whose container mounts it.  The provisioned
+    # control plane runs as stateport-control, so its volumes are that account's, not this user's.
+    control_store: _ControlRunner | None = None
+    if execution_host_info is not None and CONTROL_IDENTITY in volume_owner.values():
+        control_store = _control_access(runner)
+        if control_store is None:
+            raise InstallerRefusal(
+                "control_account_missing",
+                f"the {CONTROL_IDENTITY} account does not exist after provisioning; "
+                "the control plane's data volumes have no store to live in",
+            )
+    # The control plane's containers are already running (the root transaction started them), so its
+    # volumes exist even on a fresh install; only an earlier install of this state root proves that
+    # their data was kept rather than just created.
+    earlier_install_recorded = (state_root / "updater" / "trust" / "install-trust.json").is_file()
+    preexisting_data_volumes: list[bool] = []
     for volume_key, volume in sorted(volumes_by_key.items()):
         data_name, snapshot_name = _volume_names(signed_hex, volume_key)
-        _ensure_volume(runner, data_name)
-        failure_context.data_disposition = "created"
+        store: Runner = (
+            control_store
+            if control_store is not None and volume_owner[volume_key] == CONTROL_IDENTITY
+            else runner
+        )
+        existed = _ensure_volume(store, data_name)
+        preexisting_data_volumes.append(existed and (store is runner or earlier_install_recorded))
+        # A reinstall finds its own volumes and keeps their data; saying "created" would be false.
+        failure_context.data_disposition = "preserved" if all(preexisting_data_volumes) else "created"
         if volume["scope"] == "installation":
             installation_volumes[volume_key] = data_name
         if volume["validation"]["mode"] == "read-only-snapshot-copy":
             requires_snapshot = True
-            _ensure_volume(runner, snapshot_name)
+            _ensure_volume(store, snapshot_name)
             snapshot_bindings.append(
                 {
                     "volumeKey": volume_key,
@@ -4916,6 +6005,7 @@ def _execute_install(
     # the user and persisted in the successful install receipt.
     local_url = _loopback_url(ports.get("stateport-web:accepted:http"))
 
+    _phase(6, "Starting StatePort and waiting for it to become healthy (this can take a few minutes)...")
     # Start services via the systemd user manager (excluding provisioner-owned
     # control-plane units, which run under the control user).
     reloaded = runner.run(["systemctl", "--user", "daemon-reload"], timeout=120)
@@ -4959,6 +6049,7 @@ def _execute_install(
     for service in observed_services:
         service["healthy"] = any(item["serviceId"] == service["serviceId"] for item in evidence)
 
+    _say("  All services report healthy. Checking the web page and the sample catalog...")
     # Install-end gates (F14): the running web service must serve the real
     # product page and catalog. The privileged provisioning receipt already
     # contains the live execution-host probe performed as the allowed client;
@@ -5013,8 +6104,14 @@ def _execute_install(
     # does.  Register the confirmed per-user Windows logon keep-alive task on
     # the WSL2 target so the distro — and with it the installed product — is
     # running again at every Windows logon.  Portable Linux registers nothing.
+    # A registration that keeps timing out leaves the install healthy with the
+    # task not registered (the record stays repairable); it never crashes the
+    # install here.
+    keepalive_registered = False
     if windows_keepalive is not None:
-        _register_windows_keepalive(runner, windows_keepalive, state_root)
+        _registered, keepalive_registered = _register_windows_keepalive(
+            runner, windows_keepalive, state_root
+        )
     runtime: dict[str, Any] = {
         "releaseId": str(verified.index.release_id),
         "releaseIndexDigest": index.index_digest,
@@ -5091,6 +6188,7 @@ def _execute_install(
 
     _install_update_wrapper(config, state_root)
 
+    _phase(7, "Writing the install receipt...")
     receipt: dict[str, Any] = {
         "schema": "stateport.install-receipt/v1",
         "receiptId": f"install_receipt_{secrets.token_hex(16)}",
@@ -5128,7 +6226,7 @@ def _execute_install(
             "images": image_entries,
         },
         "runtime": runtime,
-        "dataDisposition": "created",
+        "dataDisposition": failure_context.data_disposition,
         "authority": failure_context.directive,
         "startedAt": _timestamp(failure_context.started),
         "finishedAt": _timestamp(clock()),
@@ -5143,12 +6241,40 @@ def _execute_install(
     _write_json(receipt_path, validated.as_dict())
     intent["phase"] = "receipted"
     _write_json(intent_path, intent)
+    keepalive_notes: tuple[str, ...] = ()
+    if windows_keepalive is not None and not keepalive_registered:
+        keepalive_notes = (
+            (
+                f"The optional Windows keep-alive task ({_WINDOWS_KEEPAIVE_TASK_NAME}) could not "
+                "be registered; StatePort is installed and healthy, but it may stop after the "
+                "last WSL window closes. Run the installer again to register the task."
+            ),
+        )
     return InstallOutcome(
         status="succeeded",
         code="installed",
-        message="install completed and receipted",
+        message=(
+            "install completed and receipted; "
+            + (
+                "StatePortKeepAlive registered for Windows logon"
+                if windows_keepalive is not None and keepalive_registered
+                else (
+                    "the optional Windows keep-alive task could not be registered; "
+                    "run the installer again to register it"
+                    if windows_keepalive is not None
+                    else "Windows keep-alive not required on portable Linux"
+                )
+            )
+        ),
         local_url=local_url,
         receipt_path=receipt_path,
+        keepalive_status=(
+            "registered"
+            if windows_keepalive is not None and keepalive_registered
+            else "not_registered" if windows_keepalive is not None else "not_required"
+        ),
+        target_id=config.expected_target,
+        notes=keepalive_notes,
     )
 
 
@@ -5168,6 +6294,7 @@ def target_identity_digest(failure_context: _FailureContext) -> str:
 # ---------------------------------------------------------------------------
 
 _CONTAINER_NAME = re.compile(r"^ContainerName=([0-9a-z][0-9a-z._-]{1,127})$", re.MULTILINE)
+_NETWORK_NAME = re.compile(r"^NetworkName=([A-Za-z0-9][A-Za-z0-9_.-]*)$", re.MULTILINE)
 _ACCEPTED_VOLUME_TOKEN = re.compile(r"@@STATEPORT_ACCEPTED_DATA_VOLUME:([^@]+)@@")
 # Refusals for which writing a durable record into the state root would itself
 # be wrong: the directory is foreign, unsafe, or the root argument is invalid.
@@ -5189,6 +6316,11 @@ class _RemovalPlan:
     control_units: tuple[str, ...] = ()
     preserved_provider_paths: tuple[str, ...] = ()
     windows_tasks: tuple[str, ...] = ()
+    # The part of the installation that belongs to the stateport-control account's own session.
+    control_containers: tuple[str, ...] = ()
+    control_quadlet_files: tuple[str, ...] = ()
+    control_network_units: tuple[str, ...] = ()
+    control_networks: tuple[str, ...] = ()
 
 
 def _union_removal_plans(plans: Sequence[_RemovalPlan]) -> _RemovalPlan:
@@ -5205,6 +6337,14 @@ def _union_removal_plans(plans: Sequence[_RemovalPlan]) -> _RemovalPlan:
         control_units=tuple(sorted({unit for plan in plans for unit in plan.control_units})),
         preserved_provider_paths=tuple(sorted({path for plan in plans for path in plan.preserved_provider_paths})),
         windows_tasks=tuple(sorted({task for plan in plans for task in plan.windows_tasks})),
+        control_containers=tuple(sorted({name for plan in plans for name in plan.control_containers})),
+        control_quadlet_files=tuple(
+            sorted({name for plan in plans for name in plan.control_quadlet_files})
+        ),
+        control_network_units=tuple(
+            sorted({name for plan in plans for name in plan.control_network_units})
+        ),
+        control_networks=tuple(sorted({name for plan in plans for name in plan.control_networks})),
     )
 
 
@@ -5373,6 +6513,10 @@ def _derive_removal_plan(
     containers: list[str] = []
     quadlet_files: list[str] = []
     control_units: list[str] = []
+    control_containers: list[str] = []
+    control_quadlet_files: list[str] = []
+    control_network_units: list[str] = []
+    control_networks: list[str] = []
     data_volume_keys: set[str] = set()
     provider_paths: set[str] = set()
     for artifact in manifest["artifacts"]:
@@ -5419,8 +6563,17 @@ def _derive_removal_plan(
                 )
             containers.append(names[0])
             units.append(live_relative.removesuffix(".container"))
+            if artifact.get("owner") == "stateport-control":
+                control_containers.append(names[0])
+                control_units.append(live_relative.removesuffix(".container"))
+        elif artifact.get("owner") == "stateport-control":
+            # A control-owned network: its generated service and the engine network it created.
+            control_network_units.append(live_relative.removesuffix(".network") + "-network")
+            network_names = _NETWORK_NAME.findall(text)
+            if len(network_names) == 1:
+                control_networks.append(network_names[0])
         if artifact.get("owner") == "stateport-control":
-            control_units.append(live_relative.removesuffix(".container"))
+            control_quadlet_files.append(live_relative)
         data_volume_keys.update(_ACCEPTED_VOLUME_TOKEN.findall(text))
         if (
             artifact.get("profile") == "accepted"
@@ -5479,6 +6632,10 @@ def _derive_removal_plan(
         control_units=tuple(sorted(control_units)),
         preserved_provider_paths=tuple(sorted(provider_paths)),
         windows_tasks=(keepalive.task_name,) if keepalive is not None else (),
+        control_containers=tuple(sorted(control_containers)),
+        control_quadlet_files=tuple(sorted(control_quadlet_files)),
+        control_network_units=tuple(sorted(control_network_units)),
+        control_networks=tuple(sorted(control_networks)),
     )
 
 
@@ -5501,30 +6658,32 @@ def _require_unit_enablement_observed(observed: Completed, unit: str) -> None:
 
 
 def _stop_and_disable_units(
-    runner: Runner, units: Sequence[str], *, control_units: Sequence[str] = ()
+    runner: Runner,
+    units: Sequence[str],
+    *,
+    control_units: Sequence[str] = (),
+    control: _ControlRunner | None = None,
 ) -> tuple[list[str], list[str]]:
     """Stop and disable exactly the recorded units; absent ones are convergence.
 
     Control-plane units run under the ``stateport-control`` user's systemd
-    manager; their stop/disable routes through that manager.
+    manager; their stop/disable goes through ``control``, the seam inside that
+    account's session.  When that account does not exist (``control`` is None)
+    it has no manager and no unit.
     """
 
     control_set = frozenset(control_units)
     stopped: list[str] = []
     disabled: list[str] = []
     for unit in sorted(units):
-        base_argv: tuple[str, ...] = ("systemctl", "--user")
+        unit_runner: Runner = runner
         if unit in control_set:
-            base_argv = (
-                "runuser",
-                "-u",
-                "stateport-control",
-                "--",
-                "systemctl",
-                "--user",
-            )
+            if control is None:
+                continue
+            unit_runner = control
+        base_argv: tuple[str, ...] = ("systemctl", "--user")
         active = _run_effect(
-            runner,
+            unit_runner,
             [*base_argv, "is-active", unit],
             timeout=60,
             code="unit_stop_failed",
@@ -5541,7 +6700,7 @@ def _stop_and_disable_units(
             )
         if active.returncode == 0:
             completed = _run_effect(
-                runner,
+                unit_runner,
                 [*base_argv, "stop", unit],
                 timeout=900,
                 code="unit_stop_failed",
@@ -5553,7 +6712,7 @@ def _stop_and_disable_units(
                 )
             stopped.append(unit)
         enabled = _run_effect(
-            runner,
+            unit_runner,
             [*base_argv, "is-enabled", unit],
             timeout=60,
             code="unit_disable_failed",
@@ -5561,7 +6720,7 @@ def _stop_and_disable_units(
         _require_unit_enablement_observed(enabled, unit)
         if enabled.returncode == 0:
             completed = _run_effect(
-                runner,
+                unit_runner,
                 [*base_argv, "disable", unit],
                 timeout=120,
                 code="unit_disable_failed",
@@ -5606,6 +6765,112 @@ def _remove_containers(runner: Runner, names: Sequence[str]) -> list[str]:
     return removed
 
 
+def _control_file_kind(control: _ControlRunner, path: str, *, code: str) -> str | None:
+    """``regular file`` / another file type, or None when absent; a failed query is never absence."""
+
+    observed = _run_effect(
+        control, ["stat", "--format=%F", "--", path], timeout=60, code=code
+    )
+    if observed.returncode == 0:
+        return observed.stdout.strip()
+    if "No such file or directory" in observed.stderr:
+        return None
+    raise InstallerRefusal(
+        code, f"cannot observe {path} in the {CONTROL_IDENTITY} account: {observed.stderr.strip()[:200]}"
+    )
+
+
+def _remove_control_quadlet_files(control: _ControlRunner, names: Sequence[str]) -> list[str]:
+    """Delete exactly the recorded unit files in the control account's Quadlet root."""
+
+    removed: list[str] = []
+    for name in sorted(names):
+        if PurePosixPath(name).name != name or name in {"", ".", ".."}:
+            raise InstallerRefusal("live_unit_unsafe", f"recorded control unit name is not plain: {name}")
+        path = f"{_CONTROL_QUADLET_ROOT}/{name}"
+        kind = _control_file_kind(control, path, code="live_unit_unsafe")
+        if kind is None:
+            continue
+        if kind != "regular file":
+            raise InstallerRefusal(
+                "live_unit_unsafe", f"control quadlet path is not a regular file ({kind}): {path}"
+            )
+        completed = _run_effect(
+            control, ["rm", "-f", "--", path], timeout=60, code="live_unit_unsafe"
+        )
+        if completed.returncode != 0:
+            raise InstallerRefusal(
+                "live_unit_unsafe", f"could not remove {path}: {completed.stderr.strip()[:200]}"
+            )
+        removed.append(name)
+    return removed
+
+
+def _activation_target_is_bound(content: str, identities: Sequence[Mapping[str, Any]]) -> bool:
+    bound = any(
+        f"X-StatePort-Release-Id={identity['releaseId']}" in content
+        and f"X-StatePort-Signed-Payload={identity['signedPayloadDigest']}" in content
+        for identity in identities
+    )
+    return bound and f"X-StatePort-Control-Identity={CONTROL_IDENTITY}" in content
+
+
+def _remove_control_activation_target(
+    control: _ControlRunner, *, identities: Sequence[Mapping[str, Any]]
+) -> tuple[bool, bool]:
+    """Disable and delete the control account's activation target; (disabled, removed)."""
+
+    path = f"{_CONTROL_SYSTEMD_USER_ROOT}/{ACCEPTED_ACTIVATION_TARGET}"
+    kind = _control_file_kind(control, path, code="activation_target_unsafe")
+    if kind is None:
+        return False, False
+    if kind != "regular file":
+        raise InstallerRefusal(
+            "activation_target_unsafe", f"control activation target is not a regular file ({kind}): {path}"
+        )
+    content = _run_effect(control, ["cat", "--", path], timeout=60, code="activation_target_unsafe")
+    if content.returncode != 0 or not _activation_target_is_bound(content.stdout, identities):
+        raise InstallerRefusal(
+            "activation_target_conflict",
+            "the control account's accepted activation target is not bound to the recorded installation",
+        )
+    disabled = _disable_activation_target(control)
+    completed = _run_effect(
+        control, ["rm", "-f", "--", path], timeout=60, code="activation_target_unsafe"
+    )
+    if completed.returncode != 0:
+        raise InstallerRefusal(
+            "activation_target_unsafe", f"could not remove {path}: {completed.stderr.strip()[:200]}"
+        )
+    return disabled, True
+
+
+def _remove_control_networks(control: _ControlRunner, names: Sequence[str]) -> list[str]:
+    """Remove the recorded engine networks of the control account; absent ones are convergence."""
+
+    removed: list[str] = []
+    for name in sorted(names):
+        exists = _run_effect(
+            control, ["podman", "network", "exists", name], timeout=60, code="container_remove_failed"
+        )
+        if exists.returncode not in {0, 1}:
+            raise InstallerRefusal(
+                "container_remove_failed",
+                f"cannot establish whether recorded network {name} exists; engine failure is not absence",
+            )
+        if exists.returncode != 0:
+            continue
+        completed = _run_effect(
+            control, ["podman", "network", "rm", name], timeout=120, code="container_remove_failed"
+        )
+        if completed.returncode != 0:
+            raise InstallerRefusal(
+                "container_remove_failed", f"podman network rm {name}: {completed.stderr.strip()[:200]}"
+            )
+        removed.append(name)
+    return removed
+
+
 def _remove_live_quadlet_files(live_root: Path, names: Sequence[str]) -> list[str]:
     """Delete exactly the recorded live unit files; absent ones are convergence."""
 
@@ -5644,12 +6909,7 @@ def _remove_activation_target(
     ).decode("utf-8")
     # The target binds the CURRENT accepted release: genesis before any update,
     # the accepted successor afterwards.  Any union identity proves ownership.
-    bound = any(
-        f"X-StatePort-Release-Id={identity['releaseId']}" in content
-        and f"X-StatePort-Signed-Payload={identity['signedPayloadDigest']}" in content
-        for identity in identities
-    )
-    if not bound or f"X-StatePort-Control-Identity={CONTROL_IDENTITY}" not in content:
+    if not _activation_target_is_bound(content, identities):
         raise InstallerRefusal(
             "activation_target_conflict",
             "accepted activation target is not bound to the recorded installation",
@@ -5718,6 +6978,25 @@ def _remove_volumes(runner: Runner, names: Sequence[str]) -> list[str]:
             )
         removed.append(name)
     return removed
+
+
+def _volumes_present(runner: Runner, names: Sequence[str]) -> list[str]:
+    """The recorded volumes that exist in this runner's store; an engine failure is not absence."""
+
+    present: list[str] = []
+    for name in sorted(names):
+        exists = _run_effect(
+            runner, ["podman", "volume", "exists", name], timeout=60, code="volume_remove_failed"
+        )
+        if exists.returncode not in {0, 1}:
+            raise InstallerRefusal(
+                "volume_remove_failed",
+                f"cannot establish whether recorded resource {name} exists; "
+                "engine failure is not absence",
+            )
+        if exists.returncode == 0:
+            present.append(name)
+    return present
 
 
 def _delete_state_root_contents(state_root: Path) -> list[str]:
@@ -5875,15 +7154,42 @@ def _uninstall_inner(
         identities.append(identity)
     plan = _union_removal_plans(plans)
 
+    # The control plane (its units, containers, volumes, quadlet files) lives in the stateport-control
+    # account's own session; reach it, or learn that the account does not exist, before changing anything.
+    control: _ControlRunner | None = None
+    if plan.control_units or plan.control_containers or plan.control_quadlet_files or plan.control_network_units:
+        control = _control_access(runner)
+    control_set = frozenset(plan.control_containers)
     stopped, disabled = _stop_and_disable_units(
-        runner, plan.units, control_units=plan.control_units
+        runner,
+        (*plan.units, *plan.control_network_units),
+        control_units=(*plan.control_units, *plan.control_network_units),
+        control=control,
     )
     target_disabled = _disable_activation_target(runner)
-    containers_removed = _remove_containers(runner, plan.containers)
+    control_target_disabled, control_target_removed = (
+        _remove_control_activation_target(control, identities=identities)
+        if control is not None
+        else (False, False)
+    )
+    containers_removed = _remove_containers(
+        runner, [name for name in plan.containers if name not in control_set]
+    )
+    control_containers_removed = (
+        _remove_containers(control, plan.control_containers) if control is not None else []
+    )
+    control_networks_removed = (
+        _remove_control_networks(control, plan.control_networks) if control is not None else []
+    )
     files_removed = _remove_live_quadlet_files(config.live_quadlet_root, plan.quadlet_files)
+    control_files_removed = (
+        _remove_control_quadlet_files(control, plan.control_quadlet_files) if control is not None else []
+    )
     target_removed = _remove_activation_target(config, identities=identities)
     windows_tasks_removed = _remove_windows_tasks(runner, plan.windows_tasks)
     _daemon_reload(runner)
+    if control is not None:
+        _daemon_reload(control)
 
     def build_receipt(
         *,
@@ -5893,6 +7199,8 @@ def _uninstall_inner(
         state_contents: Sequence[str],
         preserved_volumes: Sequence[str],
         preserved_paths: Sequence[str],
+        control_volumes_removed: Sequence[str] = (),
+        user_volumes_removed: Sequence[str] = (),
     ) -> dict[str, Any]:
         return {
             "schema": UNINSTALL_RECEIPT_SCHEMA,
@@ -5910,11 +7218,17 @@ def _uninstall_inner(
             "removed": {
                 "unitsStopped": list(stopped),
                 "unitsDisabled": list(disabled),
-                "containers": list(containers_removed),
+                "containers": sorted({*containers_removed, *control_containers_removed}),
+                "controlContainers": list(control_containers_removed),
+                "controlNetworks": list(control_networks_removed),
                 "quadletFiles": list(files_removed),
+                "controlQuadletFiles": list(control_files_removed),
                 "activationTargets": [plan.activation_target] if target_removed else [],
+                "controlActivationTargets": [plan.activation_target] if control_target_removed else [],
                 "windowsTasks": list(windows_tasks_removed),
                 "volumes": list(volumes_removed),
+                "controlVolumes": list(control_volumes_removed),
+                "userStoreVolumes": list(user_volumes_removed),
                 "stateRootContents": list(state_contents),
             },
             "preserved": {
@@ -5930,8 +7244,16 @@ def _uninstall_inner(
             "result": result,
         }
 
+    recorded_volumes = (*plan.data_volumes, *plan.snapshot_volumes)
     if config.purge:
-        volumes_removed = _remove_volumes(runner, (*plan.data_volumes, *plan.snapshot_volumes))
+        # The real data lives in the control account's store; the invoking user's own store can only
+        # hold same-named leftovers that earlier installers created.  Both are recorded names of this
+        # installation, so a purge that was confirmed by identity removes both.
+        control_volumes_removed = (
+            _remove_volumes(control, recorded_volumes) if control is not None else []
+        )
+        user_volumes_removed = _remove_volumes(runner, recorded_volumes)
+        volumes_removed = sorted({*control_volumes_removed, *user_volumes_removed})
         receipt_path = state_root.parent / f"{state_root.name}.purge-receipt.json"
         state_contents = sorted(child.name for child in state_root.iterdir())
         receipt = build_receipt(
@@ -5941,6 +7263,8 @@ def _uninstall_inner(
             state_contents=state_contents,
             preserved_volumes=[],
             preserved_paths=[str(receipt_path)],
+            control_volumes_removed=control_volumes_removed,
+            user_volumes_removed=user_volumes_removed,
         )
         _validate_uninstall_receipt(receipt)
         # The receipt is durable before any state root deletion begins.
@@ -5961,7 +7285,12 @@ def _uninstall_inner(
         or target_disabled
         or target_removed
         or containers_removed
+        or control_containers_removed
+        or control_networks_removed
         or files_removed
+        or control_files_removed
+        or control_target_disabled
+        or control_target_removed
         or windows_tasks_removed
     )
     result = "succeeded" if changed else "already_uninstalled"
@@ -5970,7 +7299,14 @@ def _uninstall_inner(
         result=result,
         volumes_removed=[],
         state_contents=[],
-        preserved_volumes=(*plan.data_volumes, *plan.snapshot_volumes),
+        # What actually still exists, in the store that owns it (the control account's) and in the
+        # invoking user's own: a recorded name that was never created is not "preserved".
+        preserved_volumes=sorted(
+            {
+                *(_volumes_present(control, recorded_volumes) if control is not None else []),
+                *_volumes_present(runner, recorded_volumes),
+            }
+        ),
         preserved_paths=[str(state_root), str(state_root / "updater-venv")],
     )
     _validate_uninstall_receipt(receipt)
@@ -6007,13 +7343,27 @@ def _default_quadlet_root() -> Path:
 
 
 def _tty_confirmer(summary: Mapping[str, Any]) -> bool:
-    print("StatePort exact install plan:")
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    _say("StatePort install plan:")
+    _say(f"  Release:   {summary.get('version')} ({summary.get('channel')} channel)")
+    _say(f"  Images:    {len(summary.get('images', ()))} container images, each pinned by digest")
+    _say(f"  Your data: {summary.get('stateRoot')}")
+    if summary.get("windowsKeepAlive"):
+        _say(
+            "  Windows:   a scheduled task (StatePortKeepAlive) keeps StatePort running, "
+            "including after a restart"
+        )
+    _say(f"  Plan ID:   {summary.get('planDigest')}")
+    if _VERBOSE:
+        _say(json.dumps(summary, indent=2, sort_keys=True))
     if not sys.stdin.isatty():
-        print("refusing without a TTY: pass --yes to confirm the exact plan", file=sys.stderr)
+        _say(
+            "Not confirmed: there is no terminal to ask on. Run the installer again with --yes "
+            "to install exactly this plan.",
+            stream=sys.stderr,
+        )
         return False
-    answer = input("Install exactly this plan? [type 'install'] ")
-    return answer.strip() == "install"
+    answer = input("Install this plan? [y/N] ")
+    return answer.strip().lower() in {"y", "yes", "install"}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -6138,7 +7488,29 @@ def _parser() -> argparse.ArgumentParser:
         help="path of the exact installer artifact to self-verify (defaults to this script)",
     )
     parser.add_argument(
-        "--yes", action="store_true", help="confirm the exact install plan non-interactively"
+        "--yes",
+        action="store_true",
+        help="confirm the exact install plan non-interactively; an existing installation "
+        "of this same release is kept as it is (use --reinstall to reinstall it)"
+    )
+    parser.add_argument(
+        "--reinstall",
+        action="store_true",
+        default=os.environ.get("STATEPORT_REINSTALL", "").strip().lower() in {"1", "true", "yes"},
+        help="when this release is already installed, reinstall it over the existing "
+        "installation (data is kept) instead of keeping it as it is; also enabled by "
+        "STATEPORT_REINSTALL=1. A different installed release is never replaced in place.",
+    )
+    parser.add_argument(
+        "--no-adopt-opencode",
+        action="store_true",
+        help="install mode only: do not copy this account's already signed-in OpenCode "
+        "(~/.local/share/opencode/auth.json) for StatePort after the install",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="also show the exact plan JSON and technical notices",
     )
     parser.add_argument(
         "--confirmed-plan-digest",
@@ -6154,6 +7526,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv[:1] == [_ADOPT_RUN_FLAG]:
+        return _run_embedded_adoption(raw_argv[1:])
     parser = _parser()
     args = parser.parse_args(argv)
     install_flags: dict[str, object] = {
@@ -6357,6 +7732,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.confirm_purge is not None and not args.purge:
             parser.error("--confirm-purge is only meaningful together with --purge")
+        if "--reinstall" in (argv if argv is not None else sys.argv[1:]):
+            parser.error("--reinstall is only meaningful for an install")
         outcome = uninstall(
             UninstallConfig(
                 state_root=args.state_root,
@@ -6431,6 +7808,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         confirmed_plan_digest=args.confirmed_plan_digest,
         prepare_execution_host=args.prepare_execution_host,
         health_timeout_seconds=args.health_timeout_seconds,
+        reinstall=bool(args.reinstall),
+        verbose=bool(args.verbose),
     )
 
     def cosign_factory(modules: VerifiedModules) -> Any:
@@ -6443,6 +7822,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             bundle_root=config.state_root / "updater" / "bundles",
         )
 
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
     outcome = install(
         config,
         runner=runner,
@@ -6452,26 +7832,892 @@ def main(argv: Sequence[str] | None = None) -> int:
         verifier_factory=cosign_factory,
         clock=lambda: datetime.now(timezone.utc),
         confirmer=_tty_confirmer,
+        existing_decider=_interactive_existing_decider if interactive else None,
     )
+    notes: list[str] = []
+    if outcome.status == "succeeded" and outcome.code == "installed":
+        notes = _adopt_opencode_signin(
+            runner,
+            environment=os.environ,
+            installer_path=Path(config.installer_path or Path(__file__)).resolve(),
+            opted_out=bool(args.no_adopt_opencode),
+        )
+    return _report_install_outcome(outcome, config, notes)
+
+
+_ADOPT_RUN_FLAG = "--run-embedded-opencode-adoption"
+
+
+def _load_embedded_adoption_helper() -> Any:
+    """Build the adoption helper from the sources embedded in this signed file.
+
+    The one-line install downloads only this file, so the helper and the
+    standard-library module it needs travel inside it (see the generated block
+    at the end of this module).  Nothing is read from disk but this file.
+    """
+
+    import types
+
+    module_name = "stateport_provider_adoption_standalone"
+    adoption = types.ModuleType(module_name)
+    adoption.__file__ = "<stateport-installer:provider_adoption>"
+    sys.modules[module_name] = adoption
+    exec(compile(_EMBEDDED_PROVIDER_ADOPTION_SOURCE, adoption.__file__, "exec"), adoption.__dict__)
+    helper = types.ModuleType("stateport_adopt_opencode_helper")
+    helper.__file__ = str(Path(__file__).resolve())
+    exec(compile(_EMBEDDED_ADOPTION_HELPER_SOURCE, "<stateport-installer:adopt_opencode_signin>", "exec"), helper.__dict__)
+    helper._load_adoption = lambda: adoption
+    return helper
+
+
+def _run_embedded_adoption(argv: Sequence[str]) -> int:
+    """Entry of the privileged copy: ``python3 <installer> --run-embedded-opencode-adoption ...``."""
+
+    return int(_load_embedded_adoption_helper().main(list(argv)))
+
+
+def _adopt_opencode_signin(
+    runner: Runner,
+    *,
+    environment: Mapping[str, str],
+    installer_path: Path,
+    opted_out: bool = False,
+    euid: int | None = None,
+) -> list[str]:
+    """Offer the installing user's already signed-in OpenCode to StatePort.
+
+    Presence only: this looks for the stock ``auth.json`` without opening it and
+    runs the adoption helper that is embedded in this installer file (generated
+    from ``scripts/adopt_opencode_signin.py``), which owns every path, mode and
+    owner decision, as a second process (through ``sudo -n`` unless already
+    root).  Nothing the helper prints is shown or kept here, because the
+    installer must never be a route for credential contents; the one plain
+    line it returns names no value.  This is never fatal: any problem becomes a
+    skip line and the install result is unchanged.
+    """
+
+    if opted_out:
+        return ["OpenCode sign-in: not copied (--no-adopt-opencode)."]
+    try:
+        module = _load_embedded_adoption_helper()
+        source_dir = Path(module.default_source_directory(dict(environment)))
+        auth = source_dir / "auth.json"
+        if auth.is_symlink() or not auth.is_file():
+            return ["OpenCode sign-in: none found on this account; nothing was copied."]
+        argv = [
+            sys.executable, str(installer_path), _ADOPT_RUN_FLAG, "--source-dir", str(source_dir),
+        ]
+        if (os.geteuid() if euid is None else euid) != 0:
+            argv = ["sudo", "-n", *argv]
+        completed = runner.run(argv, timeout=120)
+        if completed.returncode == 2:
+            # The helper refuses (exit 2) when none of the default providers
+            # (OpenCode Go / OpenCode) is signed in: other providers are never copied.
+            return [
+                "OpenCode sign-in: found, but it has no OpenCode Go or OpenCode account to copy "
+                "(other providers are never copied); choose one in StatePort's provider settings."
+            ]
+        if completed.returncode != 0:
+            return [
+                "OpenCode sign-in: found, but it could not be copied without administrator "
+                "rights; you can copy it from StatePort's provider settings."
+            ]
+    except Exception:  # noqa: BLE001 - adoption is a courtesy and must never fail an install
+        return ["OpenCode sign-in: not copied (the helper could not run); nothing was changed."]
+    return [
+        "Found your signed-in OpenCode; copied it for StatePort "
+        "(presence only, nothing is sent anywhere)."
+    ]
+
+
+# BEGIN GENERATED: embedded OpenCode adoption sources (scripts/generate_installer_adoption_embed.py)
+# Verbatim copies; edit the sources, never this block.
+_EMBEDDED_PROVIDER_ADOPTION_SOURCE = r'''"""Adopt an already signed-in OpenCode into the managed provider home.
+
+OpenCode keeps every sign-in it performs, stock providers and OpenCode Go
+alike, in one file: ``$XDG_DATA_HOME/opencode/auth.json`` (default
+``~/.local/share/opencode/auth.json``), a JSON object keyed by provider id
+whose values are ``{"type": "api", "key": ...}`` or ``{"type": "oauth", ...}``
+records. ``opencode.json`` under ``$XDG_CONFIG_HOME/opencode`` is user
+configuration (plugins, MCP servers, permissions), not a sign-in, and it can
+carry unrelated or secret settings, so it is deliberately never adopted.
+
+Adoption is a one-way COPY of the SELECTED provider records of that file into
+the StatePort provider home, where the managed OpenCode subprocess already
+looks for it (``<home>/data/opencode/auth.json``, see
+``opencode_subprocess_environment``):
+
+* only the record(s) of the selected provider id(s) are written; unrelated
+  providers (for example an OAuth login for another vendor) are never copied.
+  Selection order: an explicit id list (each must be present in the source),
+  else the provider named by the model currently selected in StatePort
+  (``<provider>/<model>``), else ``opencode-go`` / ``opencode`` when present,
+  else the adoption is refused and the detected NAMES are listed;
+* the copy is a regular file written with mode 0600 by the service's own
+  uid inside a 0700 directory chain; a symbolic link is never created and a
+  symbolic-linked source is refused. Every destination component is opened
+  with O_NOFOLLOW relative to a directory descriptor, so a path component
+  swapped for a symbolic link while adopting cannot redirect the write;
+* the source is parsed in memory; the only things ever recorded or returned
+  are presence, a timestamp, the source path and the provider NAMES (map keys);
+* OAuth caveat: OpenCode rotates an OAuth refresh token whenever it refreshes
+  one. A copied OAuth record that refreshes inside StatePort can invalidate the
+  original OpenCode sign-in. Prefer API-key providers (opencode-go) for adoption;
+* values are never logged, returned, written to a receipt or transmitted, and
+  no error text embeds file content.
+
+The module is standard-library only so the host-side installer helper can
+load it by file path without importing the application package.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+
+AUTH_FILE_NAME = "auth.json"
+ADOPTION_MARKER_NAME = "adopted-signin.json"
+SOURCE_OVERRIDE_ENV = "STATEPORT_OPENCODE_ADOPT_SOURCE"
+MAX_AUTH_BYTES = 65536
+_PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_MAX_PROVIDER_NAMES = 32
+DEFAULT_PROVIDER_IDS = ("opencode-go", "opencode")
+OAUTH_ROTATION_CAVEAT = (
+    "OAuth sign-ins rotate their refresh token when they refresh: if the copy refreshes, the original "
+    "OpenCode sign-in may be signed out. Prefer an API-key provider such as opencode-go."
+)
+
+
+class AdoptionError(ValueError):
+    """A bounded, fixed-code refusal. The detail names paths, never contents."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+def destination_auth_path(home: Path) -> Path:
+    """Where managed OpenCode (``XDG_DATA_HOME=<home>/data``) reads auth.json."""
+    return Path(home) / "data" / "opencode" / AUTH_FILE_NAME
+
+
+def candidate_source_directories(source: Mapping[str, str] | None = None) -> list[Path]:
+    """OpenCode data directories that may hold an existing sign-in, in order.
+
+    The list is fixed: an explicit installer-provided mount first, then the
+    service user's own XDG and home locations. No request ever supplies a
+    path, so adoption can never be turned into an arbitrary file read.
+    """
+    environment = os.environ if source is None else source
+    found: list[Path] = []
+
+    def add(raw: object) -> None:
+        text = str(raw or "").strip()
+        if not text:
+            return
+        candidate = Path(text)
+        if candidate.is_absolute() and candidate not in found:
+            found.append(candidate)
+
+    add(environment.get(SOURCE_OVERRIDE_ENV))
+    xdg = str(environment.get("XDG_DATA_HOME", "") or "").strip()
+    if xdg:
+        add(Path(xdg) / "opencode" if Path(xdg).is_absolute() else "")
+    home = str(environment.get("HOME", "") or "").strip()
+    if home:
+        add(Path(home) / ".local" / "share" / "opencode")
+    return found
+
+
+def read_signin_file(path: Path) -> tuple[bytes, list[str]]:
+    """Read one auth.json safely; return (verbatim bytes, provider names).
+
+    Callers that WRITE a copy must pass the bytes through ``select_signin``;
+    the verbatim bytes of every provider are never a valid thing to copy.
+
+    Refuses symbolic links, non-regular files, empty or oversized files and
+    anything that is not a non-empty JSON object of objects. Exceptions carry
+    the path and a fixed reason only.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise AdoptionError("adoption_source_missing", f"no OpenCode sign-in file at {path}") from exc
+    except OSError as exc:
+        raise AdoptionError(
+            "adoption_source_unsafe",
+            f"the OpenCode sign-in file at {path} is a symbolic link or cannot be opened",
+        ) from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise AdoptionError("adoption_source_unsafe", f"{path} is not a regular file")
+        if info.st_size < 2 or info.st_size > MAX_AUTH_BYTES:
+            raise AdoptionError(
+                "adoption_source_invalid",
+                f"{path} is empty or larger than the {MAX_AUTH_BYTES}-byte bound",
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_AUTH_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_AUTH_BYTES:
+        raise AdoptionError("adoption_source_invalid", f"{path} is larger than the {MAX_AUTH_BYTES}-byte bound")
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AdoptionError("adoption_source_invalid", f"{path} is not a JSON object") from exc
+    if not isinstance(parsed, dict) or not parsed or not all(isinstance(value, dict) for value in parsed.values()):
+        raise AdoptionError("adoption_source_invalid", f"{path} holds no OpenCode sign-in records")
+    names = sorted(name for name in parsed if isinstance(name, str) and _PROVIDER_NAME.fullmatch(name))
+    return raw, names[:_MAX_PROVIDER_NAMES]
+
+
+def select_provider_ids(
+    detected: list[str], requested: list[str] | None = None, selected_hint: str | None = None
+) -> list[str]:
+    """Choose which provider records to copy; never "all of them".
+
+    ``requested`` (explicit) must be a non-empty list of detected ids; else
+    ``selected_hint`` (the provider selected in StatePort) when detected; else
+    the default ids that are present; else refuse naming the detected ids.
+    """
+    if requested is not None:
+        if (
+            not isinstance(requested, (list, tuple)) or not requested or len(requested) > _MAX_PROVIDER_NAMES
+            or not all(isinstance(name, str) and _PROVIDER_NAME.fullmatch(name) for name in requested)
+        ):
+            raise AdoptionError("adoption_provider_invalid", "providers must be a non-empty list of provider ids")
+        missing = [name for name in requested if name not in detected]
+        if missing:
+            raise AdoptionError(
+                "adoption_provider_not_found",
+                f"the sign-in file holds no record for: {', '.join(missing)}. "
+                f"Detected providers: {', '.join(detected) or 'none'}.",
+            )
+        return sorted(set(requested))
+    if selected_hint and selected_hint in detected:
+        return [selected_hint]
+    defaults = [name for name in DEFAULT_PROVIDER_IDS if name in detected]
+    if defaults:
+        return defaults
+    raise AdoptionError(
+        "adoption_provider_unselected",
+        "No provider to adopt was selected and the sign-in file holds neither "
+        f"{' nor '.join(DEFAULT_PROVIDER_IDS)}. Detected providers: {', '.join(detected) or 'none'}. "
+        "Choose the provider ids to adopt explicitly.",
+    )
+
+
+def select_signin(raw: bytes, provider_ids: list[str]) -> bytes:
+    """Serialise ONLY the records of ``provider_ids`` (values untouched)."""
+    parsed = json.loads(raw.decode("utf-8"))
+    chosen = {name: parsed[name] for name in provider_ids if isinstance(parsed, dict) and name in parsed}
+    if not chosen or set(chosen) != set(provider_ids):
+        raise AdoptionError("adoption_provider_not_found", "the selected provider records are missing")
+    return (json.dumps(chosen, indent=2) + "\n").encode("utf-8")
+
+
+def marker_bytes(source: Path, providers: list[str], now: datetime | None = None) -> bytes:
+    """The only record kept: timestamp, source path and provider names."""
+    stamp = (now or datetime.now(timezone.utc)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return json.dumps(
+        {"adoptedAt": stamp, "source": str(source), "providers": providers},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_directory_chain(
+    directory: Path, base: Path | None, *, create: bool, directory_mode: int,
+    uid: int | None, gid: int | None,
+) -> int:
+    """Open ``directory`` and return a descriptor, never following a symlink.
+
+    ``base`` (default ``/``) is opened normally, trusting everything above it;
+    every component below it is opened with O_NOFOLLOW|O_DIRECTORY relative to
+    the previous descriptor (and created with mkdirat when ``create``), so a
+    component swapped for a symbolic link at any moment cannot redirect the
+    traversal: the caller keeps working on the directory it actually opened.
+    """
+    base = Path(base) if base is not None else Path("/")
+    try:
+        relative = directory.relative_to(base)
+    except ValueError as exc:
+        raise AdoptionError("adoption_home_unsafe", f"{directory} is not below {base}") from exc
+    if create and not os.path.lexists(base):
+        try:
+            base.mkdir(mode=directory_mode, parents=True, exist_ok=True)  # trusted prefix (test roots)
+        except OSError as exc:
+            raise AdoptionError("adoption_home_unwritable", f"cannot create {base}") from exc
+    try:
+        current = os.open(base, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise AdoptionError("adoption_home_unwritable", f"cannot open {base}") from exc
+    try:
+        for component in relative.parts:
+            if component in {"", ".", ".."}:
+                raise AdoptionError("adoption_home_unsafe", f"{directory} is not a normalised path")
+            try:
+                following = os.open(component, _DIRECTORY_FLAGS, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise AdoptionError("adoption_home_unwritable", f"cannot open {directory}")
+                try:
+                    os.mkdir(component, directory_mode, dir_fd=current)
+                    following = os.open(component, _DIRECTORY_FLAGS, dir_fd=current)
+                except OSError as exc:
+                    raise AdoptionError("adoption_home_unwritable", f"cannot create {directory}") from exc
+                try:
+                    os.fchmod(following, directory_mode)
+                    if uid is not None or gid is not None:
+                        os.fchown(following, -1 if uid is None else uid, -1 if gid is None else gid)
+                except OSError as exc:
+                    os.close(following)
+                    raise AdoptionError("adoption_home_unwritable", f"cannot create {directory}") from exc
+            except OSError as exc:
+                # ELOOP (symbolic link), ENOTDIR (not a directory) and the rest
+                # all mean the same thing here: this is not a private directory.
+                raise AdoptionError("adoption_home_unsafe", f"{directory} is not a private directory") from exc
+            os.close(current)
+            current = following
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def write_private_file(
+    destination: Path, data: bytes, *, mode: int = 0o600, directory_mode: int = 0o700,
+    uid: int | None = None, gid: int | None = None, base: Path | None = None,
+    file_gid: int | None = None,
+) -> os.stat_result:
+    """Atomically place ``data`` at ``destination`` as a regular file.
+
+    Everything is done relative to a directory descriptor obtained by an
+    O_NOFOLLOW walk (see ``_open_directory_chain``): the temporary file is
+    created with O_EXCL|O_NOFOLLOW beside the target, set to ``mode`` before
+    any content lands, optionally chowned through its descriptor (installer
+    side, as root) and renamed with renameat over the target. A symlinked
+    parent component or target is refused. ``base`` bounds the trusted prefix
+    (default: ``/``, i.e. every component is checked). ``file_gid`` overrides
+    ``gid`` for the file only (directories keep ``gid``).
+    """
+    parent = destination.parent
+    dirfd = _open_directory_chain(
+        parent, base, create=True, directory_mode=directory_mode, uid=uid, gid=gid
+    )
+    temporary = f".adopt.{secrets.token_hex(8)}.tmp"
+    created = False
+    try:
+        try:
+            existing = os.lstat(destination.name, dir_fd=dirfd)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise AdoptionError("adoption_home_unsafe", f"{destination} is a symbolic link")
+        try:
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=dirfd,
+            )
+            created = True
+            with os.fdopen(descriptor, "wb") as handle:
+                os.fchmod(handle.fileno(), mode)
+                group = gid if file_gid is None else file_gid
+                if uid is not None or group is not None:
+                    os.fchown(handle.fileno(), -1 if uid is None else uid, -1 if group is None else group)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+                written = os.fstat(handle.fileno())
+            os.rename(temporary, destination.name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            created = False
+            return written
+        except PermissionError as exc:
+            raise AdoptionError(
+                "adoption_home_unwritable",
+                f"{parent} is not writable by uid {os.geteuid()}; it must be owned by the service uid with mode 0700",
+            ) from exc
+        except OSError as exc:
+            raise AdoptionError("adoption_home_unwritable", f"cannot write {destination}") from exc
+    finally:
+        if created:
+            try:
+                os.unlink(temporary, dir_fd=dirfd)
+            except OSError:
+                pass
+        os.close(dirfd)
+
+
+class OpenCodeAdoption:
+    """Presence-only view and adopt/forget actions for one provider home."""
+
+    def __init__(
+        self, home: Path, environment: Mapping[str, str] | None = None,
+        selected_provider: Callable[[], str | None] | None = None,
+    ) -> None:
+        self.home = Path(home)
+        # Returns the auth.json provider id StatePort currently has selected
+        # (the ``<provider>`` of the saved ``<provider>/<model>``), or None.
+        self._selected_provider = selected_provider
+        self.auth_path = destination_auth_path(self.home)
+        self.marker_path = self.home / ADOPTION_MARKER_NAME
+        self._environment = environment
+
+    # ---------------------------------------------------------------- query
+
+    def _present(self) -> bool:
+        try:
+            info = os.lstat(self.auth_path)
+        except OSError:
+            return False
+        return stat.S_ISREG(info.st_mode) and 2 <= info.st_size <= MAX_AUTH_BYTES
+
+    def _marker(self) -> dict[str, object]:
+        try:
+            if self.marker_path.is_symlink() or self.marker_path.stat().st_size > 4096:
+                return {}
+            data = json.loads(self.marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _source_file(self) -> Path | None:
+        """First candidate that exists as a plain file (presence only)."""
+        for directory in candidate_source_directories(self._environment):
+            candidate = directory / AUTH_FILE_NAME
+            try:
+                info = os.lstat(candidate)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode) and not self._is_destination(candidate):
+                return candidate
+        return None
+
+    def _is_destination(self, candidate: Path) -> bool:
+        try:
+            return os.path.samefile(candidate, self.auth_path)
+        except OSError:
+            return False
+
+    def status(self) -> dict[str, object]:
+        """Names, presence and timestamps only; never a value."""
+        adopted = self._present()
+        marker = self._marker() if adopted else {}
+        providers = marker.get("providers")
+        source = self._source_file() if not adopted else None
+        return {
+            "adoptionStatus": "adopted" if adopted else "not_adopted",
+            "adoptionSourceAvailable": source is not None,
+            "adoptedAt": marker.get("adoptedAt") if isinstance(marker.get("adoptedAt"), str) else None,
+            "adoptedSource": marker.get("source") if isinstance(marker.get("source"), str) else None,
+            "adoptionSourceProviders": self.source_providers() if source is not None else [],
+            "adoptedProviders": [
+                name for name in providers if isinstance(name, str) and _PROVIDER_NAME.fullmatch(name)
+            ] if isinstance(providers, list) else [],
+        }
+
+    # -------------------------------------------------------------- actions
+
+    def source_providers(self) -> list[str]:
+        """Provider NAMES found in the first candidate sign-in file (never values)."""
+        source = self._source_file()
+        if source is None:
+            return []
+        try:
+            return read_signin_file(source)[1]
+        except AdoptionError:
+            return []
+
+    def adopt(
+        self, *, providers: list[str] | None = None, now: datetime | None = None
+    ) -> dict[str, object]:
+        searched = [directory / AUTH_FILE_NAME for directory in candidate_source_directories(self._environment)]
+        source = None
+        for candidate in searched:
+            if os.path.lexists(candidate) and not self._is_destination(candidate):
+                source = candidate
+                break
+        if source is None:
+            names = ", ".join(str(path) for path in searched) or "no candidate location is configured"
+            raise AdoptionError(
+                "adoption_source_missing",
+                "No existing OpenCode sign-in was found. Looked for: "
+                f"{names}. Sign in with OpenCode in this environment, or run the host-side adopt helper "
+                "(scripts/adopt_opencode_signin.py) which copies it into "
+                f"{self.auth_path}.",
+            )
+        raw, detected = read_signin_file(source)
+        hint = None
+        if self._selected_provider is not None:
+            try:
+                hint = self._selected_provider()
+            except Exception:  # noqa: BLE001 - an unreadable profile only loses the hint
+                hint = None
+        chosen = select_provider_ids(detected, providers, hint)
+        data = select_signin(raw, chosen)
+        self._guard_home()
+        base = self.home.parent
+        written = write_private_file(self.auth_path, data, base=base)
+        self._verify_destination(written)
+        write_private_file(self.marker_path, marker_bytes(source, chosen, now), base=base)
+        return self.status()
+
+    def forget(self) -> dict[str, object]:
+        """Delete only StatePort's copy. The source sign-in is never touched."""
+        for path in (self.auth_path, self.marker_path):
+            try:
+                dirfd = _open_directory_chain(
+                    path.parent, self.home.parent, create=False, directory_mode=0o700, uid=None, gid=None
+                )
+            except AdoptionError:
+                continue  # nothing (or nothing safe to follow) to remove
+            try:
+                os.unlink(path.name, dir_fd=dirfd)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise AdoptionError(
+                    "adoption_home_unwritable", f"cannot remove {path}; it must be owned by uid {os.geteuid()}"
+                ) from exc
+            finally:
+                os.close(dirfd)
+        return self.status()
+
+    # -------------------------------------------------------------- helpers
+
+    def _guard_home(self) -> None:
+        if self.home.is_symlink():
+            raise AdoptionError("adoption_home_unsafe", f"{self.home} is a symbolic link")
+        if self.home.exists():
+            info = os.lstat(self.home)
+            if not stat.S_ISDIR(info.st_mode):
+                raise AdoptionError("adoption_home_unsafe", f"{self.home} is not a directory")
+            if info.st_uid != os.geteuid():
+                raise AdoptionError(
+                    "adoption_home_unwritable",
+                    f"{self.home} is owned by uid {info.st_uid} but the service runs as uid {os.geteuid()}; "
+                    "give the provider home to the service uid with mode 0700, or use the host-side adopt helper",
+                )
+
+    def _verify_destination(self, info: os.stat_result) -> None:
+        # ``info`` is the descriptor-level stat of the file that was renamed into place.
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.geteuid():
+            raise AdoptionError(
+                "adoption_home_unsafe", f"{self.auth_path} did not end up a private regular file"
+            )
+
+
+__all__ = [
+    "ADOPTION_MARKER_NAME",
+    "AUTH_FILE_NAME",
+    "AdoptionError",
+    "DEFAULT_PROVIDER_IDS",
+    "MAX_AUTH_BYTES",
+    "OAUTH_ROTATION_CAVEAT",
+    "OpenCodeAdoption",
+    "SOURCE_OVERRIDE_ENV",
+    "candidate_source_directories",
+    "destination_auth_path",
+    "marker_bytes",
+    "read_signin_file",
+    "select_provider_ids",
+    "select_signin",
+    "write_private_file",
+]
+'''
+_EMBEDDED_ADOPTION_HELPER_SOURCE = r'''#!/usr/bin/env python3
+"""Host-side adoption of the owner's already signed-in OpenCode.
+
+Run this on the machine (the WSL distribution) where OpenCode is already
+signed in. It COPIES only the SELECTED provider record(s) out of the file
+OpenCode keeps every sign-in in, ``~/.local/share/opencode/auth.json``, into
+the three StatePort places that need it. Unrelated providers in that file are
+never copied. Selection: ``--provider ID`` (repeatable, must be present), else
+the provider of ``--model`` (``<provider>/<model>``), else ``opencode-go`` /
+``opencode`` when present, else the helper refuses and lists the detected names.
+
+1. the managed provider home        (control plane, mode 0600, stateport-control)
+2. the control agent-provider dir   (mode 0600, stateport-control; the control
+   service reads it as its own uid)
+3. the execution agent-provider dir (mode 0640, owner stateport-exec, group =
+   the host gid the sealed container's gid 10001 maps to, derived from the
+   stateport-exec entry in /etc/subgid under rootless podman ``--userns host``)
+
+Copy 3 is read by the sealed agent workspace container (``--user 10001:10001``,
+see stateport-agent-run), through the GROUP bit; it is never world-readable. If
+the mapped gid cannot be determined the copy stays 0600 and the helper says so:
+the provisioner must then chown it to the mapped gid before an agent can use it.
+(provider.env is provisioned separately and is not touched here.)
+
+OAuth caveat: OpenCode rotates an OAuth refresh token when it refreshes it. An
+OAuth record copied here that refreshes inside StatePort can sign the original
+OpenCode out; prefer an API-key provider such as opencode-go.
+
+Nothing is symlinked, the source is never modified, every destination component
+is opened with O_NOFOLLOW relative to a directory descriptor (a component
+swapped for a symlink cannot redirect root's write), and no value is ever
+printed, logged or sent anywhere: the report names paths, sizes, modes and
+provider NAMES only.
+
+Normally the in-product "Adopt existing OpenCode sign-in" action does copy 1
+by itself; this helper exists for the cases it cannot reach (the container
+cannot read the host home, the provider home is owned by another uid) and for
+the two agent-provider directories, which are read-only mounts in the web
+container.
+
+Writing into the root-provisioned directories needs root (``sudo``); use
+``--dry-run`` to see what would happen. ``--model`` also writes the ``model``
+file the agent run requires.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+from pathlib import Path
+import pwd
+import sys
+
+HERE = Path(__file__).resolve().parent
+ADOPTION_MODULE = (
+    HERE.parent / "packages" / "persistent-app" / "src" / "stateport_persistent_app" / "provider_adoption.py"
+)
+
+CONTROL_USER = "stateport-control"
+EXEC_USER = "stateport-exec"
+PROVIDER_HOME = "/var/lib/stateport-control/provider-auth/opencode"
+CONTROL_AGENT_DIR = "/var/lib/stateport-control/agent-provider"
+EXEC_AGENT_DIR = "/var/lib/stateport-exec/stateport-execution-host/agent-provider"
+SUBGID_FILE = Path("/etc/subgid")
+# engine.py runs the sealed workspace as --user 10001:10001 --userns host.
+CONTAINER_GID = 10001
+
+
+def _load_adoption():
+    spec = importlib.util.spec_from_file_location("stateport_provider_adoption_standalone", ADOPTION_MODULE)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"adopt: cannot load {ADOPTION_MODULE}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def default_source_directory(environment: dict[str, str]) -> Path:
+    """The invoking user's OpenCode data directory (the sudo caller, not root)."""
+    xdg = environment.get("XDG_DATA_HOME", "")
+    sudo_user = environment.get("SUDO_USER", "")
+    if sudo_user and os.geteuid() == 0:
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir) / ".local" / "share" / "opencode"
+        except KeyError:
+            pass
+    if xdg and Path(xdg).is_absolute():
+        return Path(xdg) / "opencode"
+    return Path(environment.get("HOME") or Path.home()) / ".local" / "share" / "opencode"
+
+
+def _ids(user: str, no_chown: bool) -> tuple[int | None, int | None]:
+    if no_chown:
+        return None, None
+    try:
+        entry = pwd.getpwnam(user)
+    except KeyError as exc:
+        raise SystemExit(
+            f"adopt: the user {user} does not exist; run the StatePort provisioner first, "
+            "or pass --no-chown for a test root"
+        ) from exc
+    return entry.pw_uid, entry.pw_gid
+
+
+def mapped_container_gid(user: str, subgid_file: Path = SUBGID_FILE, container_gid: int = CONTAINER_GID) -> int | None:
+    """Host gid that rootless podman maps container gid ``container_gid`` to for ``user``.
+
+    Container gid 0 is the user's own gid; container gid N (N >= 1) is the
+    N-th gid of the user's subordinate range. None when it cannot be derived.
+    """
+    try:
+        lines = Path(subgid_file).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.strip().split(":")
+        if len(parts) == 3 and parts[0] == user:
+            try:
+                start, count = int(parts[1]), int(parts[2])
+            except ValueError:
+                continue
+            if 1 <= container_gid <= count:
+                return start + container_gid - 1
+    return None
+
+
+def main(argv: list[str] | None = None, environment: dict[str, str] | None = None) -> int:
+    env = dict(os.environ if environment is None else environment)
+    parser = argparse.ArgumentParser(description="Copy an existing OpenCode sign-in into StatePort.")
+    parser.add_argument("--source-dir", type=Path, help="OpenCode data directory holding auth.json (default: invoking user's)")
+    parser.add_argument("--root", type=Path, default=Path("/"), help="re-root the destination paths (tests)")
+    parser.add_argument("--no-chown", action="store_true", help="do not chown (tests / already-owned roots)")
+    parser.add_argument("--model", help="also write this model id to the agent-provider directories")
+    parser.add_argument("--provider", action="append", default=None, metavar="ID",
+                        help="provider id to copy (repeatable; default: the --model provider, else opencode-go/opencode)")
+    parser.add_argument("--subgid-file", type=Path, default=SUBGID_FILE, help="subgid map used to derive the container gid")
+    parser.add_argument("--skip", action="append", default=[], choices=["provider-home", "control-agent", "exec-agent"])
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    adoption = _load_adoption()
+    source_dir = args.source_dir or default_source_directory(env)
+    source = source_dir / adoption.AUTH_FILE_NAME
+    try:
+        raw, detected = adoption.read_signin_file(source)
+        hint = args.model.strip().split("/", 1)[0] if args.model and "/" in args.model else None
+        providers = adoption.select_provider_ids(detected, args.provider, hint)
+        data = adoption.select_signin(raw, providers)
+    except adoption.AdoptionError as exc:
+        print(f"adopt: refused ({exc.code}): {exc.detail}", file=sys.stderr)
+        return 2
+
+    root = args.root
+    def under(path: str) -> Path:
+        return root / path.lstrip("/")
+
+    exec_gid = mapped_container_gid(EXEC_USER, args.subgid_file)
+    exec_mode = 0o640 if exec_gid is not None else 0o600
+    plan = []
+    if "provider-home" not in args.skip:
+        plan.append((
+            adoption.destination_auth_path(under(PROVIDER_HOME)), 0o600, 0o700, CONTROL_USER, None,
+        ))
+    if "control-agent" not in args.skip:
+        plan.append((under(CONTROL_AGENT_DIR) / adoption.AUTH_FILE_NAME, 0o600, 0o755, CONTROL_USER, None))
+    if "exec-agent" not in args.skip:
+        plan.append((under(EXEC_AGENT_DIR) / adoption.AUTH_FILE_NAME, exec_mode, 0o755, EXEC_USER, exec_gid))
+        if exec_gid is None:
+            print(
+                f"adopt: WARNING the host gid for container gid {CONTAINER_GID} could not be derived from "
+                f"{args.subgid_file} ({EXEC_USER}); the execution copy is mode 0600 and the sealed container "
+                "cannot read it until the provisioner chowns it to the mapped gid and sets mode 0640",
+                file=sys.stderr,
+            )
+
+    print(f"adopt: source {source} ({len(data)} bytes copied; providers: {', '.join(providers)}; "
+          f"not copied: {', '.join(n for n in detected if n not in providers) or 'none'})")
+    for destination, mode, directory_mode, user, _gid in plan:
+        print(f"adopt: {'would copy' if args.dry_run else 'copy'} -> {destination} mode {mode:04o} owner {user}")
+    if args.dry_run:
+        return 0
+
+    status = 0
+    for destination, mode, directory_mode, user, file_gid in plan:
+        uid, gid = _ids(user, args.no_chown)
+        # The exec copy's group is the mapped container gid; its directories keep the user's own gid.
+        try:
+            adoption.write_private_file(
+                destination, data, mode=mode, directory_mode=directory_mode, uid=uid, gid=gid, base=root,
+                file_gid=None if args.no_chown else file_gid,
+            )
+            if destination.name == adoption.AUTH_FILE_NAME and mode == 0o600:
+                adoption.write_private_file(
+                    destination.parents[2] / adoption.ADOPTION_MARKER_NAME,
+                    adoption.marker_bytes(source, providers),
+                    mode=0o600, directory_mode=directory_mode, uid=uid, gid=gid, base=root,
+                )
+            if args.model and destination.name == adoption.AUTH_FILE_NAME and destination.parent.name == 'agent-provider':
+                adoption.write_private_file(
+                    destination.parent / "model", (args.model.strip() + "\n").encode("utf-8"),
+                    mode=0o644, directory_mode=directory_mode, uid=uid, gid=gid, base=root,
+                )
+        except adoption.AdoptionError as exc:
+            print(f"adopt: FAILED {destination} ({exc.code}): {exc.detail}", file=sys.stderr)
+            status = 1
+            continue
+        info = destination.stat()
+        print(f"adopt: wrote {destination} {info.st_size} bytes mode {info.st_mode & 0o777:04o} uid {info.st_uid}")
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+# END GENERATED: embedded OpenCode adoption sources
+
+
+def _keepalive_mode_lines(config: InstallConfig, outcome: InstallOutcome) -> list[str]:
+    """Say, in plain words, what Windows allowed for the keep-alive task."""
+
+    if outcome.target_id != WSL2_TARGET_ID:
+        return []
+    try:
+        recorded = _load_windows_keepalive(config.state_root)
+    except InstallerRefusal:
+        return []
+    if recorded is None:
+        return []
+    if recorded.registered_mode == "logon-only":
+        return [
+            "  Windows only let the StatePort keep-alive task start after you sign in to Windows;",
+            "    after a restart, StatePort comes back once you sign in.",
+        ]
+    return []
+
+
+def _report_install_outcome(
+    outcome: InstallOutcome, config: InstallConfig, notes: Sequence[str] = ()
+) -> int:
+    """Say what happened in plain words; the last thing shown is what to do next."""
+
     if outcome.status == "succeeded":
-        print("StatePort is installed and healthy.")
-        print(f"  Open StatePort at: {outcome.local_url}")
-        print(f"  install receipt: {outcome.receipt_path}")
-        if outcome.execution_host is not None:
-            print("execution host: provisioned and protocol-healthy; installer did not escalate")
-            print(f"  plan: {outcome.execution_host['planPath']}")
-            print(f"  provision through root helper: {outcome.execution_host['provisionCommand']}")
+        _say()
+        if outcome.converged:
+            _say("StatePort is already installed; nothing was changed.")
+        else:
+            _say("StatePort is installed and healthy.")
+        for note in (*outcome.notes, *notes):
+            _say(f"  {note}")
+        if config.verbose:
+            _say(f"  {outcome.message}")
+            if outcome.execution_host is not None:
+                _say("  execution host: provisioned and protocol-healthy; installer did not escalate")
+                _say(f"  plan: {outcome.execution_host['planPath']}")
+                _say(f"  provision through root helper: {outcome.execution_host['provisionCommand']}")
+        _say()
+        if outcome.local_url:
+            _say(f"  Open StatePort at: {outcome.local_url}")
+            if outcome.target_id == WSL2_TARGET_ID:
+                _say("    On Windows, open that same address in your normal Windows browser;")
+                _say("    WSL forwards localhost, so it is the same localhost address there.")
+            _say('    The first screen is Applications: click "Open the study sample" to start.')
+        _say(f"  install receipt: {outcome.receipt_path}")
+        for line in _keepalive_mode_lines(config, outcome):
+            _say(line)
+        _say(f"  Your data and install records live under: {config.state_root}")
+        _say("  To stop and remove StatePort (your data is kept): run the installer again with --uninstall")
+        _say("  To reinstall it (your data is kept): run the installer again with --yes --reinstall")
+        _say("    (with the one-line installer, set STATEPORT_REINSTALL=1 instead)")
         return 0
     if outcome.status == "prepared":
-        print(f"StatePort preparation completed: {outcome.message}")
-        if outcome.execution_host is not None:
-            print(f"plan: {outcome.execution_host['planPath']}")
-            print(f"materialize: {outcome.execution_host['materializeCommand']}")
-            print(f"provision: {outcome.execution_host['provisionCommand']}")
+        _say("  The release is verified and the host setup plan is ready.")
+        if config.verbose and outcome.execution_host is not None:
+            _say(f"  plan: {outcome.execution_host['planPath']}")
+            _say(f"  materialize: {outcome.execution_host['materializeCommand']}")
+            _say(f"  provision: {outcome.execution_host['provisionCommand']}")
         return 0
-    print(f"install refused ({outcome.code}): {outcome.message}", file=sys.stderr)
+    _say("StatePort was not installed.", stream=sys.stderr)
+    _say(f"install refused ({outcome.code}): {outcome.message}", stream=sys.stderr)
     if outcome.receipt_path is not None:
-        print(f"refusal record: {outcome.receipt_path}", file=sys.stderr)
+        _say(f"  refusal record: {outcome.receipt_path}", stream=sys.stderr)
     return 2
 
 

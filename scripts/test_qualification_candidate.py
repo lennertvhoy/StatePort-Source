@@ -1034,8 +1034,8 @@ def test_installed_provider_smoke_requires_opencode_without_authentication(monke
                               'sandboxLayer': 'container', 'insideWrite': 'passed',
                               'outsideWrite': 'refused', 'symlinkEscape': 'refused',
                               'childProcess': 'passed', 'capabilities': 'dropped',
-                              'parentNetworkSocket': 'permitted', 'networkSocket': 'refused',
-                              'networkPolicy': 'container-internal',
+                              'parentNetworkSocket': 'permitted', 'networkSocket': 'unasserted',
+                              'networkPolicy': 'signed-egress-network',
                               'authentication': 'not attempted', 'runtime': 'web'}
                     if sandbox_result == 'incomplete':
                         result.pop('outsideWrite')
@@ -1122,7 +1122,9 @@ def test_provider_smoke_targets_the_shipped_opencode_executable() -> None:
     assert 'codex' not in probe_module._BOUNDARY_CHILD.lower()
     assert '1.1.1.1' in probe_module._BOUNDARY_CHILD
     assert probe_module._RUNTIMES['web'] == {
-        'uid': 65532, 'temporaryRoot': '/var/lib/stateport/data', 'readOnlyOwned': '/workspace'}
+        'uid': 65532, 'temporaryRoot': '/var/lib/stateport/data', 'readOnlyOwned': '/workspace',
+        'externalConnection': 'unasserted'}
+    assert probe_module._RUNTIMES['workspace']['externalConnection'] == 'refused'
     assert probe_module._RUNTIMES['workspace']['readOnlyOwned'] == '/home/stateport'
     source = (ROOT / 'scripts/qualification/provider_sandbox_probe.py').read_text()
     assert '/usr/local/bin/codex' not in source

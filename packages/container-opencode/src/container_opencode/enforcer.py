@@ -258,12 +258,16 @@ def verify_container_enforcement(
         _cleanup_container(container_name)
         if shm_dir.exists():
             shutil.rmtree(shm_dir, ignore_errors=True)
-    # After container exit, check for orphaned descendant processes.
-    # A properly isolated container kills all descendants on exit.
+    # After container exit, check that no descendant outlived it. The escape
+    # script's orphan lives inside this container's own PID namespace, so it can
+    # only remain if the container itself remains. The previous host-wide
+    # `pgrep -f "sleep 5"` matched any unrelated process on the machine whose
+    # command line contained that text (a concurrent shell loop, another
+    # agent's poll) and failed this check for reasons unrelated to isolation.
     try:
         check = subprocess.run(
-            ("pgrep", "-f", "sleep 5"),
-            capture_output=True, text=True, timeout=5,
+            ("podman", "ps", "--all", "--quiet", "--filter", f"name=^{container_name}$"),
+            capture_output=True, text=True, timeout=10,
         )
         if check.returncode == 0 and check.stdout.strip():
             result.remained_descendants = True

@@ -2463,7 +2463,7 @@ def installed_service_smoke(vm: VM, binding: dict) -> dict:
                        "insideWrite": "passed", "outsideWrite": "refused",
                        "symlinkEscape": "refused", "childProcess": "passed",
                        "capabilities": "dropped", "parentNetworkSocket": "permitted",
-                       "networkSocket": "refused", "networkPolicy": "container-internal",
+                       "networkSocket": "unasserted", "networkPolicy": "signed-egress-network",
                        "authentication": "not attempted", "runtime": "web",
                        "namespaceIsolation": "isolated"}:
             raise ValueError("installed provider smoke returned incomplete boundary evidence")

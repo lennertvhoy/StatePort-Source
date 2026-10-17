@@ -339,3 +339,22 @@ if __name__ == "__main__":
     ):
         test()
     print("PASS")
+
+
+def test_reads_survive_a_full_disk_when_revalidation_cannot_be_saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+
+    target = tmp_path / "instances/project"
+    target.mkdir(parents=True)
+    catalog = _catalog(tmp_path)
+    catalog.register(target, instance_id="project")
+    target.rename(target.with_name("moved"))  # forces a revalidation that changes the record
+
+    def disk_full(self, document):  # noqa: ANN001
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(InstanceCatalog, "_write", disk_full)
+    assert [r.instance_id for r in catalog.list()] == ["project"]
+    assert catalog.get("project").path == "moved"
+    with pytest.raises(OSError):  # a real write (rename) still reports the failure
+        catalog.rename("project", "new name")

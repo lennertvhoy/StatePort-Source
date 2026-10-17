@@ -13,16 +13,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from typing import Any, Callable, Mapping
 
 from codex_adapter import CodexAdapter
 from execution_host.contracts import AgentRunSpec, CapabilityRequest, require_accepted
 from external_engine_runtime import ProcessIdentity, ProcessRuntimeError, decode_jsonl
+from . import provider_failure
 from .provider_credentials import (
     ProviderCredentialStore,
     opencode_subprocess_environment,
@@ -368,9 +371,6 @@ class ProviderRouter:
             ),
         )
         require_accepted(spec, capabilities)
-        generation = "generation." + hashlib.sha256(
-            f"{work_id}:{attempt_id}".encode()
-        ).hexdigest()
         environment: dict[str, str] | None = None
         if provider["backendId"] == "opencode":
             # The XDG locations always point at the operator-owned provider home
@@ -378,35 +378,16 @@ class ProviderRouter:
             # key is added only when configured. Codex invocations pass no
             # environment override and keep their existing filtered environment.
             environment = opencode_subprocess_environment(self._provider_credentials())
-        try:
-            result = self.adapter.execute(
-                spec,
-                staging_root,
-                cancel_event=cancel_event,
-                on_started=on_started,
-                on_finished=on_finished,
-                process_generation=generation,
-                **({"environment": environment} if environment is not None else {}),
-            )
-        except Exception:
-            raise ProviderRouterError("provider_execution_unavailable") from None
-        if not result.ok:
-            if result.timed_out:
-                reason = "provider_timed_out"
-            elif result.cancelled:
-                reason = "provider_cancelled"
-            elif result.output_limited:
-                reason = "provider_output_limited"
-            else:
-                reason = "provider_failed"
-            raise ProviderRouterError(reason)
-        try:
-            events = decode_jsonl(result.stdout)
-        except ProcessRuntimeError as exc:
-            raise ProviderRouterError("provider output was not valid JSONL") from exc
-        refusal = self._opencode_refusal(events) if provider["backendId"] == "opencode" else None
-        if refusal is not None:
-            raise ProviderRouterError(refusal)
+        events, result = self._execute_with_bounded_retry(
+            spec,
+            staging_root,
+            work_id=work_id,
+            attempt_id=attempt_id,
+            environment=environment,
+            cancel_event=cancel_event,
+            on_started=on_started,
+            on_finished=on_finished,
+        )
         assistant_text = self._assistant_text(events)
         usage = self._usage(events)
         return ProviderInvocation(
@@ -420,6 +401,131 @@ class ProviderRouter:
             cleanup=result.cleanup,
             normalized_events=events,
         )
+
+    #: Pauses before each retry of a transient upstream failure. The number of
+    #: entries is the retry count; a retry also needs the remaining time budget.
+    RETRY_BACKOFF_SECONDS: tuple[float, ...] = (2.0, 6.0)
+    MIN_RETRY_WINDOW_SECONDS = 5.0
+
+    def _execute_with_bounded_retry(
+        self,
+        spec: AgentRunSpec,
+        staging_root: Path,
+        *,
+        work_id: str,
+        attempt_id: str,
+        environment: dict[str, str] | None,
+        cancel_event: Any | None,
+        on_started: Callable[[ProcessIdentity], None] | None,
+        on_finished: Callable[[ProcessIdentity], None] | None,
+    ) -> tuple[tuple[dict[str, Any], ...], Any]:
+        """Run the provider; retry only transient upstream errors, inside the budget.
+
+        Returns the decoded events and the process result of the successful
+        attempt. Every failure is raised as one fixed, public-safe cause code
+        (see ``provider_failure``); stdout/stderr text never leaves this method.
+        Quota, authentication and model-unavailable causes are never retried,
+        and a timeout is never retried because the budget is already spent.
+        """
+        opencode = self._profile["provider"]["backendId"] == "opencode"
+        budget = float(self._profile["budgets"]["timeSeconds"])
+        deadline = time.monotonic() + budget
+        try:
+            accepted = inspect.signature(self.adapter.execute).parameters
+        except (TypeError, ValueError):
+            accepted = {}
+        retries = 0
+        while True:
+            options: dict[str, Any] = {}
+            if opencode and "diagnostic_logs" in accepted:
+                options["diagnostic_logs"] = True
+            if retries and "timeout_seconds" in accepted:
+                options["timeout_seconds"] = max(deadline - time.monotonic(), 1.0)
+            if environment is not None:
+                options["environment"] = environment
+            generation = "generation." + hashlib.sha256(
+                (f"{work_id}:{attempt_id}" + (f":retry{retries}" if retries else "")).encode()
+            ).hexdigest()
+            try:
+                result = self.adapter.execute(
+                    spec,
+                    staging_root,
+                    cancel_event=cancel_event,
+                    on_started=on_started,
+                    on_finished=on_finished,
+                    process_generation=generation,
+                    **options,
+                )
+            except Exception:
+                raise ProviderRouterError("provider_execution_unavailable") from None
+            cause, events = self._attempt_cause(result, opencode)
+            if cause is None:
+                return events, result
+            if (
+                cause in provider_failure.RETRYABLE
+                and retries < len(self.RETRY_BACKOFF_SECONDS)
+                and not result.timed_out
+                and not (cancel_event is not None and cancel_event.is_set())
+            ):
+                delay = self.RETRY_BACKOFF_SECONDS[retries]
+                if deadline - time.monotonic() >= delay + self.MIN_RETRY_WINDOW_SECONDS:
+                    if self._pause(delay, cancel_event):
+                        raise ProviderRouterError("provider_cancelled")
+                    retries += 1
+                    continue
+            raise ProviderRouterError(cause)
+
+    @staticmethod
+    def _pause(delay: float, cancel_event: Any | None) -> bool:
+        """Sleep for ``delay`` seconds; True when cancellation arrived meanwhile."""
+        waiter = getattr(cancel_event, "wait", None)
+        if callable(waiter):
+            return bool(waiter(delay))
+        time.sleep(delay)
+        return False
+
+    def _attempt_cause(
+        self, result: Any, opencode: bool
+    ) -> tuple[str | None, tuple[dict[str, Any], ...]]:
+        """Return (failure cause or None, decoded events) for one attempt."""
+        if result.cancelled:
+            return "provider_cancelled", ()
+        if result.output_limited:
+            return "provider_output_limited", ()
+        try:
+            events: tuple[dict[str, Any], ...] | None = decode_jsonl(result.stdout)
+        except ProcessRuntimeError:
+            events = None
+        stderr = result.stderr if opencode and isinstance(result.stderr, str) else ""
+        diagnosed = (
+            provider_failure.classify_provider_failure(events or (), stderr)
+            if opencode
+            else None
+        )
+        if result.timed_out:
+            return diagnosed or "provider_timed_out", ()
+        if result.returncode != 0:
+            return diagnosed or "provider_failed", ()
+        if events is None:
+            raise ProviderRouterError("provider output was not valid JSONL")
+        if opencode:
+            refusal = self._opencode_refusal(events)
+            if refusal is not None:
+                return diagnosed or refusal, events
+            if diagnosed and (
+                any(event.get("type") == "error" for event in events)
+                or not self._has_assistant_text(events)
+            ):
+                return diagnosed, events
+        return None, events
+
+    @staticmethod
+    def _has_assistant_text(events: tuple[dict[str, Any], ...]) -> bool:
+        try:
+            ProviderRouter._assistant_text(events)
+        except ProviderRouterError:
+            return False
+        return True
 
     @staticmethod
     def _opencode_refusal(events: tuple[dict[str, Any], ...]) -> str | None:

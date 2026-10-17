@@ -27,6 +27,23 @@ import type { SettingSearchEntry } from './model'
 import { ALL_SEARCH_ENTRIES } from './searchEntries'
 import { useGlobalSettings } from './useGlobalSettings'
 
+/**
+ * One honest line about where these settings live. Over HTTP the service owns
+ * only the appearance theme, notification level and landing page (see
+ * HttpGlobalSettingsClient.update); everything else is a browser preference in
+ * localStorage. The demo adapter keeps everything in the browser.
+ */
+function SettingsStorageNote() {
+  const http = getClient().adapter === 'http'
+  return (
+    <p className="text-xs text-foreground-secondary" data-testid="settings-storage-note">
+      {http
+        ? 'Stored in this browser only, not on the StatePort service and not shared with other browsers or profiles. Exceptions saved by the service: theme, notification level and landing page.'
+        : 'Demo data: these settings are stored in this browser only.'}
+    </p>
+  )
+}
+
 export default function SettingsPage() {
   const { instanceId } = useParams<{ instanceId: string }>()
   if (instanceId) return <AppSettingsView instanceId={instanceId} />
@@ -326,6 +343,7 @@ function GlobalSettingsView() {
                       <h1 className="text-xl text-foreground">{activeMeta?.label}</h1>
                       {activeMeta ? <p className="mt-0.5 text-xs text-foreground-secondary">{activeMeta.description}</p> : null}
                     </header>
+                    <SettingsStorageNote />
                     {groupContent()}
                   </>
                 )}
@@ -377,6 +395,7 @@ function GlobalSettingsView() {
           ) : activeGroup ? (
             <>
               {activeMeta && isTwoPane ? <p className="-mt-2 text-xs text-foreground-secondary">{activeMeta.description}</p> : null}
+              <SettingsStorageNote />
               {groupContent()}
             </>
           ) : (

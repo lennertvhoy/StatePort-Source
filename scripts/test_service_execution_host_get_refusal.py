@@ -31,6 +31,7 @@ from stateport_persistent_app import LocalLayout  # noqa: E402
 from stateport_persistent_app.execution_host_proxy import (  # noqa: E402
     ExecutionHostProxyError,
 )
+from stateport_persistent_app.infrastructure import InfrastructureError  # noqa: E402
 from stateport_persistent_app.service_process import AppServer  # noqa: E402
 from service_test_product import service_product_fixture  # noqa: E402
 
@@ -111,10 +112,71 @@ def test_unrelated_get_failure_still_uses_the_generic_refusal(
         with patch.object(
             server.execution_host,
             "list",
-            side_effect=RuntimeError("an unrelated local failure"),
+            side_effect=RuntimeError("an unrelated local failure at /private/host/path"),
         ):
             status, error = _get_error(origin, cookie, WORKLOADS_PATH)
 
     assert status == 400
     assert error["code"] == "operation_failed"
-    assert error["message"] == "the local operation failed"
+    assert error["causeCode"] == "local_runtime_error"
+    assert error["message"] == "The local service could not complete this request. Check service health and try again."
+    assert "/private/host/path" not in json.dumps(error)
+
+
+def test_unrelated_post_io_failure_names_safe_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _served_service(tmp_path, monkeypatch) as (server, origin, cookie):
+        with patch.object(server.execution_host, "exec", side_effect=OSError("/private/host/path")):
+            request = Request(
+                f"{origin}/v1/execution-host/workloads/exec",
+                data=json.dumps({"workloadId": "agent-workspace", "argv": ["true"]}).encode(),
+                headers={
+                    "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "Origin": origin,
+                    "X-StatePort-CSRF": server.csrf_token,
+                },
+                method="POST",
+            )
+            with pytest.raises(HTTPError) as refusal:
+                urlopen(request)
+            error = json.loads(refusal.value.read())["error"]
+
+    assert refusal.value.code == 400
+    assert error["code"] == "operation_failed"
+    assert error["causeCode"] == "local_io_error"
+    assert error["message"] == "A local resource could not be accessed. Check service setup and try again."
+    assert "/private/host/path" not in json.dumps(error)
+
+
+def test_infrastructure_operation_failed_names_command_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _served_service(tmp_path, monkeypatch) as (server, origin, cookie):
+        with patch.object(
+            server,
+            "infrastructure_adapter",
+            side_effect=InfrastructureError("operation_failed", "private output /private/host/path"),
+        ):
+            request = Request(
+                f"{origin}/v1/instances/demo/infrastructure/plan",
+                data=json.dumps({"operation": "observe"}).encode(),
+                headers={
+                    "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "Origin": origin,
+                    "X-StatePort-CSRF": server.csrf_token,
+                },
+                method="POST",
+            )
+            with pytest.raises(HTTPError) as refusal:
+                urlopen(request)
+            error = json.loads(refusal.value.read())["error"]
+
+    assert refusal.value.code == 409
+    assert error["code"] == "operation_failed"
+    assert error["causeCode"] == "infrastructure_command_failed"
+    assert error["message"] == "The infrastructure command failed. Review its run receipt and try again."
+    assert "/private/host/path" not in json.dumps(error)

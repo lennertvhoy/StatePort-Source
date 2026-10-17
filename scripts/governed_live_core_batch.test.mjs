@@ -8,12 +8,18 @@
  * pinned with teeth measured by mutation rather than asserted.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { Refusal, buildPlan, governedSelection, retainedRoots } from './governed_live_core_batch.mjs'
+import {
+  Refusal,
+  buildPlan,
+  governedSelection,
+  prepareTarget,
+  retainedRoots,
+} from './governed_live_core_batch.mjs'
 
 function scratchBase() {
   const base = mkdtempSync(path.join(tmpdir(), 'governed-batch-plan-'))
@@ -90,4 +96,52 @@ test('a fresh root plans, and the argv carries the full selection', async () => 
     'the argv filter must be the version-controlled selection, not a copy of it',
   )
   assert.deepEqual(retainedRoots(base).length, 2, 'refusing a plan must not alter the roots')
+})
+
+/**
+ * The ordering that a real admission exposed. The first batch7 attempt was
+ * ADMITTED by the governor and then refused here, because the launcher created
+ * the artifact root with `mkdir -p` before asking for a plan: the re-admission
+ * refusal saw the target it had just been handed and threw. The refusal was
+ * correct and the launcher's `mkdir` defeated it, spending an admission on a run
+ * that never started.
+ */
+test('a caller that pre-creates the root is refused, and prepareTarget is the supported way', async () => {
+  const base = scratchBase()
+  const target = path.join(base, 'at-run-artifacts-batch8')
+
+  // What the launcher did: create the directory first.
+  mkdirSync(target, { recursive: true })
+
+  // The refusal must still fire, because a root that already exists is exactly
+  // the half-used root this guard exists to catch.
+  await refuses({ rootName: 'at-run-artifacts-batch8', base }, /re-admit a retained root/)
+
+  // And with a clean base, the plan is accepted and prepareTarget creates it --
+  // once, and only after the refusals have passed.
+  const clean = scratchBase()
+  const plan = await buildPlan({ rootName: 'at-run-artifacts-batch8', base: clean })
+  assert.equal(existsSync(plan.target), false, 'planning must not create the root')
+  const prepared = prepareTarget(plan)
+  assert.equal(prepared.target, plan.target, 'prepareTarget returns the plan, so callers can chain')
+  assert.equal(existsSync(prepared.target), true, 'prepareTarget must create the root')
+  // Creating it makes it retained, so a second plan for the same name is refused.
+  await refuses({ rootName: 'at-run-artifacts-batch8', base: clean }, /re-admit a retained root/)
+})
+
+test('prepareTarget refuses a root that already exists, on its own account', () => {
+  // Not merely because planning refused it: a defensive mkdir that tolerates an
+  // existing root is the same hazard by another route, and the variant that
+  // measured green is exactly that.
+  const base = scratchBase()
+  const plan = { target: path.join(base, 'at-run-artifacts-batch9') }
+  mkdirSync(plan.target, { recursive: true })
+  assert.throws(
+    () => prepareTarget(plan),
+    (error) => {
+      assert.ok(error instanceof Refusal)
+      assert.match(error.message, /already exists/)
+      return true
+    },
+  )
 })

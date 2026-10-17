@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import base64
 from dataclasses import dataclass, replace
 import hashlib
+import importlib.util
+import re
 import io
 import json
 import os
@@ -854,7 +857,9 @@ class FakeRunner:
         health_probe_healthy: bool = True,
         package_status: str = "installed",
         schtasks_create_returncode: int = 0,
+        keepalive_mode: str = "boot-and-logon",
     ) -> None:
+        self.keepalive_mode = keepalive_mode
         self.cosign_returncode = cosign_returncode
         self.podman_version = podman_version
         self.rootless = rootless
@@ -862,7 +867,19 @@ class FakeRunner:
         self.package_status = package_status
         self.schtasks_create_returncode = schtasks_create_returncode
         self.calls: list[tuple[str, ...]] = []
+        # Two podman stores, as on a real host: the invoking user's own, and the stateport-control
+        # account's (reached only through ``sudo -n runuser -u stateport-control -- env -i ...``).
         self.volumes: set[str] = set()
+        self.control_volumes: set[str] = set()
+        self.control_containers: set[str] = set()
+        self.control_networks: set[str] = set()
+        self.control_files: dict[str, str] = {}
+        self.control_file_text: dict[str, str] = {}
+        # The root provisioning transaction already started the control-plane containers, which created
+        # their data volumes in the control store, before the installer's own volume phase.
+        self.control_data_volumes_exist_already = False
+        self.control_account_exists = True
+        self.sudo_without_password = True
         self.active_units: set[str] = set()
         self.enabled_units: set[str] = set()
         self.containers: set[str] = set()
@@ -877,14 +894,60 @@ class FakeRunner:
     def run(self, argv: Sequence[str], *, timeout: int) -> installer.Completed:
         call = tuple(str(item) for item in argv)
         self.calls.append(call)
-        # Control-plane unit operations route through the stateport-control
-        # user's systemd manager via runuser; unwrap for the systemctl rules.
-        if (
-            len(call) >= 5
-            and call[0] == "runuser"
-            and call[1:4] == ("-u", "stateport-control", "--")
-        ):
-            call = call[4:]
+        # Control-plane operations act inside the stateport-control account's session:
+        # ``[sudo -n] runuser -u stateport-control -- env -i K=V... /usr/bin/<program> args``.
+        # Unwrap to the program's own argv and remember which store it addressed.
+        control = False
+        if call[:2] == ("sudo", "-n") and call[2:3] == ("true",):
+            return installer.Completed(0 if self.sudo_without_password else 1, "", "sudo: a password is required")
+        if call[:2] == ("getent", "passwd") and call[2:] == ("stateport-control",):
+            if not self.control_account_exists:
+                return installer.Completed(2, "", "")
+            return installer.Completed(
+                0, "stateport-control:x:65531:65531::/var/lib/stateport-control:/usr/sbin/nologin\n", ""
+            )
+        if call[:2] == ("sudo", "-n"):
+            call_inner = call[2:]
+        else:
+            call_inner = call
+        if call_inner[:4] == ("/usr/sbin/runuser", "-u", "stateport-control", "--"):
+            assert call_inner[4:6] == ("/usr/bin/env", "-i"), call
+            rest = call_inner[6:]
+            index = 0
+            while "=" in rest[index].split("/")[0]:
+                index += 1
+            environment = dict(item.split("=", 1) for item in rest[:index])
+            assert environment["XDG_RUNTIME_DIR"] == "/run/user/65531", environment
+            assert environment["HOME"] == "/var/lib/stateport-control", environment
+            program = rest[index]
+            assert program.startswith("/usr/bin/"), call
+            control = True
+            call = (program.rsplit("/", 1)[-1], *rest[index + 1 :])
+        elif call[0] == "runuser":
+            raise AssertionError(f"runuser must be wrapped exactly: {call}")
+        elif call[0] == "sudo" and call[1:3] != ("-n", "cat"):
+            pass
+        volumes = self.control_volumes if control else self.volumes
+        containers = self.control_containers if control else self.containers
+        if control and call[0] == "stat":
+            path = call[-1]
+            if path in self.control_files:
+                return installer.Completed(0, self.control_files[path] + "\n", "")
+            return installer.Completed(1, "", f"stat: cannot statx '{path}': No such file or directory")
+        if control and call[0] == "cat":
+            path = call[-1]
+            if path in self.control_file_text:
+                return installer.Completed(0, self.control_file_text[path], "")
+            return installer.Completed(1, "", "No such file or directory")
+        if control and call[:2] == ("rm", "-f"):
+            self.control_files.pop(call[-1], None)
+            self.control_file_text.pop(call[-1], None)
+            return installer.Completed(0, "", "")
+        if call[:3] == ("podman", "network", "exists"):
+            return installer.Completed(0 if call[-1] in self.control_networks else 1, "", "")
+        if call[:3] == ("podman", "network", "rm"):
+            self.control_networks.discard(call[-1])
+            return installer.Completed(0, "", "")
         if call == ("uname", "-s"):
             return installer.Completed(0, "Linux\n", "")
         if call == ("uname", "-m"):
@@ -944,20 +1007,22 @@ class FakeRunner:
                 return installer.Completed(1, "", "no such image")
             return installer.Completed(0, reference.rsplit("@", 1)[-1] + "\n", "")
         if call[:3] == ("podman", "volume", "exists"):
-            return installer.Completed(0 if call[-1] in self.volumes else 1, "", "")
+            if control and self.control_data_volumes_exist_already and call[-1].startswith("stateport-g"):
+                volumes.add(call[-1])
+            return installer.Completed(0 if call[-1] in volumes else 1, "", "")
         if call[:3] == ("podman", "volume", "create"):
-            self.volumes.add(call[-1])
+            volumes.add(call[-1])
             return installer.Completed(0, call[-1] + "\n", "")
         if call[:3] == ("podman", "volume", "rm"):
-            if call[-1] in self.volumes:
-                self.volumes.discard(call[-1])
+            if call[-1] in volumes:
+                volumes.discard(call[-1])
                 return installer.Completed(0, call[-1] + "\n", "")
             return installer.Completed(1, "", "no such volume")
         if call[:3] == ("podman", "container", "exists"):
-            return installer.Completed(0 if call[-1] in self.containers else 1, "", "")
+            return installer.Completed(0 if call[-1] in containers else 1, "", "")
         if call[:3] == ("podman", "rm", "-f"):
-            if call[-1] in self.containers:
-                self.containers.discard(call[-1])
+            if call[-1] in containers:
+                containers.discard(call[-1])
                 return installer.Completed(0, call[-1] + "\n", "")
             return installer.Completed(1, "", "no such container")
         if call[:2] == ("podman", "inspect"):
@@ -982,24 +1047,30 @@ class FakeRunner:
             if call[-1] in self.active_units:
                 return installer.Completed(0, "active\n", "")
             return installer.Completed(3, "inactive\n", "")
+        # The activation target exists once per manager: the user's and the control account's.
+        enablement_key = ("control:" + call[-1]) if control and call[-1].endswith(".target") else call[-1]
         if call[:3] == ("systemctl", "--user", "is-enabled"):
-            if call[-1] in self.enabled_units:
+            if enablement_key in self.enabled_units:
                 return installer.Completed(0, "enabled\n", "")
             return installer.Completed(1, "disabled\n", "")
         if call[:3] == ("systemctl", "--user", "disable"):
-            self.enabled_units.discard(call[-1])
+            self.enabled_units.discard(enablement_key)
             return installer.Completed(0, "", "")
+        if call[0] == "powershell.exe":
+            # The keep-alive registration: an encoded PowerShell script that
+            # names its task.  Decode it exactly as Windows would.
+            script = base64.b64decode(call[call.index("-EncodedCommand") + 1]).decode("utf-16-le")
+            name = re.search(r"^\$name = '([^']+)'$", script, re.MULTILINE).group(1)
+            if self.schtasks_create_returncode != 0:
+                return installer.Completed(
+                    self.schtasks_create_returncode, "", "Access is denied."
+                )
+            self.scheduled_tasks.add(name)
+            return installer.Completed(
+                0, f"{installer._WINDOWS_KEEPAIVE_MODE_PREFIX}{self.keepalive_mode}\n", ""
+            )
         if call[0] == "schtasks.exe":
             name = call[call.index("/TN") + 1]
-            if call[1] == "/Create":
-                if self.schtasks_create_returncode != 0:
-                    return installer.Completed(
-                        self.schtasks_create_returncode,
-                        "",
-                        "ERROR: Access is denied.",
-                    )
-                self.scheduled_tasks.add(name)
-                return installer.Completed(0, f"SUCCESS: Created task {name}\n", "")
             if call[1] == "/Delete":
                 if name not in self.scheduled_tasks:
                     return installer.Completed(
@@ -1725,6 +1796,7 @@ def _run_install(
     probe: FakeProbe,
     fetcher: FakeFetcher,
     confirmer=lambda summary: True,
+    existing_decider=None,
 ) -> installer.InstallOutcome:
     clock = lambda: datetime.now(timezone.utc)  # noqa: E731
     return installer.install(
@@ -1737,6 +1809,7 @@ def _run_install(
         clock=clock,
         confirmer=confirmer,
         venv_creator=_fake_venv_creator,
+        existing_decider=existing_decider,
     )
 
 
@@ -1796,7 +1869,9 @@ def test_happy_path_installs_and_receipts(
             assert "PublishPort=127.0.0.1:" in text
 
     # Web data plus one shared API/worker store, each with one snapshot copy.
-    assert len(runner.volumes) == 2 * 2
+    assert len(runner.control_volumes) == 2 * 2
+    # B2: the volumes belong to the account whose containers mount them, never to the installing user.
+    assert runner.volumes == set()
     api_unit = next(
         path for path in container_units
         if "Label=io.stateport.service.id=stateport-api" in path.read_text(encoding="utf-8")
@@ -2100,8 +2175,22 @@ def test_wsl2_bootstrap_is_deterministic_pinned_and_one_command_ready(
     assert ("stateport-execution-host-provision initialize-updater" in text) is control_transport
     if control_transport:
         position = text.index("stateport-execution-host-provision initialize-updater")
-        assert text.rindex('python3 "$tmp/installer"') < position < text.index('printf "StatePort %s installed successfully')
+        assert text.rindex('python3 "$tmp/installer"') < position
+        # Its JSON result is captured, not shown: the installer's closing
+        # summary (with the open-it instructions) must stay the last thing on
+        # screen, and the bootstrap must not add a second success claim.
+        tail = text[position:]
+        assert '>"$tmp/initialize-updater.json" || fail "The StatePort updater could not be set up' in tail
         assert '--actor-id "local-owner-$(id -un)"' in text
+    # One success claim, the installer's own: the bootstrap prints nothing after
+    # the last installer run that could contradict or repeat it, and never the
+    # internal target id.
+    assert "installed successfully" not in text
+    last_run = text.rindex('python3 "$tmp/installer"')
+    trailing = [line for line in text[last_run:].splitlines()[1:] if line.strip()]
+    assert not any(line.lstrip().startswith("printf") or line.lstrip().startswith("echo") for line in trailing)
+    syntax = subprocess.run(["sh", "-n"], input=first, capture_output=True, check=False)
+    assert syntax.returncode == 0, syntax.stderr.decode()
     assert "Windows 11 build 22000 or newer is required" in text
     assert "wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet" in text
     assert "apt-get install -y" in text and "skopeo" in text
@@ -3971,6 +4060,29 @@ def _install_trust(config: installer.InstallConfig) -> dict[str, object]:
     )
 
 
+@pytest.fixture(autouse=True)
+def _installer_runs_as_an_ordinary_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The installer is started by an ordinary user, never as root (root is covered by its own test)."""
+    monkeypatch.setattr(installer, "_euid", lambda: 1000, raising=False)
+
+
+def _control_inner(call: tuple[str, ...]) -> tuple[str, ...] | None:
+    """The program argv a call runs inside the stateport-control account, or None for any other call."""
+    inner = call[2:] if call[:2] == ("sudo", "-n") else call
+    if inner[:4] != ("/usr/sbin/runuser", "-u", "stateport-control", "--"):
+        return None
+    rest = inner[6:]
+    index = 0
+    while "=" in rest[index].split("/")[0]:
+        index += 1
+    return (rest[index].rsplit("/", 1)[-1], *rest[index + 1 :])
+
+
+def _control_calls(runner: "FakeRunner", *prefix: str) -> list[tuple[str, ...]]:
+    calls = [_control_inner(call) for call in runner.calls]
+    return [call for call in calls if call is not None and call[: len(prefix)] == prefix]
+
+
 def _uninstall_config(
     config: installer.InstallConfig, **changes: object
 ) -> installer.UninstallConfig:
@@ -4185,6 +4297,38 @@ def test_reinstall_after_non_purge_uninstall_reinstalls(
     assert third.status == "succeeded" and third.code == "already_installed"
 
 
+def test_install_after_uninstall_is_not_mistaken_for_an_existing_install_and_keeps_the_data(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control account's tree is private (mode 0700): for this user every probe there is
+    "permission denied", which the detection reads as "present".  After an uninstall that wrongly kept
+    the install looking alive ("already installed; nothing was changed") and the data never came back."""
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    _seed_control_session(runner, config)
+    real_probe = installer._readable_probe
+    monkeypatch.setattr(
+        installer,
+        "_readable_probe",
+        lambda path: True if str(path).startswith("/var/lib/stateport-control/") else real_probe(path),
+    )
+    data = set(runner.control_volumes)
+    removed = _run_uninstall(_uninstall_config(config), runner=runner)
+    assert removed.status == "succeeded" and removed.code == "uninstalled", removed.message
+    assert runner.control_files == {}
+    # The following install's root provisioning step re-creates the control plane before the installer's
+    # own pass looks for an existing installation.
+    _seed_control_session(runner, config)
+
+    second = _run_install(config, runner=runner, probe=FakeProbe(_facts()), fetcher=FakeFetcher())
+
+    assert second.status == "succeeded", second.message
+    assert second.code == "installed"  # not "already_installed"
+    receipt = json.loads(second.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["dataDisposition"] == "preserved"
+    assert runner.control_volumes == data and runner.volumes == set()
+
+
 def _simulate_accepted_update(
     config: installer.InstallConfig, runner: "FakeRunner"
 ) -> dict[str, str]:
@@ -4329,13 +4473,13 @@ def test_purge_after_accepted_update_removes_union_volumes(
 ) -> None:
     outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
     assert outcome.status == "succeeded", outcome.message
-    runner.containers.update(_live_container_names(config))
+    runner.control_containers.update(_live_container_names(config))
     update = _simulate_accepted_update(config, runner)
     trust_record = _install_trust(config)
-    runner.volumes.add("stateport-snap-succ-1")
+    runner.control_volumes.add("stateport-snap-succ-1")
     successor_data = installer._volume_names(update["genesisHex"], "web-data")[0]
-    runner.volumes.add(successor_data)
-    genesis_volumes = set(runner.volumes)
+    runner.control_volumes.add(successor_data)
+    genesis_volumes = set(runner.control_volumes)
 
     result = _run_uninstall(
         _uninstall_config(
@@ -4347,7 +4491,7 @@ def test_purge_after_accepted_update_removes_union_volumes(
     assert result.status == "succeeded", (result.code, result.message)
     # Every union volume is gone: genesis data volumes, the successor-derived
     # data volume (genesis-prefixed), and the successor snapshot volume.
-    assert not runner.volumes
+    assert not runner.control_volumes and not runner.volumes
     assert result.receipt_path is not None
     receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
     assert sorted(receipt["removed"]["volumes"]) == sorted(genesis_volumes)
@@ -4363,12 +4507,12 @@ def test_uninstall_happy_path_preserves_data(
     containers = _live_container_names(config)
     quadlet_files = _live_quadlet_files(config)
     assert len(units) == len(REVISION_SERVICES) == len(containers)
-    runner.containers.update(containers)
-    # The control-plane units were started by the root provisioning
-    # transaction under the stateport-control user; simulate that state.
+    # The control plane runs in the stateport-control account: its containers and volumes are that
+    # account's, started by the root provisioning transaction; simulate that state.
+    runner.control_containers.update(containers)
     runner.active_units.update(units)
     runner.enabled_units.update(units)
-    preserved_volumes = set(runner.volumes)
+    preserved_volumes = set(runner.control_volumes)
     assert len(preserved_volumes) == 4
     state_before = _state_bytes(config.state_root)
     runner.calls.clear()
@@ -4377,28 +4521,22 @@ def test_uninstall_happy_path_preserves_data(
 
     assert result.status == "succeeded", result.message
     assert result.code == "uninstalled"
-    # Control-plane units stop through the stateport-control user's manager;
-    # normalize the runuser prefix when matching the recorded stop calls.
-    normalized_stops = []
-    for call in runner.calls:
-        if call[:3] == ("systemctl", "--user", "stop"):
-            normalized_stops.append(call)
-        elif (
-            len(call) >= 8
-            and call[:5] == ("runuser", "-u", "stateport-control", "--", "systemctl")
-            and call[5:7] == ("--user", "stop")
-        ):
-            normalized_stops.append(("systemctl", "--user", "stop", call[-1]))
-    assert sorted(call[-1] for call in normalized_stops) == units
+    # Control-plane units stop through the stateport-control user's own manager.
+    stops = _control_calls(runner, "systemctl", "--user", "stop")
+    assert sorted(call[-1] for call in stops) == units
+    assert not [call for call in runner.calls if call[:3] == ("systemctl", "--user", "stop")]
     reloads = [
         call for call in runner.calls if call[:3] == ("systemctl", "--user", "daemon-reload")
     ]
-    assert len(reloads) == 1
-    removals = [call for call in runner.calls if call[:3] == ("podman", "rm", "-f")]
+    assert len(reloads) == 1  # the installing user's manager
+    assert len(_control_calls(runner, "systemctl", "--user", "daemon-reload")) == 1
+    removals = _control_calls(runner, "podman", "rm", "-f")
     assert sorted(call[-1] for call in removals) == containers
+    assert runner.control_containers == set()
     # Data preservation: not a single volume removal, state root untouched.
     assert not [call for call in runner.calls if call[:3] == ("podman", "volume", "rm")]
-    assert runner.volumes == preserved_volumes
+    assert not _control_calls(runner, "podman", "volume", "rm")
+    assert runner.control_volumes == preserved_volumes
     assert not any(config.live_quadlet_root.iterdir())
     state_after = _state_bytes(config.state_root)
     added = set(state_after) - set(state_before)
@@ -4508,17 +4646,9 @@ def test_uninstall_never_touches_foreign_resources(
 
 _KEEPALIVE_TASK = "StatePortKeepAlive"
 _KEEPALIVE_COMMAND = "wsl.exe -d Ubuntu --exec sleep infinity"
-_KEEPALIVE_CREATE_ARGV = (
-    "schtasks.exe",
-    "/Create",
-    "/TN",
-    _KEEPALIVE_TASK,
-    "/TR",
-    _KEEPALIVE_COMMAND,
-    "/SC",
-    "ONLOGON",
-    "/F",
-)
+_KEEPALIVE_CREATE_ARGV = installer._WindowsKeepAlive(
+    task_name=_KEEPALIVE_TASK, command=_KEEPALIVE_COMMAND
+).create_argv
 _KEEPALIVE_DELETE_ARGV = ("schtasks.exe", "/Delete", "/TN", _KEEPALIVE_TASK, "/F")
 _FOREIGN_TASK = "SomeoneElsesBackupTask"
 
@@ -4578,18 +4708,27 @@ def test_wsl2_install_registers_the_per_user_windows_logon_keepalive_task(
     )
 
     assert outcome.status == "succeeded", outcome.message
-    creates = [call for call in runner.calls if call[:2] == ("schtasks.exe", "/Create")]
+    assert outcome.keepalive_status == "registered"
+    assert "StatePortKeepAlive registered for Windows logon" in outcome.message
+    creates = [call for call in runner.calls if call[0] == "powershell.exe"]
     assert creates == [_KEEPALIVE_CREATE_ARGV]
-    # Per-user and logon only: no /RU, no /IT, no other Windows-side state.
-    assert not {"/RU", "/IT"} & set(creates[0])
-    assert "SYSTEM" not in creates[0]
+    # Per-user: the invoking user's own principal, no SYSTEM, no stored password.
+    script = _keepalive_script(creates[0])
+    assert "SYSTEM" not in script and "-Password" not in script and "-RunLevel Highest" not in script
     assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
     # The task is part of the exact plan the actor confirms, and of the
     # durable record uninstall later reads.
     assert shown and shown[0]["windowsKeepAlive"] == {
         "taskName": _KEEPALIVE_TASK,
         "command": _KEEPALIVE_COMMAND,
-        "trigger": "logon",
+        "definition": "v2",
+        "triggers": ["startup", "logon", "every-10-minutes"],
+        "settings": [
+            "allow-on-battery",
+            "no-execution-time-limit",
+            "start-when-available",
+            "restart-on-failure",
+        ],
         "scope": "invoking-user",
     }
     plan = json.loads((config.state_root / "install-plan.json").read_text(encoding="utf-8"))
@@ -4601,6 +4740,212 @@ def test_wsl2_install_registers_the_per_user_windows_logon_keepalive_task(
     assert record["taskName"] == _KEEPALIVE_TASK
     assert record["command"] == _KEEPALIVE_COMMAND
     assert record["deleteArgv"] == list(_KEEPALIVE_DELETE_ARGV)
+    assert record["definition"] == "v2"
+    assert record["registeredMode"] == "boot-and-logon"
+
+
+def _keepalive_script(argv: Sequence[str]) -> str:
+    """Decode the exact PowerShell Windows would run from the create argv."""
+
+    assert argv[0] == "powershell.exe"
+    assert argv[-2] == "-EncodedCommand"
+    assert "-NonInteractive" in argv and "-NoProfile" in argv
+    return base64.b64decode(argv[-1]).decode("utf-16-le")
+
+
+def test_keepalive_task_definition_covers_every_alpha21_defect() -> None:
+    """The Alpha.21 task never ran, stopped on battery and died after 72 h.
+
+    Pin the generated definition text: each defect found in the Windows guest
+    maps to one explicit setting.  The real Windows run is a VM gate.
+    """
+
+    keepalive = installer._WindowsKeepAlive(task_name=_KEEPALIVE_TASK, command=_KEEPALIVE_COMMAND)
+    script = _keepalive_script(keepalive.create_argv)
+    assert script == keepalive.script
+
+    # (a) never ran: a startup trigger, a logon trigger and a repeating trigger.
+    assert "New-ScheduledTaskTrigger -AtStartup" in script
+    assert "New-ScheduledTaskTrigger -AtLogOn -User $user" in script
+    assert "-Once -At '2020-01-01 00:00:00' -RepetitionInterval (New-TimeSpan -Minutes 10)" in script
+    # (d) interactive-only: the preferred principal is S4U (no password, no session).
+    assert "-LogonType S4U -RunLevel Limited" in script
+    assert script.index("S4U") < script.index("-LogonType Interactive")
+    # (b) battery, (c) 72 h limit, plus start-when-available and restart on failure.
+    assert "-AllowStartIfOnBatteries" in script
+    assert "-DontStopIfGoingOnBatteries" in script
+    assert "-ExecutionTimeLimit (New-TimeSpan -Seconds 0)" in script
+    assert "-StartWhenAvailable" in script
+    assert "-RestartCount 999" in script and "-RestartInterval (New-TimeSpan -Minutes 1)" in script
+    assert "-MultipleInstances IgnoreNew" in script
+    # The action is the exact recorded command, split into program and arguments.
+    assert "-Execute 'wsl.exe' -Argument '-d Ubuntu --exec sleep infinity'" in script
+    # Fallback order: boot+logon, then without the boot trigger, then interactive.
+    positions = [script.index(f"'{mode}'") for mode in installer._WINDOWS_KEEPAIVE_MODES]
+    assert positions == sorted(positions)
+    # Never elevates, never stores a password, never runs as SYSTEM.
+    for forbidden in ("SYSTEM", "-Password", "Highest", "-RunLevel Highest", "Start-Process -Verb"):
+        assert forbidden not in script
+    # Deterministic: no timestamps or randomness, so a rerun converges.
+    assert installer._WindowsKeepAlive(
+        task_name=_KEEPALIVE_TASK, command=_KEEPALIVE_COMMAND
+    ).create_argv == keepalive.create_argv
+
+
+def test_keepalive_script_quotes_the_distro_as_one_literal() -> None:
+    script = installer._windows_keepalive_script(_KEEPALIVE_TASK, "wsl.exe -d it's --exec sleep infinity")
+    assert "-Argument '-d it''s --exec sleep infinity'" in script
+
+
+def test_keepalive_install_reports_what_windows_allowed(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When Windows only allows the interactive fallback, say so plainly."""
+
+    runner = FakeRunner(keepalive_mode="logon-only")
+    outcome, _runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=runner
+    )
+    assert outcome.status == "succeeded", outcome.message
+    record = json.loads((config.state_root / "windows-keepalive.json").read_text(encoding="utf-8"))
+    assert record["registeredMode"] == "logon-only"
+    assert installer._report_install_outcome(outcome, config) == 0
+    seen = capsys.readouterr().out
+    assert "after you sign in to Windows" in seen
+
+
+def test_keepalive_install_is_quiet_about_a_full_registration(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    outcome, _runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert installer._report_install_outcome(outcome, config) == 0
+    assert "after you sign in to Windows" not in capsys.readouterr().out
+
+
+class _SlowPowershellRunner(FakeRunner):
+    """The first N powershell.exe calls time out (a slow host), then Windows answers."""
+
+    def __init__(self, *, timeouts_before_success: int) -> None:
+        super().__init__()
+        self.timeouts_before_success = timeouts_before_success
+        self.timeouts_seen: list[int] = []
+        self.powershell_timeouts: list[int] = []
+
+    def run(self, argv: Sequence[str], *, timeout: int) -> installer.Completed:
+        call = tuple(str(item) for item in argv)
+        if call[0] == "powershell.exe":
+            self.powershell_timeouts.append(timeout)
+            if len(self.timeouts_seen) < self.timeouts_before_success:
+                self.calls.append(call)
+                self.timeouts_seen.append(timeout)
+                raise subprocess.TimeoutExpired(cmd="powershell.exe", timeout=timeout)
+        return super().run(argv, timeout=timeout)
+
+
+def test_keepalive_slow_powershell_is_retried_once_and_then_registered(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A slow first powershell.exe is retried once with a longer timeout.
+
+    The registration then succeeds, the durable record carries the mode
+    Windows allowed, and the install reports the task as registered.
+    """
+
+    runner = _SlowPowershellRunner(timeouts_before_success=1)
+    outcome, _runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=runner
+    )
+
+    assert outcome.status == "succeeded", outcome.message
+    assert outcome.keepalive_status == "registered"
+    creates = [call for call in runner.calls if call[0] == "powershell.exe"]
+    assert creates == [_KEEPALIVE_CREATE_ARGV, _KEEPALIVE_CREATE_ARGV]
+    assert runner.timeouts_seen == [120]
+    assert runner.powershell_timeouts == [120, 300]
+    record = json.loads(
+        (config.state_root / "windows-keepalive.json").read_text(encoding="utf-8")
+    )
+    assert record["registeredMode"] == "boot-and-logon"
+    out = capsys.readouterr().out
+    assert "retrying once with a longer timeout" in out
+
+
+def test_keepalive_double_timeout_continues_with_the_task_not_registered(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both registration attempts time out on a slow host.
+
+    The install still succeeds (the services are healthy), the outcome and the
+    durable record say the optional task is NOT registered, and the person is
+    told how to retry.
+    """
+
+    runner = _SlowPowershellRunner(timeouts_before_success=2)
+    outcome, _runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=runner
+    )
+
+    assert outcome.status == "succeeded", outcome.message
+    assert outcome.keepalive_status == "not_registered"
+    assert "could not be registered" in outcome.message
+    assert "run the installer again to register it" in outcome.message
+    assert any("Run the installer again to register the task." in note for note in outcome.notes)
+    creates = [call for call in runner.calls if call[0] == "powershell.exe"]
+    assert creates == [_KEEPALIVE_CREATE_ARGV, _KEEPALIVE_CREATE_ARGV]
+    assert runner.timeouts_seen == [120, 300]
+    assert runner.scheduled_tasks == set()
+    record = json.loads(
+        (config.state_root / "windows-keepalive.json").read_text(encoding="utf-8")
+    )
+    assert record["schema"] == "stateport.windows-keepalive/v1"
+    assert "registeredMode" not in record
+    out = capsys.readouterr().out
+    assert "could not be registered" in out
+    assert "Run the installer again" in out
+
+
+def test_wsl2_rerun_upgrades_an_alpha21_logon_only_task_record(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """An Alpha.21 install left a v1 (bare ONLOGON) task and record.
+
+    The same release must not report ``already_installed`` over it: the rerun
+    re-registers the task by name with the current definition.
+    """
+
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    record_path = config.state_root / "windows-keepalive.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record.pop("definition")
+    record.pop("registeredMode")
+    record["createArgv"] = [
+        "schtasks.exe", "/Create", "/TN", _KEEPALIVE_TASK, "/TR", _KEEPALIVE_COMMAND,
+        "/SC", "ONLOGON", "/F",
+    ]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    runner.calls.clear()
+
+    rerun = _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate()),
+        fetcher=FakeFetcher(),
+    )
+
+    assert rerun.status == "succeeded", rerun.message
+    assert rerun.code != "already_installed"
+    assert [call for call in runner.calls if call == _KEEPALIVE_CREATE_ARGV]
+    upgraded = json.loads(record_path.read_text(encoding="utf-8"))
+    assert upgraded["definition"] == "v2"
 
 
 def test_wsl2_keepalive_rerun_converges_on_the_same_plan(
@@ -4626,7 +4971,79 @@ def test_wsl2_keepalive_rerun_converges_on_the_same_plan(
 
     assert rerun.status == "succeeded", rerun.message
     assert rerun.code == "already_installed"
+    assert rerun.keepalive_status == "registered"
     assert _convergence_plan(config) == first
+
+
+def test_wsl2_rerun_registers_keepalive_when_older_receipt_has_no_task_record(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    (config.state_root / "windows-keepalive.json").unlink()
+    runner.scheduled_tasks.clear()
+    runner.calls.clear()
+
+    rerun = _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate()),
+        fetcher=FakeFetcher(),
+    )
+
+    assert rerun.status == "succeeded", rerun.message
+    assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
+    assert (config.state_root / "windows-keepalive.json").is_file()
+    assert rerun.keepalive_status == "registered"
+
+
+def test_wsl2_rerun_does_not_adopt_unrecorded_existing_windows_task(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    (config.state_root / "windows-keepalive.json").unlink()
+    runner.calls.clear()
+
+    rerun = _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate()),
+        fetcher=FakeFetcher(),
+    )
+
+    assert rerun.status == "refused"
+    assert rerun.code == "windows_keepalive_task_conflict"
+    assert not [call for call in runner.calls if call[0] == "powershell.exe"]
+
+
+def test_wsl2_rerun_refuses_changed_keepalive_command_record(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    record_path = config.state_root / "windows-keepalive.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["command"] = "wsl.exe -d Other --exec sleep infinity"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    runner.calls.clear()
+
+    rerun = _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate()),
+        fetcher=FakeFetcher(),
+    )
+
+    assert rerun.status == "refused"
+    assert rerun.code == "windows_keepalive_record_mismatch"
+    assert not [call for call in runner.calls if call[0] == "powershell.exe"]
 
 
 def test_wsl2_rerun_re_registers_a_keepalive_task_deleted_off_the_host(
@@ -4696,7 +5113,7 @@ def test_wsl2_install_refuses_when_the_logon_task_cannot_be_registered(
 
     assert outcome.status == "refused"
     assert outcome.code == "windows_keepalive_registration_failed"
-    assert [call for call in runner.calls if call[:2] == ("schtasks.exe", "/Create")] == [
+    assert [call for call in runner.calls if call[0] == "powershell.exe"] == [
         _KEEPALIVE_CREATE_ARGV
     ]
     assert runner.scheduled_tasks == set()
@@ -4729,7 +5146,7 @@ def test_wsl2_install_refuses_without_wsl_interop_or_distro_name(
         )
         assert outcome.status == "refused", changed
         assert outcome.code == code, changed
-        assert not [call for call in runner.calls if call[0] == "schtasks.exe"], changed
+        assert not [call for call in runner.calls if call[0] in ("schtasks.exe", "powershell.exe")], changed
 
 
 def test_portable_linux_install_registers_no_windows_task_and_refuses_nothing(
@@ -4740,7 +5157,9 @@ def test_portable_linux_install_registers_no_windows_task_and_refuses_nothing(
     outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
 
     assert outcome.status == "succeeded", outcome.message
-    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert outcome.keepalive_status == "not_required"
+    assert "keep-alive not required on portable Linux" in outcome.message
+    assert not [call for call in runner.calls if call[0] in ("schtasks.exe", "powershell.exe")]
     assert not (config.state_root / "windows-keepalive.json").exists()
 
 
@@ -4781,7 +5200,7 @@ def test_uninstall_without_a_keepalive_record_touches_no_windows_task(
     result = _run_uninstall(_uninstall_config(config), runner=runner)
 
     assert result.status == "succeeded", result.message
-    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert not [call for call in runner.calls if call[0] in ("schtasks.exe", "powershell.exe")]
     assert result.receipt_path is not None
     receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
     assert receipt["removed"]["windowsTasks"] == []
@@ -4860,7 +5279,7 @@ def test_uninstall_refuses_a_tampered_keepalive_record(
 
     assert result.status == "refused"
     assert result.code == "installation_record_invalid"
-    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert not [call for call in runner.calls if call[0] in ("schtasks.exe", "powershell.exe")]
     assert not [call for call in runner.calls if any(_FOREIGN_TASK in part for part in call)]
     # The installation's own task is still present and untouched.
     assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
@@ -4891,7 +5310,7 @@ def test_uninstall_never_follows_a_symlinked_keepalive_record(
     _run_uninstall(_uninstall_config(config), runner=runner)
 
     # The link was never followed, so our own task was not deleted through it.
-    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert not [call for call in runner.calls if call[0] in ("schtasks.exe", "powershell.exe")]
     assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
 
 
@@ -4914,7 +5333,7 @@ def test_uninstall_refuses_a_keepalive_record_of_another_schema(
 
     assert result.status == "refused"
     assert result.code == "installation_record_invalid"
-    assert not [call for call in runner.calls if call[0] == "schtasks.exe"]
+    assert not [call for call in runner.calls if call[0] in ("schtasks.exe", "powershell.exe")]
     assert runner.scheduled_tasks == {_KEEPALIVE_TASK}
 
 
@@ -4964,9 +5383,9 @@ def test_purge_removes_volumes_and_state_root(
     outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
     assert outcome.status == "succeeded", outcome.message
     containers = _live_container_names(config)
-    runner.containers.update(containers)
+    runner.control_containers.update(containers)
     identity_id = str(_install_trust(config)["installedIdentityId"])
-    volumes = set(runner.volumes)
+    volumes = set(runner.control_volumes)
     assert len(volumes) == 4
     receipt_path = config.state_root.parent / f"{config.state_root.name}.purge-receipt.json"
 
@@ -4976,8 +5395,10 @@ def test_purge_removes_volumes_and_state_root(
 
     assert result.status == "succeeded", result.message
     assert result.code == "purged"
-    volume_removals = [call for call in runner.calls if call[:3] == ("podman", "volume", "rm")]
+    # The real data is the control account's: that is where the volumes are removed.
+    volume_removals = _control_calls(runner, "podman", "volume", "rm")
     assert sorted(call[-1] for call in volume_removals) == sorted(volumes)
+    assert runner.control_volumes == set()
     assert runner.volumes == set()
     assert not any(config.state_root.iterdir())  # contents deleted
     # The receipt was written to the surviving sibling path before deletion.
@@ -4992,6 +5413,235 @@ def test_purge_removes_volumes_and_state_root(
     assert receipt["removed"]["stateRootContents"]
     assert str(receipt_path) in receipt["preserved"]["paths"]
     assert receipt["preserved"]["volumes"] == []
+
+
+def _seed_control_session(
+    runner: "FakeRunner", config: installer.InstallConfig, *, target_bound: bool = True
+) -> dict[str, list[str]]:
+    """The state the root provisioning transaction leaves inside the stateport-control account."""
+    state_root = config.state_root
+    trust_record = _install_trust(config)
+    signed_hex = str(trust_record["signedPayloadDigest"]).removeprefix("sha256:")
+    manifest = installer._load_staged_manifest(state_root, signed_hex)
+    plan = installer._derive_removal_plan(state_root, signed_hex, manifest)
+    assert plan.control_units and plan.control_containers and plan.control_quadlet_files
+    for name in plan.control_quadlet_files:
+        runner.control_files[f"{installer._CONTROL_QUADLET_ROOT}/{name}"] = "regular file"
+    target = f"{installer._CONTROL_SYSTEMD_USER_ROOT}/{installer.ACCEPTED_ACTIVATION_TARGET}"
+    runner.control_files[target] = "regular file"
+    bound = (
+        f"[Unit]\nX-StatePort-Control-Identity=stateport-control\n"
+        f"X-StatePort-Release-Id={trust_record['releaseId']}\n"
+        f"X-StatePort-Signed-Payload={trust_record['signedPayloadDigest']}\n"
+        if target_bound
+        else "[Unit]\nX-StatePort-Control-Identity=stateport-control\nX-StatePort-Release-Id=someone-else\n"
+    )
+    runner.control_file_text[target] = bound
+    runner.control_containers.update(plan.control_containers)
+    runner.control_networks.update(plan.control_networks)
+    runner.active_units.update(plan.control_units)
+    runner.enabled_units.update(plan.control_units)
+    runner.enabled_units.add("control:" + installer.ACCEPTED_ACTIVATION_TARGET)
+    return {
+        "files": list(plan.control_quadlet_files),
+        "containers": list(plan.control_containers),
+        "networks": list(plan.control_networks),
+    }
+
+
+def test_install_creates_the_control_plane_volumes_in_the_control_store_not_the_users(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """B2: the recorded volumes must be the ones the services mount, in the account that owns them."""
+    outcome, runner, _fixture, _config_unused = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    assert len(runner.control_volumes) == 4  # two data volumes and their snapshot copies
+    assert runner.volumes == set()  # no decoys in the installing user's store
+    assert not [call for call in runner.calls if call[:3] == ("podman", "volume", "create")]
+    assert {call[-1] for call in _control_calls(runner, "podman", "volume", "create")} == runner.control_volumes
+
+
+def test_fresh_install_says_created_even_though_the_started_control_plane_made_its_volumes_first(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    fixture = _signed_index(tmp_path / "fixture", trust)
+    config = _config(fixture, tmp_path, cosign=cosign_executable)
+    runner = FakeRunner()
+    runner.control_data_volumes_exist_already = True
+    first = _run_install(config, runner=runner, probe=FakeProbe(_facts()), fetcher=FakeFetcher())
+    assert first.status == "succeeded", first.message
+    receipt = json.loads(first.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["dataDisposition"] == "created"
+    # ... and a reinstall over it, whose volumes also exist, keeps them.
+    again = _rerun(replace(config, reinstall=True), runner)
+    assert again.status == "succeeded", again.message
+    receipt = json.loads(again.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["dataDisposition"] == "preserved"
+
+
+def test_install_refuses_when_the_control_account_cannot_be_reached_without_a_prompt(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    fixture = _signed_index(tmp_path / "fixture", trust)
+    config = _config(fixture, tmp_path, cosign=cosign_executable)
+    runner = FakeRunner()
+    runner.sudo_without_password = False
+    outcome = _run_install(config, runner=runner, probe=FakeProbe(_facts()), fetcher=FakeFetcher())
+    assert outcome.status == "refused"
+    assert outcome.code == "administrator_rights_required"
+    assert "sudo -v" in outcome.message
+    assert not [call for call in runner.calls if call[:3] == ("podman", "volume", "create")]
+
+
+def test_uninstall_acts_on_the_control_account_through_one_fixed_privilege_shape(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """B1: uninstall works for an ordinary user and removes what lives in the control account."""
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    seeded = _seed_control_session(runner, config)
+    volumes = set(runner.control_volumes)
+    runner.calls.clear()
+
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "succeeded", (result.code, result.message)
+    assert result.code == "uninstalled"
+    # Every call that reached the control account is `sudo -n /usr/sbin/runuser -u stateport-control --
+    # /usr/bin/env -i <sanitized environment> <absolute program> ...`; nothing else is escalated.
+    escalated = [call for call in runner.calls if call[0] == "sudo" or call[0].endswith("runuser")]
+    assert escalated and all(call[:2] == ("sudo", "-n") for call in escalated)
+    for call in escalated:
+        if call == ("sudo", "-n", "true"):
+            continue
+        assert call[2:6] == ("/usr/sbin/runuser", "-u", "stateport-control", "--"), call
+        assert call[6:8] == ("/usr/bin/env", "-i"), call
+        program = next(item for item in call[8:] if "=" not in item.split("/")[0])
+        assert program in {"/usr/bin/systemctl", "/usr/bin/podman", "/usr/bin/stat", "/usr/bin/cat", "/usr/bin/rm"}
+    # The control plane is stopped by its own manager, its containers and network removed from its own store.
+    assert sorted(call[-1] for call in _control_calls(runner, "podman", "rm", "-f")) == sorted(seeded["containers"])
+    assert runner.control_containers == set() and runner.control_networks == set()
+    assert not [call for call in runner.calls if call[:3] == ("podman", "rm", "-f")]
+    # Its quadlet files and activation target (root-unreadable to this user) are removed in its session.
+    assert runner.control_files == {}
+    assert _control_calls(runner, "systemctl", "--user", "is-active")
+    assert _control_calls(runner, "systemctl", "--user", "disable", installer.ACCEPTED_ACTIVATION_TARGET)
+    assert len(_control_calls(runner, "systemctl", "--user", "daemon-reload")) == 1
+    # Uninstall keeps every byte of data.
+    assert runner.control_volumes == volumes
+    assert not _control_calls(runner, "podman", "volume", "rm")
+    receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["removed"]["controlContainers"] == sorted(seeded["containers"])
+    assert receipt["removed"]["controlQuadletFiles"] == sorted(seeded["files"])
+    assert receipt["removed"]["controlNetworks"] == sorted(seeded["networks"])
+    assert receipt["removed"]["controlActivationTargets"] == [installer.ACCEPTED_ACTIVATION_TARGET]
+    assert sorted(receipt["preserved"]["volumes"]) == sorted(volumes)
+
+
+def test_uninstall_as_root_needs_no_sudo(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    _seed_control_session(runner, config)
+    runner.calls.clear()
+    monkeypatch.setattr(installer, "_euid", lambda: 0)
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+    assert result.status == "succeeded", (result.code, result.message)
+    assert not [call for call in runner.calls if call[0] == "sudo"]
+    assert _control_calls(runner, "podman", "rm", "-f")
+
+
+def test_uninstall_refuses_before_any_change_when_sudo_would_prompt(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    _seed_control_session(runner, config)
+    runner.sudo_without_password = False
+    files_before = {path.name for path in config.live_quadlet_root.iterdir()}
+    runner.calls.clear()
+
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+
+    assert result.status == "refused"
+    assert result.code == "administrator_rights_required"
+    assert "sudo -v" in result.message and "Nothing was changed" in result.message
+    assert {path.name for path in config.live_quadlet_root.iterdir()} == files_before
+    assert not [call for call in runner.calls if call[:2] in {("systemctl", "--user"), ("podman", "rm")}]
+    assert runner.control_containers  # untouched
+    assert not _uninstall_receipts(config.state_root)
+
+
+def test_uninstall_without_a_control_account_converges_on_the_users_own_resources(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    runner.control_account_exists = False
+    runner.calls.clear()
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+    assert result.status == "succeeded", (result.code, result.message)
+    assert not any(call[0] == "sudo" for call in runner.calls)
+    assert _control_calls(runner) == []  # nothing was attempted inside an account that does not exist
+    assert not any(config.live_quadlet_root.iterdir())
+
+
+def test_uninstall_refuses_a_control_activation_target_that_binds_another_installation(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    _seed_control_session(runner, config, target_bound=False)
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+    assert result.status == "refused"
+    assert result.code == "activation_target_conflict"
+    assert any("activation" in key or key.endswith(".target") for key in runner.control_files)
+    assert runner.control_containers  # nothing was removed from the control account
+
+
+def test_uninstall_refuses_a_control_quadlet_path_that_is_not_a_regular_file(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    seeded = _seed_control_session(runner, config)
+    victim = f"{installer._CONTROL_QUADLET_ROOT}/{seeded['files'][0]}"
+    runner.control_files[victim] = "symbolic link"
+    result = _run_uninstall(_uninstall_config(config), runner=runner)
+    assert result.status == "refused" and result.code == "live_unit_unsafe"
+    assert victim in runner.control_files  # never followed or removed
+
+
+def test_purge_removes_the_real_volumes_in_the_control_store_and_the_old_decoys_in_the_users(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    """B2: purge must delete the data that exists, and only after the identity is confirmed."""
+    outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
+    assert outcome.status == "succeeded", outcome.message
+    _seed_control_session(runner, config)
+    real = set(runner.control_volumes)
+    # What installers before this fix left behind: same-named EMPTY volumes in the installing user's store.
+    runner.volumes.update(list(real)[:2])
+    unrelated = "podman-volume-of-another-project"
+    runner.volumes.add(unrelated)
+    runner.control_volumes.add(unrelated)
+    identity_id = str(_install_trust(config)["installedIdentityId"])
+
+    refused = _run_uninstall(_uninstall_config(config, purge=True, confirm_purge="wrong-identity"), runner=runner)
+    assert refused.status == "refused" and refused.code == "purge_confirmation_required"
+    assert real <= runner.control_volumes and runner.control_containers  # the guard fired before any change
+
+    result = _run_uninstall(_uninstall_config(config, purge=True, confirm_purge=identity_id), runner=runner)
+
+    assert result.status == "succeeded", (result.code, result.message)
+    assert runner.control_volumes == {unrelated}
+    assert runner.volumes == {unrelated}
+    assert runner.control_containers == set() and runner.control_files == {}
+    receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+    assert sorted(receipt["removed"]["controlVolumes"]) == sorted(real)
+    assert sorted(receipt["removed"]["userStoreVolumes"]) == sorted(list(real)[:2])
+    assert sorted(receipt["removed"]["volumes"]) == sorted(real)
 
 
 def test_purge_on_non_stateport_directory_refused(tmp_path: Path) -> None:
@@ -5024,7 +5674,7 @@ def test_interrupted_uninstall_rerun_converges(
 ) -> None:
     outcome, runner, _fixture, config = _happy(tmp_path, trust, cosign_executable)
     assert outcome.status == "succeeded", outcome.message
-    runner.containers.update(_live_container_names(config))
+    runner.control_containers.update(_live_container_names(config))
     _units = _live_unit_names(config)
     runner.active_units.update(_units)
     runner.enabled_units.update(_units)
@@ -5045,7 +5695,7 @@ def test_interrupted_uninstall_rerun_converges(
     assert second.status == "succeeded", second.message
     assert second.code == "uninstalled"
     assert not any(config.live_quadlet_root.iterdir())
-    assert runner.containers == set()
+    assert runner.control_containers == set()
     assert runner.active_units == set()
 
 
@@ -5167,6 +5817,15 @@ def test_install_emits_provisioning_plan_without_escalating(
         # read through sudo since /var/lib/stateport-control is root-owned;
         # it mutates nothing.
         and call[:3] != ("sudo", "-n", "cat")
+        # The control plane's data volumes live in the control account's own podman store; creating and
+        # inspecting them is the one thing the install does inside that account, as exactly
+        # ``sudo -n runuser -u stateport-control -- env -i ... /usr/bin/podman volume exists|create``.
+        and call != ("sudo", "-n", "true")
+        and not (
+            _control_inner(call) is not None
+            and _control_inner(call)[:2] == ("podman", "volume")
+            and _control_inner(call)[2] in {"exists", "create"}
+        )
     ]
     assert privileged_calls == [], f"rootless installer escalated: {privileged_calls}"
 
@@ -5850,9 +6509,10 @@ def test_uninstall_refuses_unobservable_control_manager_before_removal(
     runner.calls.clear()
 
     def denied(argv: Sequence[str], *, timeout: int) -> installer.Completed:
-        if argv[0] == "runuser" and query in argv:
+        inner = _control_inner(tuple(argv))
+        if inner is not None and query in inner:
             runner.calls.append(tuple(argv))
-            return installer.Completed(1, "", "runuser: may not be used by non-root users")
+            return installer.Completed(1, "", "Failed to connect to bus: No medium found")
         return original(argv, timeout=timeout)
 
     runner.run = denied  # type: ignore[method-assign]
@@ -5862,7 +6522,9 @@ def test_uninstall_refuses_unobservable_control_manager_before_removal(
     assert result.code == "unit_observation_failed"
     assert {path.name: path.read_bytes() for path in config.live_quadlet_root.iterdir()} == existing_files
     assert not any(call[:2] == ("podman", "rm") for call in runner.calls)
+    assert not _control_calls(runner, "podman", "rm")
     assert not any(call[:3] == ("podman", "volume", "rm") for call in runner.calls)
+    assert not _control_calls(runner, "podman", "volume", "rm")
     assert not any((config.state_root / "receipts").glob("*uninstall*"))
 
 
@@ -5920,3 +6582,995 @@ def test_current_installer_refuses_incomplete_control_transport(tmp_path: Path, 
         with pytest.raises(installer.InstallerRefusal) as refusal:
             installer.load_modules_from_venv(tmp_path)
         assert refusal.value.code == "venv_layout_unexpected"
+
+
+def _retain_setup(tmp_path: Path, name: str, incoming: bytes):
+    source = tmp_path / "src"
+    (source / "image-archives").mkdir(parents=True)
+    (source / "image-archives" / name).write_bytes(incoming)
+    destination = tmp_path / "dst"
+    destination.mkdir()
+    return source, destination
+
+
+def test_retain_image_archives_replaces_a_stale_archive_and_keeps_the_old_one(tmp_path):
+    import install_no_checkout as installer
+
+    source, destination = _retain_setup(tmp_path, "stateport-web.oci.tar", b"new-release")
+    (destination / "image-archives").mkdir()
+    (destination / "image-archives" / "stateport-web.oci.tar").write_bytes(b"old-release")
+    installer._retain_local_image_archives(source, destination)
+    kept = destination / "image-archives"
+    assert (kept / "stateport-web.oci.tar").read_bytes() == b"new-release"
+    aside = [p for p in kept.iterdir() if ".superseded-" in p.name]
+    assert len(aside) == 1 and aside[0].read_bytes() == b"old-release"
+    installer._retain_local_image_archives(source, destination)  # idempotent
+    assert len([p for p in kept.iterdir() if ".superseded-" in p.name]) == 1
+
+
+def test_retain_image_archives_refuses_a_symlinked_target(tmp_path):
+    import install_no_checkout as installer
+
+    source, destination = _retain_setup(tmp_path, "stateport-web.oci.tar", b"new")
+    (destination / "image-archives").mkdir()
+    (tmp_path / "elsewhere").write_bytes(b"x")
+    (destination / "image-archives" / "stateport-web.oci.tar").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(installer.InstallerRefusal):
+        installer._retain_local_image_archives(source, destination)
+
+
+# ---------------------------------------------------------------------------
+# Installing over an existing StatePort, the dpkg wait, and what the operator sees
+# ---------------------------------------------------------------------------
+
+
+def _installed(tmp_path: Path, trust: dict[str, object], cosign_executable: Path):
+    fixture = _signed_index(tmp_path / "fixture", trust)
+    config = _config(fixture, tmp_path, cosign=cosign_executable)
+    runner = FakeRunner()
+    first = _run_install(config, runner=runner, probe=FakeProbe(_facts()), fetcher=FakeFetcher())
+    assert first.status == "succeeded", first.message
+    return fixture, config, runner, first
+
+
+def _rerun(config, runner, **kwargs):
+    return _run_install(
+        config, runner=runner, probe=FakeProbe(_facts()), fetcher=FakeFetcher(), **kwargs
+    )
+
+
+def test_existing_install_without_a_flag_or_terminal_refuses_and_names_the_flags(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fixture, config, runner, first = _installed(tmp_path, trust, cosign_executable)
+    receipts_before = sorted((config.state_root / "receipts").glob("install_receipt_*.json"))
+    capsys.readouterr()
+
+    outcome = _rerun(replace(config, assume_yes=False), runner)
+
+    assert outcome.status == "refused"
+    assert outcome.code == "existing_install_needs_choice"
+    assert installer._report_install_outcome(outcome, config) == 2
+    seen = capsys.readouterr()
+    # The operator is told what exists and what to pass, in plain words.
+    assert "already installed" in seen.err
+    assert "--yes" in seen.err and "--reinstall" in seen.err
+    assert str(config.state_root) in seen.err
+    # Nothing was changed.
+    assert sorted((config.state_root / "receipts").glob("install_receipt_*.json")) == receipts_before
+
+
+def test_existing_install_with_yes_is_kept_and_says_so(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fixture, config, runner, first = _installed(tmp_path, trust, cosign_executable)
+    capsys.readouterr()
+
+    outcome = _rerun(config, runner)
+
+    assert outcome.status == "succeeded" and outcome.code == "already_installed"
+    assert installer._report_install_outcome(outcome, config) == 0
+    seen = capsys.readouterr().out
+    assert "already installed on this machine" in seen
+    assert "Location:" in seen and str(config.state_root) in seen
+    assert "kept as it is" in seen
+    assert "StatePort is already installed; nothing was changed." in seen
+    assert "StatePort is installed and healthy." not in seen
+    assert len(list((config.state_root / "receipts").glob("install_receipt_*.json"))) == 1
+
+
+def _rerun_with_other_ports(config, runner, **kwargs):
+    """A rerun whose derived plan differs (the host identity moved, e.g. a podman upgrade)."""
+
+    return _run_install(
+        config,
+        runner=runner,
+        probe=FakeProbe(_facts(podman_version="5.0.1")),
+        fetcher=FakeFetcher(),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("how", ["yes", "interactive-keep"])
+def test_keep_with_a_differing_plan_changes_nothing_and_says_how_to_apply_it(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+    how: str,
+) -> None:
+    """M5: Keep (or --yes) must never turn into a reinstall because the plan moved."""
+
+    _fixture, config, runner, first = _installed(tmp_path, trust, cosign_executable)
+    receipts_before = sorted((config.state_root / "receipts").glob("install_receipt_*.json"))
+    plan_before = (config.state_root / "install-plan.json").read_bytes()
+    units_before = sorted(p.name for p in config.live_quadlet_root.iterdir())
+    capsys.readouterr()
+    runner.calls.clear()
+
+    if how == "yes":
+        outcome = _rerun_with_other_ports(config, runner)
+    else:
+        outcome = _rerun_with_other_ports(
+            replace(config, assume_yes=False),
+            runner,
+            existing_decider=lambda existing: installer.EXISTING_KEEP,
+        )
+
+    assert outcome.status == "succeeded", outcome.message
+    assert outcome.code == "already_installed" and outcome.converged is True
+    assert outcome.receipt_path == first.receipt_path
+    assert outcome.local_url == first.local_url
+    # Nothing ran: no pulls, no unit writes or starts, no new receipt or plan.
+    assert not any(call[:2] in {("podman", "pull"), ("podman", "run")} for call in runner.calls)
+    assert not any(call[:3] in {("systemctl", "--user", "start"), ("systemctl", "--user", "restart"), ("systemctl", "--user", "enable")} for call in runner.calls)
+    assert sorted((config.state_root / "receipts").glob("install_receipt_*.json")) == receipts_before
+    assert (config.state_root / "install-plan.json").read_bytes() == plan_before
+    assert sorted(p.name for p in config.live_quadlet_root.iterdir()) == units_before
+    # The person is told the truth in plain words and what to pass instead.
+    assert installer._report_install_outcome(outcome, config) == 0
+    seen = capsys.readouterr().out
+    assert "StatePort is already installed; nothing was changed." in seen
+    assert "differ from the installed ones" in seen and "--reinstall" in seen
+    assert "StatePort is installed and healthy." not in seen
+
+
+def test_reinstall_with_a_differing_plan_still_reinstalls(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    _fixture, config, runner, _first = _installed(tmp_path, trust, cosign_executable)
+    outcome = _rerun_with_other_ports(replace(config, reinstall=True), runner)
+    assert outcome.status == "succeeded", outcome.message
+    assert outcome.code == "installed"
+    assert len(list((config.state_root / "receipts").glob("install_receipt_*.json"))) == 2
+
+
+def test_keep_with_the_same_plan_has_no_differing_options_note(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    _fixture, config, runner, _first = _installed(tmp_path, trust, cosign_executable)
+    outcome = _rerun(config, runner)
+    assert outcome.code == "already_installed" and outcome.notes == ()
+
+
+def test_reinstall_flag_reinstalls_the_same_release_and_keeps_the_data(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fixture, config, runner, first = _installed(tmp_path, trust, cosign_executable)
+    volumes_before = set(runner.control_volumes)
+    assert len(volumes_before) == 4
+    token = (config.state_root / "control-plane-operator-token").read_text(encoding="utf-8")
+    capsys.readouterr()
+    runner.calls.clear()
+
+    outcome = _rerun(replace(config, reinstall=True), runner)
+
+    assert outcome.status == "succeeded", outcome.message
+    assert outcome.code == "installed"
+    assert outcome.converged is False
+    assert len(list((config.state_root / "receipts").glob("install_receipt_*.json"))) == 2
+    # Data survives: same volumes, same persisted control-plane identity.
+    assert set(runner.control_volumes) == volumes_before
+    assert runner.volumes == set()
+    assert (config.state_root / "control-plane-operator-token").read_text(encoding="utf-8") == token
+    assert any(call[:2] == ("podman", "pull") for call in runner.calls)
+    seen = capsys.readouterr().out
+    assert "Reinstalling this release over it" in seen
+    # The receipt must say what happened to the data: the first install created it, the reinstall kept it.
+    dispositions = sorted(
+        json.loads(path.read_text(encoding="utf-8"))["dataDisposition"]
+        for path in (config.state_root / "receipts").glob("install_receipt_*.json")
+    )
+    assert dispositions == ["created", "preserved"]
+
+
+def test_interactive_choice_keep_reinstall_and_cancel(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    _fixture, config, runner, first = _installed(tmp_path, trust, cosign_executable)
+    receipts = lambda: len(list((config.state_root / "receipts").glob("install_receipt_*.json")))  # noqa: E731
+    asked: list[installer.ExistingInstall] = []
+
+    def choose(answer: str):
+        def decider(existing: installer.ExistingInstall) -> str:
+            asked.append(existing)
+            return answer
+
+        return decider
+
+    plain = replace(config, assume_yes=False)
+    kept = _rerun(plain, runner, existing_decider=choose(installer.EXISTING_KEEP))
+    assert kept.status == "succeeded" and kept.code == "already_installed"
+    assert receipts() == 1
+
+    cancelled = _rerun(plain, runner, existing_decider=choose(installer.EXISTING_CANCEL))
+    assert cancelled.status == "refused" and cancelled.code == "install_cancelled"
+    assert "nothing was changed" in cancelled.message
+    assert receipts() == 1
+
+    redone = _rerun(plain, runner, existing_decider=choose(installer.EXISTING_REINSTALL))
+    assert redone.status == "succeeded" and redone.code == "installed"
+    assert receipts() == 2
+
+    assert {item.version for item in asked} == {"0.2.0-rc.1"}
+    assert all(item.state_root == config.state_root and item.local_url for item in asked)
+
+
+def test_the_interactive_prompt_shows_the_version_location_and_all_three_choices(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fixture, config, _runner, _first = _installed(tmp_path, trust, cosign_executable)
+    existing = installer._detect_existing_install(config, config.state_root)
+    assert existing is not None
+    capsys.readouterr()
+    monkeypatch.setattr("builtins.input", lambda prompt="": "r")
+
+    assert installer._interactive_existing_decider(existing) == installer.EXISTING_REINSTALL
+
+    seen = capsys.readouterr().out
+    assert "StatePort 0.2.0-rc.1 is already installed" in seen
+    assert str(config.state_root) in seen
+    assert "[k]" in seen and "[r]" in seen and "[c]" in seen
+
+
+def test_a_different_installed_release_is_refused_before_anything_is_touched(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fixture, config, runner, first = _installed(tmp_path, trust, cosign_executable)
+    newer = _signed_index(tmp_path / "fixture-newer", trust, version="0.2.0-rc.2")
+    newer_config = _config(newer, tmp_path, cosign=cosign_executable)
+    plan_before = (config.state_root / "install-plan.json").read_bytes()
+    venv_before = sorted(
+        (path.name, path.stat().st_mtime_ns)
+        for path in (config.state_root / "updater-venv").rglob("*")
+    )
+    capsys.readouterr()
+    runner.calls.clear()
+
+    outcome = _rerun(newer_config, runner)
+
+    assert outcome.status == "refused"
+    assert outcome.code == "existing_install_other_release"
+    assert "0.2.0-rc.1" in outcome.message and "0.2.0-rc.2" in outcome.message
+    assert "stateport-update" in outcome.message and "--purge" in outcome.message
+    # The --reinstall flag never replaces a different release in place.
+    again = _rerun(replace(newer_config, reinstall=True), runner)
+    assert again.status == "refused" and again.code == "existing_install_other_release"
+    # Nothing of the existing install was touched.
+    assert (config.state_root / "install-plan.json").read_bytes() == plan_before
+    assert sorted(
+        (path.name, path.stat().st_mtime_ns)
+        for path in (config.state_root / "updater-venv").rglob("*")
+    ) == venv_before
+    assert not [call for call in runner.calls if call[:2] in {("podman", "pull"), ("systemctl", "--user")}]
+
+
+def test_prepare_pass_never_blocks_on_an_existing_install_of_the_same_release(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    _fixture, config, runner, _first = _installed(tmp_path, trust, cosign_executable)
+
+    outcome = _rerun(
+        replace(config, assume_yes=False, prepare_execution_host=True), runner
+    )
+
+    assert outcome.status == "prepared", outcome.message
+
+
+def test_keepalive_conflict_names_reinstall_and_reinstall_takes_the_task_over(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    outcome, runner, _fixture, config = _wsl2_install(
+        tmp_path, trust, cosign_executable, runner=FakeRunner()
+    )
+    assert outcome.status == "succeeded", outcome.message
+    (config.state_root / "windows-keepalive.json").unlink()
+    probe = lambda: FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate())  # noqa: E731
+
+    refused = _run_install(config, runner=runner, probe=probe(), fetcher=FakeFetcher())
+    assert refused.code == "windows_keepalive_task_conflict"
+    assert "--reinstall" in refused.message
+
+    runner.calls.clear()
+    redone = _run_install(
+        replace(config, reinstall=True), runner=runner, probe=probe(), fetcher=FakeFetcher()
+    )
+    assert redone.status == "succeeded", redone.message
+    assert [call for call in runner.calls if call[0] == "powershell.exe"]
+
+
+def test_a_removed_install_is_not_an_existing_install(
+    tmp_path: Path, trust: dict[str, object], cosign_executable: Path
+) -> None:
+    _fixture, config, runner, _first = _installed(tmp_path, trust, cosign_executable)
+    runner.containers.update(_live_container_names(config))
+    assert _run_uninstall(_uninstall_config(config), runner=runner).status == "succeeded"
+
+    assert installer._detect_existing_install(config, config.state_root) is None
+    redone = _rerun(replace(config, assume_yes=False), runner)
+    assert redone.status == "succeeded" and redone.code == "installed"
+
+
+# -- dpkg audit wait ---------------------------------------------------------
+
+
+class _AuditRunner:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = list(outputs)
+        self.audits = 0
+
+    def run(self, argv: Sequence[str], *, timeout: int) -> installer.Completed:
+        assert tuple(argv) == ("dpkg", "--audit")
+        self.audits += 1
+        text = self.outputs.pop(0) if self.outputs else ""
+        return installer.Completed(0, text, "")
+
+
+@pytest.fixture
+def fake_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    now = [0.0]
+    slept: list[float] = []
+    monkeypatch.setattr(installer, "_monotonic", lambda: now[0])
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(installer, "_sleep", sleep)
+    return slept
+
+
+def test_dpkg_audit_waits_for_unattended_upgrades_then_passes(
+    fake_clock: list[float], capsys: pytest.CaptureFixture[str]
+) -> None:
+    pending = "The following packages are only half configured: libfoo"
+    runner = _AuditRunner([pending, pending, pending, ""])
+
+    installer._require_clean_dpkg_audit(runner, activity=lambda: "unattended-upgrades")
+
+    assert runner.audits == 4
+    assert fake_clock, "it must back off between audits instead of refusing at once"
+    seen = capsys.readouterr().out
+    assert "Waiting for unattended-upgrades" in seen
+    assert "idle again" in seen
+
+
+def test_dpkg_audit_refuses_a_broken_audit_that_persists_when_nothing_is_running(
+    fake_clock: list[float],
+) -> None:
+    pending = "Package libfoo is in a very bad inconsistent state"
+    runner = _AuditRunner([pending] * 20)
+
+    with pytest.raises(installer.InstallerRefusal) as refusal:
+        installer._require_clean_dpkg_audit(runner, activity=lambda: None)
+
+    assert refusal.value.code == "package_installation_invalid"
+    assert "libfoo" in str(refusal.value) and "dpkg --configure -a" in str(refusal.value)
+    # A short recheck window, not the whole ten minutes.
+    assert sum(fake_clock) < 60
+
+
+def test_dpkg_audit_clears_when_the_other_package_manager_just_finished(
+    fake_clock: list[float],
+) -> None:
+    runner = _AuditRunner(["transient", ""])
+
+    installer._require_clean_dpkg_audit(runner, activity=lambda: None)
+
+    assert runner.audits == 2
+
+
+def test_dpkg_audit_gives_up_after_the_wait_budget_when_still_busy(
+    fake_clock: list[float],
+) -> None:
+    runner = _AuditRunner(["busy"] * 10_000)
+
+    with pytest.raises(installer.InstallerRefusal) as refusal:
+        installer._require_clean_dpkg_audit(runner, activity=lambda: "apt-get")
+
+    assert refusal.value.code == "package_manager_busy"
+    assert "10 minutes" in str(refusal.value)
+    assert 590 <= sum(fake_clock) <= 700
+
+
+def test_installed_package_verification_waits_out_a_transient_dpkg_audit(
+    fake_clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(installer, "_package_manager_activity", lambda: "unattended-upgrades")
+    runner = PackageRunner()
+    audits = {"count": 0}
+    original = runner.run
+
+    def run(argv: Sequence[str], *, timeout: int) -> installer.Completed:
+        if tuple(argv) == ("dpkg", "--audit"):
+            audits["count"] += 1
+            if audits["count"] < 3:
+                return installer.Completed(0, "libfoo half-configured\n", "")
+        return original(argv, timeout=timeout)
+
+    runner.run = run  # type: ignore[method-assign]
+    preflight = _installed_packages_preflight()
+
+    result = installer.verify_installed_podman_packages(preflight, runner=runner)
+
+    assert result["dpkgAudit"] == "clean"
+    assert audits["count"] == 3
+
+
+def _installed_packages_preflight() -> dict[str, Any]:
+    packages = {
+        name: {
+            "architecture": PACKAGE_ARCHITECTURES[name],
+            "version": version,
+            "sha256": "sha256:" + f"{position % 16:x}" * 64,
+            "size": position,
+        }
+        for position, (name, version) in enumerate(sorted(PACKAGE_VERSIONS.items()), 1)
+    }
+    package_plan = {
+        "releaseIndexDigest": "sha256:" + "1" * 64,
+        "signedPayloadDigest": "sha256:" + "2" * 64,
+        "artifactDigest": "sha256:" + "3" * 64,
+        "bundleManifestDigest": "sha256:" + "4" * 64,
+        "targetId": installer.WSL2_TARGET_ID,
+        "rootfsIdentity": installer._WSL_ROOTFS_IDENTITY,
+        "dependencyClosure": "apt-simulated-empty-sources-no-download",
+        "transaction": {
+            name: {
+                "action": "keep",
+                "architecture": record["architecture"],
+                "currentVersion": record["version"],
+                "targetVersion": record["version"],
+            }
+            for name, record in packages.items()
+        },
+        "packages": packages,
+        "runtimeContract": {
+            "podmanMinimumVersion": "5.4.2",
+            "runcMinimumVersion": "1.3.4",
+            "slirp4netnsMinimumVersion": "1.2.1",
+            "ociRuntime": "runc",
+            "networkBackend": "netavark",
+            "supplementaryGroupRuntime": "crun",
+            "supplementaryGroupRuntimePath": installer._CONFINED_GROUP_RUNTIME_PATH,
+            "supplementaryGroupRuntimeVersion": installer._CONFINED_GROUP_RUNTIME_VERSION,
+            "supplementaryGroupRuntimeSha256": installer._CONFINED_GROUP_RUNTIME_SHA256,
+        },
+    }
+    return {
+        "schema": "stateport.podman-package-preflight/v1",
+        **package_plan,
+        "packagePlanDigest": stateport_release.canonical_digest(package_plan),
+        "dpkgStateBeforeDigest": stateport_release.canonical_digest(package_plan["transaction"]),
+        "releaseAdmission": {
+            "schema": "stateport.release-admission/v1",
+            "status": "verified",
+            "releaseIndexDigest": package_plan["releaseIndexDigest"],
+            "signedPayloadDigest": package_plan["signedPayloadDigest"],
+            "targetId": package_plan["targetId"],
+            "artifactDigests": {"podmanPackageBundle": package_plan["artifactDigest"]},
+        },
+    }
+
+
+# -- what the operator sees ---------------------------------------------------
+
+
+def test_a_default_install_shows_phases_and_a_plain_summary_not_json(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixture = _signed_index(tmp_path / "fixture", trust, target_id=installer.WSL2_TARGET_ID)
+    config = _config(
+        fixture, tmp_path, cosign=cosign_executable, expected_target=installer.WSL2_TARGET_ID
+    )
+    outcome = _run_install(
+        config,
+        runner=FakeRunner(),
+        probe=FakeProbe(_facts(), occupied=[], substrate=_wsl2_substrate()),
+        fetcher=FakeFetcher(),
+    )
+    assert outcome.status == "succeeded", outcome.message
+    assert installer._report_install_outcome(outcome, config) == 0
+
+    seen = capsys.readouterr()
+    text = seen.out + seen.err
+    for number in range(1, 8):
+        assert f"[{number}/7]" in text
+    # No JSON receipt, digests dump, plan path or notice noise on the terminal.
+    assert "{" not in text and '"planDigest"' not in text
+    assert "notice:" not in text
+    assert "execution host:" not in text and "provision through root helper" not in text
+
+    lines = [line for line in seen.out.splitlines() if line.strip()]
+    summary = "\n".join(lines[lines.index("StatePort is installed and healthy."):])
+    assert "Open StatePort at: http://127.0.0.1:" in summary
+    assert "Windows browser" in summary and "same localhost address" in summary
+    assert '"Open the study sample"' in summary
+    assert f"install receipt: {outcome.receipt_path}" in summary
+    assert "--uninstall" in lines[-3] and "--reinstall" in lines[-2]
+    # Without a terminal, --reinstall alone refuses (the plan is never confirmed): the hint names both flags.
+    assert "--yes --reinstall" in lines[-2]
+    assert lines[-1].strip().startswith("(with the one-line installer, set STATEPORT_REINSTALL=1")
+
+
+def test_verbose_install_adds_the_technical_details(
+    tmp_path: Path,
+    trust: dict[str, object],
+    cosign_executable: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixture = _signed_index(tmp_path / "fixture", trust)
+    config = replace(_config(fixture, tmp_path, cosign=cosign_executable), verbose=True)
+    outcome = _run_install(
+        config, runner=FakeRunner(), probe=FakeProbe(_facts()), fetcher=FakeFetcher()
+    )
+    installer._report_install_outcome(outcome, config)
+
+    seen = capsys.readouterr().out
+    assert "install completed and receipted" in seen
+    assert "provision through root helper" in seen
+
+
+def test_the_plan_prompt_is_plain_text_and_json_is_verbose_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    summary = {
+        "releaseId": "stateport-alpha-0.1.0-alpha.21",
+        "version": "0.1.0-alpha.21",
+        "channel": "alpha",
+        "planDigest": "sha256:" + "a" * 64,
+        "images": ["registry/example@sha256:" + "b" * 64] * 7,
+        "stateRoot": "/home/operator/.local/state/stateport-install",
+        "windowsKeepAlive": {"taskName": "StatePortKeepAlive"},
+    }
+    monkeypatch.setattr(installer, "_VERBOSE", False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    assert installer._tty_confirmer(summary) is True
+
+    seen = capsys.readouterr().out
+    assert "0.1.0-alpha.21" in seen and "7 container images" in seen
+    assert "StatePortKeepAlive" in seen
+    assert "{" not in seen
+
+    monkeypatch.setattr(installer, "_VERBOSE", True)
+    installer._tty_confirmer(summary)
+    assert '"planDigest"' in capsys.readouterr().out
+
+
+def test_the_plan_prompt_without_a_terminal_says_which_flag_to_pass(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    assert installer._tty_confirmer({"version": "1", "channel": "alpha", "images": []}) is False
+
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_a_refusal_is_plain_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
+    config = installer.InstallConfig(
+        release_index="x", bundle_root=Path("/x"), trust_public_key=Path("/x"),
+        trust_key_id="k", trust_key_fingerprint="f", updater_wheel="w", channel="alpha",
+        cosign=Path("/x"), state_root=Path("/s"), live_quadlet_root=Path("/q"), actor_id="a",
+    )
+    outcome = installer.InstallOutcome(
+        status="refused", code="example", message="the reason", receipt_path=Path("/s/refusals/r.json")
+    )
+
+    assert installer._report_install_outcome(outcome, config) == 2
+
+    err = capsys.readouterr().err
+    assert err.splitlines()[0] == "StatePort was not installed."
+    assert "install refused (example): the reason" in err
+    assert "refusal record: /s/refusals/r.json" in err
+
+
+def test_cli_exposes_reinstall_and_verbose_and_reads_the_one_line_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STATEPORT_REINSTALL", raising=False)
+    args = installer._parser().parse_args(["--reinstall", "--verbose"])
+    assert args.reinstall is True and args.verbose is True
+    assert installer._parser().parse_args([]).reinstall is False
+    monkeypatch.setenv("STATEPORT_REINSTALL", "1")
+    assert installer._parser().parse_args([]).reinstall is True
+    with pytest.raises(SystemExit):
+        installer.main(["--uninstall", "--reinstall", "--state-root", "/tmp/none"])
+
+
+def test_main_passes_the_flags_through_and_asks_only_on_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_install(config: installer.InstallConfig, **kwargs: Any) -> installer.InstallOutcome:
+        seen["config"] = config
+        seen["decider"] = kwargs["existing_decider"]
+        return installer.InstallOutcome(
+            status="succeeded",
+            code="installed",
+            message="m",
+            local_url="http://127.0.0.1:18012/",
+            receipt_path=tmp_path / "r.json",
+            target_id=installer.PORTABLE_LINUX_TARGET_ID,
+        )
+
+    monkeypatch.setattr(installer, "install", fake_install)
+    argv = [
+        "--release-index", "i", "--bundle-root", str(tmp_path), "--trust-public-key", "k",
+        "--trust-key-id", "id", "--trust-key-fingerprint", "sha256:" + "0" * 64,
+        "--updater-wheel", "w", "--execution-host-provisioner", "p", "--compose", "c",
+        "--source-archive", "s", "--release-notes", "n", "--known-limitations", "l",
+        "--channel", "alpha", "--cosign", "cs", "--confirmed-plan-digest", "sha256:" + "1" * 64,
+        "--confirmed-package-plan-digest", "sha256:" + "2" * 64,
+        "--podman-package-bundle", "pb", "--podman-package-preflight", "pf",
+        "--state-root", str(tmp_path / "state"), "--yes", "--reinstall", "--verbose",
+    ]
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert installer.main(argv) == 0
+    assert seen["config"].reinstall is True and seen["config"].verbose is True
+    assert seen["config"].assume_yes is True
+    assert seen["decider"] is None
+    out = capsys.readouterr().out
+    assert "Open StatePort at: http://127.0.0.1:18012/" in out
+    assert "Windows browser" not in out  # portable Linux has no Windows browser to mention
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert installer.main(argv) == 0
+    assert seen["decider"] is installer._interactive_existing_decider
+
+
+def test_package_manager_activity_sees_a_held_dpkg_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "lock-frontend"
+    lock.write_bytes(b"")
+    monkeypatch.setattr(installer, "_DPKG_LOCK_FILES", (str(lock),))
+    assert installer._package_manager_activity() in {None, "dpkg", "apt", "apt-get"}  # idle lock
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl,sys,time;f=open(sys.argv[1],'r+');"
+            "fcntl.lockf(f,fcntl.LOCK_EX);print('held',flush=True);time.sleep(30)",
+            str(lock),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        assert installer._package_manager_activity() == "another package installation"
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+# ---------------------------------------------------------------------------
+# Adoption of an already signed-in OpenCode after install: presence only,
+# through the existing helper, never fatal, never prints a value.
+# ---------------------------------------------------------------------------
+
+_ADOPT_CANARY = "SECRET_CANARY_installer_adopt_9f3a1c"
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+
+
+def _lone_installer(tmp_path: Path) -> Path:
+    """The installer exactly as the one-line bootstrap leaves it: one file, no scripts/ beside it."""
+
+    download = tmp_path / "download"
+    target = download / "installer"
+    if not target.exists():
+        download.mkdir(mode=0o700)
+        shutil.copyfile(_SCRIPTS_DIR / "install_no_checkout.py", target)
+        target.chmod(0o700)
+    assert [p.name for p in download.iterdir()] == ["installer"]
+    return target
+
+
+class _AdoptRunner:
+    """Runs the real helper for real, re-rooted into a temp tree, and records argv."""
+
+    def __init__(
+        self, root: Path, *, returncode: int | None = None, raises: bool = False,
+        extra: Sequence[str] = (),
+    ) -> None:
+        self.root = root
+        self.extra = tuple(extra)
+        self.returncode = returncode
+        self.raises = raises
+        self.calls: list[tuple[str, ...]] = []
+        self.completed: list[installer.Completed] = []
+
+    def run(self, argv: Sequence[str], *, timeout: int) -> installer.Completed:
+        call = tuple(str(item) for item in argv)
+        self.calls.append(call)
+        if self.raises:
+            raise OSError("sudo: not found")
+        if self.returncode is not None:
+            return installer.Completed(self.returncode, "", "sudo: a password is required")
+        real = [item for item in call if item not in ("sudo", "-n")]
+        done = subprocess.run(
+            [*real, "--root", str(self.root), "--no-chown", *self.extra],
+            check=False, capture_output=True, text=True, timeout=timeout,
+        )
+        result = installer.Completed(done.returncode, done.stdout, done.stderr)
+        self.completed.append(result)
+        return result
+
+
+def _fake_opencode_home(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    home = tmp_path / "home"
+    data = home / ".local" / "share" / "opencode"
+    data.mkdir(parents=True)
+    auth = data / "auth.json"
+    auth.write_text(json.dumps({"opencode-go": {"type": "api", "key": _ADOPT_CANARY}}), encoding="utf-8")
+    auth.chmod(0o600)
+    return {"HOME": str(home)}, auth
+
+
+def test_adoption_with_only_an_unrelated_provider_says_so_and_copies_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment, auth = _fake_opencode_home(tmp_path)
+    auth.write_text(json.dumps({"openai": {"type": "api", "key": _ADOPT_CANARY}}), encoding="utf-8")
+    runner = _AdoptRunner(tmp_path / "root")
+
+    notes = installer._adopt_opencode_signin(
+        runner, environment=environment, installer_path=_lone_installer(tmp_path), euid=0
+    )
+
+    assert len(notes) == 1 and "no OpenCode Go or OpenCode account to copy" in notes[0]
+    assert "administrator" not in notes[0]
+    assert not any((tmp_path / "root").rglob("auth.json"))
+    captured = capsys.readouterr()
+    assert _ADOPT_CANARY not in captured.out + captured.err + "".join(notes)
+
+
+def test_adoption_copies_through_the_existing_helper_and_prints_no_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment, auth = _fake_opencode_home(tmp_path)
+    runner = _AdoptRunner(tmp_path / "root")
+
+    notes = installer._adopt_opencode_signin(
+        runner, environment=environment, installer_path=_lone_installer(tmp_path), euid=0
+    )
+
+    assert notes == [
+        "Found your signed-in OpenCode; copied it for StatePort "
+        "(presence only, nothing is sent anywhere)."
+    ]
+    assert len(runner.calls) == 1 and runner.completed[0].returncode == 0
+    assert runner.calls[0][1] == str(_lone_installer(tmp_path))
+    assert runner.calls[0][2:] == ("--run-embedded-opencode-adoption", "--source-dir", str(auth.parent))
+    copies = [p for p in (tmp_path / "root").rglob("auth.json")]
+    assert len(copies) == 3 and all(_ADOPT_CANARY in c.read_text() for c in copies)
+    # Canary grep over everything an operator or a log could see.
+    seen = capsys.readouterr()
+    everything = "\n".join([*notes, seen.out, seen.err, repr(notes)])
+    assert _ADOPT_CANARY not in everything
+    assert _ADOPT_CANARY not in "\n".join(
+        c.stdout + c.stderr for c in runner.completed
+    )
+    # The report path adds the same single line and nothing else.
+    outcome = installer.InstallOutcome(
+        status="succeeded", code="installed", message="ok",
+        local_url="http://127.0.0.1:18000/", receipt_path=tmp_path / "r.json",
+    )
+    config = SimpleNamespaceConfig(tmp_path)
+    assert installer._report_install_outcome(outcome, config, notes) == 0
+    shown = capsys.readouterr().out
+    assert _ADOPT_CANARY not in shown
+    assert shown.count("Found your signed-in OpenCode") == 1
+    assert shown.index("installed and healthy") < shown.index("Found your signed-in OpenCode")
+    assert shown.index("Found your signed-in OpenCode") < shown.index("Open StatePort at:")
+
+
+class SimpleNamespaceConfig:
+    """Only the fields the report reads."""
+
+    def __init__(self, root: Path) -> None:
+        self.verbose = False
+        self.state_root = root / "state"
+
+
+def test_adoption_never_reads_auth_json_in_the_installer(tmp_path: Path) -> None:
+    """Presence only: an unreadable auth.json is still found (so it was never opened)."""
+
+    environment, auth = _fake_opencode_home(tmp_path)
+    auth.chmod(0o000)
+    try:
+        runner = _AdoptRunner(tmp_path / "root", returncode=0)
+        notes = installer._adopt_opencode_signin(
+            runner, environment=environment, installer_path=_lone_installer(tmp_path), euid=0
+        )
+    finally:
+        auth.chmod(0o600)
+    assert notes[0].startswith("Found your signed-in OpenCode")
+    assert len(runner.calls) == 1
+
+
+def test_adoption_skips_when_there_is_no_signin(tmp_path: Path) -> None:
+    (tmp_path / "home").mkdir()
+    runner = _AdoptRunner(tmp_path / "root")
+    notes = installer._adopt_opencode_signin(
+        runner, environment={"HOME": str(tmp_path / "home")}, installer_path=_lone_installer(tmp_path), euid=0
+    )
+    assert notes == ["OpenCode sign-in: none found on this account; nothing was copied."]
+    assert runner.calls == []
+
+
+def test_adoption_refuses_a_symlinked_auth_json(tmp_path: Path) -> None:
+    environment, auth = _fake_opencode_home(tmp_path)
+    target = tmp_path / "elsewhere.json"
+    target.write_text("{}", encoding="utf-8")
+    auth.unlink()
+    auth.symlink_to(target)
+    runner = _AdoptRunner(tmp_path / "root")
+    notes = installer._adopt_opencode_signin(
+        runner, environment=environment, installer_path=_lone_installer(tmp_path), euid=0
+    )
+    assert "none found" in notes[0] and runner.calls == []
+
+
+def test_no_adopt_opencode_flag_opts_out_without_touching_anything(tmp_path: Path) -> None:
+    environment, _auth = _fake_opencode_home(tmp_path)
+    runner = _AdoptRunner(tmp_path / "root")
+    assert installer._parser().parse_args(["--no-adopt-opencode"]).no_adopt_opencode is True
+    assert installer._parser().parse_args([]).no_adopt_opencode is False
+    notes = installer._adopt_opencode_signin(
+        runner, environment=environment, installer_path=_lone_installer(tmp_path), opted_out=True, euid=0
+    )
+    assert notes == ["OpenCode sign-in: not copied (--no-adopt-opencode)."]
+    assert runner.calls == []
+    assert not (tmp_path / "root").exists()
+
+
+@pytest.mark.parametrize("failure", ["sudo-refused", "cannot-execute"])
+def test_adoption_failure_is_never_fatal_and_points_at_provider_settings(
+    tmp_path: Path, failure: str
+) -> None:
+    environment, _auth = _fake_opencode_home(tmp_path)
+    runner = (
+        _AdoptRunner(tmp_path / "root", returncode=1)
+        if failure == "sudo-refused"
+        else _AdoptRunner(tmp_path / "root", raises=True)
+    )
+    notes = installer._adopt_opencode_signin(
+        runner, environment=environment, installer_path=_lone_installer(tmp_path), euid=1000
+    )
+    assert runner.calls[0][:2] == ("sudo", "-n")  # only ever the cached, non-prompting sudo
+    assert len(notes) == 1
+    assert _ADOPT_CANARY not in notes[0]
+    if failure == "sudo-refused":
+        assert "provider settings" in notes[0] and "sudo python3" not in notes[0]
+    else:
+        assert "not copied" in notes[0]
+
+
+def test_adoption_works_from_the_lone_one_line_installer_download(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Real install shape: only the installer file exists; an unrelated provider is a canary."""
+
+    environment, auth = _fake_opencode_home(tmp_path)
+    other_canary = "SECRET_CANARY_unrelated_provider_5b2e"
+    auth.write_text(
+        json.dumps(
+            {
+                "opencode-go": {"type": "api", "key": _ADOPT_CANARY},
+                "openai": {"type": "oauth", "refresh": other_canary},
+            }
+        ),
+        encoding="utf-8",
+    )
+    lone = _lone_installer(tmp_path)
+    subgid = tmp_path / "subgid"
+    subgid.write_text("stateport-exec:200000:65536\n", encoding="utf-8")
+    runner = _AdoptRunner(tmp_path / "root", extra=("--subgid-file", str(subgid)))
+
+    notes = installer._adopt_opencode_signin(
+        runner, environment=environment, installer_path=lone, euid=0
+    )
+
+    assert notes == [
+        "Found your signed-in OpenCode; copied it for StatePort "
+        "(presence only, nothing is sent anywhere)."
+    ]
+    assert runner.completed[0].returncode == 0
+    root = tmp_path / "root"
+    modes = {
+        str(path.relative_to(root)): path.stat().st_mode & 0o777 for path in root.rglob("auth.json")
+    }
+    assert modes == {
+        "var/lib/stateport-control/provider-auth/opencode/data/opencode/auth.json": 0o600,
+        "var/lib/stateport-control/agent-provider/auth.json": 0o600,
+        "var/lib/stateport-exec/stateport-execution-host/agent-provider/auth.json": 0o640,
+    }
+    for copy in root.rglob("auth.json"):
+        copied = json.loads(copy.read_text(encoding="utf-8"))
+        assert list(copied) == ["opencode-go"] and copied["opencode-go"]["key"] == _ADOPT_CANARY
+        assert other_canary not in copy.read_text(encoding="utf-8")
+    seen = capsys.readouterr()
+    everything = "\n".join(
+        [*notes, seen.out, seen.err, *(c.stdout + c.stderr for c in runner.completed)]
+    )
+    assert _ADOPT_CANARY not in everything and other_canary not in everything
+    # The helper never needed anything beside the lone download.
+    assert [p.name for p in lone.parent.iterdir()] == ["installer"]
+
+
+def test_installer_main_runs_the_embedded_adoption_without_the_install_arguments(
+    tmp_path: Path,
+) -> None:
+    environment, _auth = _fake_opencode_home(tmp_path)
+    done = subprocess.run(
+        [sys.executable, str(_lone_installer(tmp_path)), "--run-embedded-opencode-adoption",
+         "--source-dir", str(_auth.parent), "--root", str(tmp_path / "root"), "--no-chown", "--dry-run"],
+        check=False, capture_output=True, text=True, timeout=60, env={"PATH": os.environ["PATH"], **environment},
+    )
+    assert done.returncode == 0, done.stderr
+    assert "adopt: source" in done.stdout and _ADOPT_CANARY not in done.stdout + done.stderr
+
+
+def test_embedded_adoption_sources_are_not_stale() -> None:
+    """The signed installer carries copies of the helper and provider_adoption.py: no drift."""
+
+    generator = _SCRIPTS_DIR / "generate_installer_adoption_embed.py"
+    spec = importlib.util.spec_from_file_location("generate_installer_adoption_embed", generator)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    installer_text = (_SCRIPTS_DIR / "install_no_checkout.py").read_text(encoding="utf-8")
+    assert module.apply(installer_text, module.render_block()) == installer_text, (
+        "run: python3 scripts/generate_installer_adoption_embed.py"
+    )
+    # And the constants the installer actually executes equal the files on disk.
+    assert installer._EMBEDDED_ADOPTION_HELPER_SOURCE == (
+        _SCRIPTS_DIR / "adopt_opencode_signin.py"
+    ).read_text(encoding="utf-8")
+    assert installer._EMBEDDED_PROVIDER_ADOPTION_SOURCE == module.MODULE.read_text(encoding="utf-8")

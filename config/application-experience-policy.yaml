@@ -117,6 +117,8 @@ actorPermissions:
     - application.file.write
     - application.terminal.use
     - application.cto.use
+    - application.provider.manage
+    - application.provider.credential
   platform_operator:
     - application.use
     - application.install.fixture
@@ -125,6 +127,8 @@ actorPermissions:
     - application.file.write
     - application.terminal.use
     - application.cto.use
+    - application.provider.manage
+    - application.provider.credential
     - platform.statebench.read
     - platform.authority.inspect
     - platform.authority.mutate

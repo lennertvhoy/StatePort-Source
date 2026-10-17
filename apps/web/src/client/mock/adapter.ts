@@ -1924,7 +1924,8 @@ export class MockClient implements StatePortClient {
           yield { type: 'stopped', message: { ...message } }
           return
         }
-        if (fail && i >= 6) {
+        // '__fail__' is a single word, so also fail once the reply runs short.
+        if (fail && i >= Math.min(6, words.length - 1)) {
           message.state = 'failed'
           self.persist()
           yield { type: 'error', message: 'The response failed before completion. Your message is preserved — retry is safe.' }

@@ -156,7 +156,7 @@ def test_browser_installs_exact_public_fixture_with_csrf_and_receipt(tmp_path: P
         }
 
         denied, denial = _request(port, "/v1/application-fixtures/install", cookie=cookie, body=payload)
-        assert denied == 403 and denial["error"]["code"] == "application_install_denied"
+        assert denied == 403 and denial["error"]["code"] == "csrf_token_invalid"
         stale_payload = dict(payload)
         stale_payload["applicationDescriptorDigest"] = "sha256:" + "0" * 64
         stale, stale_result = _request(
@@ -279,6 +279,130 @@ def test_browser_installs_exact_public_fixture_with_csrf_and_receipt(tmp_path: P
         )
         assert malformed_status == 400
         assert malformed["error"]["code"] == "operation_failed"
+    finally:
+        app.service_stop()
+
+
+def test_first_run_sample_flow_works_without_worker_or_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped first run: fresh state, one install action, no worker, no provider.
+
+    A brand-new install opens on an empty catalog. The one guided action must
+    install the bundled StudyState Sample and land the user inside a working
+    application while worker execution is disabled and no AI provider is
+    configured. Re-running the same action converges (a second instance)
+    instead of corrupting state, and the exact same instance identity refuses
+    instead of half-installing.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    app = PersistentApp(LocalLayout.from_environment())
+    app.setup_init()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    app.service_start(port=port, repo_root=service_product_fixture(tmp_path, ROOT))
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/session") as response:
+            session = json.loads(response.read())["result"]
+            cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+
+        status, product = _request(port, "/v1/status", cookie=cookie)
+        assert status == 200
+        runtime = product["result"]["runtime"]
+        assert runtime["workerExecutionEnabled"] is False
+        provider_status, provider = _request(port, "/v1/provider/status", cookie=cookie)
+        assert provider_status == 200
+        assert provider["result"]["configured"] is False
+        assert provider["result"]["authenticationStatus"] == "unverified"
+
+        catalog_status, catalog = _request(port, "/v1/applications", cookie=cookie)
+        assert catalog_status == 200
+        sample = next(
+            item for item in catalog["result"]["applications"] if item["applicationId"] == "studystate.sample"
+        )
+        assert sample["install"]["status"] == "available"
+        assert sample["install"]["networkPolicy"] == "disabled"
+
+        def install(instance_id: str) -> tuple[int, dict[str, object]]:
+            return _request(
+                port,
+                "/v1/application-fixtures/install",
+                cookie=cookie,
+                csrf=session["csrfToken"],
+                body={
+                    "applicationId": "studystate.sample",
+                    "instanceId": instance_id,
+                    "name": "StudyState Sample",
+                    "applicationDescriptorDigest": sample["applicationIdentity"]["descriptorDigest"],
+                    "applicationPackageDigest": sample["applicationIdentity"]["packageDigest"],
+                    "experienceDescriptorDigest": sample["experienceIdentity"]["descriptorDigest"],
+                },
+            )
+
+        first_status, first = install("studystate-first-run")
+        assert first_status == 200 and first["ok"] is True
+        assert first["result"]["entry"]["instanceId"] == "studystate-first-run"
+        assert first["result"]["source"]["networkPolicy"] == "disabled"
+        receipt = json.loads(
+            (app.layout.operations_root / "application-installs" / "studystate-first-run.json").read_text(encoding="utf-8")
+        )
+        assert receipt["consent"] == "explicit_browser_confirmation"
+
+        experience_status, experience = _request(port, "/v1/instances/studystate-first-run/experience", cookie=cookie)
+        assert experience_status == 200
+        capabilities = {item["id"] for item in experience["result"]["capabilities"]}
+        assert {"workbench", "terminal", "editor", "cto_orchestration", "benchmark_evidence"}.isdisjoint(capabilities)
+
+        actions_status, actions = _request(port, "/v1/instances/studystate-first-run/actions", cookie=cookie)
+        assert actions_status == 200
+        assert "studystate.sample.record-evidence/v1" in {item["actionId"] for item in actions["result"]["actions"]}
+        prepared = _request(
+            port,
+            "/v1/instances/studystate-first-run/execution/prepare",
+            cookie=cookie,
+            csrf=session["csrfToken"],
+            body={
+                "expectedInstanceId": "studystate-first-run",
+                "actionId": "studystate.sample.record-evidence/v1",
+                "engineId": "synthetic",
+                "inputs": {"activityId": "evidence-practice", "evidenceSummary": "First-run evidence."},
+            },
+        )
+        assert prepared[0] == 200
+        run = prepared[1]["result"]["run"]
+        approved = _request(
+            port, f"/v1/runs/{run['runId']}/approve", cookie=cookie, csrf=session["csrfToken"],
+            body={"expectedInstanceId": "studystate-first-run", "expectedRevision": run["revision"]},
+        )[1]["result"]
+        assert approved["revision"] != run["revision"]
+        executed = _request(
+            port, f"/v1/runs/{run['runId']}/execute", cookie=cookie, csrf=session["csrfToken"],
+            body={"expectedInstanceId": "studystate-first-run", "expectedRevision": approved["revision"]},
+        )[1]["result"]["run"]
+        assert executed["status"] == "state_change_proposed"
+        proposal_approved = _request(
+            port, f"/v1/runs/{run['runId']}/proposal-approve", cookie=cookie, csrf=session["csrfToken"],
+            body={"expectedInstanceId": "studystate-first-run", "expectedRevision": executed["revision"]},
+        )[1]["result"]
+        applied = _request(
+            port, f"/v1/runs/{run['runId']}/apply", cookie=cookie, csrf=session["csrfToken"],
+            body={"expectedInstanceId": "studystate-first-run", "expectedRevision": proposal_approved["revision"]},
+        )[1]["result"]["run"]
+        assert applied["status"] == "applied"
+        state = (app.layout.instances_root / "studystate-first-run" / "state" / "LEARNING.yaml").read_text(encoding="utf-8")
+        assert "First-run evidence." in state
+
+        duplicate_status, duplicate = install("studystate-first-run")
+        assert duplicate_status == 409
+        assert duplicate["error"]["code"] == "execution_refused"
+        second_status, second = install("studystate-second-run")
+        assert second_status == 200 and second["result"]["entry"]["instanceId"] == "studystate-second-run"
+        instances_status, instances = _request(port, "/v1/instances", cookie=cookie)
+        assert instances_status == 200
+        assert {item["instanceId"] for item in instances["result"]["instances"]} >= {
+            "studystate-first-run", "studystate-second-run",
+        }
     finally:
         app.service_stop()
 

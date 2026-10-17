@@ -179,6 +179,7 @@ const statusWire = z.object({
       actorId: z.string().min(1),
       platformOperationsAllowed: z.boolean(),
       statebenchInspectionAllowed: z.boolean(),
+      providerActionsAllowed: z.boolean().optional(),
     })
     .strict()
     .optional(),

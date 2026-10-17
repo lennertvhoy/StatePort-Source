@@ -57,9 +57,12 @@ const MEASURED_AT_PIN = 44
  * against the 13 retained run artifacts". Measured, that was wrong twice over:
  * no retained artifact used that filter (batch5 passes `-g` and batch6 passes
  * `--grep`, both with a 13-title alternation), and 13 is the number of
- * DECLARATIONS, not of artifacts. Counted on disk, the `at-run-artifacts-` prefix
- * covers EIGHTEEN roots -- six batches and twelve restart runs -- so "13 artifacts"
- * matched neither the declarations nor the roots. The guard was
+ * DECLARATIONS, not of artifacts, and the root count it was paired with was a
+ * point-in-time figure that has already moved twice, so neither number is
+ * restated here: "13 artifacts" matched neither the declarations nor the roots.
+ * What is enforced is mechanical -- `retainedRoots()` enumerates whatever is on
+ * disk at run time, and the batch planner refuses against that -- not a count
+ * written into a comment. The guard was
  * therefore checking a filter nobody ran, which is false confidence rather than
  * a check, while the filter that governs every admitted run was unvalidated.
  *

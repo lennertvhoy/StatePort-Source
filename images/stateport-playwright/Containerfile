@@ -53,6 +53,11 @@ RUN export HOME=/tmp/stateport-build-home \
     && rm -rf /tmp/stateport-build-home /tmp/stateport-npm-cache /tmp/node-compile-cache \
     && rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx
 
+# OpenSSL: the pinned Playwright base carries openssl/libssl3t64 3.0.13-0ubuntu3.12, which
+# CVE-2026-84782 (DTLS retransmission read past the message buffer, High) affects; Ubuntu
+# fixed it in 3.0.13-0ubuntu3.16 (advisory 2026-09-29). Both packages are installed at the
+# exact fixed version below (exact version or the build fails), remediated and not excepted.
+
 # The pinned Playwright base currently carries Chrome 151.0.7922.34. Replace
 # only that browser payload with digest-pinned Chrome for Testing153.0.8010.36.
 # The base's firefox/webkit payloads are never referenced by the product (the
@@ -65,6 +70,7 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
     && echo "167a098c4fdec156b58a9f678c90a84f9072d789f9c6e7b35496a6987b8b7ef8  /tmp/chrome-linux64-153.0.8010.36.zip" | sha256sum -c - \
     && apt-get update \
     && apt-get install --no-install-recommends -y unzip=6.0-28ubuntu4.1 \
+      openssl=3.0.13-0ubuntu3.16 libssl3t64=3.0.13-0ubuntu3.16 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /var/log/apt/history.log /var/log/apt/term.log /var/log/apt/eipp.log.xz \
       /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \

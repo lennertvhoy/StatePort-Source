@@ -173,6 +173,30 @@ def test_http_binds_authenticated_actor_and_rejects_mismatch() -> None:
             thread.join(timeout=3)
 
 
+def test_http_operation_failure_preserves_safe_cause() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        api = GovernedAPI(tmpdir)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        server.governed_api = api  # type: ignore[attr-defined]
+        server.authenticator = BearerAuthenticator.from_json_mapping({})  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with patch.object(api, "_validate_template", side_effect=ValueError("/private/host/path")):
+                status, payload = _request(url + "/v1/validate/template", {"path": "template"})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    assert status == 400
+    assert payload["error"]["code"] == "operation_failed"
+    assert payload["error"]["causeCode"] == "invalid_value"
+    assert payload["error"]["message"] == "A request value could not be used. Review the submitted values."
+    assert "/private/host/path" not in json.dumps(payload)
+
+
 def test_authenticated_operator_and_approver_complete_mutation_without_self_approval(
     tmp_path: Path,
 ) -> None:

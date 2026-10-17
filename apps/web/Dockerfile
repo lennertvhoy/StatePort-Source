@@ -92,10 +92,10 @@ LABEL org.opencontainers.image.title="StatePort Web" \
 RUN apk add --no-cache \
       git=2.52.0-r0 \
       bubblewrap=0.12.0-r0 \
-      libcrypto3=3.5.8-r0 \
+      libcrypto3=3.5.9-r0 \
       libexpat=2.8.5-r0 \
       libgcc=15.2.0-r2 \
-      libssl3=3.5.8-r0 \
+      libssl3=3.5.9-r0 \
       libstdc++=15.2.0-r2 \
       libuuid=2.41.6-r1 \
       sqlite-libs=3.53.4-r0 \

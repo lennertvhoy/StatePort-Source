@@ -680,9 +680,9 @@ def test_real_project_root_terminal_io_resize_disconnect_reconnect_and_end(tmp_p
 def test_terminal_http_auth_csrf_capability_root_identity_and_ticket_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with _service(tmp_path, monkeypatch) as service:
         status, value = _prepare(service, csrf="wrong")
-        assert status == 403 and value["error"]["code"] == "terminal_access_denied"
+        assert status == 403 and value["error"]["code"] == "csrf_token_invalid"
         status, value = _prepare(service, origin="http://example.invalid")
-        assert status == 403 and value["error"]["code"] == "terminal_access_denied"
+        assert status == 403 and value["error"]["code"] == "csrf_token_invalid"
         status, value = _prepare(service, "study-one")
         assert status == 403 and value["error"]["code"] == "terminal_access_denied"
         status, value = _prepare(service, extra={"command": "/bin/sh"})

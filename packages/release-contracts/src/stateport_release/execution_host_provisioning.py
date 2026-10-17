@@ -74,6 +74,7 @@ from .contract import (
     AGENT_PROVIDER_DIRECTORY_CONTRACT,
     CONTROL_AGENT_PROVIDER_DIRECTORY_CONTRACT,
     CONTROL_AGENT_PROVIDER_WEB_MOUNT_CONTRACT,
+    EGRESS_NETWORK_ROLE_LABEL,
     PROVIDER_HOME_CONTRACT,
     PinnedPublicKeyIdentity,
     ReleaseContractError,
@@ -3928,10 +3929,11 @@ def _step_control_start(ctx: _Apply) -> dict[str, Any]:
         _require(
             inspected.returncode == 0
             and observed_name == network_name
-            and observed_internal is True
+            and observed_internal is bool(network["internal"])
             and observed_labels == labels,
             step,
-            f"control network {network_name} does not match the signed internal labels",
+            f"control network {network_name} does not match the signed "
+            f"{'internal' if network['internal'] else 'egress'} labels",
         )
         commands.append(inspect)
 
@@ -3966,7 +3968,7 @@ def _step_control_start(ctx: _Apply) -> dict[str, Any]:
                 "network",
                 "create",
                 *([] if replace else ["--ignore"]),
-                "--internal",
+                *(["--internal"] if network["internal"] else []),
                 *[f"--label={key}={value}" for key, value in sorted(labels.items())],
                 network_name,
             ],
@@ -4040,11 +4042,20 @@ def _step_control_start(ctx: _Apply) -> dict[str, Any]:
                 labels[key] = value
             elif line.startswith("Internal="):
                 internal = line.split("=", 1)[1].strip().lower() == "true"
-        _require(network_name and labels and internal, step, "control network shape is incomplete")
+        # The only non-internal control network is the labelled egress network
+        # of a service that signs `networkEgress: external`; every other control
+        # network must remain Internal=true.
+        egress_network = labels.get(EGRESS_NETWORK_ROLE_LABEL) == "egress"
+        _require(
+            network_name and labels and (internal != egress_network),
+            step,
+            "control network shape is incomplete",
+        )
         network_unit = PurePosixPath(str(spec["path"])).name.removesuffix(".network")
         control_networks[network_name] = {
             "name": network_name,
             "labels": labels,
+            "internal": internal,
             "service": network_unit + "-network",
         }
         inspect_control_network(control_networks[network_name])

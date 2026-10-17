@@ -775,10 +775,14 @@ def render(
         'sudo -n systemctl restart "user@$(id -u).service"',
         'python3 "$tmp/installer" \\\n  ' + installer_args + final_installer_confirmation,
         *(
-            ('sudo -n /usr/local/libexec/stateport-execution-host-provision initialize-updater \\\n  --release-index "$tmp/release-index.json" --bundle-root "$tmp" \\\n  --cosign /usr/local/lib/stateport/tools/cosign \\\n  --trust-public-key /etc/stateport/alpha-2026-08-cosign.pub \\\n  --trust-key-id "' + trust_id + '" --trust-key-fingerprint "' + trust_fingerprint + '" \\\n  --channel alpha --actor-id "local-owner-$(id -un)"',)
+            ('sudo -n /usr/local/libexec/stateport-execution-host-provision initialize-updater \\\n  --release-index "$tmp/release-index.json" --bundle-root "$tmp" \\\n  --cosign /usr/local/lib/stateport/tools/cosign \\\n  --trust-public-key /etc/stateport/alpha-2026-08-cosign.pub \\\n  --trust-key-id "' + trust_id + '" --trust-key-fingerprint "' + trust_fingerprint + '" \\\n  --channel alpha --actor-id "local-owner-$(id -un)" >"$tmp/initialize-updater.json" || fail "The StatePort updater could not be set up; StatePort itself is installed (see the message above)."',)
             if control_updater else ()
         ),
-        'printf "StatePort %s installed successfully for %s.\\n" "$STATEPORT_VERSION" "$TARGET"',
+        # Nothing is printed after the installer's own closing summary: it already
+        # says whether StatePort is installed and how to open it, and a second
+        # success line here (which also named the internal target id) came after
+        # those open-it instructions and repeated the claim.  A failure above
+        # exits non-zero through fail()/set -e with its own message instead.
         "",
     ]
     return "\n".join(lines).encode("utf-8")

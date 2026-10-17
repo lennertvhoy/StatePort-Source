@@ -24,6 +24,7 @@ export const agentProviderDirectorySchema = z.object({
   present: z.boolean(),
   files: z.object({
     providerEnv: z.boolean(),
+    authJson: z.boolean().optional(),
     opencodeJson: z.boolean(),
     model: z.boolean(),
   }),

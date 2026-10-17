@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from .sandbox import validator_command
 from .contracts import (
     ACCEPTANCE_CONTRACT_FORMAT,
     CTO_MODE_POLICY_FORMAT,
@@ -257,9 +258,7 @@ def prepare_project_bootstrap(
                 "all declared action network policies are disabled",
                 "bootstrap inspection records an immutable fixture digest",
             ),
-            validation_commands=(
-                "python3 -m pytest -q scripts/test_goal_execution.py",
-            ),
+            validation_commands=(validator_command(),),
             side_effect_class="none",
             evidence_requirements=(
                 "exact repository digest",

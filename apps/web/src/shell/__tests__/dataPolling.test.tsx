@@ -342,6 +342,47 @@ describe('Topbar badges', () => {
 })
 
 describe('NotificationsPopover', () => {
+  it('displays an immutable notification list without treating it as an unavailable source', async () => {
+    const notification = {
+      id: 'attention-study', instanceId: 'ins_study_alpha', title: 'Review the next activity',
+      importance: 'important' as const, createdAt: '2026-08-09T12:00:00.000Z', read: false, acknowledged: false,
+    }
+    vi.spyOn(getClient().activity, 'listNotifications').mockResolvedValue(Object.freeze([
+      notification,
+      { ...notification, id: 'attention-second', title: 'Another activity', createdAt: '2026-08-10T12:00:00.000Z' },
+    ]) as never)
+
+    render(<MemoryRouter><NotificationsPopover><button type="button">Open notifications</button></NotificationsPopover></MemoryRouter>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open notifications' }))
+
+    expect(await screen.findByRole('button', { name: /Review the next activity/ })).toBeTruthy()
+    expect(screen.queryByTestId('notifications-unavailable')).toBeNull()
+  })
+
+  it('shows the notification source error when a response cannot be mapped', async () => {
+    vi.spyOn(getClient().activity, 'listNotifications').mockRejectedValue(
+      new ClientError('validation', 'Notification response failed validation'),
+    )
+
+    render(<MemoryRouter><NotificationsPopover><button type="button">Open notifications</button></NotificationsPopover></MemoryRouter>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open notifications' }))
+
+    expect(await screen.findByText('Notification response failed validation')).toBeTruthy()
+    expect(screen.queryByText('No notifications')).toBeNull()
+  })
+
+  it('does not offer a Retry when the client reports no notification source in this build', async () => {
+    vi.spyOn(getClient().activity, 'listNotifications').mockRejectedValue(
+      new ClientError('not_implemented', 'No notification source is available'),
+    )
+
+    render(<MemoryRouter><NotificationsPopover><button type="button">Open notifications</button></NotificationsPopover></MemoryRouter>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open notifications' }))
+
+    expect(await screen.findByText('No notification source is available in this build.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
   it('shows unavailable with Retry instead of an empty notification state', async () => {
     const list = vi.spyOn(getClient().activity, 'listNotifications')
       .mockRejectedValueOnce(new Error('notification source unavailable'))

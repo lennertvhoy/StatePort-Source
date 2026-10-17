@@ -273,9 +273,88 @@ describe('Applications home', () => {
       renderPage()
       expect(await screen.findByTestId('empty-state', undefined, { timeout: LONG })).toBeTruthy()
       expect(screen.getByText('No applications yet')).toBeTruthy()
+      expect(screen.getByRole('button', { name: /open the study sample/i })).toBeTruthy()
       expect(screen.getByRole('button', { name: /browse catalog/i })).toBeTruthy()
       expect(screen.getByRole('button', { name: /import a repository/i })).toBeTruthy()
       expect(screen.getByTestId('onboarding-strip')).toBeTruthy()
+      // Keyboard order: the primary action comes before the readiness links.
+      const sample = screen.getByRole('button', { name: /open the study sample/i })
+      const strip = screen.getByTestId('onboarding-strip')
+      expect(sample.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    },
+    LONG,
+  )
+
+  it(
+    'installs the bundled study sample with the one primary action and lands inside it',
+    async () => {
+      useSessionStore.getState().setActiveScenario('no_applications')
+      const user = userEvent.setup()
+      renderPage()
+      await user.click(await screen.findByRole('button', { name: /open the study sample/i }, { timeout: LONG }))
+      await waitFor(() => expect(screen.getByTestId('current-path').textContent).toMatch(/^\/app\/ins_/), { timeout: LONG })
+      const instanceId = screen.getByTestId('current-path').textContent!.replace('/app/', '')
+      const instance = await getClient().applications.get(instanceId)
+      expect(instance.packageName).toBe('study-state')
+    },
+    LONG,
+  )
+
+  it(
+    'second run: after the sample exists the empty state and its install action are gone',
+    async () => {
+      useSessionStore.getState().setActiveScenario('no_applications')
+      const user = userEvent.setup()
+      const first = renderPage()
+      await user.click(await screen.findByRole('button', { name: /open the study sample/i }, { timeout: LONG }))
+      await waitFor(() => expect(screen.getByTestId('current-path').textContent).toMatch(/^\/app\/ins_/), { timeout: LONG })
+      first.unmount()
+      useSessionStore.getState().setActiveScenario(null)
+      renderPage()
+      expect(await screen.findByTestId('instance-row-ins_study_alpha', undefined, { timeout: LONG })).toBeTruthy()
+      expect(screen.queryByTestId('empty-state')).toBeNull()
+      expect(screen.queryByRole('button', { name: /open the study sample/i })).toBeNull()
+    },
+    LONG,
+  )
+
+  it(
+    'keeps the primary action disabled while the sample install is in flight',
+    async () => {
+      useSessionStore.getState().setActiveScenario('no_applications')
+      const client = getClient()
+      let resolve!: (value: Awaited<ReturnType<typeof client.catalog.createInstance>>) => void
+      vi.spyOn(client.catalog, 'createInstance').mockImplementation(
+        () => new Promise((done) => { resolve = done }),
+      )
+      const user = userEvent.setup()
+      renderPage()
+      const button = await screen.findByRole('button', { name: /open the study sample/i }, { timeout: LONG })
+      await user.click(button)
+      expect(await screen.findByRole('button', { name: /preparing the study sample/i })).toHaveProperty('disabled', true)
+      await vi.waitFor(() => expect(client.catalog.createInstance).toHaveBeenCalled())
+      resolve({
+        instance: { id: 'ins_sample' } as ApplicationInstance,
+        receipt: { id: 'rcp_sample', digest: { value: 'sha256:' + '0'.repeat(64), algorithm: 'sha256' } },
+      })
+      await waitFor(() => expect(screen.getByTestId('current-path').textContent).toBe('/app/ins_sample'), { timeout: LONG })
+    },
+    LONG,
+  )
+
+  it(
+    'stays honest when the sample install fails: no navigation, typed notice, catalog still reachable',
+    async () => {
+      useSessionStore.getState().setActiveScenario('no_applications')
+      vi.spyOn(getClient().catalog, 'createInstance').mockRejectedValue(new Error('The service refused the installation.'))
+      const user = userEvent.setup()
+      renderPage()
+      await user.click(await screen.findByRole('button', { name: /open the study sample/i }, { timeout: LONG }))
+      const alert = await screen.findByRole('alert', undefined, { timeout: LONG })
+      expect(alert.textContent).toContain('The service refused the installation.')
+      expect(alert.textContent).toContain('Nothing was installed.')
+      expect(screen.getByTestId('current-path').textContent).toBe('/')
+      expect(screen.getByRole('button', { name: /browse catalog/i })).toBeTruthy()
     },
     LONG,
   )

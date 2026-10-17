@@ -140,7 +140,11 @@ def processor(
     root: Path,
     conversations: FakeConversations,
     router: FakeRouter,
+    context_sources: object = None,
 ) -> AssistantProcessor:
+    kwargs: dict[str, object] = {}
+    if context_sources is not None:
+        kwargs["context_sources"] = context_sources
     return AssistantProcessor(
         conversations,  # type: ignore[arg-type]
         work_store=AssistantWorkStore(root / "assistant.sqlite3"),
@@ -149,6 +153,7 @@ def processor(
         worker_id="assistant.test",
         conversation_store_path=None,
         reconciliation_state=AssistantReconciliationState(root / "reconciliation.json"),
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -722,3 +727,293 @@ def test_opencode_refusal_codes_map_to_truthful_messages() -> None:
         "provider_invocation_failed", ""
     )
     assert "verified" in authentication and "Sign in" in authentication
+
+
+def _write_state_instance(
+    root: Path, application_id: str, files: dict[str, str]
+) -> Path:
+    """Materialize a managed instance with state files under the instances root."""
+    instances_root = root / "data" / "stateport" / "instances"
+    source = instances_root / "instance.study"
+    source.mkdir(parents=True, exist_ok=True)
+    for relative, content in files.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    return source
+
+
+def _register_managed_instance(
+    root: Path,
+    source: Path,
+    application_id: str,
+    instance_id: str = "instance.study",
+) -> Path:
+    """Register the instance in the managed catalog (instances.json)."""
+    catalog = root / "data" / "stateport" / "catalog" / "instances.json"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    instances_root = source.parent
+    catalog.write_text(
+        json.dumps(
+            {
+                "formatVersion": "stateport.instance-catalog/v1",
+                "root": {"path": str(instances_root)},
+                "entries": [
+                    {
+                        "instanceId": instance_id,
+                        "name": "Fixture Instance",
+                        "path": source.relative_to(instances_root).as_posix(),
+                        "status": "active",
+                        "adoption": {"mode": "registered", "readOnly": True},
+                        "filesystem": {
+                            "device": source.stat().st_dev,
+                            "inode": source.stat().st_ino,
+                            "kind": "directory",
+                        },
+                        "pathState": "present",
+                        "previousPaths": [],
+                        "createdAt": "2026-09-30T00:00:00Z",
+                        "updatedAt": "2026-09-30T00:00:00Z",
+                        "lastValidatedAt": "2026-09-30T00:00:00Z",
+                        "metadata": {"applicationId": application_id},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root / "data"
+
+
+def _claim_for(application_id: str) -> AssistantClaim:
+    return AssistantClaim(
+        work_id="assistant.generic",
+        attempt_id="attempt.assistant.generic.1",
+        phase="invoke",
+        lease_token="lease",
+        lease_expires_at="2099-01-01T00:00:00Z",
+        instance_id="instance.study",
+        application_id=application_id,
+        conversation_id="conv.study",
+        message_id="msg.user",
+        participant_id="local-operator:instance.study",
+        source_sequence=1,
+        attempt_ordinal=1,
+        provider_result=None,
+    )
+
+
+def _bind(conversations: FakeConversations, application_id: str) -> None:
+    conversations.binding["applicationId"] = application_id
+    conversations.messages[0]["applicationId"] = application_id
+
+
+def test_studystate_sample_context_contains_instance_state(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = _write_state_instance(
+            root,
+            "studystate.sample",
+            {
+                "state/LEARNING.yaml": (
+                    "formatVersion: studystate.sample.state/v1\n"
+                    "goal:\n"
+                    "  label: Learn how governed evidence updates durable state\n"
+                    "activities:\n"
+                    "  - label: Complete one evidence-backed practice activity\n"
+                    "    status: planned\n"
+                ),
+            },
+        )
+        monkeypatch.setenv(
+            "XDG_DATA_HOME",
+            str(_register_managed_instance(root, source, "studystate.sample")),
+        )
+        claim = _claim_for("studystate.sample")
+
+        context = AssistantProcessor._read_instance_context(claim)
+        assert "Complete one evidence-backed practice activity" in context
+        assert "Learn how governed evidence updates durable state" in context
+        assert len(context.encode("utf-8")) <= 12 * 1024
+
+        conversations = FakeConversations()
+        _bind(conversations, "studystate.sample")
+        current = processor(root, conversations, FakeRouter())
+        objective, _digest = current._conversation_objective(claim)
+        assert "Complete one evidence-backed practice activity" in objective
+        assert len(objective.encode("utf-8")) <= 28 * 1024
+
+
+def test_projectstate_shaped_context_contains_state_and_tasks(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = _write_state_instance(
+            root,
+            "projectdd",
+            {
+                "state/project.yaml": "goal: Ship the bounded context pack\n",
+                "state/tasks.yaml": (
+                    "tasks:\n  - write the failing test first\n"
+                ),
+            },
+        )
+        monkeypatch.setenv(
+            "XDG_DATA_HOME",
+            str(_register_managed_instance(root, source, "projectdd")),
+        )
+        claim = _claim_for("projectdd")
+
+        context = AssistantProcessor._read_instance_context(claim)
+        assert "Ship the bounded context pack" in context
+        assert "write the failing test first" in context
+        assert len(context.encode("utf-8")) <= 12 * 1024
+
+        conversations = FakeConversations()
+        _bind(conversations, "projectdd")
+        current = processor(root, conversations, FakeRouter())
+        objective, _digest = current._conversation_objective(claim)
+        assert "write the failing test first" in objective
+
+
+def test_generic_state_context_never_follows_symlinks(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        outside = root / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text(
+            "TOP SECRET outside content", encoding="utf-8"
+        )
+        source = _write_state_instance(
+            root,
+            "projectdd",
+            {"state/project.yaml": "goal: visible state\n"},
+        )
+        (source / "state" / "linked.yaml").symlink_to(outside / "secret.txt")
+        monkeypatch.setenv(
+            "XDG_DATA_HOME",
+            str(_register_managed_instance(root, source, "projectdd")),
+        )
+        claim = _claim_for("projectdd")
+
+        context = AssistantProcessor._read_instance_context(claim)
+        assert "visible state" in context
+        assert "TOP SECRET outside content" not in context
+        assert "secret.txt" not in context
+
+
+def test_context_pack_includes_pending_approvals_and_recent_receipts(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        monkeypatch.setenv("XDG_DATA_HOME", str(root / "empty-data"))
+
+        def sources(instance_id: str) -> dict[str, object]:
+            assert instance_id == "instance.study"
+            return {
+                "approvals": [
+                    {
+                        "id": "template_upgrade:abc",
+                        "title": "Approve template upgrade to v0002",
+                        "risk": "medium",
+                        "status": "pending",
+                        "secret": "do-not-send",
+                    }
+                ],
+                "receipts": [
+                    {
+                        "receiptId": "receipt.1",
+                        "action": "application.install",
+                        "status": "completed",
+                        "occurredAt": "2026-09-30T10:00:00Z",
+                    }
+                ],
+            }
+
+        conversations = FakeConversations()
+        current = processor(root, conversations, FakeRouter(), sources)
+        objective, _digest = current._conversation_objective(_claim_for("studystate"))
+        assert "Active task (latest operator request):" in objective
+        assert "Pending approvals for this instance:" in objective
+        assert "Approve template upgrade to v0002" in objective
+        assert "Recent receipts for this instance:" in objective
+        assert "application.install" in objective
+        assert "do-not-send" not in objective
+        assert len(objective.encode("utf-8")) <= 28 * 1024
+
+
+def test_context_sources_are_bounded_and_filtered(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        monkeypatch.setenv("XDG_DATA_HOME", str(root / "empty-data"))
+
+        def sources(instance_id: str) -> dict[str, object]:
+            return {
+                "approvals": [
+                    {
+                        "id": f"approval-{index}",
+                        "title": "T" * 100_000,
+                        "status": "pending",
+                    }
+                    for index in range(12)
+                ],
+            }
+
+        conversations = FakeConversations()
+        current = processor(root, conversations, FakeRouter(), sources)
+        objective, _digest = current._conversation_objective(_claim_for("studystate"))
+        assert len(objective.encode("utf-8")) <= 28 * 1024
+        assert "approval-7" in objective
+        assert "approval-8" not in objective
+        assert "approval-11" not in objective
+        assert objective.count("T" * 256) == 8
+
+
+def test_unavailable_context_sources_do_not_fail_invocation(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        monkeypatch.setenv("XDG_DATA_HOME", str(root / "empty-data"))
+
+        def sources(instance_id: str) -> dict[str, object]:
+            raise RuntimeError("projection unavailable")
+
+        conversations = FakeConversations()
+        router = FakeRouter()
+        current = processor(root, conversations, router, sources)
+        queued = current.enqueue(
+            Message("msg.user"),  # type: ignore[arg-type]
+            participant_id="local-operator:instance.study",
+        )
+        assert current.process_once()
+        stored = AssistantWorkStore(root / "assistant.sqlite3").get(
+            str(queued["workId"])
+        )
+        assert stored["state"] == "result_ready"
+        assert router.invocations == 1
+
+
+def test_managed_instance_without_state_files_still_invokes(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = _write_state_instance(root, "studystate.sample", {})
+        monkeypatch.setenv(
+            "XDG_DATA_HOME",
+            str(_register_managed_instance(root, source, "studystate.sample")),
+        )
+        claim = _claim_for("studystate.sample")
+        assert AssistantProcessor._read_instance_context(claim) == ""
+
+        conversations = FakeConversations()
+        _bind(conversations, "studystate.sample")
+        router = FakeRouter()
+        current = processor(root, conversations, router)
+        queued = current.enqueue(
+            Message("msg.user", application_id="studystate.sample"),  # type: ignore[arg-type]
+            participant_id="local-operator:instance.study",
+        )
+        assert current.process_once()
+        stored = AssistantWorkStore(root / "assistant.sqlite3").get(
+            str(queued["workId"])
+        )
+        assert stored["state"] == "result_ready"
+        assert router.invocations == 1

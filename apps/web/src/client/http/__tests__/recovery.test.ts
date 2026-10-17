@@ -331,4 +331,97 @@ describe('HttpRecoveryClient', () => {
       approvalDigest: approval.approvalDigest,
     })
   })
+
+  it('parses the installed-product instance id grammar (ins_-prefixed) in the recovery wires', async () => {
+    const digest = (character: string) => `sha256:${character.repeat(64)}`
+    // The exact id shape every UI/API-installed instance carries:
+    // `ins_` + 16 lowercase hex characters (see HttpCatalogClient.createInstance).
+    const source = 'ins_1a2b3c4d5e6f7089'
+    const destination = 'ins_1a2b3c4d5e6f7089-restored'
+    const status = {
+      formatVersion: 'stateport.recovery-status/v1',
+      sourceInstanceId: source,
+      status: 'verified',
+      latest: {
+        instanceId: source,
+        archiveDigest: digest('2'),
+        archiveFileDigest: digest('3'),
+        createdAt: '2026-08-01T10:00:00Z',
+        validation: 'verified',
+        backupReceipt: { receiptId: 'backup-0123456789abcdef01234567' },
+        storageLocation: 'stateport_managed_backup_root',
+      },
+      operatorInspectionRequired: false,
+      restore: {
+        status: 'not_planned',
+        latestPlanDigest: null,
+        latestApprovalDigest: null,
+        latestReceiptId: null,
+        operatorInspectionRequired: false,
+      },
+      limitations: {
+        filesystemStateOnly: true,
+        externalEffectsRestored: false,
+        overwriteRestoreSupported: false,
+      },
+    }
+    const plan = {
+      formatVersion: 'stateport.restore-plan/v1',
+      operation: 'restore_new_instance',
+      sourceInstanceId: source,
+      destinationInstanceId: destination,
+      destinationName: 'Installed sample restored',
+      identityPolicy: 'reidentify',
+      backup: {
+        receiptId: 'backup-0123456789abcdef01234567',
+        receiptDigest: digest('1'),
+        createdAt: '2026-08-01T10:00:00Z',
+        archiveDigest: digest('2'),
+        archiveFileDigest: digest('3'),
+        manifestDigest: digest('4'),
+        sourceLockDigest: digest('5'),
+        fileCount: 7,
+        storageLocation: 'stateport_managed_backup_root',
+      },
+      preconditions: {
+        sourceBindingDigest: digest('6'),
+        destinationRootClass: 'stateport_managed_instances_root',
+        destinationAbsent: true,
+        destinationCatalogIdentityAbsent: true,
+      },
+      dryRun: {
+        status: 'verified',
+        instanceId: destination,
+        fileCount: 7,
+        archiveDigest: digest('2'),
+      },
+      effects: {
+        sourceCanonicalState: 'unchanged',
+        destinationCanonicalState: 'new_instance_created',
+        externalEffectsRestored: false,
+        overwriteAllowed: false,
+        sourceAccess: { disposition: 'not_propagated' },
+      },
+      limitations: ['filesystem_state_only', 'external_side_effects_not_restored', 'source_instance_not_modified'],
+      createdAt: '2026-08-01T10:01:00Z',
+      expiresAt: '2026-08-01T10:16:00Z',
+      planDigest: digest('7'),
+    }
+    const fake = makeFakeFetch([
+      ['GET', `/v1/instances/${source}/recovery`, jsonResponse({ ok: true, result: status })],
+      ['POST', `/v1/instances/${source}/recovery/restore/plan`, jsonResponse({ ok: true, result: plan })],
+    ])
+    const client = new HttpRecoveryClient(new HttpTransport({ fetchFn: fake.fetchFn }), applications())
+
+    // Regression row #29: the API answers 200, so the wire parse must accept
+    // the real id shape instead of reporting "Response failed validation".
+    await expect(client.getStatus(source)).resolves.toEqual(status)
+    await expect(
+      client.planRestore(source, {
+        backupReceiptId: 'backup-0123456789abcdef01234567',
+        destinationInstanceId: destination,
+        destinationName: 'Installed sample restored',
+      }),
+    ).resolves.toEqual(plan)
+  })
 })

@@ -13,10 +13,13 @@ declared writable mounts, and dropped capabilities.  This probe therefore:
   writable root and execute a child, while a write to a directory this same
   uid owns on the read-only rootfs -- directly and through a symlink -- is
   refused by the container boundary;
-* records the container's network posture: the signed topology attaches the
-  web service to an ``Internal=true`` network, so a provider-style child
-  cannot establish an external TCP connection, while socket creation itself
-  stays permitted (no seccomp denial masquerades as the network boundary).
+* records the container's network posture.  The ``workspace`` runtime stays on
+  no external network, so a provider-style child cannot establish an external
+  TCP connection while socket creation itself stays permitted (no seccomp
+  denial masquerades as the network boundary).  The ``web`` service signs
+  ``networkEgress: external`` and additionally joins the labelled non-internal
+  egress network (it must resolve GitHub and reach AI providers), so for it the
+  probe does not assert a refusal and reports the signed egress policy instead.
   Container namespace isolation from the guest is asserted by the rehearsal
   controller from outside the container, where it is observable.
 """
@@ -47,11 +50,13 @@ _RUNTIMES = {
         "uid": 65532,
         "temporaryRoot": "/var/lib/stateport/data",
         "readOnlyOwned": "/workspace",
+        "externalConnection": "unasserted",
     },
     "workspace": {
         "uid": 10001,
         "temporaryRoot": "/workspace",
         "readOnlyOwned": "/home/stateport",
+        "externalConnection": "refused",
     },
 }
 
@@ -63,12 +68,13 @@ _PROVIDER_VERSION = re.compile(
 # supplies the exact paths.  A symlink escape into the read-only rootfs and a
 # direct write there must both be refused for this same uid, which has already
 # proven it can write its own declared writable root.  The network check uses
-# a literal public address (no DNS) and requires that no connection can be
-# established; the signed topology places this service on an internal network.
+# a literal public address (no DNS); runtimes whose signed topology has no
+# egress network require that no connection can be established.
 _BOUNDARY_CHILD = r'''
 import errno, pathlib, socket, subprocess, sys
 readonly_target = pathlib.Path(sys.argv[1])
 symlink_target = pathlib.Path(sys.argv[2])
+require_no_external = sys.argv[3] == "refused"
 pathlib.Path("result").write_text("inside permitted\n")
 for path in (readonly_target, symlink_target):
     try:
@@ -84,11 +90,13 @@ except OSError as error:
     raise RuntimeError("container refused socket creation") from error
 connection.settimeout(4)
 try:
-    connection.connect(("1.1.1.1", 443))
-except OSError:
-    pass
-else:
-    raise RuntimeError("container permitted an external connection")
+    if require_no_external:
+        try:
+            connection.connect(("1.1.1.1", 443))
+        except OSError:
+            pass
+        else:
+            raise RuntimeError("container permitted an external connection")
 finally:
     connection.close()
 assert subprocess.check_output(["/bin/sh", "-ec", "printf child-process"]) == b"child-process"
@@ -154,7 +162,8 @@ def probe(runtime: str = "web") -> dict:
             raise RuntimeError("provider runtime retains effective capabilities")
         result = subprocess.run(
             [sys.executable, "-c", _BOUNDARY_CHILD, str(read_only_target),
-             str(workspace / "escape" / ".stateport-sandbox-probe")],
+             str(workspace / "escape" / ".stateport-sandbox-probe"),
+             identity["externalConnection"]],
             cwd=workspace, env=env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=45,
         )
@@ -177,8 +186,11 @@ def probe(runtime: str = "web") -> dict:
             "childProcess": "passed",
             "capabilities": "dropped",
             "parentNetworkSocket": "permitted",
-            "networkSocket": "refused",
-            "networkPolicy": "container-internal",
+            "networkSocket": identity["externalConnection"],
+            "networkPolicy": (
+                "container-internal" if identity["externalConnection"] == "refused"
+                else "signed-egress-network"
+            ),
             "authentication": "not attempted",
             "runtime": runtime,
         }

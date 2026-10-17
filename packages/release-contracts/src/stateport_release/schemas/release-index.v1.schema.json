@@ -1274,6 +1274,11 @@
                 "narrow-unix-client",
                 "narrow-unix-server"
               ]
+            },
+            "networkEgress": {
+              "enum": [
+                "external"
+              ]
             }
           }
         }

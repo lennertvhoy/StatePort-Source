@@ -12,7 +12,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { ApplicationInstance, GovernedAction, RunOperation, RunRecord, StudyStatePackageData } from '@/client'
-import { getClient } from '@/client'
+import { ClientError, getClient } from '@/client'
 import { Disclosure, InlineNotice } from '@/components'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -30,6 +30,14 @@ type ProposalIntent = 'record' | 'undo' | 'start' | 'pause' | 'redirect'
 type ControlIntent = Extract<ProposalIntent, 'start' | 'pause' | 'redirect'>
 
 class OutcomeUnknownError extends Error {}
+
+/**
+ * Refusals the service gives before it takes the instance's writer lease, so
+ * nothing was written: another change holds the instance, the disk is full,
+ * or the data folder is not writable. The outcome is known (unchanged), and
+ * the service's own sentence says what to do, so it is shown as is.
+ */
+const REFUSED_BEFORE_ANY_CHANGE = new Set(['instance_busy', 'disk_full', 'data_not_writable', 'instance_lease_unavailable'])
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -283,7 +291,10 @@ export function StudyJourney({
       let next = await transition(run, 'proposal-approve')
       try {
         next = await transition(next, 'apply')
-      } catch {
+      } catch (applyCaught: unknown) {
+        if (applyCaught instanceof ClientError && applyCaught.code && REFUSED_BEFORE_ANY_CHANGE.has(applyCaught.code)) {
+          throw new Error(applyCaught.message)
+        }
         throw new OutcomeUnknownError('StatePort could not confirm the apply response. Re-read the durable learning state before retrying.')
       }
       if (next.status !== 'applied') {
@@ -303,6 +314,37 @@ export function StudyJourney({
       setMode('applied')
     } catch (caught: unknown) {
       setOutcomeUnknown(caught instanceof OutcomeUnknownError)
+      setError(message(caught))
+    } finally {
+      releaseOperationsMutation()
+      setBusy(false)
+    }
+  }
+
+  const withdrawReview = async () => {
+    if (!run) return
+    setBusy(true)
+    setError(null)
+    setOutcomeUnknown(false)
+    const releaseOperationsMutation = useSessionStore.getState().beginOperationsMutation()
+    try {
+      // Leaving the review must withdraw the exact prepared run it owns:
+      // dropping it client-side would leave a pending approval behind in the
+      // Approvals inbox and the overview (row #14). The rejection is recorded
+      // server-side for the exact run revision; durable learning state does
+      // not change.
+      await transition(run, 'proposal-reject')
+      setRun(null)
+      setMode(intent === 'record' ? 'drafting' : 'ready')
+      try {
+        // Re-read the surfaces that showed the pending proposal. A failed
+        // refresh must not turn the confirmed withdrawal into a retry error.
+        await onDurableStateChanged()
+      } catch {
+        // Surfaces refresh on their next read; the rejection stays recorded.
+      }
+    } catch (caught: unknown) {
+      // The proposal is still pending: keep the review open and honest.
       setError(message(caught))
     } finally {
       releaseOperationsMutation()
@@ -687,14 +729,11 @@ export function StudyJourney({
           <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
             <Button
               variant="ghost"
-              onClick={() => {
-                setRun(null)
-                setMode(intent === 'record' ? 'drafting' : 'ready')
-              }}
+              onClick={() => void withdrawReview()}
               disabled={busy}
             >
               <CornerUpLeft aria-hidden="true" />
-              Go back
+              {busy ? 'Withdrawing…' : 'Go back'}
             </Button>
             <Button onClick={() => void approveAndApply()} disabled={busy} data-testid="study-approve-apply">
               <Check aria-hidden="true" />

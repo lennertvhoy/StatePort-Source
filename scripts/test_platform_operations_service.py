@@ -146,6 +146,7 @@ def test_trusted_startup_role_gates_path_free_statebench_matrix(
             "actorId": "local-user",
             "platformOperationsAllowed": False,
             "statebenchInspectionAllowed": False,
+            "providerActionsAllowed": True,
         }
         for path, headers in (
             ("/v1/platform/statebench", {}),
@@ -174,6 +175,7 @@ def test_trusted_startup_role_gates_path_free_statebench_matrix(
             "actorId": "platform-operator",
             "platformOperationsAllowed": True,
             "statebenchInspectionAllowed": True,
+            "providerActionsAllowed": True,
         }
         matrix = _get(operator_port, operator_cookie, "/v1/platform/statebench")
         assert matrix["formatVersion"] == "stateport.platform-statebench-view/v1"

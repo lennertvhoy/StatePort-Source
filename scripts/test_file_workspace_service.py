@@ -248,7 +248,7 @@ def test_a12_real_service_refuses_unclassified_canonical_and_replaced_catalog_pa
             {"path": "src/main.py", "content": "answer = 42\n", "expectedContentHash": opened["metadata"]["contentHash"], "expectedBaseSha": head},
             token=None,
         )
-        assert denied_status == 403 and denied["error"]["code"] == "file_workspace_access_denied"
+        assert denied_status == 403 and denied["error"]["code"] == "csrf_token_invalid"
         wrong_origin_status, _ = post(
             "prepareWrite",
             {"path": "src/main.py", "content": "answer = 42\n", "expectedContentHash": opened["metadata"]["contentHash"], "expectedBaseSha": head},

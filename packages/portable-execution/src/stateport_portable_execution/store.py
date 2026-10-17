@@ -12,6 +12,19 @@ import fcntl
 from .contracts import LIFECYCLE_STATES, RUN_FORMAT, allowed_lifecycle_transition, allowed_transition, lifecycle_for_status
 
 
+class RunBindingError(ValueError):
+    """A run request was bound to a revision or instance that is no longer current.
+
+    A ValueError so existing callers keep treating it as a refused request. The
+    HTTP boundary reports ``cause_code`` and the (path-free) message as a
+    distinct ``operation_failed`` refusal instead of the generic redacted one.
+    """
+
+    def __init__(self, message: str, cause_code: str):
+        super().__init__(message)
+        self.cause_code = cause_code
+
+
 class RunStore:
     def __init__(self, path: Path):
         self.path = path
@@ -101,9 +114,18 @@ class RunStore:
         expected_revision: int | None,
     ) -> None:
         if expected_instance_id is not None and item.get("instanceId") != expected_instance_id:
-            raise ValueError("run instance identity does not match the expected instance")
+            raise RunBindingError(
+                "This run belongs to a different application than the one the request names. "
+                "Reopen the run from its own application and try again.",
+                "run_instance_mismatch",
+            )
         if expected_revision is not None and item.get("revision", 0) != expected_revision:
-            raise ValueError("run revision is stale")
+            raise RunBindingError(
+                "This run changed since the request was prepared (its revision is out of date), "
+                "so it was not approved or changed. Reload the run to see its current state, "
+                "review it, and approve again if it is still wanted.",
+                "run_revision_stale",
+            )
 
     def require_binding(
         self, run_id: str, *, expected_instance_id: str | None,

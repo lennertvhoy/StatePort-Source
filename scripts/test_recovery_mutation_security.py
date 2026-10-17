@@ -114,7 +114,7 @@ def test_recovery_mutations_require_exact_same_origin_csrf_and_empty_body(
                 body={},
             )
             assert status == 403
-            assert payload["error"]["code"] == denial_code
+            assert payload["error"]["code"] == "csrf_token_invalid"
             assert calls == []
 
         status, payload = _post(

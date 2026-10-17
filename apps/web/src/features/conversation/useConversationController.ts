@@ -128,9 +128,13 @@ export function useConversationController(instanceId: string): ConversationContr
           setAnnouncement('Stopped by you.')
         } else if (chunk.type === 'error') {
           setMessages((prev) =>
-            prev.map((m) => (m.id === stream.messageId ? { ...m, state: 'failed' as const } : m)),
+            prev.map((m) =>
+              m.id === stream.messageId
+                ? { ...m, state: 'failed' as const, failureReason: chunk.message }
+                : m,
+            ),
           )
-          setAnnouncement('The response failed before completion. Your message is preserved — retry is safe.')
+          setAnnouncement(`${chunk.message} Your message is preserved.`)
         }
       }
     } catch {

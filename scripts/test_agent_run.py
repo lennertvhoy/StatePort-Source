@@ -281,6 +281,97 @@ def test_readiness_provider_directory_incomplete(tmp_path: Path) -> None:
         reasons = [row["reason"] for row in review["refusals"]]
         assert "provider_directory_incomplete" in reasons, (name, reasons)
         assert review["providerDirectory"]["files"]["providerEnv"] is (name == "missing-json")
+        detail = " ".join(row["detail"] for row in review["refusals"] if row["reason"] == "provider_directory_incomplete")
+        assert ("provider.env" if name != "missing-json" else "opencode.json") in detail
+        assert "control and execution provider directories" in detail
+        assert "replace" in detail.lower() or "place" in detail.lower()
+
+
+def _adopted_directory(tmp_path: Path) -> Path:
+    """Provider directory holding only an adopted OpenCode sign-in and a model."""
+    directory = tmp_path / "provider"
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)
+    (directory / "auth.json").write_text('{"opencode-go":{"type":"api","key":"SECRET_CANARY"}}\n', encoding="utf-8")
+    (directory / "auth.json").chmod(0o644)
+    (directory / "model").write_text("opencode-go/glm-5\n", encoding="utf-8")
+    (directory / "model").chmod(0o644)
+    return directory
+
+
+def test_readiness_accepts_an_adopted_signin_without_provider_env(tmp_path: Path) -> None:
+    review = _service(tmp_path, FakeProxy(), provider_directory=_adopted_directory(tmp_path)).readiness()
+
+    assert review["available"] is True, review["refusals"]
+    assert review["providerDirectory"]["files"] == {
+        "providerEnv": False,
+        "authJson": True,
+        "opencodeJson": False,
+        "model": True,
+    }
+    assert "SECRET_CANARY" not in json.dumps(review)
+
+
+def test_readiness_refusal_names_every_missing_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STATEPORT_AGENT_MODEL", raising=False)
+    directory = tmp_path / "provider"
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)
+
+    review = _service(tmp_path, FakeProxy(), provider_directory=directory).readiness()
+
+    assert review["available"] is False
+    detail = " ".join(row["detail"] for row in review["refusals"])
+    for missing in ("provider.env", "auth.json", "opencode.json", "model"):
+        assert str(directory / missing) in detail, (missing, detail)
+    # A credential-less directory is still refused: adoption does not weaken the gate.
+    assert review["providerDirectory"]["files"]["authJson"] is False
+
+    absent = tmp_path / "nowhere"
+    refusal = _service(tmp_path, FakeProxy(), provider_directory=absent).readiness()["refusals"][0]
+    assert refusal["reason"] == "provider_directory_missing" and str(absent) in refusal["detail"]
+
+
+def test_readiness_refuses_unsafe_adopted_signin(tmp_path: Path) -> None:
+    proxy = FakeProxy()
+    for name in ("symlink", "world-writable", "empty"):
+        case = tmp_path / name
+        case.mkdir()
+        directory = _adopted_directory(case)
+        auth = directory / "auth.json"
+        if name == "symlink":
+            target = directory / "target.json"
+            target.write_text('{"a":{"type":"api","key":"x"}}', encoding="utf-8")
+            auth.unlink()
+            auth.symlink_to(target)
+        elif name == "world-writable":
+            auth.chmod(0o666)
+        else:
+            auth.write_text("", encoding="utf-8")
+        review = _service(case, proxy, provider_directory=directory).readiness()
+        assert review["available"] is False, name
+        assert review["providerDirectory"]["files"]["authJson"] is False, name
+        assert any(str(auth) in row["detail"] for row in review["refusals"]), name
+
+
+def test_readiness_names_model_setup_when_no_model_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STATEPORT_AGENT_MODEL", raising=False)
+    directory = _provider_directory(tmp_path)
+    (directory / "model").unlink()
+    service = _service(tmp_path, FakeProxy(), provider_directory=directory)
+
+    review = service.readiness()
+
+    assert review["available"] is False
+    assert review["providerDirectory"]["files"]["model"] is False
+    assert any(
+        row["reason"] == "provider_directory_incomplete"
+        and "model" in row["detail"]
+        and "place" in row["detail"].lower()
+        for row in review["refusals"]
+    )
 
 
 def test_readiness_accepts_container_readable_material(tmp_path: Path) -> None:
@@ -294,6 +385,7 @@ def test_readiness_accepts_container_readable_material(tmp_path: Path) -> None:
     assert review["available"] is True, review["refusals"]
     assert review["providerDirectory"]["files"] == {
         "providerEnv": True,
+        "authJson": False,
         "opencodeJson": True,
         "model": True,
     }
@@ -539,6 +631,79 @@ def test_stale_marker_with_dead_pid_is_reclaimed(tmp_path: Path) -> None:
     record = _wait(service, service.start("reclaim")["runId"])
     assert record["status"] == "completed"
     assert not marker.exists()
+
+
+def _crashed_run(tmp_path: Path, *, created_at: str) -> tuple[Path, str]:
+    """What a SIGKILLed / OOM-killed control service leaves behind: a 'running' receipt and an in-flight marker for a dead pid."""
+    runs = tmp_path / "agent-runs" / "runs"
+    runs.mkdir(parents=True, exist_ok=True, mode=0o700)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    run_id = "agent-run-" + "c0ffee" * 5 + "ab"
+    record = {key: None for key in RECORD_KEYS}
+    record.update(
+        formatVersion=RECEIPT_FORMAT, runId=run_id, status="running", objective="killed mid run", objectiveDigest="sha256:" + "d" * 64,
+        workspaceId=AGENT_WORKSPACE_ID, truncated=False, startedAt=created_at, createdAt=created_at, updatedAt=created_at,
+    )
+    (runs / f"{run_id}.json").write_text(json.dumps(record), encoding="utf-8")
+    marker = runs / ".active"
+    marker.write_text(json.dumps({"runId": run_id, "createdAt": created_at, "pid": dead.pid}), encoding="utf-8")
+    marker.chmod(0o600)
+    return marker, run_id
+
+
+# Measured in the dev loop with the real daemon (2026-10-02): the AppServer was SIGKILLed 4 s into a run. After the restart the run
+# stayed "running" for ever (the UI polls it for ever) and EVERY later run was refused with agent_run_in_progress, 100 s past a 60 s
+# timeout, because a marker was only reclaimed when its run record was terminal or missing, and a dead worker can never make it so.
+
+
+def test_a_restarted_service_finalizes_the_run_its_dead_predecessor_left_running(tmp_path: Path) -> None:
+    marker, run_id = _crashed_run(tmp_path, created_at=_timestamp_now())
+    proxy = FakeProxy()
+
+    service = _service(tmp_path, proxy, provider_directory=_provider_directory(tmp_path))
+
+    record = service.status(run_id)
+    assert record["status"] == "refused"
+    assert record["refusal"]["reason"] == "run_interrupted"
+    assert "stopped" in record["refusal"]["detail"] and record["finishedAt"]
+    assert not marker.exists()
+    follow_up = _wait(service, service.start("after the crash")["runId"])
+    assert follow_up["status"] == "completed"
+
+
+def test_a_running_record_whose_worker_is_provably_dead_is_reclaimed_after_the_timeout(tmp_path: Path) -> None:
+    proxy = FakeProxy()
+    service = _service(tmp_path, proxy, provider_directory=_provider_directory(tmp_path))  # built before the crash: no start-up reconcile
+    marker, run_id = _crashed_run(tmp_path, created_at="2000-01-01T00:00:00Z")
+
+    record = _wait(service, service.start("reclaim")["runId"])
+
+    assert record["status"] == "completed"
+    interrupted = service.status(run_id)
+    assert interrupted["status"] == "refused" and interrupted["refusal"]["reason"] == "run_interrupted"
+    assert not marker.exists()
+
+
+def test_a_run_of_a_live_foreign_process_is_never_taken_over(tmp_path: Path) -> None:
+    marker, run_id = _crashed_run(tmp_path, created_at=_timestamp_now())
+    sleeper = subprocess.Popen(["sleep", "30"])
+    try:
+        data = json.loads(marker.read_text())
+        data["pid"] = sleeper.pid
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        service = _service(tmp_path, FakeProxy(), provider_directory=_provider_directory(tmp_path))
+        assert service.status(run_id)["status"] == "running" and marker.exists()
+        with pytest.raises(AgentRunError) as exc:
+            service.start("second")
+        assert exc.value.code == "agent_run_in_progress"
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def _timestamp_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_output_is_capped_and_secret_never_persisted(tmp_path: Path) -> None:

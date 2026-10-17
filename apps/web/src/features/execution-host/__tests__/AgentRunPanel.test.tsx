@@ -113,7 +113,7 @@ it('shows the exact refusal and keeps the run button disabled when unavailable',
 
   expect(await screen.findByText('Readiness: unavailable')).toBeTruthy()
   expect(screen.getByText(/provider_directory_missing: The sealed provider directory has not been mounted\./)).toBeTruthy()
-  expect(screen.getByText(/files: provider env missing, opencode\.json missing, model missing/)).toBeTruthy()
+  expect(screen.getByText(/files: provider env missing, adopted sign-in \(auth\.json\) missing, opencode\.json missing, model missing/)).toBeTruthy()
 
   fireEvent.change(screen.getByLabelText('Objective'), { target: { value: 'do work' } })
   expect(screen.getByRole('button', { name: 'Run agent' })).toHaveProperty('disabled', true)

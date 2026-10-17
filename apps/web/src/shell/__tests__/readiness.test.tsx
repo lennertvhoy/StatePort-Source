@@ -32,6 +32,21 @@ it('separates runtime reachability from disabled worker execution', () => {
   expect(screen.getByText('Disabled')).toBeTruthy()
 })
 
+it('explains worker and provider gaps as one guided next step, never a dead end', async () => {
+  vi.spyOn(getClient().applications, 'list').mockResolvedValue([])
+  useSessionStore.setState({ serviceStatus: { state: 'connected', endpoint: '', runtime: { status: 'unavailable', workerExecutionEnabled: false } } })
+  render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)
+  await waitFor(() => expect(screen.getByText('Disabled')).toBeTruthy())
+  const worker = screen.getByText(/runs approved tasks in the background/i)
+  expect(worker.textContent).toContain('study sample works without it')
+  const provider = screen.getByText(/OpenCode sign-in/i)
+  expect(provider.textContent).toContain('the study sample does not')
+  expect(provider.textContent).toContain('save a model')
+  expect(provider.textContent).toContain('API key')
+  expect(screen.getByRole('link', { name: 'Review execution controls' }).getAttribute('href')).toBe('/execution-host')
+  expect(screen.getByRole('link', { name: 'Set up or verify provider' }).getAttribute('href')).toBe('/settings/provider')
+})
+
 it('does not present cached runtime or inventory as current when offline', async () => {
   useSessionStore.setState({ serviceStatus: { state: 'offline', endpoint: '', runtime: { status: 'available', workerExecutionEnabled: true } } })
   render(<MemoryRouter><ReadinessSummary /></MemoryRouter>)

@@ -1,10 +1,16 @@
 /**
  * The declarations a governed qualification run selects, recovered from the
  * retained artifacts themselves rather than from a launch script that no longer
- * exists. `at-run-artifacts-batch5/results.json` and `-batch6/results.json` both
- * end `config.argv` with a `--grep`/`-g` alternation of exactly these 13 titles,
- * and the verifier confirmed the two artifacts carry the same titles in the same
- * order.
+ * exists.
+ *
+ * CORRECTED, because an earlier version of this comment claimed both artifacts
+ * end `config.argv` with an alternation of "exactly these 13 titles" in "the
+ * same order". Independent verification refuted that for batch5: its alternation
+ * is 13 TRUNCATED PREFIXES (22-61 characters, e.g. 'Approvals inbox routes') and
+ * is ROTATED BY ONE, with 'Platform is reachable by keyboard' last. batch6's is
+ * exact and in order. The set, count and declaration-level meaning are the same
+ * and the reconstruction is correct, but "exactly these titles" and "the same
+ * order" were false for batch5 and are not claimed here.
  *
  * WHY THIS IS A FILE AND NOT A COMMENT. The collection guard used to describe the
  * governed filter as `-g "Actual pinned ProjectState"`, verified "against the 13

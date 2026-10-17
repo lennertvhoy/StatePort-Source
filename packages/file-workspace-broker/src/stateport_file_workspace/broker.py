@@ -880,9 +880,28 @@ class FileWorkspaceBroker:
     def _rule_for(self, path: str) -> PathPolicyRule:
         matching = [rule for rule in self.profile.path_rules if rule.matches(path)]
         if not matching:
-            raise FileWorkspacePathError("path is not classified by the application policy")
+            raise FileWorkspacePathError(
+                "path is not classified by the application policy: files can only be created or "
+                f"edited in {self._writable_locations_text()}"
+            )
         matching.sort(key=lambda rule: (len(PurePosixPath(rule.path).parts), rule.match == "exact"), reverse=True)
         return matching[0]
+
+    def _writable_locations_text(self) -> str:
+        """Name, from the server-owned rules, where the Workbench may create files."""
+
+        folders = sorted(
+            {rule.path for rule in self.profile.path_rules if rule.match == "subtree" and rule.path and rule.create}
+        )
+        files = sorted(
+            {rule.path for rule in self.profile.path_rules if rule.match == "exact" and rule.path and rule.create}
+        )
+        parts = []
+        if folders:
+            parts.append("these folders (they must already exist): " + ", ".join(f"{item}/" for item in folders))
+        if files:
+            parts.append("these project files: " + ", ".join(files))
+        return "; ".join(parts) if parts else "no location in this project"
 
     def _directory_is_visible(self, path: str) -> bool:
         return any(rule.read and rule.contains(path) for rule in self.profile.path_rules)
@@ -1048,15 +1067,26 @@ class FileWorkspaceBroker:
     def _open_directory(self, path: str) -> int:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
         current = os.dup(self._root_fd)
+        walked: list[str] = []
         try:
             for component in PurePosixPath(path).parts if path else ():
+                walked.append(component)
                 next_fd = os.open(component, flags, dir_fd=current)
                 os.close(current)
                 current = next_fd
             return current
         except (OSError, ValueError) as exc:
             os.close(current)
-            raise FileWorkspacePathError("directory is unavailable without following links") from exc
+            if isinstance(exc, FileNotFoundError) and walked:
+                raise FileWorkspacePathError(
+                    f"the folder '{'/'.join(walked)}' does not exist in this project and the browser "
+                    "Workbench cannot create folders: create it first (for example in the terminal) "
+                    f"or choose a folder that exists. Files can be created in {self._writable_locations_text()}"
+                ) from exc
+            raise FileWorkspacePathError(
+                "directory is unavailable without following links (it is a link, not a folder, "
+                "or cannot be opened)"
+            ) from exc
 
     def _open_parent(self, path: str) -> tuple[int, str]:
         parts = PurePosixPath(path).parts

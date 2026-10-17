@@ -250,6 +250,9 @@ targets:
         capabilities:
           podmanSocketAccess: none
           controlContract: narrow-unix-client
+          # Only the web service imports GitHub templates and talks to AI
+          # providers; api and worker stay on the internal-only network.
+          networkEgress: external
       - serviceId: stateport-api
         imageId: stateport-api
         trustDomain: control

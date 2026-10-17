@@ -414,6 +414,97 @@ def test_governed_restore_is_path_free_new_identity_and_idempotent(
     assert "archive" not in status["latest"]
 
 
+def test_ui_generated_ins_ids_restore_end_to_end_and_equal_the_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The UI installs `ins_<16 hex>` ids and prefills `<id>-restored`: that must restore."""
+
+    app = _app(tmp_path, monkeypatch)
+    source_id = "ins_8b9003caf0ac3c1b"
+    destination_id = f"{source_id}-restored"
+    source = _instance(app, source_id)
+    backed_up = _digest_tree(source)
+    backup = app.backup(source_id)
+
+    (source / "state" / "mutated-after-backup.txt").write_text("changed\n", encoding="utf-8")
+    assert _digest_tree(source) != backed_up
+
+    plan = app.restore_plan(
+        source_id,
+        backup_receipt_id=backup["backupReceipt"]["receiptId"],
+        destination_instance_id=destination_id,
+    )
+    assert plan["destinationInstanceId"] == destination_id
+    approval = app.approve_restore(
+        source_id,
+        plan_digest=plan["planDigest"],
+        actor_id="test-operator",
+        actor_role="local_operator",
+    )
+    receipt = app.apply_restore(
+        source_id,
+        plan_digest=plan["planDigest"],
+        approval_digest=approval["approvalDigest"],
+    )
+    assert receipt["status"] == "validated"
+    assert receipt["result"]["instanceId"] == destination_id
+
+    destination = app.layout.instances_root / destination_id
+    assert destination.resolve().parent == app.layout.instances_root.resolve()
+    assert not (destination / "state" / "mutated-after-backup.txt").exists()
+    assert (destination / "state").is_dir()
+    restored_lock = yaml.safe_load((destination / ".statedd/lock.yaml").read_text())
+    assert restored_lock["instanceId"] == destination_id
+    assert app.catalog.get(destination_id)["pathState"] == "present"
+    # State equals the backup: every file the backup captured is byte-identical
+    # in the restored instance (identity files are rewritten by re-identification).
+    identity_files = {"instance.yaml", ".statedd/lock.yaml"}
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if (
+            not path.is_file()
+            or ".git" in relative.parts
+            or relative.as_posix() in identity_files
+            or relative.as_posix() == "state/mutated-after-backup.txt"
+        ):
+            continue
+        assert (destination / relative).read_bytes() == path.read_bytes(), relative
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "_leading-underscore",
+        "ins_UPPER",
+        "ins/../escape",
+        "ins_..",
+        "ins_a/b",
+        "ins.dot",
+        "ins_" + "a" * 64,
+        "../ins_x",
+        "",
+    ],
+)
+def test_restore_ids_with_underscores_stay_path_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_id: str
+) -> None:
+    app = _app(tmp_path, monkeypatch)
+    _instance(app, "ins_0123456789abcdef")
+    backup = app.backup("ins_0123456789abcdef")
+    with pytest.raises(AppError, match="destination_instance_id"):
+        app.restore_plan(
+            "ins_0123456789abcdef",
+            backup_receipt_id=backup["backupReceipt"]["receiptId"],
+            destination_instance_id=bad_id,
+        )
+    with pytest.raises(AppError, match="source_instance_id"):
+        app.restore_plan(
+            bad_id,
+            backup_receipt_id=backup["backupReceipt"]["receiptId"],
+            destination_instance_id="restore-result",
+        )
+
+
 def test_restore_refuses_destination_and_backup_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -423,12 +514,13 @@ def test_restore_refuses_destination_and_backup_drift(
     destination = app.layout.instances_root / "restore-result"
     destination.mkdir()
     (destination / "owner.txt").write_text("unrelated\n", encoding="utf-8")
-    with pytest.raises(AppError, match="destination already exists"):
+    with pytest.raises(AppError, match="already exists on disk") as exists:
         app.apply_restore(
             "restore-source",
             plan_digest=plan["planDigest"],
             approval_digest=approval["approvalDigest"],
         )
+    assert exists.value.cause_code == "restore_destination_exists"
     assert (destination / "owner.txt").read_text() == "unrelated\n"
     destination.rename(app.layout.instances_root / "owner-preserved")
 
@@ -546,8 +638,9 @@ def test_recovery_status_revalidates_persisted_plan_digest(
     tampered["destinationName"] = "Tampered status projection"
     path.write_text(json.dumps(tampered), encoding="utf-8")
 
-    with pytest.raises(ApprovalError, match="restore plan digest is invalid"):
+    with pytest.raises(ApprovalError, match="restore plan is not valid") as invalid:
         app.recovery_status("restore-source")
+    assert invalid.value.cause_code == "restore_plan_invalid"
 
 
 def test_recovery_status_revalidates_persisted_receipt_digest(
@@ -841,6 +934,123 @@ def test_operator_http_restore_uses_same_plan_approval_and_receipt_contract(
         assert _digest_tree(source) == source_before
 
         assert tmp_path.as_posix() not in json.dumps(status, sort_keys=True)
+    finally:
+        app.service_stop()
+
+
+def test_operator_http_restore_refusals_are_distinct_and_readable_and_ins_ids_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each restore refusal has its own causeCode and sentence; `ins_<hex>` ids restore over HTTP."""
+
+    app = _app(tmp_path, monkeypatch)
+    source_id = "ins_8b9003caf0ac3c1b"
+    source = _instance(app, source_id)
+    backup = app.backup(source_id)
+    receipt_id = backup["backupReceipt"]["receiptId"]
+    product_root = service_product_fixture(tmp_path, ROOT)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    base = f"http://127.0.0.1:{port}"
+    _operator_boundary_fixture(app)
+    app.service_start(port=port, repo_root=product_root, actor_role="platform_operator")
+    try:
+        with urlopen(f"{base}/session") as response:
+            cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+            csrf = json.loads(response.read())["result"]["csrfToken"]
+
+        def post(operation: str, body: dict) -> tuple[int, dict]:
+            request = Request(
+                f"{base}/v1/instances/{source_id}/recovery/restore/{operation}",
+                data=json.dumps(body).encode(),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Cookie": cookie,
+                    "Origin": base,
+                    "X-StatePort-CSRF": csrf,
+                },
+            )
+            try:
+                with urlopen(request) as response:
+                    return response.status, json.loads(response.read())
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+        generic = "A request value could not be used. Review the submitted values."
+
+        def refused(status: int, doc: dict, cause: str) -> str:
+            assert status == 400, doc
+            error = doc["error"]
+            # Backward compatible envelope: same status and umbrella code, plus a distinct cause.
+            assert error["code"] == "operation_failed"
+            assert error["causeCode"] == cause, error
+            assert error["message"] != generic
+            assert "req-" in error["diagnostic"]["requestId"]
+            assert tmp_path.as_posix() not in json.dumps(error)
+            return error["message"]
+
+        destination_id = f"{source_id}-restored"
+        status, doc = post("plan", {
+            "backupReceiptId": receipt_id, "destinationInstanceId": destination_id,
+            "destinationName": None,
+        })
+        assert status == 200, doc
+        plan = doc["result"]
+        status, doc = post("approve", {"planDigest": plan["planDigest"]})
+        assert status == 200, doc
+        approval = doc["result"]
+
+        messages = {}
+        # A: restore plan problems
+        messages["bad destination id"] = refused(
+            *post("plan", {"backupReceiptId": receipt_id, "destinationInstanceId": "Bad/Id",
+                           "destinationName": None}),
+            "instance_identity_invalid",
+        )
+        messages["same identity"] = refused(
+            *post("plan", {"backupReceiptId": receipt_id, "destinationInstanceId": source_id,
+                           "destinationName": None}),
+            "restore_destination_same_as_source",
+        )
+        messages["unknown backup"] = refused(
+            *post("plan", {"backupReceiptId": "backup-" + "0" * 24,
+                           "destinationInstanceId": "another-restore", "destinationName": None}),
+            "restore_backup_not_found",
+        )
+        messages["unknown plan on approve"] = refused(
+            *post("approve", {"planDigest": "sha256:" + "2" * 64}), "restore_plan_not_found",
+        )
+        messages["malformed plan digest"] = refused(
+            *post("approve", {"planDigest": "not-a-digest"}), "restore_plan_invalid",
+        )
+        # B: wrong restore approval digest
+        messages["wrong approval digest"] = refused(
+            *post("apply", {"planDigest": plan["planDigest"], "approvalDigest": "sha256:" + "1" * 64}),
+            "restore_approval_not_found",
+        )
+        messages["malformed approval digest"] = refused(
+            *post("apply", {"planDigest": plan["planDigest"], "approvalDigest": "approval"}),
+            "restore_approval_invalid",
+        )
+        assert not (app.layout.instances_root / destination_id).exists()
+        assert len(set(messages.values())) == len(messages), messages
+
+        status, doc = post("apply", {"planDigest": plan["planDigest"],
+                                      "approvalDigest": approval["approvalDigest"]})
+        assert status == 200, doc
+        assert doc["result"]["status"] == "validated"
+        assert doc["result"]["destinationInstanceId"] == destination_id
+        assert (app.layout.instances_root / destination_id / "state").is_dir()
+        assert _digest_tree(source) == _digest_tree(source)
+
+        # Planning the same destination again is a distinct, readable refusal.
+        refused(
+            *post("plan", {"backupReceiptId": receipt_id, "destinationInstanceId": destination_id,
+                           "destinationName": None}),
+            "restore_destination_exists",
+        )
     finally:
         app.service_stop()
 

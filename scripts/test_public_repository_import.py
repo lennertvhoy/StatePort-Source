@@ -21,6 +21,78 @@ _SYNTHETIC_INVALID_CREDENTIAL_URL = (
 )
 
 
+def test_public_target_survives_a_stalled_ipv6_answer(monkeypatch):
+    """A stalled AAAA must not mask a working A record (Win11+WSL2 guest 409).
+
+    Measured on the guest, 2026-10-06: the single flat 8s getaddrinfo over both
+    families timed out inside the container and refused every template import
+    with repository_url_unresolved while the guest itself resolved github.com
+    on the first try. The fix resolves one family at a time; this asserts the
+    flat dual-family query is gone and an IPv4 answer alone pins the target.
+    """
+    calls = []
+
+    class _Result:
+        stdout = '["140.82.121.4"]'
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == str(socket.AF_INET6):
+            raise subprocess.TimeoutExpired(argv, 8)
+        return _Result()
+
+    monkeypatch.setattr(module.subprocess, 'run', fake_run)
+    url, pinned = module._public_target(URL)
+    assert pinned == '140.82.121.4'
+    assert len(calls) == 1 and calls[0][-1] == str(socket.AF_INET)
+
+
+def test_public_target_falls_back_to_ipv6_when_ipv4_is_unavailable(monkeypatch):
+    calls = []
+
+    class _Result:
+        stdout = '["2606:50c0:8000::153"]'
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == str(socket.AF_INET):
+            raise subprocess.TimeoutExpired(argv, 8)
+        return _Result()
+
+    monkeypatch.setattr(module.subprocess, 'run', fake_run)
+    url, pinned = module._public_target(URL)
+    assert pinned == '2606:50c0:8000::153'
+    assert len(calls) == 2 and calls[1][-1] == str(socket.AF_INET6)
+
+
+def test_public_target_unresolved_only_when_every_family_fails(monkeypatch):
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 8)
+
+    monkeypatch.setattr(module.subprocess, 'run', fake_run)
+    with pytest.raises(module.RepositoryImportError, match='within the limit'):
+        module._public_target(URL)
+
+
+def test_public_target_still_refuses_private_addresses_without_family_fallback(monkeypatch):
+    calls = []
+
+    class _Result:
+        stdout = '["10.0.0.5"]'
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return _Result()
+
+    monkeypatch.setattr(module.subprocess, 'run', fake_run)
+    with pytest.raises(module.RepositoryImportError, match='private or reserved'):
+        module._public_target(URL)
+    assert len(calls) == 1
+
+
 def fixture(tmp_path, monkeypatch):
     source = _statespec_repository(tmp_path / 'source')
     revision = _git(source, 'rev-parse', 'HEAD')

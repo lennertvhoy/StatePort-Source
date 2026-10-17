@@ -24,6 +24,12 @@ _MAX_INSTANCE_CONTEXT_SOURCE_BYTES = _MAX_INSTANCE_CONTEXT_BYTES + 1
 _MIN_INSTANCE_CONTEXT_FILE_BYTES = 1024
 _MAX_SAFE_PROVIDER_SECONDS = 3500
 _AUTO = object()
+_ATM10_APPLICATION_ID = "atm10.speedrun-guide"
+_GENERIC_STATE_DIRECTORY = "state"
+_MANAGED_CATALOG_FORMAT = "stateport.instance-catalog/v1"
+_MAX_ACTIVE_TASK_BYTES = 512
+_MAX_CONTEXT_SOURCES_ITEMS = 8
+_MAX_CONTEXT_SOURCES_FIELD_BYTES = 256
 
 _ATM10_CONTEXT_FILES = (
     ("STATUS.md", 0),
@@ -89,6 +95,7 @@ class AssistantProcessor:
         poll_interval: float = 1.0,
         worker_id: str = "assistant.local",
         log_writer: Callable[[str], None] | None = None,
+        context_sources: Callable[[str], dict[str, object]] | None = None,
     ) -> None:
         config_root = Path(
             os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
@@ -145,6 +152,9 @@ class AssistantProcessor:
         self._poll_interval = poll_interval
         self._worker_id = worker_id
         self._log = log_writer
+        if context_sources is not None and not callable(context_sources):
+            raise ValueError("assistant context sources must be callable")
+        self._context_sources = context_sources
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -575,6 +585,20 @@ class AssistantProcessor:
                 "ATM10 guide source context is unavailable; "
                 "no provider invocation was attempted"
             )
+        context_is_guided = (
+            claim.application_id == _ATM10_APPLICATION_ID
+            and bool(instance_context)
+        )
+        operational_context = self._render_operational_context(
+            self._active_task_text(selected, claim.source_sequence),
+            self._bounded_context_sources(claim.instance_id),
+        )
+        if operational_context:
+            instance_context = (
+                f"{instance_context}\n\n{operational_context}"
+                if instance_context
+                else operational_context
+            )
         omitted = 0
         included = list(selected)
         while len(included) > 1:
@@ -644,6 +668,8 @@ class AssistantProcessor:
             "instanceContext": {
                 "policy": (
                     "atm10_read_only_guide_files/v1"
+                    if context_is_guided
+                    else "instance_state_and_operational_context/v1"
                     if instance_context
                     else "none"
                 ),
@@ -679,72 +705,100 @@ class AssistantProcessor:
 
     @staticmethod
     def _read_instance_context(claim: AssistantClaim) -> str:
-        """Read a small, explicit, read-only context slice for known guides.
+        """Read a small, explicit, read-only context slice for the application.
 
-        Conversation history alone is insufficient for source-backed operator
-        guides. The allowlist is intentionally application-specific and never
-        follows paths supplied by the user or the model.
+        The ATM10 guide keeps its curated, application-specific allowlist.
+        Every other application receives the bounded ``state/`` directory of
+        its own registered instance, so StudyState and ProjectState chats see
+        their real saved state instead of the conversation alone. The
+        selection never follows paths supplied by the user or the model.
         """
-        files_by_application = {
-            "atm10.speedrun-guide": _ATM10_CONTEXT_FILES,
-        }
-        relative_files = files_by_application.get(claim.application_id, ())
-        if not relative_files:
-            return ""
+        if claim.application_id == _ATM10_APPLICATION_ID:
+            return AssistantProcessor._read_guided_context(claim)
+        return AssistantProcessor._read_state_directory_context(claim)
+
+    @staticmethod
+    def _valid_directory_identity(filesystem: object) -> bool:
+        return (
+            isinstance(filesystem, dict)
+            and set(filesystem) == {"device", "inode", "kind"}
+            and filesystem.get("kind") == "directory"
+            and not any(
+                isinstance(filesystem.get(key), bool)
+                or not isinstance(filesystem.get(key), int)
+                or filesystem.get(key) < 0
+                for key in ("device", "inode")
+            )
+        )
+
+    @staticmethod
+    def _validated_instance_root(
+        source_path: Path,
+        filesystem: dict[str, object],
+    ) -> Path | None:
+        if not source_path.is_absolute():
+            return None
+        root = Path(os.path.abspath(source_path))
+        ancestor = Path(root.anchor)
+        for part in root.parts[1:]:
+            ancestor /= part
+            if ancestor.exists() and ancestor.is_symlink():
+                return None
+        root_info = os.lstat(root)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(root_info.st_mode)
+            or (root_info.st_dev, root_info.st_ino)
+            != (filesystem["device"], filesystem["inode"])
+        ):
+            return None
+        return root.resolve(strict=True)
+
+    @staticmethod
+    def _resolve_catalog_instance_root(claim: AssistantClaim) -> Path | None:
+        """Resolve this claim's instance to its validated real directory root.
+
+        Both instance catalogs are read read-only: the managed instance
+        catalog records installed instances relative to the instances root,
+        and the external repository catalog records user-registered absolute
+        paths. The root is accepted only while the recorded filesystem
+        identity still matches and no path component is a symlink.
+        """
         try:
             data_root = Path(
                 os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")
             ).expanduser().resolve() / "stateport"
-            catalog_path = data_root / "catalog" / "external-instances.json"
-            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-            entries = catalog.get("entries", [])
-            entry = next(
-                (
-                    item
-                    for item in entries
-                    if isinstance(item, dict)
-                    and item.get("instanceId") == claim.instance_id
-                    and item.get("applicationId") == claim.application_id
-                ),
-                None,
-            )
-            if not isinstance(entry, dict):
-                return _ATM10_CONTEXT_UNAVAILABLE
-            filesystem = entry.get("filesystem")
-            raw_path = entry.get("path")
-            if (
-                entry.get("formatVersion") != "stateport.external-catalog-entry/v1"
-                or entry.get("status") != "active"
-                or not isinstance(filesystem, dict)
-                or set(filesystem) != {"device", "inode", "kind"}
-                or filesystem.get("kind") != "directory"
-                or any(
-                    isinstance(filesystem.get(key), bool)
-                    or not isinstance(filesystem.get(key), int)
-                    or filesystem.get(key) < 0
-                    for key in ("device", "inode")
+            catalog_dir = data_root / "catalog"
+            try:
+                root = AssistantProcessor._resolve_managed_catalog_root(
+                    catalog_dir / "instances.json",
+                    claim,
                 )
-                or not isinstance(raw_path, str)
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
             ):
-                return _ATM10_CONTEXT_UNAVAILABLE
-            source_path = Path(raw_path).expanduser()
-            if not source_path.is_absolute():
-                return _ATM10_CONTEXT_UNAVAILABLE
-            root = Path(os.path.abspath(source_path))
-            ancestor = Path(root.anchor)
-            for part in root.parts[1:]:
-                ancestor /= part
-                if ancestor.exists() and ancestor.is_symlink():
-                    return _ATM10_CONTEXT_UNAVAILABLE
-            root_info = os.lstat(root)
-            if (
-                not stat.S_ISDIR(root_info.st_mode)
-                or stat.S_ISLNK(root_info.st_mode)
-                or (root_info.st_dev, root_info.st_ino)
-                != (filesystem["device"], filesystem["inode"])
-            ):
-                return _ATM10_CONTEXT_UNAVAILABLE
-            root = root.resolve(strict=True)
+                root = None
+            if root is None:
+                try:
+                    root = AssistantProcessor._resolve_external_catalog_root(
+                        catalog_dir / "external-instances.json",
+                        claim,
+                    )
+                except (
+                    OSError,
+                    UnicodeError,
+                    json.JSONDecodeError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                ):
+                    root = None
+            return root
         except (
             OSError,
             UnicodeError,
@@ -753,7 +807,100 @@ class AssistantProcessor:
             TypeError,
             ValueError,
         ):
-            return _ATM10_CONTEXT_UNAVAILABLE
+            return None
+
+    @staticmethod
+    def _resolve_managed_catalog_root(
+        catalog_path: Path,
+        claim: AssistantClaim,
+    ) -> Path | None:
+        document = json.loads(catalog_path.read_text(encoding="utf-8"))
+        if document.get("formatVersion") != _MANAGED_CATALOG_FORMAT:
+            return None
+        entries = document.get("entries")
+        root_record = document.get("root")
+        if (
+            not isinstance(entries, list)
+            or not isinstance(root_record, dict)
+            or not isinstance(root_record.get("path"), str)
+        ):
+            return None
+        entry = next(
+            (
+                item
+                for item in entries
+                if isinstance(item, dict)
+                and item.get("instanceId") == claim.instance_id
+            ),
+            None,
+        )
+        if not isinstance(entry, dict):
+            return None
+        metadata = entry.get("metadata")
+        application_id = (
+            metadata.get("applicationId")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if (
+            application_id != claim.application_id
+            or entry.get("status") != "active"
+            or entry.get("pathState") != "present"
+        ):
+            return None
+        filesystem = entry.get("filesystem")
+        if not AssistantProcessor._valid_directory_identity(filesystem):
+            return None
+        raw_relative = entry.get("path")
+        if not isinstance(raw_relative, str):
+            return None
+        relative = Path(raw_relative)
+        if relative.is_absolute() or ".." in relative.parts:
+            return None
+        instances_root = Path(root_record["path"]).expanduser()
+        return AssistantProcessor._validated_instance_root(
+            instances_root / relative,
+            filesystem,
+        )
+
+    @staticmethod
+    def _resolve_external_catalog_root(
+        catalog_path: Path,
+        claim: AssistantClaim,
+    ) -> Path | None:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        entries = catalog.get("entries", [])
+        entry = next(
+            (
+                item
+                for item in entries
+                if isinstance(item, dict)
+                and item.get("instanceId") == claim.instance_id
+                and item.get("applicationId") == claim.application_id
+            ),
+            None,
+        )
+        if not isinstance(entry, dict):
+            return None
+        filesystem = entry.get("filesystem")
+        raw_path = entry.get("path")
+        if (
+            entry.get("formatVersion") != "stateport.external-catalog-entry/v1"
+            or entry.get("status") != "active"
+            or not AssistantProcessor._valid_directory_identity(filesystem)
+            or not isinstance(raw_path, str)
+        ):
+            return None
+        return AssistantProcessor._validated_instance_root(
+            Path(raw_path).expanduser(),
+            filesystem,
+        )
+
+    @staticmethod
+    def _collect_sources(
+        root: Path,
+        relative_files: tuple[tuple[str, int], ...],
+    ) -> list[tuple[str, str, bool]]:
         sources: list[tuple[str, str, bool]] = []
         for relative, max_read in relative_files:
             path = root / relative
@@ -763,12 +910,18 @@ class AssistantProcessor:
                     current /= part
                     metadata = os.lstat(current)
                     if stat.S_ISLNK(metadata.st_mode):
-                        raise OSError("guide source path must not contain a symlink")
+                        raise OSError(
+                            "instance source path must not contain a symlink"
+                        )
                 candidate = path.resolve(strict=True)
                 candidate.relative_to(root)
                 if not stat.S_ISREG(os.lstat(candidate).st_mode):
                     continue
-                read_limit = max_read if max_read > 0 else _MAX_INSTANCE_CONTEXT_SOURCE_BYTES
+                read_limit = (
+                    max_read
+                    if max_read > 0
+                    else _MAX_INSTANCE_CONTEXT_SOURCE_BYTES
+                )
                 with candidate.open("rb") as source:
                     raw = source.read(read_limit)
                     source_overflow = bool(source.read(1))
@@ -777,8 +930,15 @@ class AssistantProcessor:
                 continue
             if text:
                 sources.append((relative, text, source_overflow))
+        return sources
+
+    @staticmethod
+    def _compose_source_sections(
+        sources: list[tuple[str, str, bool]],
+        empty: str,
+    ) -> str:
         if not sources:
-            return _ATM10_CONTEXT_UNAVAILABLE
+            return empty
 
         prefix = (
             "Read-only current instance context (source files; not permission to mutate):\n"
@@ -815,8 +975,137 @@ class AssistantProcessor:
             if remaining <= 0:
                 break
         if not sections:
-            return _ATM10_CONTEXT_UNAVAILABLE
+            return empty
         return prefix + "\n\n".join(sections)
+
+    @staticmethod
+    def _read_guided_context(claim: AssistantClaim) -> str:
+        root = AssistantProcessor._resolve_catalog_instance_root(claim)
+        if root is None:
+            return _ATM10_CONTEXT_UNAVAILABLE
+        sources = AssistantProcessor._collect_sources(root, _ATM10_CONTEXT_FILES)
+        return AssistantProcessor._compose_source_sections(
+            sources,
+            _ATM10_CONTEXT_UNAVAILABLE,
+        )
+
+    @staticmethod
+    def _read_state_directory_context(claim: AssistantClaim) -> str:
+        root = AssistantProcessor._resolve_catalog_instance_root(claim)
+        if root is None:
+            return ""
+        try:
+            state_dir = root / _GENERIC_STATE_DIRECTORY
+            state_info = os.lstat(state_dir)
+            if stat.S_ISLNK(state_info.st_mode) or not stat.S_ISDIR(
+                state_info.st_mode
+            ):
+                return ""
+            relative_files = tuple(
+                (f"{_GENERIC_STATE_DIRECTORY}/{name}", 0)
+                for name in sorted(os.listdir(state_dir))
+            )
+        except (OSError, ValueError):
+            return ""
+        sources = AssistantProcessor._collect_sources(root, relative_files)
+        return AssistantProcessor._compose_source_sections(sources, "")
+
+    @staticmethod
+    def _active_task_text(
+        messages: list[dict[str, object]],
+        source_sequence: int,
+    ) -> str:
+        """The latest operator ask, matching the platform continuity definition."""
+        for item in reversed(messages):
+            if item.get("kind") != "user_message":
+                continue
+            body = item.get("body")
+            if not isinstance(body, str) or not body.strip():
+                continue
+            encoded = body.strip().encode("utf-8")[:_MAX_ACTIVE_TASK_BYTES]
+            return encoded.decode("utf-8", errors="ignore")
+        return ""
+
+    def _bounded_context_sources(
+        self,
+        instance_id: str,
+    ) -> dict[str, list[dict[str, str]]]:
+        provider = self._context_sources
+        if provider is None:
+            return {"approvals": [], "receipts": []}
+        try:
+            raw = provider(instance_id)
+        except Exception:
+            return {"approvals": [], "receipts": []}
+        if not isinstance(raw, dict):
+            return {"approvals": [], "receipts": []}
+        return {
+            "approvals": AssistantProcessor._bounded_source_items(
+                raw.get("approvals"),
+                ("id", "title", "risk", "status"),
+            ),
+            "receipts": AssistantProcessor._bounded_source_items(
+                raw.get("receipts"),
+                ("receiptId", "action", "status", "occurredAt"),
+            ),
+        }
+
+    @staticmethod
+    def _bounded_source_items(
+        value: object,
+        fields: tuple[str, ...],
+    ) -> list[dict[str, str]]:
+        """Keep only allowlisted bounded string fields; drop everything else."""
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, str]] = []
+        for entry in value:
+            if len(items) >= _MAX_CONTEXT_SOURCES_ITEMS:
+                break
+            if not isinstance(entry, dict):
+                continue
+            bounded: dict[str, str] = {}
+            for field in fields:
+                item = entry.get(field)
+                if isinstance(item, str) and item.strip():
+                    encoded = item.strip().encode("utf-8")[
+                        :_MAX_CONTEXT_SOURCES_FIELD_BYTES
+                    ]
+                    bounded[field] = encoded.decode("utf-8", errors="ignore")
+            if bounded:
+                items.append(bounded)
+        return items
+
+    @staticmethod
+    def _render_operational_context(
+        task: str,
+        sources: dict[str, list[dict[str, str]]],
+    ) -> str:
+        sections: list[str] = []
+        if task:
+            sections.append(f"Active task (latest operator request):\n{task}")
+        approvals = sources.get("approvals") or []
+        if approvals:
+            lines = ["Pending approvals for this instance:"]
+            for item in approvals:
+                title = item.get("title") or item.get("id") or "approval"
+                risk = item.get("risk") or "unknown"
+                status = item.get("status") or "unknown"
+                approval_id = item.get("id") or ""
+                identity = f" ({approval_id})" if approval_id else ""
+                lines.append(f"- {title} [{risk}/{status}]{identity}")
+            sections.append("\n".join(lines))
+        receipts = sources.get("receipts") or []
+        if receipts:
+            lines = ["Recent receipts for this instance:"]
+            for item in receipts:
+                action = item.get("action") or item.get("receiptId") or "receipt"
+                status = item.get("status") or "unknown"
+                occurred_at = item.get("occurredAt") or ""
+                suffix = f" ({occurred_at})" if occurred_at else ""
+                lines.append(f"- {action} [{status}]{suffix}")
+            sections.append("\n".join(lines))
+        return "\n\n".join(sections)
 
     @staticmethod
     def _render_objective(
@@ -870,6 +1159,11 @@ class AssistantProcessor:
                 "provider_execution_unavailable": "The provider could not execute in this runtime. Check Coding provider settings and runtime permissions.",
                 "provider_executable_unavailable": "The selected provider executable is not installed in this runtime. Install the pinned provider runtime in Coding provider settings, then retry.",
                 "provider_authentication_unverified": "The provider did not accept the request and its authentication could not be verified. Sign in with the provider itself, then retry.",
+                "provider_quota_exceeded": "The provider's usage limit has been reached, so it refused the request. Wait for the limit to reset, or choose another model or plan in Coding provider settings, then retry.",
+                "provider_authentication_missing": "No provider sign-in was found. Sign in in Coding provider settings, then retry.",
+                "provider_authentication_expired": "The provider rejected the saved sign-in (it is expired or invalid). Sign in again in Coding provider settings, then retry.",
+                "provider_model_unavailable": "The selected model is not available from the provider (it may be retired or not offered in your region). Choose another model in Coding provider settings, then retry.",
+                "provider_upstream_unavailable": "The provider had a temporary server problem and still failed after retrying. Wait a minute and resend, or choose another model in Coding provider settings.",
                 "provider_failed": "The provider request failed. Verify the connection and model in Coding provider settings before retrying.",
             }.get(provider_reason, "The provider request failed. Check Coding provider settings and the work status before retrying.")
         return {

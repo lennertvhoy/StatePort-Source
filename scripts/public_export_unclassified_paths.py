@@ -18,6 +18,7 @@ So this tool answers the question the canary provokes, and changes nothing:
     python3 scripts/public_export_unclassified_paths.py            # report, exit 0
     python3 scripts/public_export_unclassified_paths.py --check    # report, exit 1
     python3 scripts/public_export_unclassified_paths.py --emit     # paste-ready YAML
+    python3 scripts/public_export_unclassified_paths.py --deps     # report broken published->private deps
 
 It is deliberately NOT a pre-commit hook. Refusing a commit would convert a correct
 late signal into an early block across every active lane in a shared tree, and the
@@ -239,6 +240,113 @@ def _stale_paths() -> list[str]:
     return sorted({path for rule in policy.rules for path in rule.paths} - tracked)
 
 
+COPYABLE = {"public-source", "public-documentation", "public-generated", "third-party-reviewed"}
+_PRIVATE = "private-internal"
+
+
+def report_dependency_defects() -> list[tuple[str, str, int, str]]:
+    """Published files that reference a path classified private-internal.
+
+    The classification canary only proves every tracked path is *classified*
+    (missing == 0). It cannot see that a published test loads a private module, which
+    makes the published tree unrunnable. This was a real defect once already: three tests
+    were published whose subject-under-test or fixtures were private-internal, and the
+    canary stayed green because it never looked.
+
+    Only LOAD-TIME references count. A name mentioned in a docstring, comment or log
+    string is not a dependency, and counting those produced a 51-item false positive
+    against the real count, so this deliberately under-reports: it looks for the repo path
+    appearing in an import/load context, not merely anywhere in the file.
+
+    This is a REPORT, not a gate. It does not exit non-zero on its own and nothing wires
+    it in, for the same reason `--check` is opt-in: a suggestion is a suggestion, and
+    promoting this to blocking is a decision about release policy, not a repair.
+
+    KNOWN LIMITATIONS - the count is a FLOOR, not a total:
+      * module-style imports are matched by top-level module NAME only, so
+        `from pkg.mod import x` is not resolved to a nested private file, and a
+        module whose name differs from its filename would be missed.
+      * it only reads files that are themselves classified copyable, so a dependency
+        reached only from a private file is out of scope by construction.
+      * it does not resolve conditionals, so a load behind a platform check is reported
+        the same as an unconditional one.
+    It is tuned to under-report rather than over-report, because the earlier crude
+    scan that counted every textual mention produced 51 findings against a real count
+    far below that, and a noisy instrument is worse than an incomplete one.
+    """
+    policy = _load_policy()
+    rules = list(policy.rules)
+    # policy.rules yields Rule objects, not dicts: identifier / classification / paths.
+    private: set[str] = {
+        path
+        for rule in rules
+        if rule.classification == _PRIVATE
+        for path in rule.paths
+    }
+    # Import statements name a MODULE, not a path. "from projectstate_gate import
+    # validate" carries no "scripts/" prefix, so path matching alone cannot see it.
+    # Map each private path to the module names it could be imported as.
+    private_modules: dict[str, str] = {}
+    for dep in private:
+        if not dep.endswith(".py"):
+            continue
+        stem = dep[: -len(".py")].rsplit("/", 1)[-1]
+        if stem == "__init__":
+            stem = dep[: -len("/__init__.py")].rsplit("/", 1)[-1]
+        private_modules.setdefault(stem, dep)
+        dotted = stem.replace("_", "-")
+        if dotted != stem:
+            private_modules.setdefault(dotted, dep)
+    published = {
+        path
+        for rule in rules
+        if rule.classification in COPYABLE
+        for path in rule.paths
+    }
+
+    defects: list[tuple[str, str, int, str]] = []
+    unreadable: list[tuple[str, str]] = []
+    for src in sorted(published):
+        if not src.endswith((".py", ".sh")):
+            continue
+        try:
+            text = Path(src).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            # A file we cannot read is NOT evidence of a clean result. Skipping it
+            # silently makes the finding count smaller for no visible reason, which is
+            # the same shape as a no-op instrument: the number looks authoritative and is
+            # quietly wrong. Collect it and report it instead.
+            unreadable.append((src, exc.__class__.__name__))
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            # LOAD-TIME contexts only: an import statement, a path built for open()/read,
+            # or a literal path argument. A bare mention in prose is skipped.
+            is_load = (
+                stripped.startswith(("import ", "from "))
+                or "read_text(" in stripped
+                or "open(" in stripped
+                or "Path(" in stripped
+                or "SCRIPT" in stripped or "ROOT /" in stripped
+            )
+            if not is_load or stripped.startswith("#"):
+                continue
+            for dep in private:
+                if dep == src:
+                    continue
+                if dep in stripped or f'"{dep}"' in stripped:
+                    defects.append((src, dep, lineno, "path"))
+                    break
+            else:
+                # module-style import of a private file
+                if stripped.startswith("import ") or stripped.startswith("from "):
+                    token = stripped.split()[1].split(".")[0]
+                    hit = private_modules.get(token)
+                    if hit and hit != src:
+                        defects.append((src, hit, lineno, f"import:{token}"))
+    return defects, unreadable
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -251,7 +359,35 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print paste-ready YAML lines for the suggested rule, without editing anything",
     )
+    parser.add_argument(
+        "--deps",
+        action="store_true",
+        help="report published files that reference a private-internal path at load time",
+    )
     args = parser.parse_args(argv)
+
+
+    if args.deps:
+        defects, unreadable = report_dependency_defects()
+        if unreadable:
+            print(
+                f"WARNING: {len(unreadable)} published file(s) could not be read; the "
+                f"finding count below EXCLUDES them and is a floor by at least that much:"
+            )
+            for path, why in unreadable[:10]:
+                print(f"  unreadable: {path} ({why})")
+        if not defects:
+            print("published->private load-time dependencies: none found")
+            return 0
+        print(f"published->private load-time dependencies: {len(defects)} finding(s)")
+        for src, dep, lineno, how in defects:
+            print(f"  {src}:{lineno} loads {dep}  [{how}]")
+        print(
+            "\nThis is a report, not a gate. Promoting it to blocking, and deciding whether"
+            "\n each finding is fixed by reclassifying the source or by publishing the"
+            "\n dependency, are release-policy decisions."
+        )
+        return 0
 
     suggestions, missing, stale_count = report()
     stale = _stale_paths()

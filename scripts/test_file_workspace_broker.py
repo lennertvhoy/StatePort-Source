@@ -495,6 +495,28 @@ def test_create_rename_and_delete_are_exact_hash_base_bound(tmp_path: Path) -> N
         broker.close()
 
 
+def test_create_refusals_name_where_files_can_be_created(tmp_path: Path) -> None:
+    """A bare project must get an actionable refusal, not an opaque policy sentence."""
+
+    broker, project = _broker(tmp_path)
+    try:
+        base = broker.profile_description(**_identity())["baseSha"]
+        with pytest.raises(FileWorkspacePathError) as unclassified:
+            broker.create_file("notes/e2e.md", "x\n", expected_base_sha=base, **_identity())
+        text = str(unclassified.value)
+        assert "not classified by the application policy" in text
+        assert "src/" in text and "scratch/" in text and "must already exist" in text
+        assert "generated" not in text and "PROJECT_STATE.yaml" not in text  # read-only rules are not offered
+        with pytest.raises(FileWorkspacePathError) as missing:
+            broker.create_file("src/nested/new.py", "x\n", expected_base_sha=base, **_identity())
+        text = str(missing.value)
+        assert "'src/nested' does not exist" in text
+        assert "cannot create folders" in text and "src/" in text
+        assert not (project / "src" / "nested").exists()
+    finally:
+        broker.close()
+
+
 def test_unsafe_rename_delete_create_and_cross_ownership_moves_are_refused(tmp_path: Path) -> None:
     broker, _ = _broker(tmp_path)
     try:

@@ -176,6 +176,44 @@ it('reviews an exact path-free restore plan before approval and apply', async ()
   })
 })
 
+it('accepts installed-product instance ids (ins_-prefixed) across status and restore planning', async () => {
+  // The exact id shape every UI/API-installed instance carries (row #29):
+  // `ins_` + 16 lowercase hex characters. The default destination draft is
+  // `${instanceId}-restored`, which must pass the same grammar.
+  const source = 'ins_1a2b3c4d5e6f7089'
+  const insStatus = {
+    ...status,
+    sourceInstanceId: source,
+    latest: { ...status.latest, instanceId: source },
+  }
+  const insPlan = {
+    ...plan,
+    sourceInstanceId: source,
+    destinationInstanceId: `${source}-restored`,
+    dryRun: { ...plan.dryRun, instanceId: `${source}-restored` },
+  }
+  const fake = makeFakeFetch([
+    ['GET', `/v1/instances/${source}/recovery`, jsonResponse({ ok: true, result: insStatus })],
+    ['POST', `/v1/instances/${source}/recovery/restore/plan`, jsonResponse({ ok: true, result: insPlan })],
+  ])
+  vi.stubGlobal('fetch', fake.fetchFn)
+  const user = userEvent.setup()
+  render(<RecoveryRestorePanel instanceId={source} onRestored={vi.fn()} />)
+
+  // The status wire parses (no "Response failed validation" refusal).
+  expect(await screen.findByText(backup.receiptId)).toBeTruthy()
+  expect(screen.queryByText('Recovery request refused')).toBeNull()
+  expect(screen.queryByText(/Response failed validation/)).toBeNull()
+
+  // The default destination draft passes the id grammar and the plan flow runs.
+  expect((screen.getByTestId('restore-destination-id') as HTMLInputElement).value).toBe(`${source}-restored`)
+  await user.click(screen.getByTestId('restore-plan-action'))
+  expect(await screen.findByText(insPlan.planDigest)).toBeTruthy()
+  expect(fake.callsTo('/recovery/restore/plan')[0].body).toMatchObject({
+    destinationInstanceId: `${source}-restored`,
+  })
+})
+
 it('shows the persisted restore status and receipt without a local apply', async () => {
   const persistedStatus = {
     ...status,
@@ -380,4 +418,24 @@ it('does not notify the new instance when an earlier apply completes after navig
   expect(onRestored).not.toHaveBeenCalled()
   expect(useSessionStore.getState().toasts).toEqual([])
   expect(screen.queryByText(receipt.receiptId)).toBeNull()
+})
+
+it('shows the service reason when Back up now is refused, for example a full disk', async () => {
+  const fake = makeFakeFetch([
+    ['GET', '/v1/instances/source-one/recovery', jsonResponse({ ok: true, result: status })],
+    [
+      'POST',
+      '/v1/instances/source-one/backup',
+      jsonResponse(
+        { ok: false, error: { code: 'operation_failed', causeCode: 'local_io_error', message: 'The disk holding StatePort data is full, so nothing was saved. Free some space and try again.' } },
+        400,
+      ),
+    ],
+  ])
+  vi.stubGlobal('fetch', fake.fetchFn)
+  const user = userEvent.setup()
+  render(<RecoveryRestorePanel instanceId="source-one" onRestored={vi.fn()} />)
+  await screen.findByText(backup.receiptId)
+  await user.click(screen.getByTestId('recovery-backup-action'))
+  expect(await screen.findByText(/disk holding StatePort data is full/i)).toBeTruthy()
 })

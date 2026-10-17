@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -105,8 +106,66 @@ from stateport_persistent_app.terminal_transport import (
 )
 
 
+class MutationAuthorizationError(PermissionError):
+    """The CSRF/origin check of a mutating request failed.
+
+    A PermissionError (so every route keeps failing closed with HTTP 403), but
+    with its own stable response code so a client can tell "refresh the token
+    and retry" apart from the ~30 route-specific authorization refusals, none
+    of which may be replayed.
+    """
+
+
+CSRF_ERROR_CODE = "csrf_token_invalid"
+CSRF_ERROR_MESSAGE = "the request could not be authorized; reload the page to refresh the session and retry"
+
+
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+_CAUSE_CODE = re.compile(r"[a-z][a-z0-9_]{2,63}")
+
+
+def _readable_refusal(exc: Exception) -> tuple[str, str] | None:
+    """Return (causeCode, message) for a refusal that curated its own safe text.
+
+    Only exceptions that deliberately set ``cause_code`` (``AppError`` and
+    ``RunBindingError``) qualify; their raisers promise secret-free,
+    content-free messages that say what to do next. The messages MAY name the
+    local filesystem paths the operator has to act on (a provider directory,
+    an adoption source): this service answers only on loopback to the
+    authenticated local session, so a path is operator guidance, not a leak.
+    They never carry file contents, credentials, or raw exception text.
+    Everything else stays redacted by ``_safe_operation_failure``.
+    """
+
+    cause = getattr(exc, "cause_code", None)
+    if getattr(exc, "http_status", None) is not None:
+        # Exceptions that declare their own HTTP status keep their typed route.
+        return None
+    if not isinstance(exc, ValueError) or not isinstance(cause, str) or not _CAUSE_CODE.fullmatch(cause):
+        return None
+    message = " ".join(str(exc).split())
+    if not message:
+        return None
+    return cause, message[:512]
+
+
+def _safe_operation_failure(exc: Exception) -> tuple[str, str]:
+    """Classify an unexpected failure without exposing exception text or paths."""
+
+    if isinstance(exc, OSError):
+        if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+            return "local_io_error", "The disk holding StatePort data is full, so nothing was saved. Free some space and try again."
+        return "local_io_error", "A local resource could not be accessed. Check service setup and try again."
+    if isinstance(exc, KeyError):
+        return "missing_value", "A required value was missing. Review the request and try again."
+    if isinstance(exc, (TypeError, ValueError)):
+        return "invalid_value", "A request value could not be used. Review the submitted values."
+    if isinstance(exc, RuntimeError):
+        return "local_runtime_error", "The local service could not complete this request. Check service health and try again."
+    return "unexpected_local_error", "The local service could not complete this request. Check service health and try again."
 
 
 _WEB_BUILD_IDENTITY_FILE = "stateport-build.json"
@@ -128,6 +187,36 @@ _HTTP_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _WEB_BUILD_TIMESTAMP = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z"
 )
+
+
+class RequestRefused(Exception):
+    """A request refused at the protocol level with its own HTTP status.
+
+    Raised before any application code ran, so nothing was changed.
+    """
+
+    def __init__(self, status: int, code: str, message: str):
+        self.status = status
+        self.code = code
+        super().__init__(message)
+
+
+# Largest amount of an unread request that is read and thrown away (in small
+# chunks, never buffered) after a refusal, so the client can still receive the
+# HTTP status instead of a reset connection. Beyond it the connection is
+# simply closed.
+_DISCARD_LIMIT_BYTES = 64 * 1024 * 1024
+_DISCARD_DEADLINE_SECONDS = 20.0
+_DISCARD_IDLE_SECONDS = 2.0
+_PROTOCOL_ERROR_CODES = {
+    400: ("request_malformed", "The request could not be understood. Check it and try again."),
+    408: ("request_timeout", "The request took too long to arrive. Try again."),
+    413: ("request_body_too_large", "The request body is larger than this service accepts."),
+    414: ("request_target_too_long", "The request address (path and query string) is too long. Shorten it and try again."),
+    431: ("request_headers_too_large", "The request headers are too large. Remove unneeded headers or cookies and try again."),
+    501: ("request_method_unsupported", "This request method is not supported."),
+    505: ("request_version_unsupported", "This HTTP version is not supported."),
+}
 
 
 class TemplateUpgradeError(ValueError):
@@ -402,6 +491,9 @@ class Handler(BaseHTTPRequestHandler):
     # BaseHTTPRequestHandler otherwise defaults to HTTP/1.0, which Chromium
     # tolerates but Firefox rejects before it emits the socket open event.
     protocol_version = "HTTP/1.1"
+    # Per-request state for answering a refused request without a connection reset.
+    _body_consumed = False
+    _unparsed_request = False
 
     def _session(self) -> bool:
         try:
@@ -453,10 +545,74 @@ class Handler(BaseHTTPRequestHandler):
             # completed. The response is no longer deliverable, and retrying an
             # error response would misclassify the completed operation as 400.
             self.close_connection = True
+            return
+        self._discard_unread_request()
 
-    def _error(self, status: int, message: str, code: str = "request_failed") -> None:
+    def _discard_unread_request(self) -> None:
+        """Let a refused request's sender finish and read the reply.
+
+        Closing a socket that still has unread request bytes makes the kernel
+        reset the connection, which can destroy the reply we just sent: the
+        client then sees a dropped connection instead of the 4xx. So after a
+        reply, half-close our side and read-and-discard what is left, in
+        64 KiB chunks (constant memory), up to a byte and time budget.
+        """
+
+        if self.command == "HEAD":
+            return
+        declared = None
+        if not getattr(self, "_body_consumed", False) and hasattr(self, "headers"):
+            raw = (self.headers.get("Content-Length") or "").strip()
+            if raw.isdigit() and len(raw) <= 20:
+                declared = int(raw)
+        # With no declared body the leftover is an over-long request line or
+        # header block: read until the peer closes or goes quiet.
+        malformed = getattr(self, "_unparsed_request", False)
+        if not malformed and not declared:
+            return
+        remaining = min(declared, _DISCARD_LIMIT_BYTES) if declared else 1024 * 1024
+        sock = self.connection
+        deadline = time.monotonic() + _DISCARD_DEADLINE_SECONDS
+        try:
+            self.wfile.flush()
+            sock.shutdown(socket.SHUT_WR)
+            sock.settimeout(_DISCARD_IDLE_SECONDS)
+            # Bytes already pulled into the buffered reader count against the budget.
+            while remaining > 0 and time.monotonic() < deadline:
+                chunk = self.rfile.read1(min(65536, remaining)) if hasattr(self.rfile, "read1") else sock.recv(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            pass
+        self.close_connection = True
+
+    def send_error(self, code, message=None, explain=None):  # type: ignore[override]
+        """Protocol-level refusals (414, 431, bad request line...) as the JSON envelope.
+
+        The stdlib answers these with an HTML page. The API speaks one error
+        shape, so the same text goes out as ``{"ok": false, "error": {...}}``.
+        """
+
+        self._unparsed_request = True
+        known = _PROTOCOL_ERROR_CODES.get(int(code))
+        error_code, text = known if known else ("request_refused", "The request was refused.")
+        if self.command == "HEAD":
+            super().send_error(code, message, explain)
+            return
+        request_id = f"req-{uuid.uuid4().hex[:16]}"
+        self.log_error("code %d, message %s", int(code), message)
+        self._send(int(code), {"ok": False, "error": {"code": error_code, "message": text, "diagnostic": {"requestId": request_id}}}, extra={"X-Request-ID": request_id})
+
+    def _error(self, status: int, message: str, code: str = "request_failed", *, cause_code: str | None = None) -> None:
         request_id = self.headers.get("X-Request-ID") or f"req-{uuid.uuid4().hex[:16]}"
-        self._send(status, {"ok": False, "error": {"code": code, "message": message, "diagnostic": {"requestId": request_id}}}, extra={"X-Request-ID": request_id})
+        if code == "operation_failed" and cause_code is None:
+            cause_code = "unclassified_operation_error"
+            message = "The local operation could not be completed. Check service health and try again."
+        error = {"code": code, "message": message, "diagnostic": {"requestId": request_id}}
+        if cause_code is not None:
+            error["causeCode"] = cause_code
+        self._send(status, {"ok": False, "error": error}, extra={"X-Request-ID": request_id})
 
     def _body(self, *, maximum_bytes: int = 64 * 1024) -> dict[str, object]:
         if self.headers.get_all("Transfer-Encoding", failobj=[]):
@@ -469,10 +625,16 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("request content length is invalid")
         length = int(raw_length)
         if length > maximum_bytes:
-            raise ValueError("request body is too large")
+            raise RequestRefused(
+                413, "request_body_too_large",
+                f"The request body is larger than the {maximum_bytes // 1024} KiB this endpoint accepts. Nothing was changed.",
+            )
         if length == 0:
+            self._body_consumed = True
             return {}
-        value = json.loads(self.rfile.read(length).decode("utf-8"))
+        raw_body = self.rfile.read(length)
+        self._body_consumed = True
+        value = json.loads(raw_body.decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("request body must be a JSON object")
         return value
@@ -554,11 +716,11 @@ class Handler(BaseHTTPRequestHandler):
         origin_values = self.headers.get_all("Origin", failobj=[])
         token_values = self.headers.get_all("X-StatePort-CSRF", failobj=[])
         if len(origin_values) != 1 or len(token_values) != 1:
-            raise PermissionError(f"{label} mutation authorization failed")
+            raise MutationAuthorizationError(f"{label} mutation authorization failed")
         supplied_origin = origin_values[0]
         supplied_token = token_values[0]
         if not self._valid_loopback_origin(supplied_origin) or not secrets.compare_digest(supplied_token, self.server.csrf_token):
-            raise PermissionError(f"{label} mutation authorization failed")
+            raise MutationAuthorizationError(f"{label} mutation authorization failed")
 
     def _file_request_security(self) -> None:
         self._mutation_security("file workspace")
@@ -826,7 +988,9 @@ class Handler(BaseHTTPRequestHandler):
             raise PreviewGatewayError(
                 "preview_request_refused", "preview request body is too large"
             )
-        return self.rfile.read(length) if length else b""
+        body = self.rfile.read(length) if length else b""
+        self._body_consumed = True
+        return body
 
     def _preview_upgrade_key(self) -> tuple[str, tuple[str, ...]]:
         if self.request_version != "HTTP/1.1":
@@ -1373,6 +1537,10 @@ class Handler(BaseHTTPRequestHandler):
             self._error(409, str(exc), "conversation_attachment_refused")
         except TemplateUpgradeError as exc:
             self._error(exc.status, str(exc)[:512], exc.code)
+        except RequestRefused as exc:
+            self._error(exc.status, str(exc), exc.code)
+        except MutationAuthorizationError:
+            self._error(403, CSRF_ERROR_MESSAGE, CSRF_ERROR_CODE)
         except PermissionError:
             if path == "/v1/settings" or "/settings" in path:
                 self._error(403, "settings access denied", "settings_access_denied")
@@ -1408,7 +1576,10 @@ class Handler(BaseHTTPRequestHandler):
             # matching the do_POST mapping.
             self._error(exc.status, str(exc)[:512], exc.code)
         except Exception as exc:  # noqa: BLE001 - local boundary redacts non-broker details
-            if exc.__class__.__module__.startswith("stateport_file_workspace."):
+            refusal = _readable_refusal(exc)
+            if refusal is not None:
+                self._error(400, refusal[1], "operation_failed", cause_code=refusal[0])
+            elif exc.__class__.__module__.startswith("stateport_file_workspace."):
                 self._error(409, str(exc), "file_workspace_refused")
             elif exc.__class__.__module__.startswith("stateport_terminal_broker."):
                 self._error(409, "the terminal request was refused", "terminal_refused")
@@ -1426,9 +1597,14 @@ class Handler(BaseHTTPRequestHandler):
                 # Governed run preparation/execution failures must surface
                 # their typed refusal instead of a generic operation_failed.
                 code = platform_surface.public_error_code(exc, "execution_refused")
-                self._error(409, str(exc)[:512], code)
+                cause = getattr(exc, "cause_code", None)
+                self._error(
+                    409, str(exc)[:512], code,
+                    cause_code=cause if isinstance(cause, str) and _CAUSE_CODE.fullmatch(cause) else None,
+                )
             else:
-                self._error(400, "the local operation failed", "operation_failed")
+                cause_code, message = _safe_operation_failure(exc)
+                self._error(400, message, "operation_failed", cause_code=cause_code)
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
@@ -1460,7 +1636,7 @@ class Handler(BaseHTTPRequestHandler):
             attachment_upload = len(parts) == 5 and parts[:2] == ["v1", "instances"] and parts[3:] == ["conversation", "attachments"]
             body = self._body(maximum_bytes=ConversationAttachmentStore.MAX_BYTES * 2 if attachment_upload else 64 * 1024)
             if path in {"/v1/provider/configure", "/v1/provider/verify", "/v1/provider/disconnect"}:
-                platform_surface.require_platform_operator(self.server)
+                self.server.require_actor_permission("application.provider.manage")
                 self._strict_body(body, ({"model", "providerId"} if "providerId" in body else {"model"}) if path.endswith("/configure") else set())
                 self._send(200, {"ok": True, "result": self.server.provider_action(path.rsplit("/", 1)[1], body)})
                 return
@@ -1468,14 +1644,29 @@ class Handler(BaseHTTPRequestHandler):
                 # Operator-owned provider API key: the request carries the key
                 # once, the response is the names-only provider projection and
                 # never echoes the value.
-                platform_surface.require_platform_operator(self.server)
+                self.server.require_actor_permission("application.provider.credential")
                 removing = path.endswith("/credential/remove")
                 self._strict_body(body, {"provider"} if removing else {"provider", "apiKey"})
                 self._send(200, {"ok": True, "result": self.server.provider_credential(removing, body)})
                 return
+            if path in {"/v1/provider/adopt", "/v1/provider/adopt/remove"}:
+                # Adopt an already signed-in OpenCode: no request field names a
+                # path, the service looks only in its fixed candidate
+                # locations, and the response is the names-only projection.
+                from .provider_adoption import AdoptionError
+                self.server.require_actor_permission("application.provider.credential")
+                removing = path.endswith("/adopt/remove")
+                self._strict_body(body, set() if removing else ({"providers"} if "providers" in body else set()))
+                try:
+                    result = self.server.provider_adopt(removing, body.get("providers"))
+                except AdoptionError as exc:
+                    self._error(409, exc.detail, exc.code)
+                    return
+                self._send(200, {"ok": True, "result": result})
+                return
             if path in {"/v1/provider/login", "/v1/provider/login/cancel", "/v1/provider/logout"}:
                 from .provider_setup import ProviderLoginError
-                platform_surface.require_platform_operator(self.server)
+                self.server.require_actor_permission("application.provider.manage")
                 self._strict_body(body, set())
                 if path == "/v1/provider/login":
                     try:
@@ -2304,6 +2495,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/application-fixtures/install":
                 try:
                     self._mutation_security("application fixture install")
+                except MutationAuthorizationError:
+                    self._error(403, CSRF_ERROR_MESSAGE, CSRF_ERROR_CODE)
+                    return
                 except PermissionError:
                     self._error(403, "application installation authorization failed", "application_install_denied")
                     return
@@ -2661,7 +2855,15 @@ class Handler(BaseHTTPRequestHandler):
         except RepositoryImportError as exc:
             self._error(409, str(exc), exc.code)
         except InfrastructureError as exc:
-            self._error(409, str(exc), exc.code)
+            if exc.code == "operation_failed":
+                self._error(
+                    409,
+                    "The infrastructure command failed. Review its run receipt and try again.",
+                    exc.code,
+                    cause_code="infrastructure_command_failed",
+                )
+            else:
+                self._error(409, str(exc), exc.code)
         except EnvironmentGatedExecution as exc:
             self._send(200, {"ok": True, "result": exc.payload})
         except ContextLifecycleError as exc:
@@ -2675,6 +2877,8 @@ class Handler(BaseHTTPRequestHandler):
         except platform_surface.PlatformSurfaceError as exc:
             status = 404 if exc.code.endswith("_not_found") else 409
             self._error(status, str(exc)[:512], exc.code)
+        except MutationAuthorizationError:
+            self._error(403, CSRF_ERROR_MESSAGE, CSRF_ERROR_CODE)
         except PermissionError:
             if path == "/v1/settings" or "/settings" in path:
                 self._error(403, "settings access denied", "settings_access_denied")
@@ -2728,8 +2932,13 @@ class Handler(BaseHTTPRequestHandler):
             self._error(409, str(exc), "conversation_attachment_refused")
         except TemplateUpgradeError as exc:
             self._error(exc.status, str(exc)[:512], exc.code)
+        except RequestRefused as exc:
+            self._error(exc.status, str(exc), exc.code)
         except Exception as exc:  # noqa: BLE001 - local boundary redacts non-broker details
-            if exc.__class__.__module__.startswith("stateport_file_workspace."):
+            refusal = _readable_refusal(exc)
+            if refusal is not None:
+                self._error(400, refusal[1], "operation_failed", cause_code=refusal[0])
+            elif exc.__class__.__module__.startswith("stateport_file_workspace."):
                 self._error(409, str(exc), "file_workspace_refused")
             elif exc.__class__.__module__.startswith("stateport_terminal_broker."):
                 self._error(409, "the terminal request was refused", "terminal_refused")
@@ -2747,9 +2956,14 @@ class Handler(BaseHTTPRequestHandler):
                 # Governed run preparation/execution failures must surface
                 # their typed refusal instead of a generic operation_failed.
                 code = platform_surface.public_error_code(exc, "execution_refused")
-                self._error(409, str(exc)[:512], code)
+                cause = getattr(exc, "cause_code", None)
+                self._error(
+                    409, str(exc)[:512], code,
+                    cause_code=cause if isinstance(cause, str) and _CAUSE_CODE.fullmatch(cause) else None,
+                )
             else:
-                self._error(400, "the local operation failed", "operation_failed")
+                cause_code, message = _safe_operation_failure(exc)
+                self._error(400, message, "operation_failed", cause_code=cause_code)
 
     def log_message(self, fmt: str, *args: object) -> None:
         # A log line must never be able to break the request that produced it.
@@ -2771,8 +2985,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
         """Log only the fixed path, never query values or request bodies."""
 
-        path = urlsplit(self.path).path
-        self.log_message("method=%s path=%s status=%s bytes=%s", self.command, path, code, size)
+        # An over-long request line is refused before it is parsed: no path yet.
+        path = urlsplit(getattr(self, "path", "")).path
+        self.log_message("method=%s path=%s status=%s bytes=%s", getattr(self, "command", None), path, code, size)
 
 
 class AppServer(ThreadingHTTPServer):
@@ -2857,6 +3072,20 @@ class AppServer(ThreadingHTTPServer):
             "canonicalSourceCatalogDigest"
         ]
         self.log = open(layout.logs_root / "service.log", "a", encoding="utf-8")
+        try:
+            quarantined = self.app.catalog.quarantine_unregistered_instance_directories()
+            if quarantined:
+                self.log.write(f"startup: moved {len(quarantined)} unregistered instance directories to quarantine: {quarantined}\n")
+                self.log.flush()
+        except Exception:  # noqa: BLE001 - housekeeping must never stop the service from starting
+            pass
+        try:
+            reconciled = self.app.reconcile_interrupted_restores()
+            if reconciled:
+                self.log.write(f"startup: rolled back {len(reconciled)} interrupted restore(s): {reconciled}\n")
+                self.log.flush()
+        except Exception:  # noqa: BLE001 - housekeeping must never stop the service from starting
+            pass
         self.execution = PortableExecutionService(self.app, product_root)
         self.execution_host = ExecutionHostProxy(catalog_entry=self.workspace_catalog_entry, catalog_entries=lambda: self.source_app().catalog.list(), instance_runs=self.execution.history)
         try:
@@ -2926,6 +3155,7 @@ class AppServer(ThreadingHTTPServer):
             self._assistant_processor = AssistantProcessor(
                 self.conversations,
                 log_writer=lambda msg: (self.log.write(msg), self.log.flush()),
+                context_sources=self._assistant_context_sources,
             )
         try:
             self.telegram_launcher = self._construct_telegram_launcher(layout)
@@ -2936,6 +3166,48 @@ class AppServer(ThreadingHTTPServer):
             raise
         if self._assistant_processor is not None:
             self._assistant_processor.start()
+
+    def _assistant_context_sources(self, instance_id: str) -> dict[str, object]:
+        """Bounded operational facts for the assistant context pack.
+
+        Only pending approvals and the recent receipt index for THIS instance
+        cross the boundary, reduced to safe display fields. Anything the
+        projections cannot provide is omitted rather than failing the chat.
+        """
+        approvals: list[dict[str, object]] = []
+        try:
+            listed = self.approvals_projection().get("approvals")
+            for item in listed if isinstance(listed, list) else []:
+                if not isinstance(item, Mapping) or item.get("instanceId") != instance_id:
+                    continue
+                approvals.append({
+                    "id": item.get("id"),
+                    "title": item.get("title"),
+                    "risk": item.get("risk"),
+                    "status": item.get("status"),
+                })
+                if len(approvals) >= 8:
+                    break
+        except Exception:
+            approvals = []
+        receipts: list[dict[str, object]] = []
+        try:
+            index = self.activity_receipts.receipt_index(instance_id)
+            listed = index.get("receipts") if isinstance(index, dict) else None
+            for item in listed if isinstance(listed, list) else []:
+                if not isinstance(item, Mapping):
+                    continue
+                receipts.append({
+                    "receiptId": item.get("receiptId"),
+                    "action": item.get("action"),
+                    "status": item.get("status"),
+                    "occurredAt": item.get("createdAt"),
+                })
+                if len(receipts) >= 8:
+                    break
+        except Exception:
+            receipts = []
+        return {"approvals": approvals, "receipts": receipts}
 
     def _stop_provider_processor(self):
         processor = self._assistant_processor
@@ -2982,6 +3254,7 @@ class AppServer(ThreadingHTTPServer):
                     self.conversations,
                     router=ProviderRouter(self.provider_setup.profile_path),
                     log_writer=lambda msg: (self.log.write(msg), self.log.flush()),
+                    context_sources=self._assistant_context_sources,
                 )
                 candidate.work_store.cancel_queued_for_disconnect()
                 candidate.activate_current_messages()
@@ -2992,7 +3265,7 @@ class AppServer(ThreadingHTTPServer):
                 self.provider_setup.detail = (
                     "OpenCode model saved. StatePort runs the pinned OpenCode executable and reports it. "
                     "An operator-provided provider API key can be stored here and is injected only into "
-                    "OpenCode invocations; StatePort never reads OpenCode's own authentication."
+                    "OpenCode invocations. An existing OpenCode sign-in can also be adopted; StatePort never displays or returns a credential."
                     if provider_id == 'opencode'
                     else "Model saved. Authenticate using Codex in this runtime, then verify. StatePort never reads or copies credentials."
                 )
@@ -3014,6 +3287,13 @@ class AppServer(ThreadingHTTPServer):
         if removing:
             return self.provider_setup.remove_credential(provider)
         return self.provider_setup.set_credential(provider, body.get("apiKey"))
+
+    def provider_adopt(self, removing, providers=None):
+        if not self._provider_execution_allowed:
+            raise PermissionError("provider execution is disabled in the validation release profile")
+        if removing:
+            return self.provider_setup.remove_adopted_signin()
+        return self.provider_setup.adopt_signin(providers)
 
     def provider_login_start(self):
         if not self._provider_execution_allowed:
@@ -3067,6 +3347,7 @@ class AppServer(ThreadingHTTPServer):
             "actorId": self.actor_id,
             "platformOperationsAllowed": statebench,
             "statebenchInspectionAllowed": statebench,
+            "providerActionsAllowed": "application.provider.manage" in permissions,
         }
 
     def settings_store(self, instance_id: str | None = None) -> SettingsStore:

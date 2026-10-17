@@ -167,14 +167,20 @@ function ExpandedContent({ onNavigate }: { onNavigate?: () => void }) {
           </button>
         </Tooltip>
       </div>
-      <div className="mt-1 flex flex-col gap-0.5 px-2" role="list" aria-label="Pinned and recent applications">
-        {rows.map((instance) => (
-          <AppRow key={instance.id} instance={instance} pathname={location.pathname} onNavigate={onNavigate} />
-        ))}
-        {rows.length === 0 ? (
-          <p className="px-3 py-1 text-xs text-foreground-tertiary">No applications yet. Install one from the Catalog.</p>
-        ) : null}
-      </div>
+      {rows.length > 0 ? (
+        <div className="mt-1 flex flex-col gap-0.5 px-2" role="list" aria-label="Pinned and recent applications">
+          {rows.map((instance) => (
+            <AppRow key={instance.id} instance={instance} pathname={location.pathname} onNavigate={onNavigate} />
+          ))}
+        </div>
+      ) : (
+        // Not inside role="list": a list may only own listitems (axe
+        // aria-required-children). Secondary text keeps >= 4.5:1 on the sidebar
+        // surface in every theme (tertiary is 4.16:1 on the light sidebar).
+        <p className="mt-1 px-4 py-1 text-xs text-foreground-secondary" data-testid="sidebar-empty">
+          No applications yet. Install one from the Catalog.
+        </p>
+      )}
 
       <div className="flex-1" />
 
@@ -218,22 +224,25 @@ function AppRow({
 }) {
   const active = pathname.startsWith(`/app/${instance.id}`)
   const health = instanceHealthPresentation(instance.health)
+  // The listitem wrapper keeps the anchor a real link for assistive tech
+  // (a role override on the <a> would drop its link semantics).
   return (
-    <Link
-      to={`/app/${instance.id}`}
-      onClick={onNavigate}
-      data-active={active}
-      aria-current={active ? 'page' : undefined}
-      role="listitem"
-      className={cn(
-        'nav-item flex h-nav-row items-center gap-2 rounded-sm px-3 text-sm transition-colors duration-instant',
-        active ? 'bg-accent-soft text-accent-soft-text' : 'text-foreground hover:bg-hover',
-      )}
-    >
-      <InstanceGlyphTile instance={instance} />
-      <span className="min-w-0 flex-1 truncate">{instance.name}</span>
-      <StatusDot state={health.state} label={health.label} showLabel={false} />
-    </Link>
+    <div role="listitem">
+      <Link
+        to={`/app/${instance.id}`}
+        onClick={onNavigate}
+        data-active={active}
+        aria-current={active ? 'page' : undefined}
+        className={cn(
+          'nav-item flex h-nav-row items-center gap-2 rounded-sm px-3 text-sm transition-colors duration-instant',
+          active ? 'bg-accent-soft text-accent-soft-text' : 'text-foreground hover:bg-hover',
+        )}
+      >
+        <InstanceGlyphTile instance={instance} />
+        <span className="min-w-0 flex-1 truncate">{instance.name}</span>
+        <StatusDot state={health.state} label={health.label} showLabel={false} />
+      </Link>
+    </div>
   )
 }
 
@@ -363,12 +372,14 @@ function RailContent() {
 
       <div className="my-2 h-px w-6 bg-border" aria-hidden="true" />
 
+      {rows.length > 0 ? (
       <div className="flex flex-col items-center gap-1" role="list" aria-label="Pinned and recent applications">
         {rows.map((instance) => {
           const active = location.pathname.startsWith(`/app/${instance.id}`)
           const health = instanceHealthPresentation(instance.health)
           return (
-            <Tooltip key={instance.id} side="right" content={`${instance.name} · ${health.label}`}>
+            <div key={instance.id} role="listitem">
+            <Tooltip side="right" content={`${instance.name} · ${health.label}`}>
               <Link
                 to={`/app/${instance.id}`}
                 aria-label={`${instance.name} — ${health.label}`}
@@ -397,9 +408,11 @@ function RailContent() {
                 />
               </Link>
             </Tooltip>
+            </div>
           )
         })}
       </div>
+      ) : null}
 
       <div className="flex-1" />
 

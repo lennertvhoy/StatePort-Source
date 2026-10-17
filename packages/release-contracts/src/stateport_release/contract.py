@@ -1087,6 +1087,17 @@ def workspace_image_environment(target: Mapping[str, Any], images: Sequence[Mapp
             "Environment=STATEPORT_EXECUTION_HOST_WORKSPACE_SPEC_DIGEST=" + digest]
 
 
+EGRESS_NETWORK_SUFFIX = "-egress"
+EGRESS_NETWORK_ROLE_LABEL = "io.stateport.network.role"
+
+
+def service_has_network_egress(service: Mapping[str, Any]) -> bool:
+    """True when the signed service asks to join the separate non-internal network."""
+
+    capabilities = service.get("capabilities")
+    return isinstance(capabilities, Mapping) and capabilities.get("networkEgress") == "external"
+
+
 def render_quadlet_bundle(
     target: Mapping[str, Any], images: Sequence[Mapping[str, Any]]
 ) -> dict[str, bytes]:
@@ -1126,6 +1137,9 @@ def render_quadlet_bundle(
 
     artifacts: list[dict[str, str]] = []
     owners = sorted({str(service["quadletOwner"]) for service in services})
+    egress_owners = {
+        str(service["quadletOwner"]) for service in services if service_has_network_egress(service)
+    }
     for owner in owners:
         for profile in ("validation", "accepted"):
             network_token = f"@@STATEPORT_NETWORK:{owner}:{profile}@@"
@@ -1142,6 +1156,38 @@ def render_quadlet_bundle(
             artifacts.append(
                 {
                     "templatePath": template_path,
+                    "owner": owner,
+                    "profile": profile,
+                    "kind": "network",
+                    "liveRoot": materialization["liveQuadletRoots"][owner],
+                    "phase": "validation-start" if profile == "validation" else "promotion-cas",
+                }
+            )
+            if owner not in egress_owners:
+                continue
+            # The internal network above has no route and no upstream DNS
+            # forwarding by design (measured on a Windows 11 + WSL2 guest: every
+            # getaddrinfo() inside a container on it fails with EAI_NONAME, and
+            # `DNS=` on an Internal=true network changes nothing).  A service
+            # that signs `networkEgress: external` additionally joins this
+            # separate, labelled, non-internal network, so only that service can
+            # resolve and reach external hosts.  Peers keep resolving each other
+            # through the internal network.
+            egress_template_path = (
+                f"templates/{owner}/stateport-{network_token}{EGRESS_NETWORK_SUFFIX}.network.in"
+            )
+            files[egress_template_path] = (
+                "[Network]\n"
+                f"NetworkName=stateport-{network_token}{EGRESS_NETWORK_SUFFIX}\n"
+                "Label=io.stateport.managed=true\n"
+                f"Label={EGRESS_NETWORK_ROLE_LABEL}=egress\n"
+                f"Label=io.stateport.release.id={target['releaseId']}\n"
+                f"Label=io.stateport.target.id={target['targetId']}\n"
+                f"Label=io.stateport.profile={profile}\n"
+            ).encode("utf-8")
+            artifacts.append(
+                {
+                    "templatePath": egress_template_path,
                     "owner": owner,
                     "profile": profile,
                     "kind": "network",
@@ -1168,6 +1214,16 @@ def render_quadlet_bundle(
             lines = [
                 "[Unit]",
                 f"Description=StatePort staged {profile} profile for {service_id}",
+            ]
+            if profile == "accepted":
+                # The activation drop-in binds these units with Wants=/After=
+                # only, and systemd propagates stop/restart exclusively through
+                # PartOf= on the unit side. Without this line,
+                # `systemctl --user restart stateport-accepted.target` exits 0
+                # while every container keeps its previous MainPID — measured
+                # on Alpha.22 (Win11+WSL2 guest, 2026-10-06).
+                lines.append("PartOf=stateport-accepted.target")
+            lines = lines + [
                 "",
                 # Quadlet's default network-online wait never completes on WSL2
                 # (nothing activates network-online.target), which delayed every
@@ -1187,6 +1243,11 @@ def render_quadlet_bundle(
                 "DropCapability=all",
                 f"UserNS=keep-id:uid={service['runAsUser']},gid={service['runAsUser']}",
                 f"Network=stateport-{network_token}.network",
+                *(
+                    [f"Network=stateport-{network_token}{EGRESS_NETWORK_SUFFIX}.network"]
+                    if service_has_network_egress(service)
+                    else []
+                ),
                 f"Label=io.stateport.source.commit={image['sourceCommit']}",
                 f"Label=io.stateport.source.tree={image['sourceTree']}",
                 f"Label=io.stateport.release.id={target['releaseId']}",

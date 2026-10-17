@@ -105,6 +105,7 @@ class AgentRunService:
         self._timeout_seconds = self._bounded_timeout(timeout_seconds)
         self._clock = clock or _utc_now
         self._mutex = threading.RLock()
+        self._reconcile_dead_predecessor()
 
     @staticmethod
     def _bounded_timeout(value: int | None) -> int:
@@ -195,35 +196,52 @@ class AgentRunService:
             return False
         return minimum <= info.st_size <= maximum
 
+    @staticmethod
+    def _container_readable(path: Path, minimum: int, maximum: int) -> bool:
+        """A regular, non-symlink file the sealed container can read.
+
+        The container reads as a mapped uid, so the file needs read bits; only
+        group/other WRITE bits are refused.
+        """
+        if not AgentRunService._regular_file(path, minimum, maximum):
+            return False
+        return not os.lstat(path).st_mode & 0o022
+
     def _provider_files(self, directory: Path, projection: dict[str, Any]) -> list[dict[str, str]]:
         refusals: list[dict[str, str]] = []
         env_path = directory / "provider.env"
-        env_ok = self._regular_file(env_path, 1, 4096)
-        if env_ok:
-            # The sealed workspace container reads this material as a mapped
-            # container uid, so the directory needs traverse bits and the file
-            # needs read bits.  Only group/other WRITE bits are refused; the
-            # directory stays owned by this user inside the private state root,
-            # which is what keeps other local users out.
-            env_mode = os.lstat(env_path).st_mode
-            if env_mode & 0o022:
-                env_ok = False
-        if env_ok:
-            projection["files"]["providerEnv"] = True
-        else:
+        auth_path = directory / "auth.json"
+        # The sealed workspace container reads this material as a mapped
+        # container uid, so the directory needs traverse bits and the file
+        # needs read bits.  Only group/other WRITE bits are refused; the
+        # directory stays owned by this user inside the private state root,
+        # which is what keeps other local users out.
+        env_ok = self._container_readable(env_path, 1, 4096)
+        # An adopted OpenCode sign-in (auth.json) is an alternative credential
+        # source: provider.env is only demanded when it is absent.
+        adopted = self._container_readable(auth_path, 2, 65536)
+        projection["files"]["providerEnv"] = env_ok
+        projection["files"]["authJson"] = adopted
+        if not env_ok and not adopted:
             refusals.append(
                 {
                     "reason": "provider_directory_incomplete",
-                    "detail": "provider.env is missing or unsafe",
+                    "detail": (
+                        f"Missing or unsafe credential: {env_path} or {auth_path}. Place or replace provider.env "
+                        "in the control and execution provider directories with a readable regular file containing "
+                        "one supported API key line, or adopt an existing OpenCode sign-in "
+                        "(scripts/adopt_opencode_signin.py copies auth.json into both directories)."
+                    ),
                 }
             )
-        if self._regular_file(directory / "opencode.json", 1, 65536):
+        config_path = directory / "opencode.json"
+        if self._regular_file(config_path, 1, 65536):
             projection["files"]["opencodeJson"] = True
-        else:
+        elif not adopted:
             refusals.append(
                 {
                     "reason": "provider_directory_incomplete",
-                    "detail": "opencode.json is missing or invalid",
+                    "detail": f"Place or replace {config_path} in the control and execution provider directories with a readable regular configuration file.",
                 }
             )
         model_path = directory / "model"
@@ -234,9 +252,16 @@ class AgentRunService:
                 refusals.append(
                     {
                         "reason": "provider_directory_incomplete",
-                        "detail": "the optional model file is invalid",
+                        "detail": f"Replace the invalid {model_path} in the control and execution provider directories with a readable regular file containing one model ID.",
                     }
                 )
+        elif not os.environ.get("STATEPORT_AGENT_MODEL", "").strip():
+            refusals.append(
+                {
+                    "reason": "provider_directory_incomplete",
+                    "detail": f"Place a model file ({model_path}) containing one model ID in the control and execution provider directories, or configure STATEPORT_AGENT_MODEL.",
+                }
+            )
         return refusals
 
     def readiness(self) -> dict[str, Any]:
@@ -246,14 +271,14 @@ class AgentRunService:
         projection = {
             "configured": self._provider_directory is not None,
             "present": False,
-            "files": {"providerEnv": False, "opencodeJson": False, "model": False},
+            "files": {"providerEnv": False, "authJson": False, "opencodeJson": False, "model": False},
         }
         directory: Path | None = None
         if not isinstance(self._provider_directory, str) or not self._provider_directory:
             refusals.append(
                 {
                     "reason": "provider_directory_unconfigured",
-                    "detail": "an operator provider directory is not configured",
+                    "detail": "Configure STATEPORT_AGENT_PROVIDER_DIR for the control provider directory during service setup.",
                 }
             )
         else:
@@ -262,7 +287,7 @@ class AgentRunService:
                 refusals.append(
                     {
                         "reason": "provider_directory_unconfigured",
-                        "detail": "the operator provider directory must be an absolute path",
+                        "detail": "Configure STATEPORT_AGENT_PROVIDER_DIR as an absolute control provider directory during service setup.",
                     }
                 )
             else:
@@ -283,7 +308,7 @@ class AgentRunService:
                 refusals.append(
                     {
                         "reason": "provider_directory_missing",
-                        "detail": "the operator provider directory is missing or unsafe",
+                        "detail": f"Provision the control provider directory {directory} with its service owner and safe mode (owned by uid {os.geteuid()}, no group/other write), then place the required provider files in both provider directories.",
                     }
                 )
             else:
@@ -358,6 +383,59 @@ class AgentRunService:
             )
         return objective
 
+    @staticmethod
+    def _pid_alive(pid: Any) -> bool:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:  # PermissionError: it exists and is somebody else's
+            return True
+        return True
+
+    def _finalize_interrupted(self, run_id: str) -> None:
+        """Close a receipt whose worker died with its process: a thread that no longer exists can never finish it.
+
+        Without this a service killed mid-run (SIGKILL, OOM, power loss) left the receipt "running" for ever, the UI polling it for
+        ever, and every later run refused with ``agent_run_in_progress``.  The outcome of the exec inside the sealed workspace is
+        unknown, so it is recorded as exactly that, never as a success or a failure of the objective.
+        """
+
+        try:
+            record = self._read_record(run_id)
+        except AgentRunError:
+            return
+        if record.get("status") != "running":
+            return
+        self._refuse(
+            record,
+            "run_interrupted",
+            "the control service stopped while this run was in flight; its outcome was not recorded "
+            "and the agent workspace may hold partial changes",
+        )
+        self._write_record(record)
+
+    def _reconcile_dead_predecessor(self) -> None:
+        """At start-up, finalize the run an earlier, now dead, service process left in flight (never a live process's run)."""
+
+        marker = self._marker_path()
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            run_id = data["runId"]
+            pid = data.get("pid")
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        if not isinstance(run_id, str) or pid == os.getpid() or self._pid_alive(pid):
+            return
+        with self._mutex:
+            try:
+                self._finalize_interrupted(run_id)
+                marker.unlink()
+            except (OSError, AgentRunError):
+                pass
+
     def _require_no_live_run(self) -> None:
         """Refuse a second concurrent run, reclaiming only a provably dead one.
 
@@ -390,23 +468,10 @@ class AgentRunService:
         age = (self._now() - created).total_seconds()
         if age <= self._timeout_seconds + _IN_PROGRESS_GRACE_SECONDS:
             raise AgentRunError("agent_run_in_progress", "an agent run is already in progress")
-        pid_alive = False
-        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                pid_alive = False
-            except PermissionError:
-                pid_alive = True
-            except OSError:
-                pid_alive = True
-            else:
-                pid_alive = True
-        try:
-            previous = self._read_record(run_id)
-        except AgentRunError:
-            previous = None
-        if not pid_alive and (previous is None or previous.get("status") in _TERMINAL_STATUSES):
+        pid_alive = self._pid_alive(pid)
+        if not pid_alive:
+            # A dead worker can never finish its receipt: close it as interrupted instead of refusing for ever.
+            self._finalize_interrupted(run_id)
             try:
                 marker.unlink()
             except OSError:

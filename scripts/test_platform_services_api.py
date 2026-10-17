@@ -921,7 +921,7 @@ def test_platform_mutations_require_csrf_origin_and_session(
         body=body,
     )
     assert status == 403
-    assert payload["error"]["code"] == "deployment_access_denied"
+    assert payload["error"]["code"] == "csrf_token_invalid"
 
     status, payload = _request(
         harness.port,
@@ -933,7 +933,7 @@ def test_platform_mutations_require_csrf_origin_and_session(
         body=body,
     )
     assert status == 403
-    assert payload["error"]["code"] == "deployment_access_denied"
+    assert payload["error"]["code"] == "csrf_token_invalid"
 
 
 def test_local_user_cannot_read_authority_index_or_mutate_authority_with_csrf(

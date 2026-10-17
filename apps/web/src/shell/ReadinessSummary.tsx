@@ -28,11 +28,23 @@ export function ReadinessSummary() {
     : provider?.failed ? 'Status unavailable'
     : !observation ? 'Checking provider'
     : `Executable: ${observation.executableInstalled ? 'installed' : 'missing'}; configuration: ${observation.configured ? 'configured' : 'not configured'}; authentication: ${observation.authenticationStatus}; request: ${observation.requestStatus}. Quota and billing: unavailable.`
+  // A readiness row may observe a gap, but it must never dead-end: each gap
+  // gets one plain sentence that says what the gap means and whether the study
+  // sample needs it, plus the single guided next action below. The steps mirror
+  // the shipped Coding provider settings (choose OpenCode, save a model, then
+  // connect an API key or sign in with OpenCode itself).
+  const providerReady = Boolean(observation?.configured && observation.authenticationStatus === 'authenticated')
+  const providerExplanation = !online || providerReady ? undefined
+    : 'AI coding agents need an OpenCode sign-in; the study sample does not. To set up: open Coding provider, choose OpenCode, save a model, then connect an API key or sign in with OpenCode.'
+  const workerReady = Boolean(runtime?.workerExecutionEnabled)
+  const workerExplanation = !runtime || runtime.workerExecutionEnabled === undefined ? undefined
+    : workerReady ? undefined
+    : 'Worker execution runs approved tasks in the background and is off by default; the study sample works without it.'
   const checks = [
     { name: 'Local service', value: status?.state === 'connected' ? 'Connected' : status?.state === 'degraded' ? 'Degraded' : status?.state === 'offline' ? 'Offline' : 'Not checked', action: 'Review connection', to: '/settings/advanced' },
     { name: 'Execution runtime', value: !runtime ? 'Not checked' : runtime.status === 'available' ? 'Reachable' : 'Unavailable', action: 'Inspect execution host', to: '/execution-host' },
-    { name: 'Worker execution', value: !runtime || runtime.workerExecutionEnabled === undefined ? 'Not checked' : runtime.workerExecutionEnabled ? 'Enabled; each task still requires authority' : 'Disabled', action: 'Review execution controls', to: '/execution-host' },
-    { name: 'Provider', value: providerValue, action: 'Set up or verify provider', to: '/settings/provider' },
+    { name: 'Worker execution', value: !runtime || runtime.workerExecutionEnabled === undefined ? 'Not checked' : runtime.workerExecutionEnabled ? 'Enabled; each task still requires authority' : 'Disabled', explanation: workerExplanation, action: 'Review execution controls', to: '/execution-host' },
+    { name: 'Provider', value: providerValue, explanation: providerExplanation, action: 'Set up or verify provider', to: '/settings/provider' },
     { name: 'Applications', value: !online || error ? 'Inventory unavailable' : loading ? 'Checking inventory' : instances.length ? `${instances.length} installed; review an application before work` : 'No applications installed', action: instances.length && online && !error ? 'Review applications' : 'Import a template', to: instances.length && online && !error ? '/applications' : '/catalog' },
   ]
   return (
@@ -45,6 +57,9 @@ export function ReadinessSummary() {
             <dt className="text-xs font-medium text-foreground">{check.name}</dt>
             <dd className="mt-0.5 text-xs text-foreground-secondary">
               <p>{check.value}</p>
+              {'explanation' in check && typeof check.explanation === 'string' ? (
+                <p className="mt-1 text-foreground-tertiary">{check.explanation}</p>
+              ) : null}
               <Link to={check.to} className="mt-1 inline-flex min-h-8 items-center rounded-sm text-accent hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{check.action}</Link>
             </dd>
           </div>

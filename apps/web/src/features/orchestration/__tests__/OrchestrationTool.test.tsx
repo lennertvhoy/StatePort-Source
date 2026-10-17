@@ -9,7 +9,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
-import { getClient, resetClientForTests, resetMockState, useScenarioStore } from '@/client'
+import { ClientError, getClient, resetClientForTests, resetMockState, useScenarioStore } from '@/client'
 import type { ScenarioId } from '@/client'
 import { INSTANCE_IDS } from '@/client/mock/seed'
 
@@ -402,6 +402,43 @@ describe('OrchestrationTool — unavailable state', () => {
     expect(screen.queryByTestId('orchestration-approve')).toBeNull()
     expect(screen.queryByTestId('orchestration-run')).toBeNull()
     expect(screen.queryByTestId('orchestration-close')).toBeNull()
+  })
+
+  it('states the real scope of an available sandbox backend and keeps prepare enabled', async () => {
+    const adapter = getClient().orchestration
+    const original = await adapter.getView(NIXOS)
+    vi.spyOn(adapter, 'getView').mockImplementation(async () => ({
+      ...original,
+      backendAvailability: {
+        status: 'available',
+        backendId: 'sandbox_bwrap',
+        testOnly: false,
+        message:
+          'Sandboxed execution only. No coding agent is configured, so a run checks the project and changes nothing. Real model coding-agent runs are not supported here.',
+      },
+    }))
+    renderTool()
+    const scope = await screen.findByTestId('orchestration-backend-scope')
+    expect(within(scope).getByText(/Sandboxed execution only/)).toBeTruthy()
+    expect(within(scope).getByText(/not supported here/)).toBeTruthy()
+    expect(screen.queryByTestId('orchestration-backend-unavailable')).toBeNull()
+  })
+
+  it('shows the service refusal reason instead of generic copy when a prepare is refused', async () => {
+    const user = userEvent.setup()
+    renderTool()
+    expect(await screen.findByText('No orchestration session')).toBeTruthy()
+    const adapter = getClient().orchestration
+    vi.spyOn(adapter, 'prepareSlice').mockRejectedValue(
+      new ClientError('http', 'refused', {
+        status: 409,
+        code: 'goal_backend_unavailable',
+        detail: 'bubblewrap (bwrap) is not installed on this host',
+      }),
+    )
+    await user.type(screen.getByTestId('orchestration-objective'), 'Check it')
+    await user.click(screen.getByTestId('orchestration-prepare'))
+    expect(await screen.findByText(/bubblewrap \(bwrap\) is not installed on this host/)).toBeTruthy()
   })
 
   it('maps a refused prepare to plain copy when availability was stale', async () => {

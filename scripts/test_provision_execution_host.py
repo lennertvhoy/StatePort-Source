@@ -1334,6 +1334,101 @@ def test_control_start_refuses_a_foreign_same_name_network(
     assert "does not match the signed internal labels" in receipt["failure"]["detail"]
 
 
+_EGRESS_PATH = "accepted/revision/stateport-control/stateport-web-egress.network"
+_INTERNAL_PATH = "accepted/revision/stateport-control/stateport-web.network"
+_WEB_UNIT_PATH = "accepted/revision/stateport-control/stateport-web.container"
+
+
+def _egress_materialization(*, egress_extra: str = "") -> dict[str, bytes]:
+    return {
+        _WEB_UNIT_PATH: (
+            "[Container]\nContainerName=stateport-web\nImage=example.invalid/web@sha256:"
+            + "a" * 64
+            + "\nNetwork=stateport-web.network\nNetwork=stateport-web-egress.network\n"
+        ).encode(),
+        _INTERNAL_PATH: (
+            "[Network]\nNetworkName=stateport-web-net\n"
+            "Label=io.stateport.managed=true\nInternal=true\n"
+        ).encode(),
+        _EGRESS_PATH: (
+            "[Network]\nNetworkName=stateport-web-net-egress\n"
+            "Label=io.stateport.managed=true\nLabel=io.stateport.network.role=egress\n"
+            + egress_extra
+        ).encode(),
+    }
+
+
+def _start_egress_case(sim, monkeypatch, materialization):
+    verified = _verified("wsl2-ubuntu2404-linux-amd64-rootless-podman-quadlet")
+    monkeypatch.setattr(
+        prov,
+        "observe_linux_substrate",
+        lambda: type("Substrate", (), {"substrate": "wsl2"})(),
+    )
+    sim[3].start()
+    return _apply(
+        sim,
+        verified=verified,
+        revalidate=lambda: verified,
+        control_plane_materialization=materialization,
+    )
+
+
+def test_control_start_accepts_a_labelled_non_internal_egress_network(
+    sim, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The signed egress network is the one control network allowed to be non-internal.
+
+    Measured on Windows 11 + WSL2 (Alpha.23): an Internal=true network cannot resolve
+    or reach any external host, so the web service additionally joins this network.
+    """
+    _accounts, host, _runner, _daemon = sim
+    receipt = _start_egress_case(sim, monkeypatch, _egress_materialization())
+    assert receipt["result"] == "succeeded", receipt.get("failure")
+    assert host.networks["stateport-web-net"]["internal"] is True
+    assert host.networks["stateport-web-net-egress"]["internal"] is False
+
+
+def test_control_start_refuses_an_egress_network_that_is_observed_internal(
+    sim, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _accounts, host, _runner, _daemon = sim
+    host.networks["stateport-web-net-egress"] = {
+        "name": "stateport-web-net-egress",
+        "internal": True,
+        "labels": {
+            "io.stateport.managed": "true",
+            "io.stateport.network.role": "egress",
+        },
+    }
+    receipt = _start_egress_case(sim, monkeypatch, _egress_materialization())
+    assert receipt["result"] == "failed"
+    assert "does not match the signed egress labels" in receipt["failure"]["detail"]
+
+
+def test_control_start_refuses_a_non_internal_network_without_the_egress_role(
+    sim, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materialization = _egress_materialization()
+    materialization[_EGRESS_PATH] = (
+        "[Network]\nNetworkName=stateport-web-net-egress\n"
+        "Label=io.stateport.managed=true\n"
+    ).encode()
+    receipt = _start_egress_case(sim, monkeypatch, materialization)
+    assert receipt["result"] == "failed"
+    assert "control network shape is incomplete" in receipt["failure"]["detail"]
+
+
+def test_control_start_refuses_an_egress_labelled_network_that_also_claims_internal(
+    sim, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = _start_egress_case(
+        sim, monkeypatch, _egress_materialization(egress_extra="Internal=true\n")
+    )
+    assert receipt["result"] == "failed"
+    assert "control network shape is incomplete" in receipt["failure"]["detail"]
+
+
 def test_control_start_recovers_exact_ipam_network_not_found_once(
     sim, monkeypatch: pytest.MonkeyPatch
 ) -> None:

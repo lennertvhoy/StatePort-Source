@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ApplicationInstance, GovernedAction, RunOperation, RunRecord, StudyStatePackageData } from '@/client'
-import { getClient, resetClientForTests } from '@/client'
+import { ClientError, getClient, resetClientForTests } from '@/client'
 import { useApplicationsPrefs } from '@/features/applications/lib/prefsStore'
 import { useSessionStore } from '@/state'
 
@@ -425,5 +425,117 @@ describe('StudyState focused learning journey', () => {
 
     expect(await screen.findByText('Apply outcome needs verification')).toBeTruthy()
     expect(useApplicationsPrefs.getState().studyReflectionDrafts[`${instance.id}:evidence-practice`]).toBe(reflection)
+  })
+
+  it('tells the loser of a concurrent apply that another change is in progress, and that nothing changed', async () => {
+    const user = userEvent.setup()
+    const reflection = 'Keep me while another change finishes.'
+    const proposal = recordOperation('Complete one evidence-backed practice activity', reflection)
+    const busy = 'Another change is being applied to this instance right now, so this one was not applied. Wait for it to finish, then try again.'
+    mockLifecycle('studystate.sample.record-evidence/v1', proposal, {
+      applyError: new ClientError('http', busy, { status: 409, code: 'instance_busy' }),
+    })
+
+    render(<StudyJourney instance={instance} study={study} onDurableStateChanged={() => undefined} />)
+    await user.click(await screen.findByRole('button', { name: 'Write reflection' }))
+    await user.type(screen.getByLabelText(/What changed in your understanding/), reflection)
+    await user.click(screen.getByTestId('study-review-change'))
+    await user.click(await screen.findByTestId('study-approve-apply'))
+
+    expect(await screen.findByText(busy)).toBeTruthy()
+    expect(screen.getByText('The learning state was not changed')).toBeTruthy()
+    expect(screen.queryByText('Apply outcome needs verification')).toBeNull()
+    expect(useApplicationsPrefs.getState().studyReflectionDrafts[`${instance.id}:evidence-practice`]).toBe(reflection)
+  })
+
+  it('rejects the prepared proposal it owns when going back from review', async () => {
+    const user = userEvent.setup()
+    const pauseProposal = {
+      type: 'pause_activity',
+      activityId: 'evidence-practice',
+      activityTitle: 'Complete one evidence-backed practice activity',
+      priorStatus: 'in_progress',
+      resultingStatus: 'paused',
+      expectedPlanDigest: BEFORE,
+      resultingPlanDigest: AFTER,
+    }
+    const actionId = 'studystate.sample.pause-activity/v1'
+    vi.spyOn(getClient().runs, 'listActions').mockResolvedValue(allActions)
+    vi.spyOn(getClient().runs, 'listEngines').mockResolvedValue([
+      { id: 'synthetic', label: 'Local', kind: 'synthetic', availability: 'available', available: true },
+    ])
+    vi.spyOn(getClient().runs, 'prepare').mockResolvedValue(record(1, 'awaiting_approval', { actionId }))
+    const transition = vi.spyOn(getClient().runs, 'transition').mockImplementation(
+      async (_id, operation: RunOperation) => {
+        if (operation === 'approve') return record(2, 'approved', { actionId })
+        if (operation === 'execute') return record(3, 'state_change_proposed', { actionId, proposal: pauseProposal })
+        if (operation === 'proposal-reject') {
+          return { ...record(4, 'state_change_rejected', { actionId }), state: 'rejected' }
+        }
+        return record(5, 'applied', { actionId, proposal: pauseProposal, withReceipt: true })
+      },
+    )
+    const refreshed = vi.fn()
+    const activeStudy: StudyStatePackageData = {
+      ...study,
+      activities: [{ ...study.activities[0], state: 'in_progress' }, study.activities[1]],
+    }
+
+    render(<StudyJourney instance={instance} study={activeStudy} onDurableStateChanged={refreshed} />)
+    await user.click(await screen.findByRole('button', { name: 'Pause activity' }))
+    expect(await screen.findByTestId('study-change-preview')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: 'Go back' }))
+
+    // The prepared run is rejected server-side, so no pending approval is
+    // left behind in Approvals or the overview (row #14).
+    expect(transition.mock.calls.map((call) => call[1])).toEqual([
+      'approve', 'execute', 'proposal-reject',
+    ])
+    await waitFor(() => expect(screen.queryByTestId('study-change-preview')).toBeNull())
+    expect(screen.getByRole('button', { name: 'Pause activity' })).toBeTruthy()
+    // Durable learning state did not change, but the surfaces that showed the
+    // now-withdrawn pending proposal re-read (approvals inbox, overview).
+    await waitFor(() => expect(refreshed).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps the pending review honest when the rejection is refused', async () => {
+    const user = userEvent.setup()
+    const pauseProposal = {
+      type: 'pause_activity',
+      activityId: 'evidence-practice',
+      activityTitle: 'Complete one evidence-backed practice activity',
+      priorStatus: 'in_progress',
+      resultingStatus: 'paused',
+      expectedPlanDigest: BEFORE,
+      resultingPlanDigest: AFTER,
+    }
+    const actionId = 'studystate.sample.pause-activity/v1'
+    vi.spyOn(getClient().runs, 'listActions').mockResolvedValue(allActions)
+    vi.spyOn(getClient().runs, 'listEngines').mockResolvedValue([
+      { id: 'synthetic', label: 'Local', kind: 'synthetic', availability: 'available', available: true },
+    ])
+    vi.spyOn(getClient().runs, 'prepare').mockResolvedValue(record(1, 'awaiting_approval', { actionId }))
+    vi.spyOn(getClient().runs, 'transition').mockImplementation(
+      async (_id, operation: RunOperation) => {
+        if (operation === 'approve') return record(2, 'approved', { actionId })
+        if (operation === 'execute') return record(3, 'state_change_proposed', { actionId, proposal: pauseProposal })
+        throw new Error('rejection refused for this run revision')
+      },
+    )
+    const activeStudy: StudyStatePackageData = {
+      ...study,
+      activities: [{ ...study.activities[0], state: 'in_progress' }, study.activities[1]],
+    }
+
+    render(<StudyJourney instance={instance} study={activeStudy} onDurableStateChanged={() => undefined} />)
+    await user.click(await screen.findByRole('button', { name: 'Pause activity' }))
+    await user.click(await screen.findByRole('button', { name: 'Go back' }))
+
+    // The proposal was not withdrawn: the review stays open and says so,
+    // instead of silently leaving a stale pending approval behind.
+    expect(await screen.findByText(/rejection refused for this run revision/)).toBeTruthy()
+    expect(screen.getByTestId('study-change-preview')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Go back' })).toBeTruthy()
   })
 })

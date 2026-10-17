@@ -26,6 +26,14 @@ export const providerStatusSchema = z.object({
   credentialStatus: z.enum(['configured', 'unconfigured']).optional(),
   credentialProvider: z.enum(OPENCODE_CREDENTIAL_PROVIDERS).nullable().optional(),
   credentialEnvVar: z.string().nullable().optional(),
+  // Adopted OpenCode sign-in: presence, timestamp, source path and provider
+  // names only. The service never returns, and this client never holds, a value.
+  adoptionStatus: z.enum(['adopted', 'not_adopted']).optional(),
+  adoptionSourceAvailable: z.boolean().optional(),
+  adoptedAt: z.string().nullable().optional(),
+  adoptedSource: z.string().nullable().optional(),
+  adoptedProviders: z.array(z.string()).optional(),
+  adoptionSourceProviders: z.array(z.string()).optional(),
 })
 export type ProviderStatus = z.infer<typeof providerStatusSchema>
 export const loginFlowSchema = z.object({
@@ -50,6 +58,8 @@ export const providerClient = {
   disconnect: () => mutate('disconnect'),
   setCredential: (provider: OpenCodeCredentialProvider, apiKey: string) => mutate('credential', { provider, apiKey }),
   removeCredential: (provider: OpenCodeCredentialProvider) => mutate('credential/remove', { provider }),
+  adoptSignIn: (providers?: string[]) => mutate('adopt', providers && providers.length > 0 ? { providers } : {}),
+  removeAdoptedSignIn: () => mutate('adopt/remove'),
   login: () => mutateLoginFlow('login'),
   getLogin: () => transport.request('/v1/provider/login', { schema: loginFlowSchema }),
   cancelLogin: () => mutateLoginFlow('login/cancel'),

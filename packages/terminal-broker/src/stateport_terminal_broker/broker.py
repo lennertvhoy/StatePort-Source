@@ -83,9 +83,10 @@ def _project_sandbox_command(
         "--unshare-all",
         "--cap-drop",
         "ALL",
-        "--hostname",
-        "stateport-workspace",
     ]
+    # No ``--hostname``: ``--unshare-all`` already gives a private UTS namespace,
+    # and setting a name inside it needs a capability that nested rootless
+    # podman denies ("Can't set hostname ... Operation not permitted").
     # The broker already gives each session a dedicated pseudoterminal and
     # process session.  Asking Bubblewrap to create another session would
     # detach the shell from that PTY and disable interactive job control.

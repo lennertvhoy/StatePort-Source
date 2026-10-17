@@ -17,7 +17,7 @@
  * alias: the shell route-smoke test asserts it until the shell suite moves to
  * the new id (applications-page).
  */
-import { History, LayoutGrid, ListFilter, Plus, Rows2, Rows3, Search, X } from 'lucide-react'
+import { GraduationCap, History, LayoutGrid, ListFilter, Plus, Rows2, Rows3, Search, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
@@ -59,6 +59,15 @@ const MAX_OPERATION_ROWS = 5
 const MAX_RECENT_ROWS = 5
 
 const SORT_LABELS: Record<ApplicationsSort, string> = { recent: 'Recent', name: 'Name', package: 'Package', manual: 'Manual' }
+
+// The shipped first run must not dead-end on an empty catalog: the bundled
+// StudyState Sample installs with ONE explicit confirmation and lands the user
+// inside it, no catalog knowledge needed. The service keeps every check (exact
+// digest binding, CSRF/origin, disabled-network fixture, durable receipt with
+// explicit_browser_confirmation consent); nothing here bypasses them. The
+// service advertises the sample as 'studystate.sample'; the dev mock client
+// ships the same sample under its seed identity, so both resolve.
+const STUDY_SAMPLE_PACKAGE_IDS = ['studystate.sample', 'pkg_study_state'] as const
 
 export default function ApplicationsPage() {
   const navigate = useNavigate()
@@ -122,8 +131,33 @@ export default function ApplicationsPage() {
   const [filter, setFilter] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [renameTarget, setRenameTarget] = useState<ApplicationInstance | null>(null)
+  const [sampleInstall, setSampleInstall] = useState<{ state: 'idle' | 'installing' | 'failed'; error?: string }>({ state: 'idle' })
   const filterRef = useRef<HTMLInputElement>(null)
   const dragIdRef = useRef<string | null>(null)
+
+  const installStudySample = useCallback(async () => {
+    if (sampleInstall.state === 'installing') return
+    setSampleInstall({ state: 'installing' })
+    try {
+      const catalog = getClient().catalog
+      let sampleId: string | null = null
+      for (const id of STUDY_SAMPLE_PACKAGE_IDS) {
+        try {
+          await catalog.get(id)
+          sampleId = id
+          break
+        } catch {
+          // Try the next known sample identity; the resolver never invents digests.
+        }
+      }
+      if (!sampleId) throw new Error('The bundled study sample is not available from the connected service.')
+      const created = await catalog.createInstance(sampleId, { name: 'StudyState Sample' })
+      void refresh()
+      navigate(`/app/${created.instance.id}`)
+    } catch (error) {
+      setSampleInstall({ state: 'failed', error: error instanceof Error ? error.message : String(error) })
+    }
+  }, [sampleInstall.state, navigate, refresh])
 
   // ── pinned order reconciliation (client pin flags ↔ persisted user order) ──
   const pinnedKey = instances.filter((i) => i.pinned).map((i) => i.id).join(',')
@@ -422,16 +456,29 @@ export default function ApplicationsPage() {
 
         {empty ? (
           <>
-            {!onboardingDismissed ? <OnboardingStrip onDismiss={dismissOnboarding} /> : null}
+            {sampleInstall.state === 'failed' && sampleInstall.error ? (
+              <InlineNotice tone="danger" title="The study sample could not be installed">
+                {`${sampleInstall.error} Nothing was installed.`}
+              </InlineNotice>
+            ) : null}
             <div className="rounded-md border border-border bg-surface">
               <EmptyState
-                icon={LayoutGrid}
+                icon={GraduationCap}
                 title="No applications yet"
-                description="Install a reviewed package to create your first governed workspace."
-                action={{ label: 'Browse Catalog', onClick: () => void navigate('/catalog') }}
-                secondaryAction={{ label: 'Import a repository', onClick: () => void navigate('/catalog?import=1') }}
+                description="Open the bundled study sample to try a complete governed application. It works without any AI provider or worker setup."
+                action={{
+                  label: sampleInstall.state === 'installing' ? 'Preparing the study sample' : 'Open the study sample',
+                  onClick: () => void installStudySample(),
+                  disabled: sampleInstall.state === 'installing',
+                }}
+                secondaryAction={{ label: 'Browse Catalog', onClick: () => void navigate('/catalog') }}
               />
+              <div className="flex justify-center pb-6">
+                <Button size="sm" variant="ghost" onClick={() => void navigate('/catalog?import=1')}>Import a repository</Button>
+              </div>
             </div>
+            {/* After the primary action, so a keyboard user reaches it before the readiness links. */}
+            {!onboardingDismissed ? <OnboardingStrip onDismiss={dismissOnboarding} /> : null}
           </>
         ) : (
           <>

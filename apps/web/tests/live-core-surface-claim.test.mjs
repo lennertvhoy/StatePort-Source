@@ -369,10 +369,15 @@ const SPEC_SOURCE = readFileSync(
 )
 
 test('WIRING: the spec no longer writes a whole-surface approvals literal', () => {
+  // The value is deliberately NOT required to be `{`. Independent verification
+  // reinstated the batch5 overstatement as `approvals: BATCH5_APPROVALS_LITERAL`
+  // -- the literal one identifier away -- and every check stayed green, because
+  // this pattern demanded a brace. A leg-written approvals ENTRY is the defect
+  // however its value is spelled.
   assert.equal(
-    /matrix\.surfaces\s*=\s*\{[^}]*\bapprovals\s*:\s*\{/s.test(SPEC_SOURCE),
+    /matrix\.surfaces\s*=\s*\{[^}]*\bapprovals\s*:/s.test(SPEC_SOURCE),
     false,
-    'a literal matrix.surfaces.approvals block is exactly the batch5 overstatement',
+    'a leg-written matrix.surfaces.approvals entry is the batch5 overstatement, whatever its value is spelled',
   )
   assert.equal(
     /status:\s*'live-tested'[\s\S]{0,400}?notExercisedApprovalKinds/.test(SPEC_SOURCE),
@@ -448,6 +453,41 @@ test('WIRING: every surface is run-certified through stampRunOutcomeCaveat in af
     /matrix\.surfaces = stampRunOutcomeCaveat\(/,
     'matrix.surfaces must be the caveated set, not the raw merge',
   )
+  // NEITHER THE CAVEAT NOR THE STAMP MAY BE CONDITIONAL. Independent
+  // verification rewrote the caveat as `if (!journeyFailed) matrix.surfaces =
+  // stampRunOutcomeCaveat(...)` -- so it would run on a PASSING run and be
+  // skipped on a failing one, exactly inverting its contract -- and every check
+  // stayed green, because the text of the call is unchanged. A conditional
+  // prefix is invisible to any pattern that only looks for the call itself.
+  for (const [label, needle] of [
+    ['the run-certification caveat', 'matrix.surfaces = stampRunOutcomeCaveat('],
+    ['the run outcome stamp', 'matrix.runOutcome = stampRunOutcome('],
+  ]) {
+    const at = SPEC_SOURCE.indexOf(needle)
+    assert.ok(at > 0, `${label} must be present`)
+    const lineStart = SPEC_SOURCE.lastIndexOf('\n', at) + 1
+    const line = SPEC_SOURCE.slice(lineStart, SPEC_SOURCE.indexOf('\n', at))
+    assert.equal(
+      /\bif\s*\(|\bfor\s*\(|\bwhile\s*\(|\?/.test(line),
+      false,
+      `${label} must not be conditional or inlined into a loop -- a prefix like \`if (!journeyFailed) \` inverts its contract invisibly`,
+    )
+  }
+  // SPREAD ORDER IS LOAD-BEARING AND WAS UNGUARDED. Independent verification
+  // swapped the two spreads so a leg-written entry landed last, which displaces
+  // the derived approval entirely: uncoveredPaths, coveredPaths and
+  // invalidDeclarationPaths all vanish and the surface reads `live-tested` with
+  // no coverage data at all. That was green across all 22 checks. The claim in
+  // the correction journal that "its spread is last so it wins over any
+  // leg-written entry" was true of the tree and checked by nothing.
+  const caveatArgs2 = balancedCallArgs(SPEC_SOURCE, SPEC_SOURCE.indexOf('stampRunOutcomeCaveat('))
+  const existingAt = caveatArgs2.indexOf('...(matrix.surfaces as Record<string, unknown>)')
+  const derivedAt = caveatArgs2.indexOf('...deriveSurfaces(')
+  assert.ok(existingAt > 0 && derivedAt > 0, 'both spreads must be present in the merge')
+  assert.ok(
+    derivedAt > existingAt,
+    'the DERIVED entry must spread LAST, or a leg-written entry displaces it and the surface reads live-tested with no coverage data',
+  )
 })
 
 test('WIRING: resultingState is interpolated from the observed decision, not a literal', () => {
@@ -475,14 +515,28 @@ test('WIRING: each approvals observation is recorded after its leg observed the 
     runDecision > approveAssertion,
     "run-decision must be recorded after the decision is observed, not before",
   )
-  const infraAssert = SPEC_SOURCE.indexOf('toContainText(')
+  // ANCHORED TO THE LEG, NOT TO THE FILE. This used to compare against the
+  // FIRST `toContainText(` anywhere in an 8,000-line spec -- an accessibility
+  // helper some 3,700 lines above the infrastructure leg. Independent
+  // verification moved the infrastructure-plan call site to the top of an
+  // unrelated early test and all 22 checks stayed green: the assertion's own
+  // message said "after its own evidence is asserted" while it was checking
+  // against a helper it never looked at. The same defect I had already fixed
+  // once with balanced-paren extraction, left in place here.
   const infraPlan = SPEC_SOURCE.indexOf(
     "recordSurfaceObservation('approvals', 'infrastructure-plan'",
   )
   assert.ok(infraPlan > 0, 'the infrastructure-plan observation must be recorded')
+  const infraLegStart = SPEC_SOURCE.lastIndexOf("\ntest('", infraPlan)
+  assert.ok(infraLegStart > 0, 'the call site must sit inside a named test')
+  const infraLeg = SPEC_SOURCE.slice(infraLegStart, SPEC_SOURCE.indexOf('\n})', infraLegStart))
   assert.ok(
-    infraPlan > infraAssert,
-    'infrastructure-plan must be recorded after its own evidence is asserted',
+    /Infrastructure preserves dirty and stopped truth/.test(infraLeg),
+    'the infrastructure-plan observation must be recorded by the infrastructure leg, not some other test',
+  )
+  assert.ok(
+    infraPlan > infraLeg.indexOf('toContainText('),
+    'infrastructure-plan must be recorded after ITS OWN leg asserts its evidence',
   )
 })
 
@@ -587,10 +641,28 @@ test('DRIFT: the spec helper mirrors the conditions the fixture actually keys on
     /source_authority\s*=.*STATEPORT_UI_SOURCE_AUTHORITY.*or reviewed_issuance/,
     'reviewed_issuance must reach source_authority',
   )
+  // ANCHORED TO THE END OF THE ASSIGNMENT, not merely "contains". Independent
+  // verification added a THIRD route -- `or os.environ.get("STATEPORT_UI_REVIEWED_OPERATOR") == "1"`
+  // -- and the guard stayed green with the spec helper now wrong, because
+  // `.*` is intra-line and the pattern matched the original text as a prefix.
+  // The guard's own comment claims it fails when "someone changes which
+  // conditions the fixture keys its override on"; that is true for removals and
+  // reorderings and was FALSE for additions. This falsified the guard's stated
+  // invariant, so the invariant is now the one actually enforced.
+  const assignmentLine = (name) => {
+    const line = FIXTURE_SOURCE.split('\n').find((l) => l.trimStart().startsWith(name))
+    assert.ok(line, `${name} must be assigned in the fixture`)
+    return line.trim()
+  }
   assert.match(
-    FIXTURE_SOURCE,
-    /workspace_operator\s*=.*STATEPORT_UI_REAL_WORKSPACES.*or source_authority/,
-    'workspace_operator must be reachable through both routes',
+    assignmentLine('workspace_operator ='),
+    /^workspace_operator = os\.environ\.get\("STATEPORT_UI_REAL_WORKSPACES"\) == "1" or source_authority$/,
+    'workspace_operator must be reachable through EXACTLY these two routes; a third route leaves the spec helper wrong',
+  )
+  assert.match(
+    assignmentLine('source_authority ='),
+    /^source_authority = os\.environ\.get\("STATEPORT_UI_SOURCE_AUTHORITY"\) == "1" or reviewed_issuance$/,
+    'source_authority must be reachable through EXACTLY these two routes',
   )
   // The precondition that makes mirroring only two conditions sufficient. If
   // this is ever removed, the two-condition helper becomes wrong for a

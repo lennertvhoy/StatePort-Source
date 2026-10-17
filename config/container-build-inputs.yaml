@@ -56,7 +56,9 @@ alpinePackages:
   # libcrypto3/libssl3/sqlite-libs are exact-pinned security upgrades of the
   # python base image's own packages (the upstream rebuilt tag still ships
   # 3.5.7-r0/3.51.2-r0); every alpine-based runtime image pins the same
-  # versions against the base's default v3.23 repositories.
+  # versions against the base's default v3.23 repositories. Re-pinned
+  # 2026-10-07 to 3.5.9-r0 (the maintained v3.23 release; 3.5.8-r0 pins only
+  # resolved against the frozen base layer, not the live repository).
   # libexpat is the exact-pinned security upgrade of the Git dependency chain
   # to the maintained v3.23 release fixing CVE-2026-93990 (2.8.5-r0).
   # libstdc++/libgcc are the C++ runtime the pinned musl OpenCode binary links
@@ -65,10 +67,10 @@ alpinePackages:
   packages:
     git: 2.52.0-r0
     bubblewrap: 0.12.0-r0
-    libcrypto3: 3.5.8-r0
+    libcrypto3: 3.5.9-r0
     libexpat: 2.8.5-r0
     libgcc: 15.2.0-r2
-    libssl3: 3.5.8-r0
+    libssl3: 3.5.9-r0
     libstdc++: 15.2.0-r2
     libuuid: 2.41.6-r1
     sqlite-libs: 3.53.4-r0
@@ -88,22 +90,22 @@ executionHostAlpine:
     crun: 1.30.1-r0
     glib: 2.90.0-r0
     json-c: 0.19-r1
-    libblkid: 2.42.4-r0
+    libblkid: 2.42.4-r2
     libbsd: 0.12.2-r0
     libcap2: 2.78-r0
     libeconf: 0.8.4-r0
     libgcc: 15.2.0-r9
     libintl: 1.0-r0
-    libmd: 1.2.0-r0
-    libmount: 2.42.4-r0
-    libseccomp: 2.6.0-r2
-    linux-pam: 1.7.1-r3
+    libmd: 1.3.0-r0
+    libmount: 2.42.4-r2
+    libseccomp: 2.6.1-r0
+    linux-pam: 1.7.1-r4
     netavark: 2.1.0-r0
-    passt: 2026.09.25-r0
-    pcre2: 10.48-r0
+    passt: 2026.10.02-r0
+    pcre2: 10.49-r0
     skalibs-libs: 2.15.1.0-r0
-    shadow-libs: 4.18.0-r1
-    shadow-subids: 4.18.0-r1
+    shadow-libs: 4.20.3-r2
+    shadow-subids: 4.20.3-r2
     utmps-libs: 0.1.3.4-r0
 
 ubuntuSnapshot:
@@ -191,10 +193,15 @@ upstreamTools:
     digest: sha256:5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1
     installPath: /usr/local/lib/node_modules/npm
   brace-expansion:
-    version: 5.0.9
-    uri: https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz
-    digest: sha256:5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf
+    version: 5.0.11
+    uri: https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.11.tgz
+    digest: sha256:67bb5a1b4d4a8ff497d845a0b891ffe6b7233aea2202641315cec88d0fff15eb
     installPath: /usr/local/lib/node_modules/npm/node_modules/brace-expansion
+  undici:
+    version: 6.28.1
+    uri: https://registry.npmjs.org/undici/-/undici-6.28.1.tgz
+    digest: sha256:e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74
+    installPath: /usr/local/lib/node_modules/npm/node_modules/undici
   ip-address:
     version: 10.3.1
     uri: https://registry.npmjs.org/ip-address/-/ip-address-10.3.1.tgz
@@ -214,13 +221,13 @@ browserAssets:
     installPath: /ms-playwright/chromium-1234/chrome-linux64
 
 definitions:
-  apps/api/Dockerfile: sha256:b99f3541983ab4d2ad5057249c2c54422d4356042ae1fc621338e87d351b7219
-  apps/web/Dockerfile: sha256:d2747d898b3e767d54457c8b052e0dc560a17d07d00a122659c6a3b0036e2385
-  apps/worker/Dockerfile: sha256:4fc27944b9f35c9604b596baf4424659b3ed1a6e7c18a406d82e399ff0de317a
-  apps/runner/Dockerfile: sha256:3bb9c0535d80d683dfe289958020825d78c7f4cd777e39ab49797ebd3902d881
-  images/stateport-dev-workspace/Containerfile: sha256:818f92e2811f92bb6269287390e9d7e172e44b0bca2befd64de74289c28821d0
-  images/stateport-execution-host/Containerfile: sha256:a164eeb8f1279b760b18d7988e0d7f88bbaca110160104b06cf8f0334ad2310a
-  images/stateport-playwright/Containerfile: sha256:13af4b32ba753ffe9bc6c8ed003e3af9036fd16bb742861aa2a3b43df8dbbd61
+  apps/api/Dockerfile: sha256:4f70d831b0b59b38e1efb8860155a5356b517a3938404450269ab6a048efa68d
+  apps/web/Dockerfile: sha256:3594d06cae18c75ce96ea038e1cf31955bfe69d2f72b67ce9d098174a8b164dc
+  apps/worker/Dockerfile: sha256:6366f53bf659714576d245c3fd78eaa213c7789e8c45fe470918780b0f5905af
+  apps/runner/Dockerfile: sha256:979cfbba4e82bf4b1d1e3a69bb41b843291461d916b7941dc6c5f8cc88499b6e
+  images/stateport-dev-workspace/Containerfile: sha256:787da80c1835dc138ffc365f3765dee13c9b55f93aaf4ab87a161be3f90eefe7
+  images/stateport-execution-host/Containerfile: sha256:168954d0566e42fdd8ba2126757521fe4fc4d800faee1f4d8370191f843531f1
+  images/stateport-playwright/Containerfile: sha256:089c96b4d51c53109d71d1b56bd191c439a5f1b3a3d388e4f6631ad9aae5ca7f
   images/packaged-content.v1.yaml: sha256:1014e6e05083703b45c4f89b26322ff1bbe40d5a1a95891530195cf907531f48
   images/image-set.v1.yaml: sha256:fe469f62f352330c1b949a5e42bef9bbc0d4d66eafe0fc66dd619e5146c81ad0
 

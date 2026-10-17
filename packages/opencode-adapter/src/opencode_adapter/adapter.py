@@ -173,6 +173,7 @@ class OpenCodeAdapter:
         staging_root: Path,
         *,
         model: str | None = None,
+        diagnostic_logs: bool = False,
     ) -> tuple[str, ...]:
         if not self.probe.installed:
             raise RuntimeError("opencode executable is unavailable")
@@ -197,8 +198,14 @@ class OpenCodeAdapter:
             "--format", "json",
             "--model", selected_model,
             "--dir", staging_root.as_posix(),
-            prompt,
         ]
+        if diagnostic_logs:
+            # ERROR-level log lines on stderr carry the real failure cause
+            # (usage limit, expired sign-in, unknown model) that the JSON
+            # event stream hides while opencode retries internally. Callers
+            # only classify them; the text is never persisted or returned.
+            args[4:4] = ["--print-logs", "--log-level", "ERROR"]
+        args.append(prompt)
         return tuple(args)
 
     def execute(
@@ -212,7 +219,8 @@ class OpenCodeAdapter:
         on_started: Callable[[ProcessIdentity], None] | None = None,
         on_finished: Callable[[ProcessIdentity], None] | None = None,
         process_generation: str | None = None,
-        timeout_seconds: int | None = None,
+        timeout_seconds: int | float | None = None,
+        diagnostic_logs: bool = False,
     ) -> ProcessResult:
         """Run one staging-only OpenCode invocation under the shared supervisor.
 
@@ -230,7 +238,9 @@ class OpenCodeAdapter:
             run_process,
         )
 
-        command = self.build_command(spec, staging_root, model=model)
+        command = self.build_command(
+            spec, staging_root, model=model, diagnostic_logs=diagnostic_logs
+        )
         budgets = spec.budgets if isinstance(spec.budgets, Mapping) else {}
         configured_timeout = budgets.get("timeSeconds")
         if timeout_seconds is not None:

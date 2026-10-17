@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from governed_api import API_VERSION, GovernedAPI, Response
+from governed_api.application import OPERATION_FAILURE_SENTENCES
 from stateport_auth import AuthError, BearerAuthenticator, OIDCAuthenticator
 from stateport_observability import NullObserver, OperationalObserver, observer_from_environment
 
@@ -232,6 +233,7 @@ class _Handler(BaseHTTPRequestHandler):
         *,
         request_id: str,
         allow: str | None = None,
+        cause_code: str | None = None,
     ) -> None:
         diagnostic = {
             "requestId": request_id,
@@ -239,9 +241,12 @@ class _Handler(BaseHTTPRequestHandler):
             "method": getattr(self, "command", None) or "unknown",
         }
         headers = {"allow": allow} if allow else None
+        error = {"code": code, "message": message, "diagnostic": diagnostic}
+        if cause_code is not None:
+            error["causeCode"] = cause_code
         self._send(
             status,
-            {"ok": False, "error": {"code": code, "message": message, "diagnostic": diagnostic}},
+            {"ok": False, "error": error},
             request_id=request_id,
             headers=headers,
         )
@@ -269,9 +274,14 @@ class _Handler(BaseHTTPRequestHandler):
             # boundary.  In particular, exception text can contain local paths,
             # credentials supplied to an embedding, or other sensitive detail.
             message = error.get("message") if isinstance(error.get("message"), str) else "request failed"
-            if code in {"internal_error", "operation_failed"}:
+            cause_code = None
+            if code == "operation_failed":
+                proposed = error.get("causeCode")
+                cause_code = proposed if isinstance(proposed, str) and proposed in OPERATION_FAILURE_SENTENCES else "unclassified_error"
+                message = OPERATION_FAILURE_SENTENCES[cause_code]
+            elif code == "internal_error":
                 message = "the operation failed"
-            self._send_error(response.status, code, message, request_id=request_id)
+            self._send_error(response.status, code, message, request_id=request_id, cause_code=cause_code)
             return
         self._send(response.status, payload, request_id=request_id, headers=response.headers)
 

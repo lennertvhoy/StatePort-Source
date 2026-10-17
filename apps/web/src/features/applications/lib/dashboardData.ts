@@ -10,10 +10,11 @@
  *   (kept here module-level so it survives remounts) with mutating actions
  *   hidden.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import type { ApplicationInstance, Approval, OperationRecord } from '@/client'
 import { getClient } from '@/client'
+import { notifyApplicationsChanged, useApplicationsRevision } from '@/shell/data'
 import { useSessionStore } from '@/state'
 
 const LOAD_TIMEOUT_MS = 8_000
@@ -45,7 +46,7 @@ export function useApplicationsDashboard(): DashboardData {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(lastGoodSnapshot)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
-  const [nonce, setNonce] = useState(0)
+  const revision = useApplicationsRevision()
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -95,9 +96,9 @@ export function useApplicationsDashboard(): DashboardData {
       window.clearTimeout(timeout)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- snapshot is intentionally only read at effect start
-  }, [nonce, activeScenario])
+  }, [revision, activeScenario])
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), [])
+  const refresh = notifyApplicationsChanged
 
   const data = snapshot ?? lastGoodSnapshot ?? { instances: [], pendingApprovals: [], operations: [] }
   return {

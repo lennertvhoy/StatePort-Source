@@ -285,7 +285,11 @@ def test_functionality_preservation_manifest_covers_routes_buttons_apis_and_alia
         # credential and device-login operations, and the three typed-client
         # templates. Each new entry cites a real evidence literal in the code that
         # serves or builds the path, and a test that already exercised it.
-        "apis": 160,
+        # 162: the validator's measured count on the current tree. The pin
+        # still said 160 after later manifest commits (for example a322ea90,
+        # provider sign-in adoption) added operation entries without raising
+        # it; this RAISES it to the measured count, no entry was removed.
+        "apis": 162,
         "capabilities": 18,
         "aliases": 10,
         "dynamicControls": 15,
@@ -330,7 +334,12 @@ def test_functionality_preservation_manifest_covers_routes_buttons_apis_and_alia
         # source, so a drop means controls left the shipped surface, and a jump
         # means new ones were added without a declaration. Both are the events
         # this figure exists to make visible.
-        "undeclaredControls": 511,
+        # 515: the measured census on the current tree, up from 511 because
+        # later commits added shipped web controls without raising this pin
+        # (this lane added none: base plus the evidence fix already measures
+        # 515). The figure is reported, not enforced; it is recorded here rather
+        # than hidden.
+        "undeclaredControls": 515,
     }
 
 
@@ -689,7 +698,7 @@ def test_shape_breakdown_does_not_change_the_reported_coverage_figure() -> None:
     could plausibly disturb: the count itself, and the rest of the counts.
     """
     counts = validate()
-    assert counts["undeclaredControls"] == 511
+    assert counts["undeclaredControls"] == 515
     assert counts["routes"] == 17 and counts["controls"] == 77
     sources, undeclared = _real_census()
     shapes = _control_shape_classes(sources, undeclared)
@@ -933,9 +942,9 @@ def test_the_shape_report_is_actually_printed_and_agrees_with_the_figure() -> No
     printed = buffer.getvalue()
 
     counts = validate()
-    assert counts["undeclaredControls"] == 511
+    assert counts["undeclaredControls"] == 515
     shape_line = next(line for line in printed.splitlines() if line.startswith("SHAPES "))
-    assert "undeclaredControls=511" in shape_line
+    assert "undeclaredControls=515" in shape_line
     # The printed sum is checked against the printed classes, and the printed
     # classes are checked against the census, so a lie in the report line is
     # caught here even if every underlying function is correct.
@@ -1511,11 +1520,670 @@ def test_the_citation_line_reaches_stdout_with_its_ceiling() -> None:
     #     subscript, so this row moved through construct 2 alone. It is named here so
     #     the four are not over-credited to the subscript fix.
     #
+    # CONDITIONAL VERBS ARE NOW DECIDED FROM THE CALL SITE (2026-09-29).
+    #
+    # The figure moved from supported=71 unsupported=68 unresolved=21 to
+    # supported=75 unsupported=68 unresolved=17 because the resolver no longer
+    # DECIDES a conditional verb wrong. The construct is a sink reading
+    # `method="POST" if body is not None else "GET"`: the old binder could not
+    # reduce a call site's `body={"expectedVersion": 3}` to a string, so it
+    # bound nothing, so the "unsupplied parameters take their declared default"
+    # loop then bound `body` to its null marker, and the conditional decided
+    # GET. That is a confident wrong answer about a request the test issues
+    # WITH a body, and it is worse than an unknown because it manufactures a
+    # contradiction a reader may "fix" by corrupting the manifest.
+    #
+    # The verb is now decided from the call site, by AST: a supplied argument
+    # that is provably not None -- a dict/list/set/tuple literal, an f-string, a
+    # non-None constant, or a name resolved through its own assignment -- makes
+    # `x is not None` true and selects POST; an explicit `None`, or an omitted
+    # argument whose declared default is None, selects GET; and a call site
+    # whose body CANNOT BE PROVEN still yields `unresolved` and NOT either verb.
+    # That last clause is the safety property and is pinned as a real negative
+    # control in test_call_site_body_decides_the_conditional_verb below, because
+    # a rule that cannot be shown to refuse is not a rule. Nothing is inferred
+    # from a method name, a variable name, a path segment or a comment.
+    #
+    # The four rows, and the call site that decides each -- every one moved
+    # unresolved -> supported, i.e. this is a pure narrowing of the unknown:
+    #   install-application-fixture -> scripts/test_application_onboarding.py:158
+    #     `body=payload`, and payload is a dict literal assigned at :146.
+    #   post-instance-template-upgrade-request/approve/apply -> the same
+    #     onboarding helper, same `body=payload` shape.
+    # unsupported did not move at all, and that is structural rather than lucky:
+    # `_citation_measurement` calls a row `unsupported` ONLY when no resolved
+    # path matches it; a row whose path matches but whose verb does not is
+    # `unresolved`. So a verb decision can move a row between `supported` and
+    # `unresolved` and can never manufacture a new `unsupported`.
+    #
     # This stays an EXACT-match tripwire for drift on purpose: a range, regex or
     # approximate comparison here would be indistinguishable from deleting the check.
-    assert line == "CITATIONS rows=160 supported=71 unsupported=68 unresolved=21"
+    #
+    # THE TWO ATTENTION ROWS ARE REPOINTED TO THE FILE THAT ACTUALLY ISSUES THEM
+    # (2026-09-29). The figure moved supported=75 unsupported=68 unresolved=17
+    # -> supported=77 unsupported=66 unresolved=17, and ONLY these two ids left
+    # the unsupported list (verified by set difference over the
+    # CITATIONS_DETAIL entries: removed = post-attention-read,
+    # post-attention-acknowledge; added = nothing).
+    #
+    # Both rows cited scripts/test_application_experience.py, which contains
+    # ZERO occurrences of "acknowledge" and no "/read" route literal at all: it
+    # starts no server, so the rows were unsupported honestly. The requests that
+    # DO exist are in scripts/test_activity_receipts_service.py, whose :401
+    # sink is `method="POST" if body is not None else "GET"`:
+    #   post-attention-read        -> :423 request("/v1/instances/activity-fixture/
+    #     activity/recovery-backup/read", ...) with body= a dict literal keyed
+    #     {"expectedVersion"} at :427 -> POST.
+    #   post-attention-acknowledge -> :416 (no csrf, asserts 403), :441 (stale
+    #     409) and :433 (success), each with a dict literal body keyed
+    #     {"expectedVersion"} -> POST.
+    # The verb is therefore not asserted by the manifest: the service registers
+    # both routes inside do_POST (service_process.py:1433, route at :1765) and
+    # calls self._strict_body(body, {"expectedVersion"}), so a GET could never
+    # supply the required body. No method label was changed on either row.
+    #
+    # THE FIGURE NOW MOVES BY REACHABILITY, 77/66/17 -> 81/62/17. Four rows left
+    # the unsupported list, and the construct is THE SINK IS PROVEN BY A TERMINAL
+    # OPERATION INSTEAD OF BY ITS CALLEE NAME. The old rule asked whether a call's
+    # NAME was in a fixed list; that is a naming convention, not a property of the
+    # code, so a genuine request through a differently-named transport was
+    # invisible. The new rule asks whether the thing the call reaches actually
+    # performs I/O, and refuses when no terminal operation can be named. Nothing
+    # in it can be satisfied by spelling.
+    #
+    #   post-template-upgrade-mutation-request   test_studystate_upgrade_surface.py:2079
+    #   post-template-upgrade-approval-decision  test_studystate_upgrade_surface.py:2097
+    #   post-template-upgrade-mutation-apply     test_studystate_upgrade_surface.py:2104
+    #     api.dispatch("POST", "/v1/...", {...}) resolves to GovernedAPI.dispatch
+    #     (packages/governed-api/src/governed_api/application.py:202), whose body
+    #     builds the route table at :271-298 and calls the looked-up handler at
+    #     :300. TERMINAL: service route dispatch -- a {"/route": handler} table,
+    #     looked up BY THE REQUEST PATH, whose looked-up value is CALLED.
+    #     All three assert real outcomes: :2087 status == 200, :256 a 403 and
+    #     :2097 a 200, :2104-2117 a 403 on self-apply and a 200 with
+    #     idempotent == True.
+    #
+    #   terminal-socket                            test_terminal_service.py:362
+    #     RawWebSocket.open(service, path=SOCKET_PATH) does
+    #     socket.create_connection(("127.0.0.1", port)) at :379 and writes the
+    #     request line f"GET {path} HTTP/1.1" at :387.
+    #     TERMINAL: socket.create_connection(...).
+    #     The path is the `path=` KEYWORD, not args[0] (which is the service
+    #     dict), and the verb is read out of that handshake request line rather
+    #     than assumed; :725 asserts a 400 for a query-string variant.
+    #
+    # ZERO rows moved supported -> anything, and NOTHING was added to the
+    # unsupported list: the set difference over the CITATIONS_DETAIL entries is
+    # removed = exactly these four, added = nothing. A resolvable sink still
+    # cannot fabricate a path -- the (method, path, body) offsets that make the
+    # dispatch shape readable are gated on the SAME reachability proof, so a
+    # computed path keeps its hole and an undecidable verb stays undecided.
+    # 162/64: the two operation rows added after this pin was written (see the
+    # `apis` pin) cite tests that do not contain their route, so they land in
+    # `unsupported`; supported and unresolved are unchanged. That is the
+    # report's honest answer for them, recorded rather than hidden.
+    assert line == "CITATIONS rows=162 supported=81 unsupported=64 unresolved=17"
     assert "WHAT THE CITATIONS LINE DOES NOT ESTABLISH" in printed
     assert "not a gate" in printed
+
+
+# ---------------------------------------------------------------------------
+# CALL-SITE SUPPLIEDNESS: the conditional verb is decided from the call site
+# ---------------------------------------------------------------------------
+#
+# The sink below is the real shape, verbatim from
+# scripts/test_activity_receipts_service.py:393-401 and
+# scripts/test_application_onboarding.py:48-63: a helper whose `body` is
+# keyword-only with a None default, whose request verb is picked by testing that
+# body. Whether the request is a POST or a GET is decided entirely by what each
+# CALL SITE passes, which is why reading the sink alone can never answer it.
+_CONDITIONAL_HELPER = '''
+from urllib.request import Request, urlopen
+
+def request(path, *, cookie=None, csrf=None, body=None):
+    with urlopen(Request(f"http://127.0.0.1:8080{path}", data=body,
+                         method="POST" if body is not None else "GET")) as response:
+        return response.read()
+'''
+
+
+def _verbs_for(tmp_path: Path, body_argument: str) -> frozenset[str]:
+    """The verbs one body-passing call site resolves to over a fixed route.
+
+    The route is under `/v1/` because `_strip_origin` cuts a composed origin at
+    the first of /v1/, /session or /health, so any other probe route keeps its
+    `http://host` prefix and would never match the declaration it is compared
+    against.
+    """
+    probe = _write_probe(
+        tmp_path, _CONDITIONAL_HELPER + f'\nrequest("/v1/probe", {body_argument})\n'
+    )
+    pairs, analysable = _resolve_test_citations(probe)
+    assert analysable, "the probe must parse; an unparsable probe proves nothing"
+    return frozenset(
+        verb
+        for found, verbs in pairs
+        if _path_matches(found, "/v1/probe")
+        for verb in verbs
+    )
+
+
+def test_call_site_body_decides_the_conditional_verb(tmp_path: Path) -> None:
+    """A supplied body decides POST, an absent one decides GET, by AST.
+
+    This is the rule the metric change added, pinned in both directions. The
+    old behaviour bound nothing for a supplied non-string body, let the
+    helper's `None` default stand in for it, and decided GET for call sites
+    that plainly pass a body -- a confident wrong answer, which is worse than
+    an unknown because a reader may "fix" the contradiction by editing the
+    manifest.
+
+    Both parameter shapes are covered because both occur for real:
+    `body=payload` against a keyword-only `body` in
+    scripts/test_application_onboarding.py:48, and a positional
+    `request(path, {...})` against `def request(path, body=None)` in
+    scripts/test_studystate_upgrade_surface.py:154.
+    """
+    for label, body_argument in (
+        ("dict literal", 'body={"expectedVersion": 3}'),
+        ("empty dict literal", "body={}"),
+        ("list literal", "body=[1, 2]"),
+        ("f-string body", 'body=f"{x}"'),
+        ("name bound to a dict literal", "body=payload"),
+    ):
+        source = _CONDITIONAL_HELPER + '\npayload = {"a": 1}\n'
+        probe = _write_probe(tmp_path, source + f'request("/v1/probe", {body_argument})\n')
+        pairs, analysable = _resolve_test_citations(probe)
+        assert analysable
+        verbs = frozenset(
+            verb
+            for found, found_verbs in pairs
+            if _path_matches(found, "/v1/probe")
+            for verb in found_verbs
+        )
+        assert verbs == frozenset({"POST"}), (
+            f"{label}: a supplied body that is provably not None makes "
+            f"`body is not None` true, so the sink's POST branch is the one "
+            f"this call site reaches; got {sorted(verbs)}"
+        )
+
+    # The POSITIONAL shape, which is what three of the four moved rows use.
+    positional = '''
+from urllib.request import Request, urlopen
+
+def request(path, body=None):
+    with urlopen(Request(f"http://127.0.0.1:8080{path}", data=body,
+                         method="POST" if body is not None else "GET")) as response:
+        return response.read()
+
+request("/v1/probe", {"expectedVersion": 3})
+'''
+    pairs, analysable = _resolve_test_citations(_write_probe(tmp_path, positional))
+    assert analysable
+    assert frozenset(
+        verb
+        for found, found_verbs in pairs
+        if _path_matches(found, "/v1/probe")
+        for verb in found_verbs
+    ) == frozenset({"POST"}), "a positional dict body must also decide POST"
+
+    for label, body_argument in (
+        ("explicit None", "body=None"),
+        ("body omitted, default is None", "cookie=None"),
+    ):
+        assert _verbs_for(tmp_path, body_argument) == frozenset({"GET"}), (
+            f"{label}: no body was supplied, so `body is not None` is false and "
+            f"the sink issues a GET; the resolver must read that from the call "
+            f"site rather than defaulting either way"
+        )
+
+    # A positional body omitted entirely: `request("/v1/probe")`.
+    pairs, analysable = _resolve_test_citations(
+        _write_probe(
+            tmp_path,
+            positional.replace('request("/v1/probe", {"expectedVersion": 3})', 'request("/v1/probe")'),
+        )
+    )
+    assert analysable
+    assert frozenset(
+        verb
+        for found, found_verbs in pairs
+        if _path_matches(found, "/v1/probe")
+        for verb in found_verbs
+    ) == frozenset({"GET"}), (
+        "an omitted positional body whose default is None must decide GET; the "
+        "keyword-only default binding alone would leave this undecided"
+    )
+
+
+def test_an_unprovable_call_site_body_stays_unresolved_and_not_either_verb(
+    tmp_path: Path,
+) -> None:
+    """The negative control: a body this resolver cannot type yields NO verb.
+
+    A rule that cannot be shown to refuse is not a rule. Each body below is
+    genuinely supplied and genuinely may be None -- `dict.get` returns None,
+    `next` raises or returns None, and a live-response subscript may hold
+    anything -- so deciding either verb here would manufacture assurance. The
+    assertion is on the EMPTY set specifically: not GET, and not POST.
+
+    These are not invented shapes. `body=stale_payload` at
+    scripts/test_application_onboarding.py:163 and `body=stale_package_payload`
+    at :173 are exactly the `dict(payload)` form, and both of those real call
+    sites are among the sites this resolver still refuses.
+    """
+    for label, body_argument in (
+        ("call that may return None", "body=dict(payload)"),
+        ("name bound to such a call", "body=maybe"),
+        ("subscript of a live response", 'body=response["body"]'),
+        ("attribute of an unknown object", "body=response.body"),
+        ("binary op of unknown operands", "body=a + b"),
+    ):
+        assert _verbs_for(tmp_path, body_argument) == frozenset(), (
+            f"{label}: this resolver cannot prove the body is not None, so the "
+            f"verb is undecidable and the row must land `unresolved`. Deciding "
+            f"GET would be the exact defect this rule was added to remove, and "
+            f"deciding POST would be a worse one; got "
+            f"{sorted(_verbs_for(tmp_path, body_argument))}"
+        )
+
+    # The same refusal at the level where it would reach a published figure.
+    probe = _write_probe(
+        tmp_path, _CONDITIONAL_HELPER + '\nrequest("/v1/probe", body=dict(payload))\n'
+    )
+    for method in ("GET", "POST"):
+        buckets = _citation_measurement(
+            [
+                {
+                    "id": "probe-row",
+                    "path": "/v1/probe",
+                    "method": method,
+                    "test": str(probe),
+                }
+            ]
+        )
+        assert buckets["supported"] == [], (
+            f"declared {method}: an unreadable verb must never produce a "
+            f"supported row; got {buckets}"
+        )
+        assert buckets["unresolved"] == ["probe-row"], (
+            f"declared {method}: the route is present and the verb unknown, so "
+            f"this is the honest unknown; got {buckets}"
+        )
+
+
+def test_suppliedness_never_overwrites_a_string_the_file_already_proved() -> None:
+    """A body fact must not displace a proved path value for the same name.
+
+    Suppliedness is merged AFTER the string bindings, and this is the test that
+    holds that ordering. Written into the same map it overwrote a module-level
+    value the resolver had already proved: scripts/test_post_mutation_
+    security_matrix.py fell from 89 resolved paths to 10 and three `supported`
+    rows became `unsupported`, because `request(ACTION)` lost the value
+    `_resolved_assignments` had established for `ACTION`.
+    """
+    source = '''
+from urllib.request import Request, urlopen
+
+ACTION = "/probe"
+
+def request(path, *, body=None):
+    with urlopen(Request(f"http://127.0.0.1:8080{path}", data=body,
+                         method="POST" if body is not None else "GET")) as response:
+        return response.read()
+
+def test_it():
+    request(ACTION)
+'''
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        probe = _write_probe(Path(directory), source)
+        pairs, analysable = _resolve_test_citations(probe)
+    assert analysable
+    paths = {found for found, _ in pairs}
+    assert "/probe" in paths, (
+        "the module-level ACTION binding must survive a call site that supplies "
+        f"no body; the resolver saw {sorted(paths)}"
+    )
+
+
+def test_the_four_rows_this_construct_moved_are_credited_for_their_own_call_sites() -> None:
+    """The exact rows the figure moved by, pinned to the call sites that decide them.
+
+    The pin in the figure test fixes the published number; this fixes WHY it
+    moved, so a future change that moves those four rows for some other reason
+    cannot quietly inherit the credit. Three of the four come from a POSITIONAL
+    dict body and one from a keyword body, and each is pinned twice: the sink
+    that carries the conditional, and the call site that supplies the body.
+    """
+    sinks = (
+        # (file, sink line) -- the `method="POST" if body is not None else "GET"`
+        ("scripts/test_application_onboarding.py", 67),
+        ("scripts/test_studystate_upgrade_surface.py", 164),
+    )
+    for relative, line in sinks:
+        source = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        window = "\n".join(source[line - 4 : line + 4])
+        assert 'method="POST" if body is not None else "GET"' in window, (
+            f"{relative}:{line} is cited as the conditional sink for rows this "
+            f"construct moved; the construct is gone: {window!r}"
+        )
+
+    # The call sites that supply a provably non-None body.
+    for relative, line in (
+        ("scripts/test_application_onboarding.py", 158),
+        ("scripts/test_application_onboarding.py", 205),
+        ("scripts/test_studystate_upgrade_surface.py", 189),
+        ("scripts/test_studystate_upgrade_surface.py", 204),
+        ("scripts/test_studystate_upgrade_surface.py", 266),
+        ("scripts/test_studystate_upgrade_surface.py", 279),
+    ):
+        source = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        window = "\n".join(source[line - 2 : line + 2])
+        assert "request(" in window and ("body=" in window or ", {" in window), (
+            f"{relative}:{line} supplies no body at all, so it cannot be the "
+            f"evidence for a row that moved on a supplied body: {window!r}"
+        )
+
+    # And the dict literal that makes the keyword body's value provable.
+    source = (ROOT / "scripts/test_application_onboarding.py").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert source[148].strip() == "payload = {", (
+        "scripts/test_application_onboarding.py:149 must be the dict-literal "
+        f"assignment that makes `body=payload` provably not-None; got {source[148]!r}"
+    )
+
+    # The four rows, and that they are supported rather than merely reachable.
+    buckets = _citation_measurement(
+        [
+            {
+                "id": "install-application-fixture",
+                "method": "POST",
+                "path": "/v1/application-fixtures/install",
+                "test": "scripts/test_application_onboarding.py",
+            },
+            {
+                "id": "post-instance-template-upgrade-request",
+                "method": "POST",
+                "path": "/v1/instances/{instanceId}/template-upgrade/request",
+                "test": "scripts/test_studystate_upgrade_surface.py",
+            },
+        ]
+    )
+    assert buckets["supported"] == [
+        "install-application-fixture",
+        "post-instance-template-upgrade-request",
+    ], f"the rows this construct moved must be credited by their own call sites; got {buckets}"
+
+
+
+# ---------------------------------------------------------------------------
+# REACHABILITY: A TRANSPORT IS PROVEN BY A TERMINAL OPERATION, NOT BY ITS NAME
+# ---------------------------------------------------------------------------
+#
+# The defect: `_is_request_sink` decided a call was a transport because its
+# CALLEE NAME was in a fixed list. That is a naming convention, not a property of
+# the code, so a real request through a differently-named transport was invisible
+# and its row was reported `unsupported` -- a false accusation against a correct
+# test. The rule under test asks instead whether the thing the call reaches
+# actually performs I/O, and refuses when it cannot NAME a terminal operation.
+#
+# The two halves below are the point of the increment and they pull in opposite
+# directions, so both are asserted: the four real transports must be credited,
+# and the four convincing non-transports must be refused.
+
+def _sinks_in_source(source: str) -> list[str]:
+    """The calls the resolver treats as transports in `source`."""
+    import ast as _ast
+
+    import validate_application_experience as module
+
+    tree = _ast.parse(source)
+    functions = module._functions(tree)
+    module._record_dispatch_calls(tree, functions)
+    return [_ast.unparse(node) for _, node in module._sinks_in(tree, functions)]
+
+
+# The real transports, reproduced in miniature. Each one REACHES a terminal
+# operation; none of them is named like a transport in `_TRANSPORT_NAMES`.
+_REACHES_A_TERMINAL = '''
+
+def dispatch(method, path, body=None):
+    routes = {
+        "/v1/alpha": _alpha,
+        "/v1/beta": _beta,
+    }
+    if method != "POST":
+        raise ValueError(method)
+    chosen = routes.get(path)
+    return chosen(body)
+
+
+class Wire:
+    @classmethod
+    def open(cls, service, *, path="/v1/terminal/socket"):
+        import socket
+        connection = socket.create_connection(("127.0.0.1", 8080), timeout=3)
+        return connection
+
+
+a = dispatch("POST", "/v1/alpha", {})
+w = Wire.open({}, path="/v1/terminal/socket")
+'''
+
+# The convincing non-transports. NONE of these reaches a terminal operation:
+# the first only takes a path and returns a dict, the second is named like a
+# transport and returns a constant, the third has a `request` method that
+# touches nothing, and the fourth opens a file, which is I/O but not a network
+# primitive and is therefore not a transport.
+_REACHES_NO_TERMINAL = '''
+
+def describe(path):
+    return {"path": path, "count": 1}
+
+
+def request(path):
+    return 200
+
+
+class Client:
+    def get(self, path):
+        return {"ok": True}
+
+    def post(self, path, body=None):
+        return 200
+
+    def request(self, path):
+        return {"path": path}
+
+
+c = Client()
+a = describe("/v1/x")
+b = request("/v1/y")
+g = c.get("/v1/z")
+p = c.post("/v1/w", {})
+r = c.request("/v1/v")
+with open("/tmp/not-a-transport") as handle:
+    body = handle.read()
+'''
+
+
+def test_a_transport_is_proven_by_the_terminal_operation_it_reaches() -> None:
+    """The rule credits what performs I/O, however it is named."""
+    sinks = _sinks_in_source(_REACHES_A_TERMINAL)
+    assert any("dispatch(" in sink for sink in sinks), (
+        "a service route dispatch reaches its terminal operation and must be a "
+        f"sink; got {sinks}"
+    )
+    assert any("Wire.open(" in sink for sink in sinks), (
+        "a classmethod that calls socket.create_connection reaches a terminal "
+        f"operation and must be a sink; got {sinks}"
+    )
+    # And the terminals are NAMED, not merely implied, so a reader can audit
+    # which operation justified the credit.
+    import ast as _ast
+
+    import validate_application_experience as module
+
+    tree = _ast.parse(_REACHES_A_TERMINAL)
+    functions = module._functions(tree)
+    terminals = {
+        module._reaches_transport(node, tree, functions, module._transport_bindings(tree))
+        for node in _ast.walk(tree)
+        if isinstance(node, _ast.Call)
+    }
+    terminals.discard(None)
+    assert "service route dispatch: routes.get(path) then handler(payload)" in terminals
+    assert "socket.create_connection(...)" in terminals
+
+
+def test_the_rule_refuses_a_call_that_reaches_no_transport() -> None:
+    """THE NEGATIVE CONTROL. A rule that cannot refuse is not a rule.
+
+    If this test were deleted the metric would credit `describe("/v1/x")` -- a
+    function that takes a path and returns a dict -- as a request, and would
+    report every row citing such a file as supported. That is precisely the
+    fabrication this increment exists to prevent, so the refusal is asserted
+    rather than assumed.
+    """
+    assert _sinks_in_source(_REACHES_NO_TERMINAL) == [], (
+        "none of these reaches a terminal operation, so none is a transport: a "
+        "path argument, a transport-shaped name, a request-shaped method and a "
+        "file open are not network primitives"
+    )
+
+
+def test_the_rule_refuses_a_suggestive_name_without_a_terminal() -> None:
+    """A method named exactly like a transport, with no terminal inside it."""
+    source = '''
+class Sink:
+    def request(self, method, path, body=None):
+        return {"method": method, "path": path}
+
+
+s = Sink()
+r = s.request("POST", "/v1/x", {})
+'''
+    assert _sinks_in_source(source) == [], (
+        "`s.request(...)` is named like the http.client transport but reaches "
+        "no terminal operation, so the name must not credit it"
+    )
+
+
+def test_a_constructing_receiver_is_never_credited_without_a_terminal() -> None:
+    """A class the file builds is not enough; its method must reach a terminal.
+
+    `_attribute_terminal` resolves a receiver through the constructors and
+    annotations in the cited file, which is a real widening. This is the test
+    that bounds it: resolution alone never credits anything.
+    """
+    source = '''
+class Client:
+    def fetch(self, path):
+        return {"path": path}
+
+
+c = Client()
+got = c.fetch("/v1/x")
+'''
+    assert _sinks_in_source(source) == [], (
+        "the receiver resolves to a class this file constructs, but `fetch` "
+        "reaches no terminal operation, so it must not be credited"
+    )
+
+
+def test_a_compound_annotation_never_fabricates_a_receiver_class() -> None:
+    """`list[WebHarness]` and friends are refused, not guessed at.
+
+    This resolver has already shipped a fabrication class by reaching into a
+    compound annotation and naming a class that was not the receiver's type, so
+    the compound forms are refused outright rather than mined.
+    """
+    import validate_application_experience as module
+
+    import ast as _ast
+
+    for annotation in ("WebHarness", "list[WebHarness]", "WebHarness | None", "Any"):
+        source = f'''
+def use(harness: {annotation}, path):
+    return harness.post(path, {{}})
+'''
+        tree = _ast.parse(source)
+        resolved = module._annotated_class_names(tree, _ast.Name(id="harness"))
+        if annotation == "WebHarness":
+            assert resolved == {"WebHarness"}, f"a bare annotation is a statement: {resolved}"
+        else:
+            assert resolved == set(), (
+                f"{annotation!r} is a compound annotation and must resolve to "
+                f"nothing rather than be mined for a class name; got {resolved}"
+            )
+
+
+def test_the_four_measured_rows_are_supported_by_their_own_transports() -> None:
+    """The four rows this increment moved, credited by their own call sites."""
+    buckets = _citation_measurement(
+        [
+            {
+                "id": "post-template-upgrade-mutation-request",
+                "method": "POST",
+                "path": "/v1/mutations/request",
+                "test": "scripts/test_studystate_upgrade_surface.py",
+            },
+            {
+                "id": "post-template-upgrade-approval-decision",
+                "method": "POST",
+                "path": "/v1/approvals/decide",
+                "test": "scripts/test_studystate_upgrade_surface.py",
+            },
+            {
+                "id": "post-template-upgrade-mutation-apply",
+                "method": "POST",
+                "path": "/v1/mutations/apply",
+                "test": "scripts/test_studystate_upgrade_surface.py",
+            },
+            {
+                "id": "terminal-socket",
+                "method": "GET",
+                "path": "/v1/terminal/socket",
+                "test": "scripts/test_terminal_service.py",
+            },
+        ]
+    )
+    assert sorted(buckets["supported"]) == [
+        "post-template-upgrade-approval-decision",
+        "post-template-upgrade-mutation-apply",
+        "post-template-upgrade-mutation-request",
+        "terminal-socket",
+    ], f"all four must be credited by reachability; got {buckets}"
+    assert buckets["unsupported"] == [], f"none may remain unsupported; got {buckets}"
+
+
+def test_a_dispatch_with_a_computed_path_stays_unresolved() -> None:
+    """A resolvable sink must not let a resolvable sink fabricate a path.
+
+    The dispatch shape makes `dispatch(method, path, body)` readable, which is
+    what recovered these rows. The safety property is that the path still has to
+    COMPOSE: a path built from a name the file never binds stays a hole, and a
+    hole is reported `unresolved`, never `supported`.
+    """
+    import validate_application_experience as module
+
+    tree = module._resolve_test_citations(ROOT / "scripts/test_studystate_upgrade_surface.py")
+    pairs, analysable = tree
+    assert analysable
+    # The three dispatch rows resolve to REAL paths, not holes.
+    for path, verbs in pairs:
+        for wanted in ("/v1/mutations/request", "/v1/approvals/decide", "/v1/mutations/apply"):
+            if path == wanted:
+                assert "POST" in verbs, f"{wanted} must carry its verb; got {verbs}"
+    # And no hole-bearing path may be confirmed for a row it does not fill.
+    from validate_application_experience import _path_matches
+
+    for path, _ in pairs:
+        if path and "" in path:
+            assert not _path_matches(path, "/v1/mutations/request")
 
 
 if __name__ == "__main__":

@@ -131,7 +131,10 @@ jobs:
         run: npm run test:live-core-surface-claim
 
       - name: Verify a governed live-core batch refuses retained and half-used roots
-        run: node --test scripts/governed_live_core_batch.test.mjs
+        # This job's working-directory is apps/web, so the repo-root path must be
+        # explicit. Written without it, the step failed to resolve the file, the
+        # guard ran NOWHERE, and the job went red on it.
+        run: node --test ../../scripts/governed_live_core_batch.test.mjs
 
       - name: Validate frontend dependency tree
         run: npm run check:dependencies
