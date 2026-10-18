@@ -1,0 +1,23 @@
+formatVersion: stateport.application-action/v1
+applicationId: stateport.synthetic-reference
+actions:
+  - formatVersion: synthetic.action/v1
+    actionId: synthetic.inspect-reference/v1
+    displayName: Inspect reference state
+    purpose: Read a deterministic public-safe reference document.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, digest]}
+    contextPolicy:
+      id: synthetic.reference-context/v1
+      includeCategories: [reference_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 120
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: []
+    networkPolicy: disabled
+    toolPolicy: none
+    mutationPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 5
+    budgetDefaults: {token: 120, costMinor: 0, timeSeconds: 5, steps: 1}

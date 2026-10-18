@@ -1,0 +1,21 @@
+formatVersion: stateport.application/v1
+applicationId: studystate.sample
+displayName: StudyState Sample
+description: A public-safe learning application proving goals, activities, evidence, and review without development controls.
+sourceProfile: fixture:studystate-sample
+productionEligible: false
+privacyClassification: public_safe
+lifecycleTemplate:
+  templateId: stateport.fixture.studystate-sample
+  installRevision: v0001
+  revisions:
+    v0001: revisions/v0001
+    v0002: revisions/v0002
+stateLayout:
+  canonical: [state/LEARNING.yaml]
+  generated: [generated/]
+  ownership:
+    state/LEARNING.yaml: instance
+actionsPath: actions.yaml
+executorCommand: scripts/study_actions.py
+validationCommand: python3 -c "import pathlib,yaml; value=yaml.safe_load(pathlib.Path('state/LEARNING.yaml').read_text()); assert isinstance(value,dict) and isinstance(value.get('activities'),list) and isinstance(value.get('evidence'),list)"

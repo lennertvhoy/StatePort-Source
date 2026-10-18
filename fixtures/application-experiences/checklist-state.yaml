@@ -1,0 +1,76 @@
+formatVersion: stateport.application-experience/v1
+applicationId: checklistdd
+displayName: ChecklistState
+description: A small public-safe application for completing governed checklist actions.
+capabilities:
+  - conversation
+  - progress_dashboard
+  - goal_execution
+  - proactive_notifications
+views:
+  - viewId: checklist-home
+    label: Checklist
+    component: progress_overview
+    route: /application
+    capability: progress_dashboard
+  - viewId: checklist-conversation
+    label: Conversation
+    component: conversation_thread
+    route: /conversation
+    capability: conversation
+  - viewId: checklist-next-action
+    label: Next item
+    component: goal_actions
+    route: /application/activity
+    capability: goal_execution
+  - viewId: checklist-reminders
+    label: Reminders
+    component: notification_feed
+    route: /application/notifications
+    capability: proactive_notifications
+navigation:
+  - contributionId: checklist-home-nav
+    label: Checklist
+    viewId: checklist-home
+    placement: application
+    order: 10
+  - contributionId: checklist-conversation-nav
+    label: Conversation
+    viewId: checklist-conversation
+    placement: conversation
+    order: 20
+conversation:
+  enabled: true
+  mode: application_attached
+  component: conversation_thread
+  title: Checklist conversation
+  emptyState: Continue this checklist conversation from any bound channel.
+advancedControls:
+  - controlId: checklist-state
+    label: Checklist state
+    component: state_summary
+    capability: progress_dashboard
+    order: 10
+  - controlId: checklist-history
+    label: Activity history
+    component: activity_history
+    capability: progress_dashboard
+    order: 20
+  - controlId: checklist-context
+    label: Context
+    component: context_summary
+    capability: conversation
+    order: 30
+  - controlId: checklist-runs
+    label: Governed runs
+    component: run_history
+    capability: goal_execution
+    order: 35
+  - controlId: checklist-receipts
+    label: Receipts
+    component: receipt_list
+    capability: goal_execution
+    order: 40
+platformOperations: []
+legacyAliases:
+  - ChecklistDD

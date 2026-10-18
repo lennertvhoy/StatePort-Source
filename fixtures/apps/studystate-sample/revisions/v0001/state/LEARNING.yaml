@@ -1,0 +1,16 @@
+formatVersion: studystate.sample.state/v1
+goal:
+  id: durable-evidence
+  label: Learn how governed evidence updates durable state
+activities:
+  - id: evidence-practice
+    label: Complete one evidence-backed practice activity
+    reason: This is the next unfinished activity and directly exercises the learning goal.
+    status: planned
+    updatedAt: "2026-07-28T12:00:00Z"
+  - id: explain-back
+    label: Explain the governance loop in your own words
+    reason: Use this when a written explanation is a better fit than the practical exercise.
+    status: planned
+    updatedAt: "2026-07-28T12:00:00Z"
+evidence: []

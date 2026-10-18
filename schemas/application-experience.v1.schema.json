@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.dev/schemas/application-experience.v1.schema.json",
+  "title": "ApplicationExperienceDescriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "applicationId", "displayName", "description", "capabilities", "views", "navigation", "conversation", "advancedControls", "platformOperations", "legacyAliases"],
+  "properties": {
+    "formatVersion": {"const": "stateport.application-experience/v1"},
+    "applicationId": {"$ref": "#/$defs/id"},
+    "displayName": {"$ref": "#/$defs/label"},
+    "description": {"type": "string", "minLength": 1, "maxLength": 240},
+    "capabilities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/capability"}},
+    "views": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/view"}},
+    "navigation": {"type": "array", "items": {"$ref": "#/$defs/navigation"}},
+    "conversation": {"$ref": "#/$defs/conversation"},
+    "advancedControls": {"type": "array", "items": {"$ref": "#/$defs/advancedControl"}},
+    "platformOperations": {"type": "array", "items": {"$ref": "#/$defs/platformOperation"}},
+    "legacyAliases": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$"},
+    "label": {"type": "string", "minLength": 1, "maxLength": 80},
+    "component": {
+      "type": "string",
+      "enum": ["activity_history", "application_home", "backup_manager", "benchmark_evidence", "context_summary", "conversation_thread", "cost_summary", "cto_orchestration", "development_workbench", "editor_surface", "file_viewer", "goal_actions", "notification_feed", "permission_summary", "progress_overview", "receipt_list", "run_history", "state_summary", "terminal_surface", "update_manager"]
+    },
+    "capability": {
+      "type": "string",
+      "enum": ["conversation", "progress_dashboard", "goal_execution", "proactive_notifications", "file_viewer", "workbench", "terminal", "editor", "cto_orchestration", "benchmark_evidence", "backup", "calendar", "web_research"]
+    },
+    "route": {"type": "string", "maxLength": 160, "pattern": "^/(?:application|conversation|advanced|workbench)(?:/[a-z0-9][a-z0-9._-]{0,126})?$"},
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["viewId", "label", "component", "route", "capability"],
+      "properties": {"viewId": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"}, "component": {"$ref": "#/$defs/component"}, "route": {"$ref": "#/$defs/route"}, "capability": {"$ref": "#/$defs/capability"}}
+    },
+    "navigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contributionId", "label", "viewId", "placement", "order"],
+      "properties": {"contributionId": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"}, "viewId": {"$ref": "#/$defs/id"}, "placement": {"enum": ["application", "conversation", "advanced"]}, "order": {"type": "integer", "minimum": 0, "maximum": 1000}}
+    },
+    "conversation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "mode", "component", "title", "emptyState"],
+      "properties": {"enabled": {"type": "boolean"}, "mode": {"const": "application_attached"}, "component": {"const": "conversation_thread"}, "title": {"$ref": "#/$defs/label"}, "emptyState": {"type": "string", "minLength": 1, "maxLength": 240}}
+    },
+    "advancedControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controlId", "label", "component", "capability", "order"],
+      "properties": {"controlId": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"}, "component": {"$ref": "#/$defs/component"}, "capability": {"$ref": "#/$defs/capability"}, "order": {"type": "integer", "minimum": 0, "maximum": 1000}}
+    },
+    "platformOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operationId", "label", "component", "capability", "requiredActorPermissions"],
+      "properties": {"operationId": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"}, "component": {"$ref": "#/$defs/component"}, "capability": {"$ref": "#/$defs/capability"}, "requiredActorPermissions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{1,127}$"}}}
+    }
+  }
+}

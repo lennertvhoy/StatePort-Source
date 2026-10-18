@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stateport.recovery-status/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "sourceInstanceId", "status", "latest", "restore", "limitations"],
+  "properties": {
+    "formatVersion": {"const": "stateport.recovery-status/v1"},
+    "sourceInstanceId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "status": {"enum": ["no_backup", "verified", "degraded"]},
+    "latest": {"type": ["object", "null"]},
+    "operatorInspectionRequired": {"type": "boolean"},
+    "verificationIssues": {"type": "array", "items": {"type": "string"}},
+    "verification": {"type": "object"},
+    "restore": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "latestPlanDigest", "latestApprovalDigest", "latestReceiptId", "operatorInspectionRequired"],
+      "properties": {
+        "status": {"enum": ["not_planned", "planned", "approved", "validated", "failed"]},
+        "latestPlanDigest": {"type": ["string", "null"]},
+        "latestApprovalDigest": {"type": ["string", "null"]},
+        "latestReceiptId": {"type": ["string", "null"]},
+        "operatorInspectionRequired": {"type": "boolean"},
+        "stagingRetained": {"type": "boolean"}
+      }
+    },
+    "limitations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filesystemStateOnly", "externalEffectsRestored", "overwriteRestoreSupported"],
+      "properties": {
+        "filesystemStateOnly": {"const": true},
+        "externalEffectsRestored": {"const": false},
+        "overwriteRestoreSupported": {"const": false}
+      }
+    }
+  }
+}

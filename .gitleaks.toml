@@ -1,0 +1,38 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore one exact keyboard chord and generated Vite copies of scanned source."
+regexTarget = "match"
+regexes = [
+  '''defaultKeys\s*:\s*['"]mod\+shift\+enter['"]''',
+]
+paths = [
+  '''apps/web/dist/''',
+  '''apps/web/dist-demo/''',
+]
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Ignore the documented public alpha trust-key fingerprint only."
+condition = "AND"
+regexTarget = "match"
+paths = [
+  '''^HANDOFF_2026-08-03-FEDORA-ALPHA2\.md$''',
+]
+regexes = [
+  '''^--trust-key-fingerprint[ \t]+sha256:23c965bfec8e56f3075ae3bdcf4b08ef28060522d89261a31fa7d361e05553d8[ \t]+$''',
+]
+
+[[rules.allowlists]]
+description = "Ignore the RFC WebSocket test nonce only in its containment fixture."
+condition = "AND"
+regexTarget = "match"
+paths = [
+  '''^scripts/test_preview_gateway_containment\.py$''',
+]
+regexes = [
+  '''^Sec-WebSocket-Key\": \"dGhlIHNhbXBsZSBub25jZQ==\"$''',
+]

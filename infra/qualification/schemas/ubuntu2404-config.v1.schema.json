@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/ubuntu2404-config.v1.schema.json",
+  "title": "StatePort Ubuntu 24.04 qualification config v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "candidate", "artifacts", "verification", "guest", "receipt", "guestStage"],
+  "properties": {
+    "schema": {"const": "stateport.qualification.ubuntu2404-config/v1"},
+    "candidate": {"$ref": "#/$defs/candidate"},
+    "artifacts": {"$ref": "#/$defs/artifacts"},
+    "verification": {"$ref": "#/$defs/verification"},
+    "guest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["guestId", "distribution", "version", "isolationContract"],
+      "properties": {
+        "guestId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$"},
+        "distribution": {"const": "ubuntu"},
+        "version": {"const": "24.04"},
+        "isolationContract": {"const": "exactly-one-clean-ubuntu-24.04-guest-no-checkout-no-preexisting-stateport"}
+      }
+    },
+    "receipt": {"$ref": "#/$defs/file"},
+    "guestStage": {"$ref": "#/$defs/guestStage"}
+  },
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "https": {"type": "string", "pattern": "^https://[^\\s?#]+$"},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/digest"}}
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["releaseId", "version", "targetId", "releaseIndexDigest", "signedPayloadDigest", "sourceCommit", "sourceTree", "publicSource", "imageDigests", "installerDigest"],
+      "properties": {
+        "releaseId": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1},
+        "targetId": {"const": "linux-amd64-rootless-podman-quadlet"},
+        "releaseIndexDigest": {"$ref": "#/$defs/digest"}, "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+        "sourceCommit": {"$ref": "#/$defs/sha1"}, "sourceTree": {"$ref": "#/$defs/sha1"},
+        "installerDigest": {"$ref": "#/$defs/digest"},
+        "publicSource": {
+          "type": "object", "additionalProperties": false,
+          "required": ["authorityUrl", "ref", "commit", "tree"],
+          "properties": {"authorityUrl": {"$ref": "#/$defs/https"}, "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$"}, "commit": {"$ref": "#/$defs/sha1"}, "tree": {"$ref": "#/$defs/sha1"}}
+        },
+        "imageDigests": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}}
+      }
+    },
+    "artifacts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["releaseIndex", "signedPayload", "installer", "executionHostProvisioner", "updater", "images"],
+      "properties": {
+        "releaseIndex": {"$ref": "#/$defs/file"}, "signedPayload": {"$ref": "#/$defs/file"}, "installer": {"$ref": "#/$defs/file"}, "executionHostProvisioner": {"$ref": "#/$defs/file"}, "updater": {"$ref": "#/$defs/file"},
+        "images": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/image"}}
+      }
+    },
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "required": ["archivePath", "archiveDigest", "manifestDigest", "signatureBundle"],
+      "properties": {"archivePath": {"type": "string", "minLength": 1}, "archiveDigest": {"$ref": "#/$defs/digest"}, "manifestDigest": {"$ref": "#/$defs/digest"}, "signatureBundle": {"$ref": "#/$defs/file"}}
+    },
+    "verification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["publicKey", "signatureBundle", "predecessorSignatureBundle", "cosign", "keyId", "publicKeyFingerprint"],
+      "properties": {"publicKey": {"$ref": "#/$defs/file"}, "signatureBundle": {"$ref": "#/$defs/file"}, "predecessorSignatureBundle": {"$ref": "#/$defs/file"}, "cosign": {"$ref": "#/$defs/file"}, "keyId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"}, "publicKeyFingerprint": {"$ref": "#/$defs/digest"}}
+    },
+    "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "guestStage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provisionerPath", "provisionerInstallArgv", "rootPreflightArgv", "materializeArgv", "provisionArgv", "provisionReceiptPath", "healthArgv", "installArgv", "uninstallArgv", "purgeArgv", "rootCleanupArgv", "restartArgv", "journeyArgv", "stateRoot", "liveQuadletRoot", "ownedPaths", "preservedPaths", "ownedServices", "ownedImages", "checkoutPaths"],
+      "properties": {
+        "provisionerPath": {"const": "/usr/local/libexec/stateport-execution-host-provision"}, "provisionerInstallArgv": {"$ref": "#/$defs/argv"}, "rootPreflightArgv": {"$ref": "#/$defs/argv"}, "materializeArgv": {"$ref": "#/$defs/argv"}, "provisionArgv": {"$ref": "#/$defs/argv"}, "provisionReceiptPath": {"type": "string", "pattern": "^/[^\\u0000]*$"}, "healthArgv": {"$ref": "#/$defs/argv"}, "installArgv": {"$ref": "#/$defs/argv"}, "uninstallArgv": {"$ref": "#/$defs/argv"}, "purgeArgv": {"$ref": "#/$defs/argv"}, "rootCleanupArgv": {"$ref": "#/$defs/argv"}, "restartArgv": {"$ref": "#/$defs/argv"}, "journeyArgv": {"$ref": "#/$defs/argv"},
+        "stateRoot": {"type": "string", "pattern": "^/[^\\u0000]*$"}, "liveQuadletRoot": {"type": "string", "pattern": "^/[^\\u0000]*$"},
+        "ownedPaths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^/[^\\u0000]*$"}}, "preservedPaths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^/[^\\u0000]*$"}},
+        "ownedServices": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-zA-Z0-9_.@:-]+$"}}, "ownedImages": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[^\\s]+$"}}, "checkoutPaths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^/[^\\u0000]*$"}}
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="24 21 464 464" role="img" aria-labelledby="title desc">
+  <title id="title">StatePort favicon</title>
+  <desc id="desc">A solid blue house containing a bold white checkmark.</desc>
+  <path fill="#3085f4" d="M256 42 464 196v252c0 13-11 24-24 24H72c-13 0-24-11-24-24V196L256 42Z"/>
+  <path fill="none" stroke="#fff" stroke-width="58" stroke-linecap="round" stroke-linejoin="round" d="m139 286 78 79 158-170"/>
+</svg>

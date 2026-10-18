@@ -1,0 +1,346 @@
+schema: stateport.authority-policy/v1
+defaultProfile: balanced
+actionPolicies:
+  inspect_repository:
+    risk: low
+    reversible: true
+    localMutation: false
+    processLaunch: false
+    remoteSideEffect: false
+  analyze:
+    risk: low
+    reversible: true
+    localMutation: false
+    processLaunch: false
+    remoteSideEffect: false
+  run_tests:
+    risk: low
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  launch_local_process:
+    risk: medium
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  edit_scoped_files:
+    risk: low
+    reversible: true
+    localMutation: true
+    processLaunch: false
+    remoteSideEffect: false
+  classify_workspace:
+    risk: medium
+    reversible: true
+    localMutation: true
+    processLaunch: false
+    remoteSideEffect: false
+  create_managed_worktree:
+    risk: low
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  export_workspace_evidence:
+    risk: low
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  retire_owned_worktree:
+    risk: medium
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  close_authority_scope:
+    risk: medium
+    reversible: false
+    localMutation: true
+    processLaunch: false
+    remoteSideEffect: false
+  routine_cleanup:
+    risk: medium
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  update_project_state:
+    risk: medium
+    reversible: true
+    localMutation: true
+    processLaunch: false
+    remoteSideEffect: false
+  commit:
+    risk: low
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  network_access:
+    risk: medium
+    reversible: false
+    localMutation: false
+    processLaunch: false
+    remoteSideEffect: true
+  provider_access:
+    risk: medium
+    reversible: false
+    localMutation: false
+    processLaunch: false
+    remoteSideEffect: true
+  push_private_branch:
+    risk: medium
+    reversible: true
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  push_integration_branch:
+    risk: high
+    reversible: false
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  open_draft_pr:
+    risk: medium
+    reversible: true
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  merge:
+    risk: high
+    reversible: false
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  tag:
+    risk: high
+    reversible: false
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  public_release:
+    risk: critical
+    reversible: false
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  deployment:
+    risk: critical
+    reversible: false
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  plan_deployment:
+    risk: medium
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  apply_deployment:
+    risk: high
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  observe_deployment:
+    risk: low
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  collect_deployment_logs:
+    risk: low
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  restart_deployment:
+    risk: medium
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  remove_deployment_runtime:
+    risk: high
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  backup_deployment_data:
+    risk: high
+    reversible: true
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  restore_deployment_data:
+    risk: critical
+    reversible: false
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  purge_deployment_data:
+    risk: critical
+    reversible: false
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  repository_visibility_change:
+    risk: critical
+    reversible: false
+    localMutation: false
+    processLaunch: false
+    remoteSideEffect: true
+  destructive_local_action:
+    risk: high
+    reversible: false
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  destructive_remote_action:
+    risk: critical
+    reversible: false
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  real_secret_use:
+    risk: critical
+    reversible: false
+    localMutation: false
+    processLaunch: false
+    remoteSideEffect: true
+  delegate_subagent:
+    risk: medium
+    reversible: true
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: false
+  modify_authority_policy:
+    risk: critical
+    reversible: true
+    localMutation: true
+    processLaunch: false
+    remoteSideEffect: false
+  force_push:
+    risk: critical
+    reversible: false
+    localMutation: false
+    processLaunch: true
+    remoteSideEffect: true
+  history_rewrite:
+    risk: critical
+    reversible: false
+    localMutation: true
+    processLaunch: true
+    remoteSideEffect: false
+  disable_safety_gates:
+    risk: critical
+    reversible: false
+    localMutation: true
+    processLaunch: false
+    remoteSideEffect: false
+profiles:
+  guarded:
+    default: ask_each_time
+    autoWithReceipt:
+      - inspect_repository
+      - analyze
+      - run_tests
+    approveScopeOnce: []
+    autoAndNotify: []
+    deny: []
+  balanced:
+    default: ask_each_time
+    autoWithReceipt:
+      - inspect_repository
+      - analyze
+      - run_tests
+      - edit_scoped_files
+      - create_managed_worktree
+      - export_workspace_evidence
+      - retire_owned_worktree
+      - close_authority_scope
+      - routine_cleanup
+      - update_project_state
+      - commit
+    approveScopeOnce:
+      - classify_workspace
+      - network_access
+      - provider_access
+      - push_private_branch
+      - open_draft_pr
+      - delegate_subagent
+    autoAndNotify: []
+    deny: []
+  delegated:
+    default: ask_each_time
+    autoWithReceipt:
+      - inspect_repository
+      - analyze
+      - run_tests
+      - launch_local_process
+      - edit_scoped_files
+      - classify_workspace
+      - create_managed_worktree
+      - export_workspace_evidence
+      - retire_owned_worktree
+      - close_authority_scope
+      - routine_cleanup
+      - update_project_state
+      - commit
+      - network_access
+      - provider_access
+      - push_private_branch
+      - open_draft_pr
+      - merge
+      - delegate_subagent
+    approveScopeOnce:
+      - push_integration_branch
+    autoAndNotify: []
+    deny: []
+  custom:
+    default: ask_each_time
+    autoWithReceipt: []
+    approveScopeOnce: []
+    autoAndNotify: []
+    deny: []
+hardDeny:
+  - force_push
+  - history_rewrite
+  - disable_safety_gates
+mergeRequirements:
+  - exact_head_verified
+  - required_gates_passed
+subagentDefaultDeny:
+  - push_integration_branch
+  - update_project_state
+  - merge
+  - tag
+  - public_release
+  - deployment
+  - plan_deployment
+  - apply_deployment
+  - collect_deployment_logs
+  - restart_deployment
+  - remove_deployment_runtime
+  - backup_deployment_data
+  - restore_deployment_data
+  - purge_deployment_data
+  - repository_visibility_change
+  - destructive_remote_action
+  - real_secret_use
+  - modify_authority_policy
+  - close_authority_scope
+  - delegate_subagent
+escalationConditions:
+  - outside_standing_grant
+  - repository_or_runtime_identity_uncertain
+  - safety_gate_failed
+  - unrelated_work_at_risk
+  - sensitive_capability_required
+  - irreversible_or_public_consequence
+  - budget_exceeded
+  - conflicting_policy_rules
+  - result_unverifiable

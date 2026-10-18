@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/release-disposition.v2.schema.json",
+  "title": "StatePort signed successor release disposition v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion",
+    "signedBy",
+    "sequence",
+    "status",
+    "at",
+    "reason",
+    "previousDispositionDigest"
+  ],
+  "properties": {
+    "formatVersion": {"const": "stateport.release-disposition/v2"},
+    "signedBy": {"const": "stateport.release-index/v1"},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+    "status": {"enum": ["active", "deprecated", "withdrawn"]},
+    "at": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+        {"type": "null"}
+      ]
+    },
+    "reason": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 1024},
+        {"type": "null"}
+      ]
+    },
+    "previousDispositionDigest": {
+      "oneOf": [
+        {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    }
+  }
+}

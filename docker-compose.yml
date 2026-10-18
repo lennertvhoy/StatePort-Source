@@ -1,0 +1,139 @@
+x-stateport-build-args: &stateport-build-args
+  STATEPORT_BUILD_SOURCE_COMMIT: "${STATEPORT_BUILD_SOURCE_COMMIT:-unknown}"
+  STATEPORT_BUILD_SOURCE_TREE: "${STATEPORT_BUILD_SOURCE_TREE:-unknown}"
+  STATEPORT_BUILD_SOURCE_REF: "${STATEPORT_BUILD_SOURCE_REF:-unknown}"
+  STATEPORT_BUILD_SOURCE_DIRTY: "${STATEPORT_BUILD_SOURCE_DIRTY:-true}"
+  STATEPORT_BUILD_SOURCE_DATE_EPOCH: "${STATEPORT_BUILD_SOURCE_DATE_EPOCH:-unknown}"
+  STATEPORT_BUILD_VERSION: "${STATEPORT_BUILD_VERSION:-0.0.0-source}"
+  STATEPORT_BUILD_CREATED: "${STATEPORT_BUILD_CREATED:-1970-01-01T00:00:00Z}"
+  STATEPORT_BUILD_ADAPTER: "${STATEPORT_BUILD_ADAPTER:-source-compose-unknown}"
+
+services:
+  stateport-api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args: *stateport-build-args
+    init: true
+    read_only: true
+    environment:
+      STATEPORT_LOG_LEVEL: "${STATEPORT_LOG_LEVEL:-info}"
+    tmpfs:
+      - /tmp
+    volumes:
+      - stateport-operations:/workspace/.stateport
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    mem_limit: 1g
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/stateport-healthcheck", "--kind", "http", "--host", "127.0.0.1", "--port", "8790", "--path", "/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks: [stateport]
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+  stateport-web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      # Provenance defaults keep raw `compose up` builds honest ("unknown"/dirty).
+      # scripts/install.sh exports the exact Git provenance of the checkout as
+      # these env vars before building, so the shipped image records real source.
+      args: *stateport-build-args
+    init: true
+    # AppServer is loopback-only on the host by contract. Inside the container
+    # the bind is deliberately non-loopback (0.0.0.0, gated by AppServer's
+    # explicit --allow-public-bind flag) because the private bridge interface
+    # is not loopback there; on every platform, including Docker Desktop on
+    # macOS/Windows where host networking is a no-op, host exposure stays
+    # loopback-only via the "127.0.0.1:${STATEPORT_WEB_PORT:-8080}:8080" port mapping. There is no
+    # static-only server or parallel reverse proxy.
+    ports:
+      - "127.0.0.1:${STATEPORT_WEB_PORT:-8080}:8080"
+    environment:
+      # The same-origin AppServer accepts this one explicit loopback authority
+      # in addition to its container port, so a non-default host mapping
+      # remains usable without opening a DNS-rebinding alias.
+      STATEPORT_EXTERNAL_LOOPBACK_PORT: "${STATEPORT_WEB_PORT:-8080}"
+    networks: [stateport]
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      # `z` permits this read-only metadata mount under SELinux without
+      # weakening label isolation for the container. The AppServer validates
+      # the exact Git identity of the product root at startup
+      # (_validate_product_root), so source-build compose must expose the
+      # checkout's .git; digest-pinned pull installs use Quadlets instead and
+      # never carry .git.
+      - ./.git:/workspace/.git:ro,z
+      - stateport-product-data:/var/lib/stateport
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 1024
+    mem_limit: 2g
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/stateport-healthcheck", "--kind", "http", "--host", "127.0.0.1", "--port", "8080", "--path", "/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+  stateport-worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+      args: *stateport-build-args
+    init: true
+    depends_on:
+      stateport-api:
+        condition: service_healthy
+    read_only: true
+    environment:
+      STATEPORT_LOG_LEVEL: "${STATEPORT_LOG_LEVEL:-info}"
+    tmpfs:
+      - /tmp
+    volumes:
+      - stateport-operations:/workspace/.stateport
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    mem_limit: 1g
+    cpus: 2.0
+    networks: [stateport]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/stateport-healthcheck", "--kind", "http", "--host", "127.0.0.1", "--port", "8791", "--path", "/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+networks:
+  stateport:
+    driver: bridge
+
+volumes:
+  stateport-operations:
+  stateport-product-data:

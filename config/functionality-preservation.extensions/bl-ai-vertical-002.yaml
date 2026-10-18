@@ -1,0 +1,23 @@
+formatVersion: stateport.functionality-preservation-extension/v1
+scope: bl-ai-vertical-002
+apiOperations:
+  - id: get-instance-assistant-work
+    method: GET
+    path: '/v1/instances/{instanceId}/conversation/assistant-work'
+    classification: conversation
+    status: foundation
+    migrationBehavior: Returns only bounded non-secret durable assistant work identities and states so the application conversation can reconstruct transient placeholders after refresh.
+    test: apps/web/src/client/http/__tests__/assistantConversation.test.ts
+    evidence:
+      file: packages/persistent-app/src/stateport_persistent_app/service_entry.py
+      contains: 'work_projection_path(path)'
+  - id: get-instance-assistant-events
+    method: GET
+    path: '/v1/instances/{instanceId}/conversation/messages/{messageId}/events'
+    classification: conversation
+    status: foundation
+    migrationBehavior: Replays the authenticated same-origin immutable assistant event journal with exact message identity, Last-Event-ID continuity, and per-work cancellation when the final stream disconnects.
+    test: scripts/test_assistant_cancellation.py
+    evidence:
+      file: packages/persistent-app/src/stateport_persistent_app/service_cancellation_entry.py
+      contains: 'processor.detach_stream('

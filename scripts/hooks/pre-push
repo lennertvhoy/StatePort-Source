@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# StatePort pre-push guard (versioned; enable with scripts/install_git_hooks.sh).
+# Why: CI runs only on pull requests, and history is direct-to-main, so lint-red code
+# (7 ruff F821 incl. a real NameError) stayed on main for weeks. This runs the cheap tier
+# of the CI recipe in ~15 s. Bypass deliberately with `git push --no-verify`.
+set -u
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+py=python3; [ -x .venv/bin/python ] && py=.venv/bin/python
+ruff=ruff; [ -x .venv/bin/ruff ] && ruff=.venv/bin/ruff
+fail=0
+step() { local name=$1; shift; if out=$("$@" 2>&1); then echo "pre-push: ok   $name"; else echo "pre-push: FAIL $name"; echo "$out" | tail -n 15; fail=1; fi; }
+if command -v "$ruff" >/dev/null 2>&1; then step "ruff (CI lint selection)" "$ruff" check apps packages scripts
+else echo "pre-push: skip ruff (not installed; CI pins ruff 0.16.0)"; fi
+step "repo validation" "$py" scripts/validate_repo.py
+step "StateSpec schemas" "$py" scripts/statedd_validate_schema.py
+step "compile" "$py" -m compileall -q apps packages scripts
+[ "$fail" -eq 0 ] || { echo "pre-push: refused. Fix the above, or bypass on purpose with --no-verify."; exit 1; }

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stateport.restore-receipt/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "receiptId", "operation", "status", "sourceInstanceId", "destinationInstanceId", "planDigest", "approvalDigest", "backup", "result", "effects", "createdAt", "receiptDigest"],
+  "properties": {
+    "formatVersion": {"const": "stateport.restore-receipt/v1"},
+    "receiptId": {"type": "string", "pattern": "^restore-[0-9a-f]{24}$"},
+    "operation": {"const": "restore_new_instance"},
+    "status": {"const": "validated"},
+    "sourceInstanceId": {"$ref": "#/$defs/id"},
+    "destinationInstanceId": {"$ref": "#/$defs/id"},
+    "planDigest": {"$ref": "#/$defs/digest"},
+    "approvalDigest": {"$ref": "#/$defs/digest"},
+    "backup": {"type": "object"},
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityPolicy", "instanceId", "fileCount", "archiveDigest", "baseGit", "validation", "catalogIdentity"],
+      "properties": {
+        "identityPolicy": {"const": "reidentify"},
+        "instanceId": {"$ref": "#/$defs/id"},
+        "fileCount": {"type": "integer", "minimum": 1},
+        "archiveDigest": {"$ref": "#/$defs/digest"},
+        "baseGit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "validation": {"type": "object"},
+        "catalogIdentity": {"type": "object"}
+      }
+    },
+    "effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceCanonicalState", "destinationCanonicalState", "externalEffectsRestored", "sourceAccess"],
+      "properties": {
+        "sourceCanonicalState": {"const": "unchanged"},
+        "destinationCanonicalState": {"const": "new_instance_created"},
+        "externalEffectsRestored": {"const": false},
+        "sourceAccess": {"$ref": "#/$defs/sourceAccess"}
+      }
+    },
+    "createdAt": {"type": "string", "minLength": 20},
+    "receiptDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sourceAccess": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition"],
+          "properties": {"disposition": {"const": "not_propagated"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sourceAccessClass", "productionInstallAllowed", "sourceReceiptDigest", "destinationReceiptDigest"],
+          "properties": {
+            "disposition": {"const": "propagated"},
+            "sourceAccessClass": {"enum": ["canonical_release", "development_candidate"]},
+            "productionInstallAllowed": {"type": "boolean"},
+            "sourceReceiptDigest": {"$ref": "#/$defs/digest"},
+            "destinationReceiptDigest": {"$ref": "#/$defs/digest"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"sourceAccessClass": {"const": "canonical_release"}}},
+              "then": {"properties": {"productionInstallAllowed": {"const": true}}},
+              "else": {"properties": {"productionInstallAllowed": {"const": false}}}
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

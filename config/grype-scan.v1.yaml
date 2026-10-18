@@ -1,0 +1,96 @@
+# StatePort release vulnerability-scan configuration (grype), version 1.
+#
+# This file is the EXPLICIT, COMMITTED, VERSION-CONTROLLED ignore configuration
+# for every release vulnerability scan.  scripts/collect_release_evidence.py
+# passes it to grype with an explicit `-c <this file>` on every collection, and
+# the collection ABORTS (EvidenceError) when this file is missing, unparseable,
+# or contains anything other than the single rule below.  A scan can therefore
+# never silently resolve an ambient grype configuration from outside the
+# repository again.
+#
+# The file name carries the version.  Renaming it is a new configuration, and
+# the pin in scripts/collect_release_evidence.py must change with it.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS RULE SUPPRESSES (measured, not estimated)
+# ---------------------------------------------------------------------------
+# Exactly one rule, and it is the only rule in this file.
+#
+# Observed population in the signed Alpha.19 r12 candidate
+# (release-index.signed-payload.json sha256:562c6afa12f7cf513654cb7c2abf22f41691d5af17cf327c43e56fd92a209d5d,
+#  image stateport-dev-workspace, retained scan document
+#  stateport-dev-workspace.grype.json sha256:f49864d4090c1a4058bd528b8c511413569d8b88582439fee40323313a31932d,
+#  19500056 bytes; digest and size as declared by that signed index):
+#
+#   ignored matches ............ 3508, on ONE artifact
+#   artifact ................... deb linux-libc-dev 6.8.0-136.136
+#   namespace .................. ubuntu:distro:ubuntu:24.04 (all 3508)
+#   match type ................. exact-indirect-match
+#   severities ................. 3110 Medium, 195 Low, 184 High, 13 Negligible, 6 Critical
+#   High or Critical ........... 190 total (170 not-fixed, 20 fixed)
+#   linux-* packages in matches  0  (this image installs no kernel)
+#
+# These are Ubuntu kernel advisories.  The dpkg matcher found them by searching
+# for the UPSTREAM package `linux` and matching the installed package
+# `linux-libc-dev`; a header/binary development package of the kernel therefore
+# inherited every finding addressed to the kernel itself, including ones that
+# the same image had already fixed.  Re-derivable at any time by
+#   evidence/one-line-release-001/grype-config-pin-probe-20260926.py
+# which re-derives these numbers from the retained signed document.
+#
+# ---------------------------------------------------------------------------
+# WHY THE RULE IS UNSCOPED
+# ---------------------------------------------------------------------------
+# `package` here carries NO `location`.  That is deliberate and it is the
+# strongest scope the evidence actually supports: the `artifact` record of every
+# one of the 3508 ignored matches in the signed document has no `location` key
+# at all, so a location-scoped rule cannot be reconstructed from the evidence
+# and inventing one here would be a claim the signed bytes do not make.
+# The rule as written therefore applies to any deb artifact named
+# `linux-libc-dev` with upstream name `linux`, in any scanned image, at any
+# version, in any namespace.  Do not add a `version` or `location` constraint
+# to narrow it: doing so silently changes which findings are suppressed, and
+# the collection would then disagree with the recorded population.
+#
+# ---------------------------------------------------------------------------
+# WHY IT IS DEFENSIBLE
+# ---------------------------------------------------------------------------
+# The finding is about the kernel, and the kernel is not in the image and not
+# under this project's control.  A container shares the host kernel: the
+# scanned image contains ZERO `linux-*` packages in its real findings, so no
+# kernel code in this image is vulnerable to these advisories, and replacing
+# `linux-libc-dev` in the image would not change the host kernel that actually
+# runs the workload.  The residual risk is the host kernel itself, which is the
+# host operator's to patch; it is tracked in the release's known limitations,
+# not here.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS FILE MUST NEVER BECOME
+# ---------------------------------------------------------------------------
+# A place to record unresolved vulnerabilities.  It suppresses exactly one
+# structural misattribution of kernel advisories to a kernel headers package.
+# Any new suppression of a real finding needs a named, expiring, reviewed entry
+# in config/release-scan-exceptions.v1.yaml (the signed exception ledger), and
+# the evidence collection re-checks that ledger.  A rule added here suppresses
+# findings before the ledger ever sees them.
+#
+# Provenance of the rule as written: the 2026-09-25 ambient configuration that
+# produced the signed documents carried FOUR ignore rules (an rpm
+# `kernel-headers`, a deb `linux(-.*)?-headers-.*`, this deb `linux-libc-dev`,
+# and a deb `linux-kbuild-.*`).  Only THIS rule ever fired: across all seven
+# signed per-image documents, the other three suppressed zero matches, and no
+# `grype.yaml` and no `GRYPE_*` variable exists on this host any more, so their
+# source is unfindable and they are not reproduced.  Dropping them cannot hide
+# a finding that any signed document recorded; it can only cause a future image
+# that does contain such a package to surface those findings, which is the
+# fail-closed direction.
+# ---------------------------------------------------------------------------
+
+ignore:
+  - match-type: exact-indirect-match
+    namespace: ""
+    package:
+      name: linux-libc-dev
+      type: deb
+      upstream-name: linux
+      language: ""
