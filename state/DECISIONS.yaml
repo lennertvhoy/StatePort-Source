@@ -1,0 +1,25 @@
+formatVersion: decision-log.state/v1
+decisions:
+  - id: 0001-database-backup-approach
+    title: How do we back up the production database?
+    status: decided
+    created: 2026-03-02
+    owner: tech lead
+    decideBy: 2026-03-20
+    decidedOn: 2026-03-17
+    reviewOn: 2026-09-17
+    rationale: A nightly encrypted dump kept at a second provider is simple, cheap and restore-tested, and a 24-hour recovery point is acceptable for now.
+  - id: 0002-meeting-cadence
+    title: How often does the team meet, and for how long?
+    status: open
+    created: 2026-08-24
+    owner: team lead
+    decideBy: 2026-10-02
+    context: The five-person team currently has a daily 30-minute stand-up and a weekly planning meeting. People report too many interruptions and too little focus time.
+  - id: 0003-status-page-tool
+    title: Which tool do we use for the public status page?
+    status: open
+    created: 2026-09-14
+    owner: operations
+    decideBy: 2027-01-29
+    context: Customers ask where to check for incidents. The page must be reachable even when our own hosting is down, and cost under a small monthly budget.

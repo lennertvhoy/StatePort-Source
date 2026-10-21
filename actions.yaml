@@ -1,0 +1,107 @@
+formatVersion: decision-log.actions/v1
+application:
+  id: decision-log
+  descriptorVersion: decision-log.application/v1
+actions:
+  - formatVersion: decision-log.action/v1
+    id: decision-log.check/v1
+    displayName: Check the decision log
+    purpose: Evaluate the log. Verdict is invalid when the state file does not parse or an entry lacks required fields, not_yet when an open question is past its decideBy date or a decided entry lacks a rationale or a record, and passed otherwise.
+    executorKind: script
+    executorCommand: scripts/decision_actions.py
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema:
+      type: object
+      required: [formatVersion, actionId, verdict, summary, findings]
+      properties:
+        formatVersion: {type: string}
+        actionId: {type: string}
+        verdict: {enum: [passed, not_yet, invalid]}
+        summary: {type: string}
+        findings: {type: array}
+    contextPolicy:
+      id: decision-log.context/v1
+      categoryPaths:
+        decision_state: [state/DECISIONS.yaml]
+        decision_records: [decisions/]
+      includeCategories: [instance_descriptor, decision_state, decision_records]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 300
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 10
+    budgetDefaults: {token: 300, costMinor: 0, timeSeconds: 10, steps: 1}
+  - formatVersion: decision-log.action/v1
+    id: decision-log.list-due/v1
+    displayName: List what is due
+    purpose: List open questions past their decideBy date and decided entries whose reviewOn date has passed, oldest first, without changing anything.
+    executorKind: script
+    executorCommand: scripts/decision_actions.py
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema:
+      type: object
+      required: [formatVersion, actionId, verdict, summary, findings]
+      properties:
+        formatVersion: {type: string}
+        actionId: {type: string}
+        verdict: {enum: [passed, not_yet, invalid]}
+        summary: {type: string}
+        findings: {type: array}
+    contextPolicy:
+      id: decision-log.context/v1
+      categoryPaths:
+        decision_state: [state/DECISIONS.yaml]
+        decision_records: [decisions/]
+      includeCategories: [instance_descriptor, decision_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 300
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 10
+    budgetDefaults: {token: 300, costMinor: 0, timeSeconds: 10, steps: 1}
+  - formatVersion: decision-log.action/v1
+    id: decision-log.draft-decision/v1
+    displayName: Draft the oldest open decision
+    purpose: A model drafts the decision record for the oldest open question and proposes marking it decided. The change is a proposal; nothing is applied until the owner approves it.
+    executorKind: agent
+    actionClass: agent.edit-state
+    writablePaths: [state/DECISIONS.yaml, decisions/]
+    instructions: |
+      Take the oldest open question in state/DECISIONS.yaml (earliest `created` date; the first one listed if dates tie).
+      Write decisions/<id>.md, where <id> is that entry's id, with these sections: Context, Options considered (at least
+      two, each with its trade-offs), Recommended option, Rationale, Consequences.
+      Then, in state/DECISIONS.yaml, set only that entry's status to decided, add a one-line `rationale`, and add
+      `decidedOn` set to today's date (YYYY-MM-DD).
+      Change nothing else: do not touch other entries, other fields or any other file.
+      If information needed to decide is missing, still write the record, but keep the status open, add a `needs` list
+      to that entry naming what is missing, and add neither `rationale` nor `decidedOn`.
+      Base the record only on the state file and existing records. Do not invent facts, names, figures or dates.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object}
+    contextPolicy:
+      id: decision-log.context/v1
+      categoryPaths:
+        decision_state: [state/DECISIONS.yaml]
+        decision_records: [decisions/]
+      includeCategories: [instance_descriptor, decision_state, decision_records]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 6000
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: model_provider_only
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 180
+    budgetDefaults: {token: 8000, costMinor: 0, timeSeconds: 180, steps: 8}

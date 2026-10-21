@@ -1,0 +1,15 @@
+formatVersion: stateport.application/v1
+applicationId: decision-log
+displayName: Decision Log
+description: A small decision log for a team or a person. Open questions carry a decide-by date, decisions carry a rationale and a written record, and a deterministic check says whether the log is up to date.
+productionEligible: false
+privacyClassification: public_safe
+stateLayout:
+  canonical: [state/DECISIONS.yaml, decisions/]
+  ownership:
+    state/DECISIONS.yaml: instance
+    decisions/: instance
+actionsPath: actions.yaml
+executorCommand: scripts/decision_actions.py
+validationCommand: python3 scripts/decision_actions.py --root . --action check --fail-on-invalid
+evaluatorAction: decision-log.check/v1
