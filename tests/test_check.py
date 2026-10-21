@@ -316,7 +316,9 @@ def test_descriptor_matches_the_contract():
 
 def test_actions_match_the_contract():
     actions = {a["id"]: a for a in load("actions.yaml")["actions"]}
-    assert set(actions) == {"decision-log.check/v1", "decision-log.list-due/v1", "decision-log.draft-decision/v1"}
+    assert set(actions) == {
+        "decision-log.check/v1", "decision-log.list-due/v1", "decision-log.draft-decision/v1", "decision-log.add-question/v1"
+    }
     assert load("application.yaml")["evaluatorAction"] in actions
     for name in ("decision-log.check/v1", "decision-log.list-due/v1"):
         action = actions[name]
@@ -330,6 +332,13 @@ def test_actions_match_the_contract():
     )
     assert draft["writablePaths"] == ["state/DECISIONS.yaml", "decisions/"]
     assert 0 < len(draft["instructions"]) <= 1500
+    add = actions["decision-log.add-question/v1"]
+    assert (add["executorKind"], add["mutationPolicy"], add["networkPolicy"], add["actionClass"]) == (
+        "agent", "propose_only", "model_provider_only", "agent.edit-state"
+    )
+    assert add["writablePaths"] == ["state/DECISIONS.yaml"]
+    assert add["inputSchema"]["required"] == ["question"] and add["inputSchema"]["additionalProperties"] is False
+    assert 0 < len(add["instructions"]) <= 1500
     for action in actions.values():
         assert action["formatVersion"] == "decision-log.action/v1" and action["contextPolicy"]["id"]
 

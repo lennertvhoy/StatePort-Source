@@ -11,7 +11,7 @@ It is a public-safe example of an independent StatePort application: nothing in 
 | Path | Purpose |
 |---|---|
 | `application.yaml` | StatePort application descriptor (`stateport.application/v1`). Names the evaluator, `decision-log.check/v1`. |
-| `actions.yaml` | The three actions below. |
+| `actions.yaml` | The four actions below. |
 | `scripts/decision_actions.py` | Executor for the two check actions. Read-only, Python standard library plus PyYAML, prints one JSON object, always exits 0. |
 | `state/DECISIONS.yaml` | The log. Owned by the instance. Seeded with a small example (database backups, meeting cadence, status page). |
 | `decisions/<id>.md` | One record per decided entry: context, options considered, decision, rationale, consequences. Owned by the instance. |
@@ -37,6 +37,9 @@ Required: `id` (also the record file name, so letters, digits, `.`, `_`, `-`), `
    marks the entry `decided` with a `rationale` and `decidedOn`. It may only write `state/DECISIONS.yaml` and `decisions/`.
    If information is missing it keeps the entry `open` and lists what it needs under `needs`. The result is a proposal for
    you to review, and the evaluator is the judge of the outcome.
+4. **`decision-log.add-question/v1`** (agent, propose only, model provider network only). You give a question, and
+   optionally context, an owner and a decide-by date; a model adds it as one well-formed `open` entry (default decide-by:
+   14 days from today) and changes nothing else. It may only write `state/DECISIONS.yaml`.
 
 On the seeded state the check says `not_yet`, because question `0002-meeting-cadence` is past its `decideBy` date. Draft it,
 approve it, and the verdict becomes `passed`.

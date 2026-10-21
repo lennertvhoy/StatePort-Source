@@ -105,3 +105,44 @@ actions:
     validationPolicy: {command: true}
     timeoutSeconds: 180
     budgetDefaults: {token: 8000, costMinor: 0, timeSeconds: 180, steps: 8}
+  - formatVersion: decision-log.action/v1
+    id: decision-log.add-question/v1
+    displayName: Add an open question
+    purpose: A model turns your question into a well-formed open entry with a decide-by date. The change is a proposal; nothing is applied until you approve it.
+    executorKind: agent
+    actionClass: agent.edit-state
+    writablePaths: [state/DECISIONS.yaml]
+    instructions: |
+      Add exactly one new entry to the `decisions` list in state/DECISIONS.yaml for the question given in the inputs.
+      Use status open, created set to today's date (YYYY-MM-DD), the given owner (or "to be decided" if none), and
+      decideBy set to the given date, or to 14 days after today if none was given. Derive a short lowercase id from the
+      title, prefixed with the next free four-digit number (for example 0004-...), unique in the file. Put the given
+      context under `context`, unchanged in meaning; if no context was given, write one sentence saying what must be
+      decided and nothing more. Keep every other entry, field and comment exactly as it is, and change no other file.
+      Do not invent facts, names, figures or dates beyond the ones given and the rules above.
+    inputSchema:
+      type: object
+      required: [question]
+      additionalProperties: false
+      properties:
+        question: {type: string, title: Question, minLength: 5, maxLength: 200}
+        context: {type: string, title: Context, maxLength: 1000}
+        owner: {type: string, title: Owner, maxLength: 80}
+        decideBy: {type: string, title: Decide by, format: date}
+    outputSchema: {type: object}
+    contextPolicy:
+      id: decision-log.context/v1
+      categoryPaths:
+        decision_state: [state/DECISIONS.yaml]
+      includeCategories: [instance_descriptor, decision_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: public
+      budgetTokens: 4000
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: model_provider_only
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 180
+    budgetDefaults: {token: 8000, costMinor: 0, timeSeconds: 180, steps: 8}
