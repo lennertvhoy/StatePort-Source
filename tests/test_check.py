@@ -327,14 +327,14 @@ def test_actions_match_the_contract():
         )
         assert (ROOT / action["executorCommand"]).is_file()
     draft = actions["decision-log.draft-decision/v1"]
-    assert (draft["executorKind"], draft["mutationPolicy"], draft["networkPolicy"], draft["actionClass"]) == (
-        "agent", "propose_only", "model_provider_only", "agent.edit-state"
+    assert (draft["executorKind"], draft["mutationPolicy"], draft["networkPolicy"], draft["actionClass"], draft["toolPolicy"]) == (
+        "agent", "propose_only", "model_provider_only", "agent.edit-state", "edit"
     )
     assert draft["writablePaths"] == ["state/DECISIONS.yaml", "decisions/"]
     assert 0 < len(draft["instructions"]) <= 1500
     add = actions["decision-log.add-question/v1"]
-    assert (add["executorKind"], add["mutationPolicy"], add["networkPolicy"], add["actionClass"]) == (
-        "agent", "propose_only", "model_provider_only", "agent.edit-state"
+    assert (add["executorKind"], add["mutationPolicy"], add["networkPolicy"], add["actionClass"], add["toolPolicy"]) == (
+        "agent", "propose_only", "model_provider_only", "agent.edit-state", "edit"
     )
     assert add["writablePaths"] == ["state/DECISIONS.yaml"]
     assert add["inputSchema"]["required"] == ["question"] and add["inputSchema"]["additionalProperties"] is False

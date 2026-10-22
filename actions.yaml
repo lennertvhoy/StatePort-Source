@@ -101,7 +101,7 @@ actions:
     optionalCapabilities: [cancellation]
     mutationPolicy: propose_only
     networkPolicy: model_provider_only
-    toolPolicy: none
+    toolPolicy: edit
     validationPolicy: {command: true}
     timeoutSeconds: 180
     budgetDefaults: {token: 8000, costMinor: 0, timeSeconds: 180, steps: 8}
@@ -142,7 +142,7 @@ actions:
     optionalCapabilities: [cancellation]
     mutationPolicy: propose_only
     networkPolicy: model_provider_only
-    toolPolicy: none
+    toolPolicy: edit
     validationPolicy: {command: true}
     timeoutSeconds: 180
     budgetDefaults: {token: 8000, costMinor: 0, timeSeconds: 180, steps: 8}
