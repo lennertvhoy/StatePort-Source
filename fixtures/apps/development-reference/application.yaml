@@ -1,0 +1,14 @@
+formatVersion: stateport.application/v1
+applicationId: stateport.development-reference
+displayName: Development reference
+description: A one-file development fixture StatePort uses to test itself. For your own project, import the ProjectState template instead.
+sourceProfile: fixture:development-reference
+productionEligible: false
+privacyClassification: public_safe
+stateLayout:
+  canonical: [state/PROJECT.yaml]
+  generated: [generated/]
+  ownership:
+    state/PROJECT.yaml: instance
+actionsPath: actions.yaml
+validationCommand: python3 -c "import pathlib; assert pathlib.Path('state/PROJECT.yaml').is_file()"

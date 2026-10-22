@@ -1,0 +1,12 @@
+version: projectstate-template-v6
+profile: core
+project:
+  name: Lantern Library
+  outcome_ref: PROJECT.md
+current_slice:
+  id: catalogue-search
+  status: active
+  next_action: Add the search index to the catalogue page.
+blockers: []
+risks: []
+owner_questions: []

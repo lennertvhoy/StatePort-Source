@@ -1,0 +1,46 @@
+formatVersion: stateport.provider-runtime-inputs/v1
+resolvedOn: "2026-10-22"
+
+opencode:
+  package: opencode-ai
+  version: 1.19.3
+  source:
+    repository: https://github.com/anomalyco/opencode
+    tag: v1.19.3
+    tagType: lightweight
+    commit: e3c4eb242585dcd77be1a867391b7c25fd47ce52
+    releasedAt: "2026-10-16T12:32:00Z"
+  npm:
+    registry: https://registry.npmjs.org
+    packageTarball: https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.19.3.tgz
+    packageIntegrity: sha512-wDRcUlMDibaLzecIGvVGUA9naghXVqzCWcUE7N3qagpGiLSUlU4VbixI+bpsErwJp+AAuSO2lhSr/XxJl7XbrQ==
+    packageUnpackedSize: 7852
+    packageJson: config/opencode-runtime/package.json
+    packageLock: config/opencode-runtime/package-lock.json
+  platforms:
+    glibc:
+      package: opencode-linux-x64
+      tarball: https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.19.3.tgz
+      integrity: sha512-wz+kXi7ZkvLW04hEIocW3RoEznALJ3YGnvNlZdXFarYF0v1jyDyAwpPGZkxb4JZDrw4oy48/LDZ8wCFIQDTxhw==
+      unpackedSize: 186013961
+      os: linux
+      cpu: x64
+      binaryMember: package/bin/opencode
+      observedBinarySha256: sha256:179ca421d61eefeadfa0c50e084a6e79c1623734732f0f4593f81ccfd3ab7ee9
+    musl:
+      package: opencode-linux-x64-musl
+      tarball: https://registry.npmjs.org/opencode-linux-x64-musl/-/opencode-linux-x64-musl-1.19.3.tgz
+      integrity: sha512-6wdrvDPyFzGj3iW8QJ9EdLgbmT7oWDQ0+nBV5F9fKsFGIpavCZTWEyQfsiolGT7RFkb7lYdxQeJQnoNSd75weQ==
+      unpackedSize: 196430282
+      os: linux
+      cpu: x64
+      binaryMember: package/bin/opencode
+      # Musl build; the Alpine web image supplies libstdc++/libgcc for it.
+      observedBinarySha256: sha256:132c231b3df1d10c4d58d0db65d2ef660ce77c47b7dd3fa918efcc12a17ec8cb
+  license:
+    spdx: MIT
+    packagePath: LICENSE
+  verification:
+    observedVersion: "1.19.3"
+    versionSource: opencode --version
+    installMode: npm-ci-ignore-scripts-omit-dev

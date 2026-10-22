@@ -1,0 +1,123 @@
+formatVersion: stateport.template.projectstate.actions/v1
+application:
+  id: stateport.template.projectstate
+  descriptorVersion: stateport.application/v1
+actions:
+  - formatVersion: stateport.template.projectstate.action/v1
+    id: stateport.template.projectstate.inspect/v1
+    displayName: Inspect project outcome
+    purpose: Validate and summarize the current ProjectState outcome and slice without mutating it.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, digest, summary]}
+    contextPolicy:
+      id: stateport.template.projectstate.context/v1
+      categoryPaths: {project_outcome: [PROJECT.md], project_state: [STATE.yaml]}
+      includeCategories: [project_outcome, project_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 1200
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 10
+    budgetDefaults: {token: 1200, costMinor: 0, timeSeconds: 10, steps: 1}
+  - formatVersion: stateport.template.projectstate.action/v1
+    id: stateport.template.projectstate.check/v1
+    displayName: Check the project gate
+    purpose: Run StatePort's pinned ProjectState v6.4.0 gate on the instance and report passed, not yet, or invalid with its findings.
+    executorKind: script
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, verdict, summary, findings]}
+    contextPolicy:
+      id: stateport.template.projectstate.context/v1
+      categoryPaths: {project_state: [STATE.yaml]}
+      includeCategories: [project_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 30
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 30, steps: 1}
+  - formatVersion: stateport.template.projectstate.action/v1
+    id: stateport.template.projectstate.next-action/v1
+    displayName: Do the next action
+    purpose: Ask a model to carry out the next_action recorded in STATE.yaml on a copy of the project and return its changes as one proposal for review.
+    executorKind: agent
+    actionClass: agent.edit-state
+    instructions: |-
+      Do the next_action recorded in STATE.yaml, and only that step.
+      Never edit PROJECT.md: it is the owner's outcome. Do not edit scripts/projectstate_gate.py.
+      When you are done, update STATE.yaml truthfully: record what you did, set next_action to the one next executable step, and never mark a journey passed that you did not run.
+      Record what you did and how you checked it in evidence/<current_slice.id>/summary.md (create it if it is missing), using its sections Primary journey, Secondary checks, Artifacts and Limitations.
+      Keep changes small and reviewable. If the next action cannot be done here, change nothing except a short note in STATE.yaml explaining why.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object}
+    contextPolicy:
+      id: stateport.template.projectstate.agent-context/v1
+      categoryPaths:
+        project_outcome: [PROJECT.md]
+        project_state: [STATE.yaml]
+        project_rules: [AGENTS.md]
+      includeCategories: [project_outcome, project_state, project_rules]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 6000
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: model_provider_only
+    toolPolicy: edit
+    # Everything instance-owned except the owner's outcome.
+    protectedPaths: [PROJECT.md]
+    validationPolicy: {command: true}
+    timeoutSeconds: 300
+    budgetDefaults: {token: 6000, costMinor: 0, timeSeconds: 300, steps: 1}
+  - formatVersion: stateport.template.projectstate.action/v1
+    id: stateport.template.projectstate.setup-project/v1
+    displayName: Set up this project
+    purpose: Turn the imported template into your project, written only from your own words, and return the change as one proposal for review.
+    executorKind: agent
+    actionClass: agent.edit-state
+    instructions: |-
+      Make this repository describe the owner's project, using only the inputs: project (the name), user (who it is for), outcome (what must be true when it works) and, if given, firstSlice (the first piece of work).
+      Rewrite PROJECT.md with the sections the template already uses for user, outcome, scope, non-goals and durable constraints. Write strictly from the inputs; wherever the inputs do not say something, write "to be decided by the owner". Do not invent requirements, users, dates or numbers.
+      Reset STATE.yaml to a first slice for this project: keep version: projectstate-template-v6 and the current profile, keep the schema valid, set the primary journey status to not_run, remove the template's own history, blockers and slice evidence, and set next_action to one concrete executable step for this project.
+      Create evidence/<current_slice.id>/summary.md for the new slice with the sections Primary journey, Secondary checks, Artifacts and Limitations, and Result: not_run. Update README.md's title and first paragraph to name the project.
+      Do not touch AGENTS.md or anything outside PROJECT.md, STATE.yaml, evidence/ and README.md.
+      Before you finish, run python3 scripts/projectstate_gate.py --root . and make sure it exits 0 or 1; exit code 2 means STATE.yaml is invalid and must be fixed.
+    inputSchema:
+      type: object
+      required: [project, user, outcome]
+      additionalProperties: false
+      properties:
+        project: {type: string, minLength: 1, maxLength: 120, title: Project name, description: "A short name, for example: Repair cafe booking site."}
+        user: {type: string, minLength: 1, maxLength: 300, title: Who it is for, description: The people who will use what the project makes.}
+        outcome: {type: string, minLength: 1, maxLength: 600, title: Outcome, description: "What is true for them when the project works, in one or two sentences."}
+        firstSlice: {type: string, minLength: 1, maxLength: 300, title: First piece of work, description: The smallest step that moves toward the outcome. Leave empty and the project names none yet.}
+    outputSchema: {type: object}
+    contextPolicy:
+      id: stateport.template.projectstate.agent-context/v1
+      categoryPaths:
+        project_outcome: [PROJECT.md]
+        project_state: [STATE.yaml]
+      includeCategories: [project_outcome, project_state]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 6000
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: model_provider_only
+    toolPolicy: edit
+    writablePaths: [PROJECT.md, STATE.yaml, evidence/, README.md]
+    validationPolicy: {command: true}
+    timeoutSeconds: 300
+    budgetDefaults: {token: 6000, costMinor: 0, timeSeconds: 300, steps: 1}

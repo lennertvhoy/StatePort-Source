@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-demo
+.DS_Store
+
+# e2e outputs
+test-results/
+.scratch/
+/output/

@@ -1,0 +1,72 @@
+formatVersion: stateport.canonical-source/v1
+sourceId: stateport.source.studystate
+application:
+  id: study-state
+  publicName: StudyState
+  legacyIdentifiers:
+    - studydd
+    - StudyDD_Template
+authority:
+  repository: https://github.com/lennertvhoy/StudyDD_Template.git
+  canonicalRefPolicy: immutable_release_tag
+  manifestPath: .statedd/manifest.yaml
+  manifestContract: statedd.template-manifest/v2
+requirements:
+  modules:
+    - studydd.core
+    - studydd.activities
+    - studydd.source-freshness
+    - studydd.fast-drill
+  selfTests:
+    - core-health
+    - core-demo-replay
+    - core-cross-platform-paths
+    - activities-contract
+    - source-freshness-contract
+    - source-aware-routing
+    - fast-drill-checkpoint-contract
+    - fast-drill-settings-migration
+canonicalResolution:
+  sourceClass: canonical_release
+  requestedRef: null
+  identity: null
+  releaseStatus: null
+  verifiedModules: []
+  verifiedSelfTests: []
+developmentCandidate:
+  sourceClass: development_candidate
+  requestedRef: cffc45a2f69f8719b950abce37988667b1712830
+  identity:
+    repository: https://github.com/lennertvhoy/StudyDD_Template.git
+    commit: cffc45a2f69f8719b950abce37988667b1712830
+    tree: e518c185fab3dbd1624cf76d017f566e4aad317f
+    manifestDigest: sha256:425008e382cc87076e05a3ae02a6915167107bcbb74dc2ffe7236650c0591671
+    sourceDigest: sha256:0e575f528d962095ee0c2a9ed3bd2d45ad3d126869686a556ae96f675a0e5222
+  releaseStatus: candidate
+  verifiedModules:
+    - studydd.core
+    - studydd.activities
+    - studydd.source-freshness
+    - studydd.fast-drill
+  verifiedSelfTests:
+    - core-health
+    - core-demo-replay
+    - core-cross-platform-paths
+    - activities-contract
+    - source-freshness-contract
+    - source-aware-routing
+    - fast-drill-checkpoint-contract
+    - fast-drill-settings-migration
+trust:
+  state: development_only
+  canonicalInstallAllowed: false
+  developmentTestingAllowed: true
+status:
+  code: awaiting_verified_release
+  installable: false
+  unresolvedReason: canonical_release_not_published
+observations:
+  canonicalRef: refs/heads/main
+  canonicalCommit: 27e153d57226560a09c50294e97fea54cf31b71d
+  canonicalManifestPresent: false
+  observedAt: "2026-07-15T00:00:00+02:00"

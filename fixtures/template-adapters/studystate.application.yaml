@@ -1,0 +1,27 @@
+formatVersion: stateport.application/v1
+applicationId: stateport.template.studystate
+displayName: StudyState
+description: An isolated StudyState learner workspace backed by StatePort-owned actions.
+sourceProfile: managed-template:studystate
+managedTemplateAdapter: studystate
+productionEligible: true
+privacyClassification: private_by_default
+catalogVisible: false
+actionsPath: actions/studystate.yaml
+executorCommand: scripts/template_actions.py
+# The evaluator E(S): StudyState marker checks plus the pinned ProjectState gate
+# on the embedded v6 core when it is present (ADR-0007).
+evaluatorAction: stateport.template.studystate.check/v1
+stateLayout:
+  ownership:
+    state/: instance
+    targets/: instance
+    sessions/: instance
+    reviews/: instance
+    activities/: instance
+    NEXT_ACTIONS.md: instance
+  # The template identity is never action work; the mode lifecycle is changed
+  # only by setup-study (see its action contract).
+  protectedPaths:
+    - state/STUDYDD_TEMPLATE_VERSION.yaml
+validationCommand: python3 /application/scripts/template_actions.py --root /instance --validate studystate

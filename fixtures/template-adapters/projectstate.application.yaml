@@ -1,0 +1,23 @@
+formatVersion: stateport.application/v1
+applicationId: stateport.template.projectstate
+displayName: ProjectState
+description: An isolated ProjectState workspace backed by StatePort-owned actions.
+sourceProfile: managed-template:projectstate-v6
+managedTemplateAdapter: projectstate-v6
+productionEligible: true
+privacyClassification: private_by_default
+catalogVisible: false
+actionsPath: actions/projectstate.yaml
+executorCommand: scripts/template_actions.py
+# The evaluator E(S): StatePort's pinned ProjectState v6.4.0 gate (ADR-0007).
+evaluatorAction: stateport.template.projectstate.check/v1
+stateLayout:
+  # Longest match wins; `./` is the whole instance. The instance's own gate
+  # copy is the evaluator's twin: no action may write it (the fixed-point law).
+  # PROJECT.md (the owner's outcome) is written only by setup-project, from the
+  # owner's own words; every other action protects it.
+  ownership:
+    ./: instance
+  protectedPaths:
+    - scripts/projectstate_gate.py
+validationCommand: python3 /application/scripts/template_actions.py --root /instance --validate projectstate

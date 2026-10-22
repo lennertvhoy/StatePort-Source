@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorkflowDeclaration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "id", "task", "preflight", "execution", "verify", "failure", "closure"],
+  "properties": {
+    "formatVersion": {"const": "stateport.workflow/v1"},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "task": {"type": "object", "additionalProperties": false, "required": ["kind"], "properties": {"kind": {"type": "string", "minLength": 1, "maxLength": 128}}},
+    "preflight": {"$ref": "#/$defs/argvCommand"},
+    "execution": {"type": "object", "additionalProperties": false, "required": ["supportedModes", "defaultMode"], "properties": {"supportedModes": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["agent_native", "assisted", "managed"]}}, "defaultMode": {"enum": ["agent_native", "assisted", "managed"]}}},
+    "verify": {"$ref": "#/$defs/argvCommand"},
+    "failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["defaultAction", "sideEffectClass", "automaticRetryAllowed"],
+      "properties": {"defaultAction": {"const": "report_and_stop"}, "sideEffectClass": {"enum": ["none", "idempotent", "compensated", "external", "filesystem_transaction", "unknown"]}, "automaticRetryAllowed": {"type": "boolean"}},
+      "allOf": [{"if": {"properties": {"automaticRetryAllowed": {"const": true}}, "required": ["automaticRetryAllowed"]}, "then": {"properties": {"sideEffectClass": {"enum": ["none", "idempotent"]}}}}]
+    },
+    "closure": {"type": "object", "additionalProperties": false, "required": ["requireCleanWorktree", "requireReceipt"], "properties": {"requireCleanWorktree": {"const": true}, "requireReceipt": {"const": true}}},
+    "profileReferences": {"type": "object", "minProperties": 1, "additionalProperties": false, "properties": {"runtime": {"type": "string", "minLength": 1, "maxLength": 4096}, "context": {"type": "string", "minLength": 1, "maxLength": 4096}, "agent": {"type": "string", "minLength": 1, "maxLength": 4096}}}
+  },
+  "$defs": {
+    "argvCommand": {
+      "type": "object", "additionalProperties": false, "required": ["command", "timeoutSeconds"],
+      "properties": {"command": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}, "timeoutSeconds": {"type": "integer", "minimum": 1}}
+    }
+  }
+}

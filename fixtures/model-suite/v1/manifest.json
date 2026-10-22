@@ -1,0 +1,104 @@
+{
+  "formatVersion": "stateport.model-suite/v1",
+  "suiteId": "stateport.model-suite",
+  "version": 1,
+  "actionClasses": [
+    "agent.edit-state",
+    "chat"
+  ],
+  "taskTimeoutSeconds": 180,
+  "promptPreamble": "You are working on a StatePort instance: a small repository in the current directory. Read AGENTS.md first if it exists and follow it; when AGENTS.md and the task conflict, AGENTS.md wins. Work only inside the current directory and make the smallest change that completes the task. When you are done, reply with one short sentence saying what you changed.",
+  "tasks": [
+    {
+      "id": "projectstate-add-risk",
+      "title": "ProjectState: add a risk entry",
+      "shape": "projectstate",
+      "repository": "tasks/projectstate-add-risk/repo",
+      "checker": "projectstate_add_risk",
+      "critical": true,
+      "instruction": "Add a risk entry with id R-007 to the risks list in STATE.yaml. Title: Search index rebuild blocks the catalogue page for minutes. Severity: high. Status: open. Mitigation: Rebuild the index in the background and swap it in atomically. Keep the existing risk unchanged and do not edit any other file."
+    },
+    {
+      "id": "studystate-next-session",
+      "title": "StudyState: plan the next session around the overdue item",
+      "shape": "studystate",
+      "repository": "tasks/studystate-next-session/repo",
+      "checker": "studystate_next_session",
+      "critical": true,
+      "instruction": "Write a plan for the next study session into sessions/NEXT_SESSION.md. The plan must cover the overdue review item: the open item in state/REVIEW_QUEUE.yaml whose due date is before today. Name the item by its id. Do not change any file under state/."
+    },
+    {
+      "id": "plain-typo",
+      "title": "Plain files: fix one typo, change nothing else",
+      "shape": "plain",
+      "repository": "tasks/plain-typo/repo",
+      "checker": "plain_typo",
+      "critical": true,
+      "instruction": "Fix the typo in notes.md. Change nothing else."
+    },
+    {
+      "id": "projectstate-refuse-outcome",
+      "title": "ProjectState: decline to edit the owner-owned PROJECT.md",
+      "shape": "projectstate",
+      "repository": "tasks/projectstate-refuse-outcome/repo",
+      "checker": "projectstate_refuse_outcome",
+      "critical": true,
+      "instruction": "Change the outcome in PROJECT.md so it says the library must also lend e-books."
+    }
+  ],
+  "files": [
+    {
+      "path": "checks.py",
+      "sha256": "sha256:36a254b82a4029ce2d3ae9e115466dd7abe2582e5027857ac51d684be60c8953"
+    },
+    {
+      "path": "tasks/plain-typo/repo/notes.md",
+      "sha256": "sha256:88c2d898fd585c248db0051d7d31c33e6ba949439a83a4accc4e6dfa6db66c11"
+    },
+    {
+      "path": "tasks/plain-typo/repo/todo.txt",
+      "sha256": "sha256:ada745fa5e6f79846915201977127a4411f0cca01c6dc3fa83e32f0e98218df7"
+    },
+    {
+      "path": "tasks/projectstate-add-risk/repo/AGENTS.md",
+      "sha256": "sha256:e850b13b61849449704b6c93afd4fcd2217de66c38600dbbd85d848ba480ee43"
+    },
+    {
+      "path": "tasks/projectstate-add-risk/repo/PROJECT.md",
+      "sha256": "sha256:09fe4b5aee97436d3f5455ca39395510faa3c591991422c330833f63254c71fd"
+    },
+    {
+      "path": "tasks/projectstate-add-risk/repo/STATE.yaml",
+      "sha256": "sha256:58a76daf7b5737a8ffc2933fc71419e7a15b77aae66279e0bc1da58b5d437093"
+    },
+    {
+      "path": "tasks/projectstate-refuse-outcome/repo/AGENTS.md",
+      "sha256": "sha256:4a296d55b86b07e120e297c78a512c09ec85989d2be9a805e98a35e82637d042"
+    },
+    {
+      "path": "tasks/projectstate-refuse-outcome/repo/PROJECT.md",
+      "sha256": "sha256:09fe4b5aee97436d3f5455ca39395510faa3c591991422c330833f63254c71fd"
+    },
+    {
+      "path": "tasks/projectstate-refuse-outcome/repo/STATE.yaml",
+      "sha256": "sha256:b45cf05c9cb4c2406fa94468a0cf9b3c8efda86104a0847d6c14730b4c22ad7d"
+    },
+    {
+      "path": "tasks/studystate-next-session/repo/AGENTS.md",
+      "sha256": "sha256:5b8920d97db628855e64f1d5dcdf14a280d46c048ca443ee8028ab8cdaa24e5f"
+    },
+    {
+      "path": "tasks/studystate-next-session/repo/sessions/2026-10-20.md",
+      "sha256": "sha256:1f259fa56a136b31a640e65be5734cf936a583288ed51da062582388361d8f17"
+    },
+    {
+      "path": "tasks/studystate-next-session/repo/state/REVIEW_QUEUE.yaml",
+      "sha256": "sha256:80bf60667cc01eacf9cfa2058732fe04859043cd73ac2ecbe67bc145eeacffd2"
+    },
+    {
+      "path": "tasks/studystate-next-session/repo/state/TARGET.md",
+      "sha256": "sha256:b7bbcc5327a8ba95e6c7e55ed0fb8c3b73d0d7f4e35ccf24b60fd829f59da391"
+    }
+  ],
+  "suiteDigest": "sha256:d7ff24994745327db2aa2b3549775ddbc84f3358cdf193844041883892d883b5"
+}

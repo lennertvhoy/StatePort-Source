@@ -1,0 +1,135 @@
+formatVersion: stateport.template.studystate.actions/v1
+application:
+  id: stateport.template.studystate
+  descriptorVersion: stateport.application/v1
+actions:
+  - formatVersion: stateport.template.studystate.action/v1
+    id: stateport.template.studystate.inspect/v1
+    displayName: Inspect study state
+    purpose: Validate and summarize the current StudyState learner and study workflow without mutating it.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, digest, summary]}
+    contextPolicy:
+      id: stateport.template.studystate.context/v1
+      categoryPaths:
+        study_mode: [state/STUDYDD_MODE.yaml]
+        study_state: [state/STUDY_STATE.yaml]
+        next_action: [NEXT_ACTIONS.md]
+      includeCategories: [study_mode, study_state, next_action]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: private
+      budgetTokens: 1600
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 10
+    budgetDefaults: {token: 1600, costMinor: 0, timeSeconds: 10, steps: 1}
+  - formatVersion: stateport.template.studystate.action/v1
+    id: stateport.template.studystate.check/v1
+    displayName: Check study state
+    purpose: Check the StudyState state files and, when the ProjectState core is present, run StatePort's pinned v6.4.0 gate; report passed, not yet, or invalid.
+    executorKind: script
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object, required: [actionId, verdict, summary, findings]}
+    contextPolicy:
+      id: stateport.template.studystate.context/v1
+      categoryPaths:
+        study_mode: [state/STUDYDD_MODE.yaml]
+        study_state: [state/STUDY_STATE.yaml]
+      includeCategories: [study_mode, study_state]
+      excludeCategories: [credentials, engine_sessions, private_learner_data]
+      sensitivity: private
+      budgetTokens: 400
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: none
+    networkPolicy: disabled
+    toolPolicy: none
+    validationPolicy: {command: true}
+    timeoutSeconds: 30
+    budgetDefaults: {token: 400, costMinor: 0, timeSeconds: 30, steps: 1}
+  - formatVersion: stateport.template.studystate.action/v1
+    id: stateport.template.studystate.plan-next-session/v1
+    displayName: Plan the next study session
+    purpose: Ask a model to plan the learner's next study session from the current study state and return the changes as one proposal for review.
+    executorKind: agent
+    actionClass: agent.edit-state
+    instructions: |-
+      Plan the learner's next study session from the current StudyState.
+      Base the plan on the active target, the review queue and the recorded evidence; never claim mastery or readiness that the evidence does not show.
+      Write the plan as the current next action in NEXT_ACTIONS.md: the topic, the goal, two or three concrete activities and the time they need.
+      Record the planned session in sessions/ and add any review items it schedules to reviews/REVIEW_QUEUE.md.
+      Change only state/, targets/, sessions/, reviews/ and NEXT_ACTIONS.md. Do not change state/STUDYDD_MODE.yaml.
+      If there is not enough learner information to plan a session, change nothing except a short note in NEXT_ACTIONS.md saying what is missing.
+    inputSchema: {type: object, additionalProperties: false}
+    outputSchema: {type: object}
+    contextPolicy:
+      id: stateport.template.studystate.agent-context/v1
+      categoryPaths:
+        study_mode: [state/STUDYDD_MODE.yaml]
+        study_state: [state/STUDY_STATE.yaml]
+        next_action: [NEXT_ACTIONS.md]
+        review_queue: [reviews/REVIEW_QUEUE.md]
+        session_log: [sessions/SESSION_SUMMARIES.md]
+      includeCategories: [study_mode, study_state, next_action, review_queue, session_log]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 6000
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: model_provider_only
+    toolPolicy: edit
+    writablePaths: [state/, targets/, sessions/, reviews/, NEXT_ACTIONS.md]
+    protectedPaths: [state/STUDYDD_MODE.yaml]
+    validationPolicy: {command: true}
+    timeoutSeconds: 300
+    budgetDefaults: {token: 6000, costMinor: 0, timeSeconds: 300, steps: 1}
+  - formatVersion: stateport.template.studystate.action/v1
+    id: stateport.template.studystate.setup-study/v1
+    displayName: Set up my study
+    purpose: Turn the imported template into your own study workspace from your own words, and return the change as one proposal for review.
+    executorKind: agent
+    actionClass: agent.edit-state
+    instructions: |-
+      Turn this StudyState template into the learner's own study workspace, using only the inputs: goal (what the learner wants to reach), and if given deadline (YYYY-MM-DD), level (where the learner starts), hoursPerWeek and learnerName.
+      Move state/STUDYDD_MODE.yaml from mode template to learner_instance as the transition documented in that file says (personalized: true, public_safe: false_or_review_required, template_origin recorded).
+      Fill state/LEARNER_PROFILE.yaml and state/STUDY_STATE.yaml from the inputs: learner.name is learnerName, or "to be decided by the owner" when it is not given; set active_target_id, study_target (title, exam_or_goal, deadline), a few starting skills in state/SKILL_MAP.yaml derived from the goal, and active_focus.next_question.
+      Create the first target as targets/<active_target_id>/TARGET.yaml following targets/README.md.
+      Make sure state/EVIDENCE_LOG.md has an "## Evidence" section, sessions/SESSION_LOG.md a "## Sessions" section and reviews/REVIEW_QUEUE.md a "## Due now" section, and write the first next action in NEXT_ACTIONS.md.
+      Never invent facts about the learner: no readiness, mastery, history or preferences that the inputs do not state. Leave unknown fields empty.
+      Change only state/, targets/, sessions/, reviews/ and NEXT_ACTIONS.md. Do not change state/STUDYDD_TEMPLATE_VERSION.yaml.
+    inputSchema:
+      type: object
+      required: [goal]
+      additionalProperties: false
+      properties:
+        goal: {type: string, minLength: 1, maxLength: 200, title: What you want to reach, description: "For example: pass the B2 Dutch exam, or read research papers in statistics."}
+        deadline: {type: string, format: date, title: Deadline}
+        level: {type: string, minLength: 1, maxLength: 200, title: Where you start, description: What you can already do. Nothing is assumed when this is empty.}
+        hoursPerWeek: {type: integer, minimum: 1, maximum: 80, title: Hours per week}
+        learnerName: {type: string, minLength: 1, maxLength: 80, title: Your name}
+    outputSchema: {type: object}
+    contextPolicy:
+      id: stateport.template.studystate.agent-context/v1
+      categoryPaths:
+        study_mode: [state/STUDYDD_MODE.yaml]
+        study_state: [state/STUDY_STATE.yaml]
+        learner_profile: [state/LEARNER_PROFILE.yaml]
+        next_action: [NEXT_ACTIONS.md]
+      includeCategories: [study_mode, study_state, learner_profile, next_action]
+      excludeCategories: [credentials, engine_sessions]
+      sensitivity: private
+      budgetTokens: 6000
+    requiredCapabilities: [structuredEvents, nonInteractiveExecution]
+    optionalCapabilities: [cancellation]
+    mutationPolicy: propose_only
+    networkPolicy: model_provider_only
+    toolPolicy: edit
+    writablePaths: [state/, targets/, sessions/, reviews/, NEXT_ACTIONS.md]
+    validationPolicy: {command: true}
+    timeoutSeconds: 300
+    budgetDefaults: {token: 6000, costMinor: 0, timeSeconds: 300, steps: 1}

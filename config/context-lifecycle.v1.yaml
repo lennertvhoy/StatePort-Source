@@ -1,0 +1,63 @@
+formatVersion: stateport.context-lifecycle/v1
+policyId: stateport.default-balanced-candidate
+
+# Candidate product defaults. These values are configurable and have not yet
+# been justified by repeated real-provider StateBench experiments.
+budget:
+  maximumInputTokens: 120000
+  preferredInputTokens: 70000
+
+compression:
+  # A mission may compact automatically once; its second compaction hands off.
+  mode: automatic
+  triggerRatio: 0.72
+  preserve:
+    - active_task
+    - requirements
+    - decisions
+    - approvals
+    - unresolved_risks
+    - exact_git_identities
+    - acceptance_criteria
+    - validation_state
+    - next_action
+
+handoff:
+  # The mission envelope enforces the compaction count and receipt boundary.
+  mode: automatic
+  triggerRatio: 0.88
+  createArtifact: true
+  requireReceipt: true
+
+session:
+  resumeOnlyWhen:
+    - same_instance
+    - same_workstream
+    - compatible_runtime_profile
+    - unchanged_base_snapshot
+    - fresh_context_manifest
+
+contextCategories:
+  included:
+    - active_task
+    - requirements
+    - completed_work
+    - pending_work
+    - decisions
+    - approvals
+    - unresolved_risks
+    - exact_git_identities
+    - acceptance_criteria
+    - validation_state
+    - next_action
+    - relevant_state_references
+    - recent_receipts
+    - application_state
+    - conversation_summary
+    - tool_outcomes
+  excluded:
+    - credentials
+    - raw_provider_prompt
+    - raw_provider_transcript
+    - raw_terminal_transcript
+    - private_unselected_data

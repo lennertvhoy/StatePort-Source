@@ -1,0 +1,29 @@
+formatVersion: stateport.frontend-dynamic-preservation/v1
+scope: BL-WORKSPACE-002
+controls:
+  - {id: readiness-action-links, evidence: {file: apps/web/src/shell/SetupStatus.tsx, contains: 'to="/settings/models"'}}
+  - {id: platform-control-links, evidence: {file: apps/web/src/shell/PlatformPage.tsx, contains: '<Link key={control.to} to={control.to}'}}
+  - {id: catalog-reviewed-install-control, evidence: {file: apps/web/src/features/catalog/CatalogPage.tsx, contains: 'data-testid={`install-${pkg.name}`}'}}
+  - {id: native-action-select, evidence: {file: apps/web/src/features/runs/RunsPage.tsx, contains: 'data-testid={`runs-action-${action.id}`}'}}
+  - {id: native-action-prepare, evidence: {file: apps/web/src/features/runs/RunPreparation.tsx, contains: 'data-testid="run-prepare"'}}
+  - {id: native-run-operation, evidence: {file: apps/web/src/features/runs/RunWorkspace.tsx, contains: 'data-testid="run-execute"'}}
+  - {id: overview-provenance-disclosure, evidence: {file: apps/web/src/features/app-overview/components/ProvenanceOwnershipSection.tsx, contains: 'Exact identity and bounded paths'}}
+operations:
+  - {id: file-list-directory, method: GET, operation: listDirectory, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "getOperation(instanceId, 'listDirectory', path)"}}
+  - {id: file-read, method: GET, operation: readFile, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "getOperation(instanceId, 'readFile', path)"}}
+  - {id: file-read-metadata, method: GET, operation: readFileMetadata, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: 'metadata: z.object({'}}
+  - {id: file-prepare-write, method: POST, operation: prepareWrite, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'prepareWrite', {"}}
+  - {id: file-preview-diff, method: POST, operation: previewDiff, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'previewDiff', { preparedWriteId })"}}
+  - {id: file-commit-write, method: POST, operation: commitWrite, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'commitWrite', {"}}
+  - {id: file-discard-write, method: POST, operation: discardWrite, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'discardWrite', { preparedWriteId })"}}
+  - {id: file-create, method: POST, operation: createFile, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'createFile', {"}}
+  - {id: file-rename, method: POST, operation: renamePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'renamePath', {"}}
+  - {id: file-delete, method: POST, operation: deletePath, evidence: {file: apps/web/src/client/http/domainsCore.ts, contains: "postOperation(instanceId, 'deletePath', {"}}
+behaviors:
+  - {id: provider-operator-refusal-configuring-mutation, evidence: {file: apps/web/src/features/settings/ProviderSettings.tsx, contains: "  async function perform(action: () => Promise<ProviderStatus>, mutation = true, saveDraft = false, verify = false) {\n    if (mutation && !operator) {"}}
+  - {id: provider-operator-refusal-credential-write, evidence: {file: apps/web/src/features/settings/ProviderSettings.tsx, contains: "  async function runCredential(action: () => Promise<ProviderStatus>) {\n    if (!operator) {"}}
+  - {id: readiness-provider-observations, evidence: {file: apps/web/src/shell/setupStatusModel.ts, contains: 'export function modelStateFrom(status: ProviderStatus): ModelState'}}
+  - {id: catalog-durable-install-confirmation, evidence: {file: apps/web/src/features/catalog/InstallReview.tsx, contains: 'The durable installation receipt did not match the created application or digest.'}}
+  - {id: writer-lease, evidence: {file: packages/file-workspace-broker/src/stateport_file_workspace/broker.py, contains: 'Quarantine and writer-lease transitions share one cross-process lock.'}}
+  - {id: receipt-conversation-bridge, evidence: {file: apps/web/src/features/receipts/ReceiptDetail.tsx, contains: "kind: 'receipt'"}}
+  - {id: approval-conversation-bridge, evidence: {file: apps/web/src/features/approvals/ApprovalDetailPane.tsx, contains: "kind: 'approval'"}}

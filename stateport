@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# StatePort admin CLI wrapper.
+# Resolves the repo root from the script location and runs the CLI.
+
+# Do not allow sourcing: this script must be executed.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    echo "error: stateport must be executed, not sourced" >&2
+    return 1
+fi
+
+set -euo pipefail
+
+# Resolve the real path of this script, following symlinks, portably.
+SCRIPT_PATH="$(python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
+MAIN_PY="${SCRIPT_DIR}/apps/admin-cli/src/admin_cli/main.py"
+if [[ ! -f "$MAIN_PY" ]]; then
+    echo "error: could not find StatePort CLI entry point: $MAIN_PY" >&2
+    exit 1
+fi
+
+export PYTHONPATH="${SCRIPT_DIR}/packages/statedd-core/src:${SCRIPT_DIR}/packages/template-validator/src:${SCRIPT_DIR}/packages/execution-host/src:${SCRIPT_DIR}/packages/external-engine-runtime/src:${SCRIPT_DIR}/packages/codex-adapter/src:${SCRIPT_DIR}/packages/run-bundle/src:${SCRIPT_DIR}/packages/sandbox-runtime/src:${SCRIPT_DIR}/packages/portable-execution/src:${SCRIPT_DIR}/packages/persistent-app/src:${SCRIPT_DIR}/packages/diagnostics/src:${SCRIPT_DIR}/packages/instance-catalog/src:${SCRIPT_DIR}/packages/instance-backup/src:${SCRIPT_DIR}/packages/deployment/src:${SCRIPT_DIR}/apps/runner/src:${SCRIPT_DIR}/apps/admin-cli/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+exec python3 "$MAIN_PY" "$@"

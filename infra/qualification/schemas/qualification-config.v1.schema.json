@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stateport.invalid/schemas/qualification-config.v1.schema.json",
+  "title": "StatePort clean-host qualification config v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "candidate", "acceptedReceiptDigests", "guests"],
+  "properties": {
+    "schema": {"const": "stateport.qualification-config/v1"},
+    "candidate": {"$ref": "#/$defs/candidate"},
+    "acceptedReceiptDigests": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}},
+    "guests": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/guest"}}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["releaseId", "version", "targetId", "releaseIndexUri", "releaseIndexDigest", "signedPayloadDigest", "sourceCommit", "sourceTree", "imageDigests"],
+      "properties": {
+        "releaseId": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "targetId": {"const": "linux-amd64-rootless-podman-quadlet"},
+        "releaseIndexUri": {"type": "string", "minLength": 1},
+        "releaseIndexDigest": {"$ref": "#/$defs/digest"},
+        "signedPayloadDigest": {"$ref": "#/$defs/digest"},
+        "sourceCommit": {"$ref": "#/$defs/sha1"},
+        "sourceTree": {"$ref": "#/$defs/sha1"},
+        "imageDigests": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/digest"}}
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "host", "user", "port", "knownHosts"],
+      "properties": {
+        "kind": {"const": "ssh"},
+        "host": {"type": "string", "minLength": 1},
+        "user": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "knownHosts": {"type": "string", "minLength": 1}
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "timeoutSeconds"],
+      "properties": {
+        "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 86400}
+      }
+    },
+    "guest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["guestId", "distribution", "version", "transport", "stageCommands"],
+      "properties": {
+        "guestId": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{2,127}$"},
+        "distribution": {"enum": ["ubuntu", "debian", "fedora", "rolling"]},
+        "version": {"type": "string", "minLength": 1},
+        "transport": {"$ref": "#/$defs/transport"},
+        "stageCommands": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["release_verification", "provisioning", "install", "protocol_health", "representative_app", "backup_export", "restart_reread", "update_rollback", "uninstall_purge", "final_durable_state"],
+          "properties": {
+            "release_verification": {"$ref": "#/$defs/command"},
+            "provisioning": {"$ref": "#/$defs/command"},
+            "install": {"$ref": "#/$defs/command"},
+            "protocol_health": {"$ref": "#/$defs/command"},
+            "representative_app": {"$ref": "#/$defs/command"},
+            "backup_export": {"$ref": "#/$defs/command"},
+            "restart_reread": {"$ref": "#/$defs/command"},
+            "update_rollback": {"$ref": "#/$defs/command"},
+            "uninstall_purge": {"$ref": "#/$defs/command"},
+            "final_durable_state": {"$ref": "#/$defs/command"}
+          }
+        }
+      }
+    }
+  }
+}

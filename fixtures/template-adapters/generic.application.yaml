@@ -1,0 +1,12 @@
+formatVersion: stateport.application/v1
+applicationId: stateport.template.generic
+displayName: StatePort Template
+description: An isolated declarative template backed by the generic StatePort adapter.
+sourceProfile: managed-template:generic
+managedTemplateAdapters: [native-application, statespec-template]
+productionEligible: true
+privacyClassification: private_by_default
+catalogVisible: false
+actionsPath: actions/generic.yaml
+executorCommand: scripts/template_actions.py
+validationCommand: python3 -c "import pathlib; root=pathlib.Path('.'); assert (root/'application.yaml').is_file() or (root/'template.yaml').is_file()"

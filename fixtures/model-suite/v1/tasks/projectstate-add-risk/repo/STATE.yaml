@@ -1,0 +1,17 @@
+version: projectstate-template-v6
+profile: core
+project:
+  name: Lantern Library
+  outcome_ref: PROJECT.md
+current_slice:
+  id: catalogue-search
+  status: active
+  next_action: Add the search index to the catalogue page.
+blockers: []
+risks:
+  - id: R-001
+    title: Catalogue import drops records with non-ASCII titles
+    severity: medium
+    status: open
+    mitigation: Add an import test with accented titles before the next release.
+owner_questions: []

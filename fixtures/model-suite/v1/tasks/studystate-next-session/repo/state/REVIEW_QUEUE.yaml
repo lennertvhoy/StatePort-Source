@@ -1,0 +1,15 @@
+formatVersion: studystate.review-queue/v1
+today: "2026-10-21"
+items:
+  - id: storage-tiers
+    topic: Blob storage access tiers
+    due: "2026-10-09"
+    status: done
+  - id: rbac-scopes
+    topic: Role assignment scopes and inheritance
+    due: "2026-10-14"
+    status: open
+  - id: vnet-peering
+    topic: Virtual network peering is not transitive
+    due: "2026-10-28"
+    status: open

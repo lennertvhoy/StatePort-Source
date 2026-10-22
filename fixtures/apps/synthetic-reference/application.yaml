@@ -1,0 +1,11 @@
+formatVersion: stateport.application/v1
+applicationId: stateport.synthetic-reference
+displayName: Synthetic reference
+description: Public-safe fixture proving the action registry is not StudyState-specific.
+productionEligible: false
+privacyClassification: public_safe
+stateLayout:
+  canonical: [state/reference.yaml]
+  generated: [generated/]
+actionsPath: actions.yaml
+validationCommand: python3 -c "import pathlib; assert pathlib.Path('state/reference.yaml').is_file()"
