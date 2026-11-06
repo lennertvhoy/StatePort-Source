@@ -11,23 +11,24 @@ policy, validation, execution-host adapters, and receipts stay behind it.
 
 StatePort has published signed alpha artifacts for **Windows 11, WSL2, Ubuntu
 24.04 AMD64**. Publication is not complete-product or native qualification.
-The current public alpha is **Alpha.24** (`0.1.0-alpha.24`). Its signed release
+The current public alpha is **Alpha.26** (`0.1.0-alpha.26`). Its signed release
 index marks it a qualification *candidate* (not a qualified release) and
 declares rollback unsupported. Measured so far, on one local KVM-hosted
-Windows 11 guest (not bare metal): the public one-line command exited 0 in 474
-seconds on one attempt; the bundled StudyState sample ran end to end; its saved
-data survived a service restart and a full `wsl --terminate`; and the real
-StudyState template imported from public GitHub HTTPS (inspected, planned and
-installed as a new instance; the study planner itself is the bundled sample,
-not something the import adds). Not
-measured on Alpha.24: Windows reboot survival, uninstall or an identical
-reinstall on Windows, importing ProjectState or a third template into the
-installed product, AI provider, chat and coding-agent paths, and resource use
-on real hardware. **Alpha.16 is a superseded predecessor**, retained for
-history: its fresh installation was blocked by a signature-check defect, so do
-not use the Alpha.16 route for a fresh installation. Alpha.17 through Alpha.23
-are earlier alphas kept for history, and the public one-line command installs
-Alpha.24. Earlier published artifacts are immutable.
+Windows 11 25H2 guest (not bare metal): the versioned one-line command
+installed the same bytes as the public command and exited 0 in 466 seconds on
+one attempt; the bundled StudyState sample ran end to end; ProjectState_Template,
+StudyState_Template and a third template imported by their public addresses with
+their check actions run; the web interface in Microsoft Edge (applications,
+catalog, approvals, runs, receipts, backup, restore-as-a-new-application,
+rename, settings); a service restart and a full WSL restart with data intact;
+and uninstall, identical reinstall and purge. Not measured on Alpha.26: agent
+actions and chat (OpenCode's anonymous free route had reached its usage limit),
+the upgrade from Alpha.24, and Windows restart survival. **Alpha.16 is a
+superseded predecessor**, retained for history: its fresh installation was
+blocked by a signature-check defect, so do not use the Alpha.16 route for a
+fresh installation. Alpha.17 through Alpha.24 are earlier alphas kept for
+history, and the public one-line command installs Alpha.26. Earlier published
+artifacts are immutable.
 See the [public installation guidance](https://lennertvhoy.github.io/StatePort-Site/)
 and [current release status](https://lennertvhoy.github.io/StatePort-Site/releases/).
 The public site is the authoritative statement of what is currently published; if
